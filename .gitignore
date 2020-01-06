@@ -60,3 +60,4 @@ debug/
 debug/src/madness/world/CMakeFiles/test_world.dir/flags.make
 debug/src/madness/tensor/CMakeFiles/linalg_unittests.dir/build.make
 debug/src/madness/tensor/CMakeFiles/oldtest.dir/cmake_clean.cmake
+.vscode
