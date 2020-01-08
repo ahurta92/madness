@@ -26,6 +26,7 @@ build*
 .project
 .settings
 Makefile.in
+cmake-build-debug
 src/madness/config.h.in
 aclocal.m4
 autom4te.cache
