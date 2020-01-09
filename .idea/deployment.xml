@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData">
+    <serverData>
+      <paths name="CNMEM (1) (da325882-e27e-4e96-bd21-991e5c04ac9a)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/tmp.ODEFy2ZxYH" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="Snmem (080e6562-edb4-4243-a6ca-6a2691c81663)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/tmp.qqbX7pTHTQ" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

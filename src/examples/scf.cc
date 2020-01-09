@@ -20,7 +20,7 @@
 
 using namespace madness;
 
-void readTensor(std::ifstream &fs, Tensor<double> &T, int dim, int nbf, bool sym);
+void readTensor(std::ifstream &fs, Tensor<double> &T, int dim, int nbf, bool sym)
 void computeDensity(Tensor<double> &P, Tensor<double> &Cocc, Tensor<double> &C, int Nocc);
 Tensor<double> computeG(Tensor<double> &twoE, Tensor<double> P, int nbf);
 double computeTwoEE(Tensor<double> twoE, Tensor<double> P, int nbf);
