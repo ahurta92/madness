@@ -58,9 +58,13 @@ double myf(const coord_1d& r) {
 
 int main(int argc, char** argv) {
     initialize(argc, argv);
+    print("world is initialzed ",initialized());
     World world(SafeMPI::COMM_WORLD);
 
+
     startup(world,argc,argv);
+
+    print("world is initialzed ",initialized());
 
     FunctionDefaults<1>::set_cubic_cell(0,10);
 
