@@ -1,7 +1,7 @@
-#examples/myExamples
+#examples/myexamples
 
 set(EXAMPLE_SOURCES
-  hehf
+  mhehf
 )
 
 #if(LIBXC_FOUND)

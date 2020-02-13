@@ -75,7 +75,7 @@ int main(int argc, char** argv){
     real_funcimpl_3d rho = square(psi).truncate();
     double two_electron_energy = inner(apply(op,rho),rho);
     double nuclear_attraction_energy = 2.0*inner(Vnuc*psi,psi);
-    double total_energy= kinetic_energy+nuclear_attraction_energy+two_electron_energy;:w
+    double total_energy= kinetic_energy+nuclear_attraction_energy+two_electron_energy:
     
      // Manually tabluate the orbital along a line ... probably easier
     // to use the lineplot routine
@@ -91,7 +91,7 @@ int main(int argc, char** argv){
         print(" Nuclear attraction energy ", nuclear_attraction_energy);
         print("       Two-electron energy ", two_electron_energy);
         print("              Total energy ", total_energy);
-        print("                    Virial ", (nuclear_attraction_energy + two_electron_energy) / kinetic_energy);
+        print("                    Virial ", ((nuclear_attraction_energy + two_electron_energy) / kinetic_energy));
     }
 
     world.gop.fence();
