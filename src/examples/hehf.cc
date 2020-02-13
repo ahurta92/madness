@@ -116,7 +116,7 @@ void iterate(World& world, real_function_3d& V, real_function_3d& psi, double& e
     real_function_3d Vpsi = (V*psi);
     Vpsi.scale(-2.0).truncate();
     real_convolution_3d op = BSHOperator3D(world, sqrt(-2*eps), 0.001, 1e-6);
-    real_function_3d tmp = apply(op,Vpsi).truncate();
+    real_function_3d tmp = apply(op,Vpsi).truncate(); //
     double norm = tmp.norm2();
     real_function_3d r = tmp-psi;
     double rnorm = r.norm2();
