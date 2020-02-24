@@ -7,6 +7,7 @@ using namespace madness;
 static const double L = 32.0;// box size
 static const long k = 8;// box size
 static const double thresh = 1e-6;// box size
+static const double Z =8.0;// atomic number
 
 //The intial guess exp(-2r) r=sqrt(x^2+y^2+z^2)
 /* Q1 What is the importance of 1e-4
@@ -14,12 +15,13 @@ static const double thresh = 1e-6;// box size
 */
 static double guess(const coord_3d& r){
     const double x=r[0], y = r[1], z= r[2];
-    return 6.0*exp(-2.0*sqrt(x*x+y*y+z*z+1e-4));
+    return std::pow(Z,1.5)*exp(-Z*sqrt(x*x+y*y+z*z+1e-4));
+    
 }
 
 static double V(const coord_3d& r) {
     const double x=r[0], y = r[1], z= r[2];
-    return -2.0/(sqrt(x*x+y*y+z*z+1e-8));
+    return -Z/(sqrt(x*x+y*y+z*z+1e-8));
 }
 
 
@@ -61,7 +63,7 @@ int main(int argc, char** argv){
     double eps = -1.0;
     for (int iter =0; iter < 10; iter++){
         real_function_3d rho = square(psi).truncate();// what does truncate do here?
-        real_function_3d potential = Vnuc + apply(op,rho).truncate();//what is apply
+        real_function_3d potential = Vnuc;// + apply(op,rho).truncate();//what is apply
         iterate(world,potential,psi,eps);
     }
 
@@ -73,9 +75,9 @@ int main(int argc, char** argv){
     }
 
     real_function_3d rho = square(psi).truncate();
-    double two_electron_energy = inner(apply(op,rho),rho);
-    double nuclear_attraction_energy = 2.0*inner(Vnuc*psi,psi);
-    double total_energy= kinetic_energy+nuclear_attraction_energy+two_electron_energy
+    //double two_electron_energy = inner(apply(op,rho),rho);
+    double nuclear_attraction_energy = inner(Vnuc*psi,psi);
+    double total_energy= .5*kinetic_energy+nuclear_attraction_energy;//+two_electron_energy;
     
      // Manually tabluate the orbital along a line ... probably easier
     // to use the lineplot routine
@@ -89,9 +91,10 @@ int main(int argc, char** argv){
    if (world.rank() == 0) {
         print("            Kinetic energy ", kinetic_energy);
         print(" Nuclear attraction energy ", nuclear_attraction_energy);
-        print("       Two-electron energy ", two_electron_energy);
+        //print("       Two-electron energy ", two_electron_energy);
         print("              Total energy ", total_energy);
-        print("                    Virial ", ((nuclear_attraction_energy + two_electron_energy) / kinetic_energy));
+        print("                    Virial ", ((nuclear_attraction_energy ) / kinetic_energy));
+        print("  Exact hydrogenlike energy",-Z*Z/2);
     }
 
     world.gop.fence();

@@ -1,7 +1,7 @@
 #examples/myexamples
 
 set(EXAMPLE_SOURCES
-  mhehf
+  mhehf mhydrogen
 )
 
 #if(LIBXC_FOUND)
