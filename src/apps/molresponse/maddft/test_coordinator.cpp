@@ -2,6 +2,7 @@
 // Created by adrianhurtado on 1/1/22.
 //
 #include "CalculationParameters.h"
+#include "CalculationParameters.h"
 
 #define CATCH_CONFIG_RUNNER
 
