@@ -740,18 +740,28 @@ protected:
 
     auto kain_x_space_update(World &world, const X_space &chi, const X_space &residual_chi, response_solver &kain_x_space) -> X_space;
 
-    void x_space_step_restriction(World &world, const X_space &old_Chi, X_space &temp, bool restrict_y,
-                                  const double &max_bsh_rotation);
+    void x_space_step_restriction(World &world, const X_space &old_Chi, X_space &temp, bool restrict_y, const double &max_bsh_rotation);
+#if defined(__has_include)
+#if __has_include(<filesystem>)
+#define MADCHEM_HAS_STD_FILESYSTEM
+// <filesystem> is not reliably usable on Linux with gcc < 9
+#if defined(__GNUC__)
+#if __GNUC__ >= 7 && __GNUC__ < 9
+#undef MADCHEM_HAS_STD_FILESYSTEM
+#endif
+#endif
+#if defined(MADCHEM_HAS_STD_FILESYSTEM)
+    void PlotGroundDensityVTK(World &world, const ResponseBase &calc);
+    void plotResponseOrbitals(World &world, size_t iteration, const response_space &x_response, const response_space &y_response, const ResponseParameters &responseParameters,
+                              const GroundStateCalculation &g_params);
 
-//    void plotResponseOrbitals(World &world, size_t iteration,
-//                              const response_space &x_response,
-//                              const response_space &y_response,
-//                              const ResponseParameters &responseParameters,
-//                              const GroundStateCalculation &g_params);
-
+#endif
+#endif
+#endif
 
   static auto orbital_load_balance(World &world, const gamma_orbitals &,
                                    double load_balance) -> gamma_orbitals;
+    static auto orbital_load_balance(World &world, const gamma_orbitals &, double load_balance) -> gamma_orbitals;
 
     auto compute_gamma_tda(World &world, const gamma_orbitals &density, const XCOperator<double, 3> &xc) const -> X_space;
 

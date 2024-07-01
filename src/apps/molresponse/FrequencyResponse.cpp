@@ -187,6 +187,25 @@ void FrequencyResponse::iterate(World &world)
 
 
 
+
+#if defined(__has_include)
+#if __has_include(<filesystem> )
+#define MADCHEM_HAS_STD_FILESYSTEM
+// <filesystem> is not reliably usable on Linux with gcc < 9
+#if defined(__GNUC__)
+#if __GNUC__ >= 7 && __GNUC__ < 9
+#undef MADCHEM_HAS_STD_FILESYSTEM
+#endif
+#endif
+#if defined(MADCHEM_HAS_STD_FILESYSTEM)
+                if (r_params.plot_all_orbitals())
+                {
+                    plotResponseOrbitals(world, iter, Chi.x, Chi.y, r_params, ground_calc);
+                }
+#endif
+#endif
+#endif
+
                 break;
             }
         }
