@@ -68,3 +68,6 @@ compile_commands
 .history/src/apps/molresponse/global_functions_20230530165428.cc
 
 src/apps/molresponse/maddft/doc/output_dir/
+cmake_seawulf
+.bashrc.bak
+.vscode/settings.json
