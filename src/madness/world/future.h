@@ -1052,11 +1052,7 @@ namespace madness {
     /// \return The output stream.
     template <typename T>
     inline std::ostream& operator<<(std::ostream& out, const Future<T>& f) {
-        if (f.probe()) {
-          if constexpr (is_ostreammable_v<T>) {
-            out << f.get();
-          }
-        }
+        if (f.probe()) out << f.get();
         else if (f.is_remote()) out << f.f->remote_ref;
         else if (f.f) out << "<unassigned refcnt=" << f.f.use_count() << ">";
         else out << "<unassigned>";

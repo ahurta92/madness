@@ -369,32 +369,29 @@ namespace madness {
         /// Sets the generator attribute.
 
         /// \param[in] generator_hint The new value for the generator attribute.
-        TaskAttributes& set_generator(bool generator_hint) {
+        void set_generator(bool generator_hint) {
             if (generator_hint)
                 flags |= GENERATOR;
             else
                 flags &= ~GENERATOR;
-            return *this;
         }
 
         /// Sets the stealable attribute.
 
         /// \param[in] stealable The new value for the stealable attribute.
-        TaskAttributes& set_stealable(bool stealable) {
+        void set_stealable(bool stealable) {
             if (stealable) flags |= STEALABLE;
             else flags &= ~STEALABLE;
-            return *this;
         }
 
         /// Sets the high priority attribute.
 
         /// \param[in] hipri The new value for the high priority attribute.
-        TaskAttributes& set_highpriority(bool hipri) {
+        void set_highpriority(bool hipri) {
             if (hipri)
                 flags |= HIGHPRIORITY;
             else
                 flags &= ~HIGHPRIORITY;
-            return *this;
         }
 
         /// Set the number of threads.
