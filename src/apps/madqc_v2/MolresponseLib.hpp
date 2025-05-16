@@ -110,7 +110,6 @@ struct molresponse_lib {
 
         computeFrequencyLoop(world, rm, state, ground, metadata, debug_logger);
 
-        if (debug_logger.enabled()) debug_logger.write_to_disk();
         // Check if we reached final protocol or should advance
         if (state.at_final_threshold()) {
           if (world.rank() == 0) {

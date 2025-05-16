@@ -50,7 +50,7 @@ inline bool iterate(World &world, const ResponseManager &rm,
   functionT drho_old;
 
   for (size_t iter = 0; iter < max_iter; ++iter) {
-    logger.begin_iteration(iter);
+    logger.begin_iteration(world, iter);
     drho_old = copy(drho);
     // Inner product of response state
     DEBUG_LOG_VALUE(world, &logger, "<x|x>",
@@ -95,23 +95,23 @@ inline bool iterate(World &world, const ResponseManager &rm,
     }
     if (drho_change < density_target && res_norm < x_residual_target) {
       if (world.rank() == 0) print("✓ Converged in", iter, "iterations.");
-      logger.end_iteration();
+      logger.end_iteration(world);
       rvec.sync();
-      logger.finalize_state();
+      logger.finalize_state(world);
       return true;
     }
-    logger.end_iteration();
+    logger.end_iteration(world);
   }
   if (world.rank() == 0)
     print("⚠️  Reached max iterations without convergence.");
-  logger.end_iteration();
+  logger.end_iteration(world);
 
   if (world.rank() == 0) {
     madness::print("📊 Iteration summary for", state.description());
     logger.print_timing_table(state.description());
     logger.print_values_table(state.description());
   }
-  logger.finalize_state();
+  logger.finalize_state(world);
   return false;
 };
 
@@ -293,7 +293,7 @@ inline void computeFrequencyLoop(World &world, const ResponseManager &rm,
 
     bool converged = solve_response_vector(
         world, rm, ground_state, state, guess, logger, max_iter, conv_thresh);
-    logger.finalize_state();
+    logger.finalize_state(world);
 
     world.gop.fence();
 
