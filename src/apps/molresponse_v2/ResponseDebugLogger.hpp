@@ -93,9 +93,9 @@ class ResponseDebugLogger {
   void end_iteration(World &world) {
     if (!enabled_) return;
     if (world.rank() == 0) {
-      std::cout << "📊 Iteration summary for " << current_key_ << "\n";
       current_entry_["iterations"].push_back(current_iter_);
-      std::cout << current_entry_.dump(2) << "\n";
+      /*std::cout << "📊 Iteration summary for " << current_key_ << "\n";*/
+      /*std::cout << current_entry_.dump(2) << "\n";*/
     }
   }
 
@@ -104,8 +104,8 @@ class ResponseDebugLogger {
     if (!enabled_) return;
     if (world.rank() == 0) {
       log_data_[current_key_] = current_entry_;
-      print("📂 Wrote response log for", current_key_);
-      std::cout << log_data_.dump(2) << "\n";
+      /*print("📂 Wrote response log for", current_key_);*/
+      /*std::cout << log_data_.dump(2) << "\n";*/
 
       write_to_disk(world);
     }

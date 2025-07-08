@@ -71,7 +71,7 @@ inline bool iterate(World &world, const ResponseManager &rm,
     double res_norm = norm2(world, sub(world, all_x, x_new));
     DEBUG_LOG_VALUE(world, &logger, "res_norm", res_norm);
     // 4. Do step restriction
-    if (res_norm > rm.params().maxrotn()) {
+    if (false) {
       DEBUG_TIMED_BLOCK(world, &logger, "step_restriction", {
         ResponseSolverUtils::do_step_restriction(world, all_x, kain_x, res_norm,
                                                  "a", rm.params().maxrotn());

@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
     // Execute both in "MyCalc" directory
     wf.run("MyCalc");
 
-    if (true) {
+    if (false) {
       qcapp::Workflow opt_wf;
 
       std::function<std::unique_ptr<Application>(Params)> scfFactory =

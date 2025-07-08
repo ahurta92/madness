@@ -25,9 +25,9 @@ void save_response_vector(World &world, const Desc &desc,
         int i = 0;
 
         for (const auto &f : vec.flat) {
-          if (world.rank() == 0) {
-            print("Saving response vector ", i++);
-          }
+          /*if (world.rank() == 0) {*/
+          /*  print("Saving response vector ", i++);*/
+          /*}*/
           ar & f;
         }
       },
@@ -64,9 +64,9 @@ inline bool load_response_vector(World &world, const int &num_orbitals,
       [&](auto &v) {
         int i = 0;
         for (auto &f : v.flat) {
-          if (world.rank() == 0) {
-            print("Loading response vector ", i++);
-          }
+          /*if (world.rank() == 0) {*/
+          /*  print("Loading response vector ", i++);*/
+          /*}*/
           ar & f;
         }
         v.sync();

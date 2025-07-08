@@ -1,6 +1,9 @@
 build*
 cmake-build-debug*
 .history*
+hdf5_examples*
+testing*
+.vs
 
 # Compiled Object files
 *.slo
@@ -57,6 +60,7 @@ cmake/cmake-*
 cmake/bin
 cmake/doc
 cmake/share
+_build/
 Makefile-prog.in
 compile_commands.json
 *.idx

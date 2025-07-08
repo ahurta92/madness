@@ -10,6 +10,7 @@
 #include "../molresponse_v2/StateGenerator.hpp"
 #include "InputWriter.hpp"
 #include "ParameterManager.hpp"
+#include "funcdefaults.h"
 
 struct molresponse_lib {
   // -----------------------------------------------------------------------------
@@ -101,12 +102,13 @@ struct molresponse_lib {
       ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
       ground.computePreliminaries(world, *rm.getCoulombOp(), rm.getVtol(),
                                   fock_json_file);
-      if (world.rank() == 0)
-        madness::print("hamiltonian:\n", ground.Hamiltonian);
+      /*if (world.rank() == 0)*/
+      /*  madness::print("hamiltonian:\n", ground.Hamiltonian);*/
 
       for (auto& state : generated_states.states) {
         //     if (state.is_converged || state.current_threshold() != thresh)
         //     continue;
+        //
 
         computeFrequencyLoop(world, rm, state, ground, metadata, debug_logger);
 
@@ -136,63 +138,79 @@ struct molresponse_lib {
       /*}*/
     }
 
-    // compute requested properties
-    PropertyManager properties(world, "properties.json");
-    std::string dip_dirs = rp.dipole_directions();
-    std::string nuc_dirs = rp.nuclear_directions();
+    // Before preceding, check if all states are converged
+    // if not, print a warning and exit
 
-    for (auto const& prop : rp.requested_properties()) {
-      if (prop == "polarizability") {
-        if (world.rank() == 0)
-          madness::print("▶️ Computing polarizability α...");
-        compute_alpha(world, generated_states.state_map, ground,
-                      rp.dipole_frequencies(), rp.dipole_directions(),
-                      properties);
-        properties.save();
+    bool all_states_converged = true;
+    for (auto& state : generated_states.states) {
+      auto pertDesc = state.perturbationDescription();
+      for (auto& freq : state.frequencies) {
+        if (!metadata.is_converged(pertDesc, FunctionDefaults<3>::get_thresh(),
 
-      } else if (prop == "hyperpolarizability") {
-        if (world.rank() == 0)
-          madness::print("▶️ Computing hyperpolarizability β...");
-
-        compute_hyperpolarizability(world, ground, rp.dipole_frequencies(),
-                                    dip_dirs, properties);
-        properties.save();
-
-      } else if (prop == "raman") {
-        auto nuclear_dirs = rp.nuclear_directions();
-        auto dipole_dirs = rp.dipole_directions();
-        if (world.rank() == 0) madness::print("▶️ Computing Raman response...");
-        // compute_Raman(world, ground, rp.dipole_frequencies(), dipole_dirs,
-        // properties);
-        properties.save();
-      }
-      if (world.rank() == 0) {
-        properties.print_table();
+                                   freq)) {
+          all_states_converged = false;
+          if (world.rank() == 0)
+            madness::print("⚠️  Not all states converged. Exiting...");
+          break;
+        };
       }
     }
 
-    // global inner-product contributions
-    auto contribs = global_inner_contributions();
-    if (world.rank() == 0 && !contribs.empty()) {
-      std::ofstream out("all_inner_contributions.json");
-      out << std::setw(2) << contribs << std::endl;
-      madness::print("📂 Wrote all inner‐product contributions");
+    if (!all_states_converged) {
+      if (world.rank() == 0)
+        madness::print("⚠️  Not all states converged. Exiting...");
+      return {};
+    } else {
+      // compute requested properties
+      PropertyManager properties(world, "properties.json");
+      std::string dip_dirs = rp.dipole_directions();
+      std::string nuc_dirs = rp.nuclear_directions();
+
+      for (auto const& prop : rp.requested_properties()) {
+        if (prop == "polarizability") {
+          if (world.rank() == 0)
+            madness::print("▶️ Computing polarizability α...");
+          compute_alpha(world, generated_states.state_map, ground,
+                        rp.dipole_frequencies(), rp.dipole_directions(),
+                        properties);
+          properties.save();
+
+        } else if (prop == "hyperpolarizability") {
+          if (world.rank() == 0)
+            madness::print("▶️ Computing hyperpolarizability β...");
+
+          compute_hyperpolarizability(world, ground, rp.dipole_frequencies(),
+                                      dip_dirs, properties);
+          properties.save();
+
+        } else if (prop == "raman") {
+          auto nuclear_dirs = rp.nuclear_directions();
+          auto dipole_dirs = rp.dipole_directions();
+          if (world.rank() == 0)
+            madness::print("▶️ Computing Raman response...");
+          // compute_Raman(world, ground, rp.dipole_frequencies(), dipole_dirs,
+          // properties);
+          properties.save();
+        }
+        if (world.rank() == 0) {
+          properties.print_table();
+        }
+      }
+
+      // global inner-product contributions
+      auto contribs = global_inner_contributions();
+      if (world.rank() == 0 && !contribs.empty()) {
+        std::ofstream out("all_inner_contributions.json");
+        out << std::setw(2) << contribs << std::endl;
+        madness::print("📂 Wrote all inner‐product contributions");
+      }
+      // aggregate JSON results
+      Results results;
+      results.metadata = metadata.to_json();
+      results.properties = properties.to_json();
+      results.debug_log = debug_logger.to_json();
+      return results;
     }
-
-    // finalize & stats
-    if (world.rank() == 0)
-      madness::print(
-          "\n✅ Molecular response & property calculation complete.");
-    world.gop.fence();
-    world.gop.fence();
-    print_stats(world);
-
-    // aggregate JSON results
-    Results results;
-    results.metadata = metadata.to_json();
-    results.properties = properties.to_json();
-    results.debug_log = debug_logger.to_json();
-    return results;
   }
 
 };  // namespace molresponse_lib
