@@ -11,7 +11,6 @@
 #include <madness/world/cloud.h>
 
 namespace madness {
-
 class SimpleVBCComputer {
 public:
   SimpleVBCComputer(World &world, const GroundStateData &gs)
@@ -23,8 +22,8 @@ public:
     auto [stateB, stateC] = vbc_state.get_states();
     // 2) Load their response vectors:
     ResponseVector Bv, Cv;
-    load_response_vector(world_, num_orbitals_, stateB, Bv, /*th*/ 0, /*f*/ 0);
-    load_response_vector(world_, num_orbitals_, stateC, Cv, /*th*/ 0, /*f*/ 0);
+    load_response_vector(world_, num_orbitals_, stateB, /*th*/ 0, /*f*/ 0, Bv);
+    load_response_vector(world_, num_orbitals_, stateC, /*th*/ 0, /*f*/ 0, Cv);
 
     // 3) Promote to dynamic (x/y) if needed:
     auto Bdyn = make_response_vector(num_orbitals_, /*is_static=*/false,
@@ -133,6 +132,7 @@ public:
 
     return std::make_pair(result_x, result_y);
   };
+
   ResponseVector compute_vbc_response(World &world, const GroundStateData &gs,
                                       const ResponseVector &B,
                                       const ResponseVector &C,
@@ -170,7 +170,7 @@ public:
       ResponseVector loaded;
       if (world_.rank() == 0)
         print("📂 Loading existing VBC from", filename);
-      load_response_vector(world_, num_orbitals_, vbc_state, loaded);
+      load_response_vector(world_, num_orbitals_, vbc_state, 0, 0, loaded);
       return loaded;
     }
 
@@ -182,8 +182,8 @@ public:
     auto VC = perturbation_vector(world_, gs_, stateC);
     VB.insert(VB.end(), VB.begin(), VB.end());
     VC.insert(VC.end(), VC.begin(), VC.end());
-    auto vb = raw_perturbation_operator(world_, gs_, stateB);
-    auto vc = raw_perturbation_operator(world_, gs_, stateC);
+    auto vb = raw_perturbation_operator(world_, gs_, stateB.perturbation);
+    auto vc = raw_perturbation_operator(world_, gs_, stateC.perturbation);
 
     auto result = compute_vbc_response(world_, gs_, xB, xC, VB, VC, vb, vc);
 
@@ -200,5 +200,4 @@ private:
   int num_orbitals_;
   bool spin_restricted_;
 };
-
 } // namespace madness
