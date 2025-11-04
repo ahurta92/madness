@@ -426,7 +426,7 @@ public:
 	bool provides_gradient() const {return true;}
 
 	/// returns the molecular hessian matrix at structure x
-	Tensor<double> hessian(const Tensor<double>& x);
+	VibrationalResults hessian(const Tensor<double>& x);
 
 	/// construct the fock operator based on the calculation parameters (K or XC?)
 	virtual std::shared_ptr<Fock<double,3>> make_fock_operator() const;
