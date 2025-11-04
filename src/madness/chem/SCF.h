@@ -190,6 +190,7 @@ public:
 
 class SCF {
 public:
+    std::filesystem::path work_dir;
     std::shared_ptr<PotentialManager> potentialmanager;
     std::shared_ptr<GTHPseudopotential<double> > gthpseudopotential;
     Molecule molecule;
