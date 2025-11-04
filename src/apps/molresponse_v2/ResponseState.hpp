@@ -4,14 +4,15 @@
 #include <madness/chem/projector.h>
 #include <madness/mra/mra.h>
 
+#include "ResponseVector.hpp"
 #include <madness/external/nlohmann_json/json.hpp>
 #include <sstream>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "GroundStateData.hpp"
 #include "Perturbation.hpp"
-#include "ResponseVector.hpp"
 #include "molecular_functors.h"
 #include "vmra.h"
 
@@ -20,40 +21,40 @@ namespace fs = std::filesystem;
 
 struct AbstractResponseDescriptor {
   [[nodiscard]] virtual bool is_spin_restricted() const = 0;
+
   [[nodiscard]] virtual bool is_static() const = 0;
+
   [[nodiscard]] virtual std::string response_filename() const = 0;
-  [[nodiscard]] virtual std::string response_filename(
-      const size_t &thresh_index, const size_t &freq_index) const = 0;
+
+  [[nodiscard]] virtual std::string
+  response_filename(const size_t &thresh_index,
+                    const size_t &freq_index) const = 0;
+
   virtual ~AbstractResponseDescriptor() = default;
 };
 
 struct LinearResponseDescriptor : public AbstractResponseDescriptor {
-  PerturbationType type;
   Perturbation perturbation;
 
-  bool spin_restricted = false;  // Is the system open shell?
+  bool spin_restricted = false; // Is the system open shell?
 
   std::vector<double> frequencies;
-  std::map<double, size_t> frequency_map;  // Frequency to index map
-  std::vector<double> thresholds;          // Accuracy levels to loop over
+  std::map<double, size_t> frequency_map; // Frequency to index map
+  std::vector<double> thresholds;         // Accuracy levels to loop over
   //
   size_t current_frequency_index = 0;
-  size_t current_thresh_index = 0;  // Track which threshold we're working on
+  size_t current_thresh_index = 0; // Track which threshold we're working on
   bool is_converged = false;
+
   LinearResponseDescriptor() = default;
 
-  LinearResponseDescriptor(Perturbation pert, PerturbationType ptype,
-                           const std::vector<double> &freq,
+  // default copy constructor
+
+  LinearResponseDescriptor(Perturbation pert, const std::vector<double> &freq,
                            const std::vector<double> &thresh,
                            bool spin_restricted)
-      : type(ptype),
-        perturbation(pert),
-        spin_restricted(spin_restricted),
-        frequencies(freq),
-        thresholds(thresh),
-        current_frequency_index(0),
-        current_thresh_index(0),
-        is_converged(false) {
+      : perturbation(pert), frequencies(freq), thresholds(thresh),
+        spin_restricted(spin_restricted) {
     for (size_t i = 0; i < frequencies.size(); ++i) {
       frequency_map[frequencies[i]] = i;
     }
@@ -83,14 +84,16 @@ struct LinearResponseDescriptor : public AbstractResponseDescriptor {
   void advance_threshold() {
     if (!at_final_threshold()) {
       ++current_thresh_index;
-      is_converged = false;  // reset convergence at new protocol
+      is_converged = false; // reset convergence at new protocol
     }
   }
+
   void advance_frequency() {
     if (!at_final_frequency()) {
       ++current_frequency_index;
     }
   }
+
   [[nodiscard]] bool is_static() const override {
     return std::abs(current_frequency()) < 1e-8;
   }
@@ -124,54 +127,41 @@ struct LinearResponseDescriptor : public AbstractResponseDescriptor {
   [[nodiscard]] std::string response_filename() const override {
     return response_filename(current_thresh_index, current_frequency_index);
   }
-  [[nodiscard]] std::string response_filename(
-      const size_t &thresh_index, const size_t &freq_index) const override {
+
+  [[nodiscard]] std::string
+  response_filename(const size_t &thresh_index,
+                    const size_t &freq_index) const override {
     return make_key(thresh_index, freq_index);
     ;
   }
+
   [[nodiscard]] std::string perturbationDescription() const {
     return describe_perturbation(perturbation);
   }
   [[nodiscard]] std::string description() const {
     return make_key(current_threshold(), current_frequency());
   }
-  // Create the right‐shaped ResponseVector for orbitals at frequency index
-  // `fi`.
-  //
-  //   - if  freq[fi]==0 → “static”  else → “dynamic”
-  //   - unrestricted = !spin_restricted
-  //
-  [[nodiscard]] ResponseVector make_vector(int num_orbitals, size_t fi) const {
-    bool stat = is_static(fi);
-    bool urstr = !spin_restricted;
-    return make_response_vector(num_orbitals, stat, urstr);
-  }
 };
 
 struct SecondOrderResponseDescriptor : public AbstractResponseDescriptor {
-  std::pair<PerturbationType, PerturbationType> ptypes_;
   std::pair<Perturbation, Perturbation> perturbations_;
   std::pair<double, double> frequencies_;
 
   double thresh;
-  bool spin_restricted_ = false;  // Is the system open shell?
+  bool spin_restricted_ = false; // Is the system open shell?
 
-  SecondOrderResponseDescriptor(PerturbationType t1, PerturbationType t2,
-                                Perturbation p1, Perturbation p2, double f1,
+  SecondOrderResponseDescriptor(Perturbation p1, Perturbation p2, double f1,
                                 double f2, double thresh, bool spin_restricted)
-      : ptypes_(t1, t2),
-        perturbations_(p1, p2),
-        frequencies_(f1, f2),
-        thresh(thresh),
+      : perturbations_(p1, p2), frequencies_(f1, f2), thresh(thresh),
         spin_restricted_(spin_restricted) {}
 
   [[nodiscard]] LinearResponseDescriptor B_state() const {
-    return LinearResponseDescriptor(perturbations_.first, ptypes_.first,
-                                    {frequencies_.first}, {thresh},
-                                    spin_restricted_);
+    return LinearResponseDescriptor(perturbations_.first, {frequencies_.first},
+                                    {thresh}, spin_restricted_);
   }
+
   [[nodiscard]] LinearResponseDescriptor C_state() const {
-    return LinearResponseDescriptor(perturbations_.second, ptypes_.second,
+    return LinearResponseDescriptor(perturbations_.second,
                                     {frequencies_.second}, {thresh},
                                     spin_restricted_);
   }
@@ -203,6 +193,8 @@ struct SecondOrderResponseDescriptor : public AbstractResponseDescriptor {
     // Second order response is always dynamic (x an y response
     // functions)
   }
+  [[nodiscard]] bool is_static(size_t freq_index) const { return false; }
+
   // Build the core "<prefix><pert1>_<pert2>_f<f1>_<f2>_p<thresh>"
   [[nodiscard]] std::string make_key(double f1, double f2,
                                      double thresh) const {
@@ -234,8 +226,10 @@ struct SecondOrderResponseDescriptor : public AbstractResponseDescriptor {
     return make_key(frequencies_.first, frequencies_.second, thresh) +
            ".response";
   }
-  [[nodiscard]] std::string response_filename(
-      const size_t &thresh_index, const size_t &freq_index) const override {
+
+  [[nodiscard]] std::string
+  response_filename(const size_t &thresh_index,
+                    const size_t &freq_index) const override {
     return response_filename();
   }
 
@@ -260,52 +254,84 @@ struct XBCResponseState : public SecondOrderResponseDescriptor {
   [[nodiscard]] const char *prefix() const override { return "XBC"; }
 };
 
+inline int dir_index(char c) {
+  switch (std::tolower(static_cast<unsigned char>(c))) {
+  case 'x':
+    return 0;
+  case 'y':
+    return 1;
+  case 'z':
+    return 2;
+  }
+  throw std::invalid_argument("Direction must be x/y/z");
+}
+
+inline real_function_3d
+make_perturbation_operator(World &world, const GroundStateData &g_s,
+                           const DipolePerturbation &d) {
+  std::map<char, int> dipole_map = {{'x', 0}, {'y', 1}, {'z', 2}};
+  std::vector<int> dir(3, 0);
+  dir[dipole_map.at(d.direction)] = 1;
+  real_function_3d f =
+      real_factory_3d(world).functor(real_functor_3d{new MomentFunctor(dir)});
+  f.truncate(FunctionDefaults<3>::get_thresh());
+  return f;
+}
+
+inline real_function_3d
+make_perturbation_operator(World &world, const GroundStateData &gs,
+                           const NuclearDisplacementPerturbation &n) {
+  std::map<char, int> dipole_map = {{'x', 0}, {'y', 1}, {'z', 2}};
+
+  madchem::MolecularDerivativeFunctor mdfunctor(gs.molecule, n.atom_index,
+                                                dipole_map.at(n.direction));
+  // you’d have whatever MomentDisplacementFunctor exists:
+  real_function_3d dvdx = real_factory_3d(world)
+                              .functor(mdfunctor)
+                              .truncate_on_project()
+                              .truncate_mode(0);
+                              //.nofence()
+  
+
+  
+  dvdx.get_impl()->set_truncate_mode(1);
+
+  //dvdx.truncate();
+  return dvdx;
+}
+
+inline real_function_3d
+make_perturbation_operator(World &world, const GroundStateData &gs,
+                           const MagneticPerturbation &m) {
+  // Not implemented yet...
+  //
+  //
+  throw std::runtime_error("Magnetic perturbation not implemented yet");
+}
+
+inline real_function_3d raw_perturbation_operator(World &world,
+                                                  const GroundStateData &gs,
+                                                  const Perturbation &p) {
+  return std::visit(
+      [&](const auto &pp) -> real_function_3d {
+        return make_perturbation_operator(world, gs, pp);
+      },
+      p);
+}
+
 // -----------------------------------------------------------------------------
 // 1) Raw operator in real space, before applying to orbitals:
 //
 //    e.g. for a dipole:  V(r) = x, y or z moment
 // -----------------------------------------------------------------------------
-inline real_function_3d raw_perturbation_operator(
-    World &world, const GroundStateData &gs,
-    const LinearResponseDescriptor &state) {
-  using P = PerturbationType;
-  switch (state.type) {
-    case P::Dipole: {
-      auto d = std::get<DipolePerturbation>(state.perturbation);
-      // build the moment functor f = (1,0,0) or (0,1,0) or (0,0,1)
-      std::map<char, int> dipole_map = {{'x', 0}, {'y', 1}, {'z', 2}};
-      std::vector<int> dir(3, 0);
-      dir[dipole_map.at(d.direction)] = 1;
-      real_function_3d f = real_factory_3d(world).functor(
-          real_functor_3d{new MomentFunctor(dir)});
-      f.truncate(FunctionDefaults<3>::get_thresh());
-      return f;
-    }
-    case P::NuclearDisplacement: {
-      auto n = std::get<NuclearDisplacementPerturbation>(state.perturbation);
-      // you’d have whatever MomentDisplacementFunctor exists:
-      real_function_3d f = real_factory_3d(world).functor(
-          real_functor_3d{new madchem::MolecularDerivativeFunctor(
-              gs.molecule, n.atom_index, n.direction)});
-      f.truncate(FunctionDefaults<3>::get_thresh());
-      return f;
-    }
-    case P::Magnetic: {
-      // Not implemented yet...
-      //
-      //
-      throw std::runtime_error("Magnetic perturbation not implemented yet");
-    }
-  }
-  throw std::runtime_error("Unknown perturbation type");
-}
 
 // -----------------------------------------------------------------------------
 // 2) Apply it to the ground‐state orbitals to get your Vp basis functions.
 //    (You already have this in ResponseState::perturbation_vector.)
 // -----------------------------------------------------------------------------
-inline vector_real_function_3d project_perturbation_onto_orbitals(
-    World &world, const GroundStateData &gs, const real_function_3d &raw_op) {
+inline vector_real_function_3d
+project_perturbation_onto_orbitals(World &world, const GroundStateData &gs,
+                                   const real_function_3d &raw_op) {
   auto vp = mul(world, raw_op, gs.orbitals, /*fence=*/true);
   vp = gs.Qhat(vp);
   truncate(world, vp, FunctionDefaults<3>::get_thresh(), /*fence=*/true);
@@ -313,10 +339,10 @@ inline vector_real_function_3d project_perturbation_onto_orbitals(
 }
 
 // Linear (first-order) response
-inline madness::vector_real_function_3d perturbation_vector(
-    madness::World &world, GroundStateData const &gs,
-    LinearResponseDescriptor const &state) {
-  auto raw_op = raw_perturbation_operator(world, gs, state);
+inline madness::vector_real_function_3d
+perturbation_vector(madness::World &world, GroundStateData const &gs,
+                    LinearResponseDescriptor const &state) {
+  auto raw_op = raw_perturbation_operator(world, gs, state.perturbation);
   auto Vp = project_perturbation_onto_orbitals(world, gs, raw_op);
   if (!state.is_static()) {
     // duplicate for dynamic response
@@ -326,24 +352,10 @@ inline madness::vector_real_function_3d perturbation_vector(
 }
 
 // Second-order (VBC) response
-inline madness::vector_real_function_3d perturbation_vector(
-    madness::World &world, GroundStateData const &gs,
-    XBCResponseState const &sos) {
-  // build (or reuse) the VBCComputer for this ground state
-  // you’ll need to pass it the same directions & frequency list
-  // that you used to set up your ResponseStates originally:
-  /*static thread_local VBCComputer2 vbc(*/
-  /**/
-  /*// find the indices of sos.frequencies in that computer’s list:*/
-  /*size_t bi = vbc.frequency_index(sos.frequencies.first);*/
-  /*size_t ci = vbc.frequency_index(sos.frequencies.second);*/
-  /*// and the BC-pair index from its perturbation characters:*/
-  /*size_t bc = vbc.BC_pair_index(sos.perturbations.first.direction,*/
-  /*                              sos.perturbations.second.direction);*/
-  /**/
-  /*// will load from disk if already there, otherwise compute & save:*/
-  /*return get_flat(vbc.compute_and_save(bc, bi, ci));*/
+inline madness::vector_real_function_3d
+perturbation_vector(madness::World &world, GroundStateData const &gs,
+                    XBCResponseState const &sos) {
   return {};
 }
 
-#endif  // RESPONSE_STATE_HPP
+#endif // RESPONSE_STATE_HPP
