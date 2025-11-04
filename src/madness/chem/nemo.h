@@ -56,6 +56,7 @@
 #include<madness/chem/pcm.h>
 #include<madness/chem/AC.h>
 #include<madness/chem/pointgroupsymmetry.h>
+#include "Results.h"
 #include"madness/mra/commandlineparser.h"
 #include<madness/chem/QCPropertyInterface.h>
 #include <madness/world/timing_utilities.h>
@@ -363,6 +364,7 @@ public:
 
 
 public:
+	std::filesystem::path work_dir;
 
 	/// ctor
 
