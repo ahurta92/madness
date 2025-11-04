@@ -8,7 +8,7 @@
 #include "PropertyManager.hpp"
 #include "ResponseDebugLogger.hpp"
 #include "ResponseManager.hpp"
-#include "ResponseMetaData.hpp"
+#include "ResponseRecord.hpp"
 #include "StateGenerator.hpp"
 #include <madness/mra/funcdefaults.h>
 
