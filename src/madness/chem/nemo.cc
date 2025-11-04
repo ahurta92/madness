@@ -236,7 +236,7 @@ double Nemo::value(const Tensor<double>& x) {
 
 	if(world.rank()==0) std::cout << "Nemo Orbital Energies: " << calc->aeps << "\n";
 
-    calc->output_calc_info_schema();
+  // calc->output_calc_info_schema();
 
     if (world.rank()==0) print_header2("end computing the nemo wave function");
     return calc->current_energy;
@@ -848,9 +848,9 @@ Tensor<double> Nemo::gradient(const Tensor<double>& x) {
 
 
 /// compute the nuclear hessian
-Tensor<double> Nemo::hessian(const Tensor<double>& x) {
+VibrationalResults Nemo::hessian(const Tensor<double> &x) {
 
-    const bool hessdebug=(false and (world.rank()==0));
+  const bool hessdebug = (true and (world.rank() == 0));
 
     const size_t natom=molecule().natom();
     const vecfuncT& nemo=get_calc()->amo;
@@ -912,19 +912,21 @@ Tensor<double> Nemo::hessian(const Tensor<double>& x) {
                     MolecularDerivativeFunctor mdf(molecule(), jatom, jaxis);
                     hessian(i,j)=inner(dens_pt[i],mdf);
 
-                    // integration by parts < 0 | H^{YX} | 0 >
-                    if (iatom==jatom) hessian(i,j)+=inner(drho[iaxis],mdf);
-
-                }
-            }
+          // integration by parts < 0 | H^{YX} | 0 >
+          if (iatom == jatom)
+            hessian(i, j) += inner(drho[iaxis], mdf);
         }
+      }
     }
-//    if (hessdebug) {
-        print("\n raw electronic Hessian (a.u.)\n");
-        print(hessian);
-//    }
-    for (size_t i=0; i<3*natom; ++i) hessian(i,i)=0.0;
-    if (get_nemo_param().get<bool>("purify_hessian")) hessian=purify_hessian(hessian);
+  }
+      if (hessdebug) {
+  print("\n raw electronic Hessian (a.u.)\n");
+  print(hessian);
+      }
+  for (size_t i = 0; i < 3 * natom; ++i)
+    hessian(i, i) = 0.0;
+  if (get_nemo_param().get<bool>("purify_hessian"))
+    hessian = purify_hessian(hessian);
 
     Tensor<double> asymmetric=0.5*(hessian-transpose(hessian));
     const double max_asymmetric=asymmetric.absmax();
@@ -947,60 +949,71 @@ Tensor<double> Nemo::hessian(const Tensor<double>& x) {
         hessian(i,i)=-sum;
     }
 
-//    if (hessdebug) {
-        print("\n electronic Hessian (a.u.)\n");
-        print(hessian);
-//    }
+      if (hessdebug) {
+  print("\n electronic Hessian (a.u.)\n");
+  print(hessian);
+      }
 
-    // add the nuclear-nuclear contribution
-    hessian+=molecule().nuclear_repulsion_hessian();
-        print("\n nuclear Hessian (a.u.)\n");
-        print(molecule().nuclear_repulsion_hessian());
+  // add the nuclear-nuclear contribution
+  hessian += molecule().nuclear_repulsion_hessian();
+  if(hessdebug){
+  print("\n nuclear Hessian (a.u.)\n");
+  print(molecule().nuclear_repulsion_hessian());
+}
 
-//    if (hessdebug) {
-        print("\n Hessian (a.u.)\n");
-        print(hessian);
-//    }
+      if (hessdebug) {
+  print("\n Hessian (a.u.)\n");
+  print(hessian);
+      }
 
     time_hessian.end("compute hessian");
 
     Tensor<double> normalmodes;
     Tensor<double> frequencies=compute_frequencies(molecule(),hessian,normalmodes,false,hessdebug);
 
-    if (hessdebug) {
-        print("\n vibrational frequencies (unprojected) (a.u.)\n");
-        print(frequencies);
-        print("\n vibrational frequencies (unprojected) (cm-1)\n");
-        print(constants::au2invcm*frequencies);
+  if (hessdebug) {
+    print("\n vibrational frequencies (unprojected) (a.u.)\n");
+    print(frequencies);
+    print("\n vibrational frequencies (unprojected) (cm-1)\n");
+    print(constants::au2invcm * frequencies);
+  }
+
+  VibrationalResults results;
+
+  frequencies = compute_frequencies(molecule(), hessian, normalmodes, true, hessdebug);
+
+
+  Tensor<double> intensities = compute_IR_intensities(normalmodes, dens_pt);
+  Tensor<double> reducedmass = compute_reduced_mass(molecule(), normalmodes);
+
+
+
+  if (world.rank() == 0) {
+    print("\nprojected vibrational frequencies (cm-1)\n");
+    printf("frequency in cm-1   ");
+    for (int i = 0; i < frequencies.size(); ++i) {
+      printf("%10.3f", constants::au2invcm * frequencies(i));
     }
-
-    frequencies=compute_frequencies(molecule(),hessian, normalmodes,true,hessdebug);
-    Tensor<double> intensities=compute_IR_intensities(normalmodes,dens_pt);
-    Tensor<double> reducedmass=compute_reduced_mass(molecule(),normalmodes);
-
-    if (world.rank() == 0) {
-        print("\nprojected vibrational frequencies (cm-1)\n");
-        printf("frequency in cm-1   ");
-        for (int i=0; i<frequencies.size(); ++i) {
-            printf("%10.3f",constants::au2invcm*frequencies(i));
-        }
-        printf("\n");
-        printf("intensity in km/mol ");
-        for (int i=0; i<intensities.size(); ++i) {
-            printf("%10.3f",intensities(i));
-        }
-        printf("\n");
-        printf("reduced mass in amu ");
-        for (int i=0; i<intensities.size(); ++i) {
-            printf("%10.3f",reducedmass(i));
-        }
-        printf("\n\n");
-        printf("done with computing the hessian matrix at time %8.1fs \n",wall_time());
-        printf("final energy %16.8f", calc->current_energy);
+    printf("\n");
+    printf("intensity in km/mol ");
+    for (int i = 0; i < intensities.size(); ++i) {
+      printf("%10.3f", intensities(i));
     }
-
-    return hessian;
-
+    printf("\n");
+    printf("reduced mass in amu ");
+    for (int i = 0; i < intensities.size(); ++i) {
+      printf("%10.3f", reducedmass(i));
+    }
+    printf("\n\n");
+    printf("done with computing the hessian matrix at time %8.1fs \n", wall_time());
+    printf("final energy %16.8f", calc->current_energy);
+  }
+  results.hessian = hessian;
+  results.frequencies = frequencies;
+  results.intensities = intensities;
+  results.reducedmass = reducedmass;
+  results.normalmodes = normalmodes;
+  return results;
 }
 
 /// purify and symmetrize the hessian
@@ -1024,23 +1037,28 @@ Tensor<double> Nemo::purify_hessian(const Tensor<double>& hessian) const {
                     double diff=0.5*fabs(purified(i,j)-purified(j,i));
                     maxasymmetric=std::max(maxasymmetric,diff);
 
-                    unsigned int ZA=calc->molecule.get_atomic_number(iatom);
-                    unsigned int ZB=calc->molecule.get_atomic_number(jatom);
-                    if (ZA<ZB) purified(i,j)=purified(j,i);
-                    if (ZA>ZB) purified(j,i)=purified(i,j);
-                    if (ZA==ZB) {
-                        purified(i,j)=mean;
-                        purified(j,i)=mean;
-                    }
-                }
-            }
+          unsigned int ZA = calc->molecule.get_atomic_number(iatom);
+          unsigned int ZB = calc->molecule.get_atomic_number(jatom);
+          if (ZA < ZB)
+            purified(i, j) = purified(j, i);
+          if (ZA > ZB)
+            purified(j, i) = purified(i, j);
+          if (ZA == ZB) {
+            purified(i, j) = mean;
+            purified(j, i) = mean;
+          }
         }
+      }
     }
-    print("purify: max asymmetric element ",maxasymmetric);
-    print("purify: raw hessian ");
-    print(hessian);
-    print("purify: purified hessian ");
-    print(purified);
+  }
+  if(world.rank()==0){
+
+  print("purify: max asymmetric element ", maxasymmetric);
+  print("purify: raw hessian ");
+  print(hessian);
+  print("purify: purified hessian ");
+  print(purified);
+}
 
     return purified;
 }
@@ -1185,7 +1203,10 @@ vecfuncT Nemo::solve_cphf(const size_t iatom, const int iaxis, const Tensor<doub
         const Tensor<double> incomplete_hessian, const vecfuncT& parallel,
         const SCFProtocol& proto, const std::string& xc_data) const {
 
-    print("\nsolving nemo cphf equations for atom, axis",iatom,iaxis);
+	if(world.rank()==0){
+
+  print("\nsolving nemo cphf equations for atom, axis", iatom, iaxis);
+	}
 
     vecfuncT xi=guess;
     // guess for the perturbed MOs
@@ -1320,12 +1341,14 @@ vecfuncT Nemo::solve_cphf(const size_t iatom, const int iaxis, const Tensor<doub
         }
         h_diff=h-old_h;
 
-        if (world.rank() == 0)
-            print("xi_"+stringify(ii),"CPHF BSH residual: rms", rms,
-                    "   max", maxval, "H, Delta H", h.normf(), h_diff.absmax());
-        print("h+ihr");
-        print(h+ihr);
-        old_h=h;
+    if (world.rank() == 0){
+
+      print("xi_" + stringify(ii), "CPHF BSH residual: rms", rms, "   max", maxval, "H, Delta H", h.normf(),
+            h_diff.absmax());
+    print("h+ihr");
+    print(h + ihr);
+		}
+    old_h = h;
 
         if (rms/norm<proto.dconv and (h_diff.absmax()<1.e-2)) break;
     }
@@ -1340,16 +1363,16 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
     std::vector<vecfuncT> xi(3*natom);
     const vecfuncT& nemo=calc->amo;
 
-    // read CPHF vectors from file if possible
-    if (get_calc()->param.get<bool>("read_cphf")) {
-        for (int i=0; i<3*natom; ++i) {
-            load_function(xi[i],"xi_"+stringify(i));
-            real_function_3d dens_pt=dot(world,xi[i],nemo);
-            dens_pt=4.0*R_square*dens_pt;
-            save(dens_pt,"dens_pt"+stringify(i));
-        }
-        return xi;
+  // read CPHF vectors from file if possible
+  if (get_nemo_param().get<bool>("read_cphf")) {
+    for (int i = 0; i < 3 * natom; ++i) {
+      load_function(xi[i], "xi_" + stringify(i));
+      real_function_3d dens_pt = dot(world, xi[i], nemo);
+      dens_pt = 4.0 * R_square * dens_pt;
+      save(dens_pt, "dens_pt" + stringify(i));
     }
+    return xi;
+  }
 
 
     timer t1(world,get_calc_param().print_level()>2);
@@ -1359,10 +1382,12 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
 
     // compute some intermediates
 
-    // compute those contributions to the hessian that do not depend on the response
-    Tensor<double> incomplete_hessian=make_incomplete_hessian();
-    t1.tag("make incomplete hessian");
-    print(incomplete_hessian);
+  // compute those contributions to the hessian that do not depend on the response
+  Tensor<double> incomplete_hessian = make_incomplete_hessian();
+  t1.tag("make incomplete hessian");
+	if(world.rank()==0){
+  print(incomplete_hessian);
+	}
 
     // compute the initial guess for the response
     const Tensor<double> fock=compute_fock_matrix(nemo,get_calc()->get_aocc());
@@ -1385,21 +1410,20 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
     }
     t1.tag("make constant and parallel terms");
 
-
-    // initial guess from the constant rhs or from restart
-    if (get_calc()->param.restart_cphf()) {
-        for (int i=0; i<3*natom; ++i) {
-            load_function(xi[i],"xi_guess"+stringify(i));
-        }
-        t1.tag("read guess from file");
-    } else {
-        for (std::size_t i=0; i<rhsconst.size(); ++i) {
-            xi[i]=apply(world, bsh, -2.0*rhsconst[i]);
-            truncate(world,xi[i]);
-            save_function(xi[i],"xi_guess"+stringify(i));
-        }
-        t1.tag("make initial guess");
+  // initial guess from the constant rhs or from restart
+  if (get_nemo_param().get<bool>("restart_cphf")) {
+    for (int i = 0; i < 3 * natom; ++i) {
+      load_function(xi[i], "xi_guess" + stringify(i));
     }
+    t1.tag("read guess from file");
+  } else {
+    for (std::size_t i = 0; i < rhsconst.size(); ++i) {
+      xi[i] = apply(world, bsh, -2.0 * rhsconst[i]);
+      truncate(world, xi[i]);
+      save_function(xi[i], "xi_guess" + stringify(i));
+    }
+    t1.tag("make initial guess");
+  }
 
 
     // do some pre-iterations using fast LDA xc functional
@@ -1432,13 +1456,15 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
             printf("\nfinished CPHF equations at time %8.1fs \n",wall_time());
         }
 
-        std::vector<vecfuncT> full_xi(3*natom);
-        for (int i=0; i<3*natom; ++i) full_xi[i]=xi[i]-parallel[i];
-        Tensor<double> complementary_hessian=make_incomplete_hessian_response_part(full_xi);
-        print("full hessian matrix");
-        print(incomplete_hessian+complementary_hessian);
+    std::vector<vecfuncT> full_xi(3 * natom);
+    for (int i = 0; i < 3 * natom; ++i)
+      full_xi[i] = xi[i] - parallel[i];
+    Tensor<double> complementary_hessian = make_incomplete_hessian_response_part(full_xi);
+		if(world.rank()==0){
+    print("full hessian matrix");
+    print(incomplete_hessian + complementary_hessian);
 
-    }
+  }
 
     // solve the response equations
     SCFProtocol p(world,get_calc_param());
@@ -1468,13 +1494,15 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
             printf("\nfinished CPHF equations at time %8.1fs \n",wall_time());
         }
 
-        std::vector<vecfuncT> full_xi(3*natom);
-        for (int i=0; i<3*natom; ++i) full_xi[i]=xi[i]-parallel[i];
-        Tensor<double> complementary_hessian=make_incomplete_hessian_response_part(full_xi);
-        print("full hessian matrix");
-        print(incomplete_hessian+complementary_hessian);
-
-    }
+    std::vector<vecfuncT> full_xi(3 * natom);
+    for (int i = 0; i < 3 * natom; ++i)
+      full_xi[i] = xi[i] - parallel[i];
+    Tensor<double> complementary_hessian = make_incomplete_hessian_response_part(full_xi);
+		if(world.rank()==0){
+    print("full hessian matrix");
+    print(incomplete_hessian + complementary_hessian);
+		}
+  }
 
     // reset the initial thresholds
     set_protocol(get_calc()->param.econv());
@@ -1496,8 +1524,15 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
         printf("finished solving the CPHF equations at time %8.1fs \n", wall_time());
     }
 
-    return xi;
-
+  Tensor<double> xi_norms(4 * natom);
+  for (int i = 0; i < 3 * natom; ++i)
+    xi_norms(i) = norm2(world, xi[i]);
+  if (world.rank() == 0) {
+    print("norms of the CPHF vectors");
+    print(xi_norms);
+  }
+    
+  return xi;
 }
 
 
