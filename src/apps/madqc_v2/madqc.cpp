@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
 
 
             // Create workflow
-            qcapp::Workflow wf(world);
+            qcapp::Workflow wf;
             std::string user_workflow = "scf";
             if (parser.key_exists("workflow")) user_workflow = parser.value("workflow");
             else if (parser.key_exists("wf")) user_workflow = parser.value("wf");
