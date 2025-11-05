@@ -1537,6 +1537,7 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
     
   return xi;
 }
+}
 
 vecfuncT Nemo::compute_cphf_parallel_term(const size_t iatom, const int iaxis) const {
 
