@@ -129,6 +129,7 @@ struct molresponse_lib {
     };
 
     const auto molecule = read_molecule(moldft_checkpt);
+    print("Read molecule with ", molecule.natom(), " atoms.");
     GroundStateData ground(world, relative_archive.string(), molecule);
     ResponseManager response_manager(world, calc_params);
 
@@ -290,6 +291,7 @@ struct molresponse_lib {
         }
 
         auto unit_amu_toau = std::sqrt(constants::atomic_mass_in_au);
+        const double csg_factor = 142.9435756;
         Tensor<double> normal_modes = *vib.normalmodes / unit_amu_toau;
         auto vib_freq = *vib.frequencies * constants::au2invcm;
 
@@ -346,29 +348,66 @@ struct molresponse_lib {
                   "β' (a.u.)", "    ", "I_Raman (a.u.)", "   ",
                   "I_Depolarized (a.u.)", "   ", "ρ");
           }
+
+          auto compute_alpha_mean = [](const Tensor<double> &alpha) {
+            auto alpha_mean = 0.0;
+            for (int i = 0; i < 3; ++i) {
+              alpha_mean += alpha(i, i);
+            }
+            return alpha_mean / 3.0;
+          };
+
+          auto compute_beta2 = [](const Tensor<double> &alpha) {
+            auto beta2 = 0.0;
+            for (int i = 0; i < 3; ++i) {
+              for (int j = 0; j < 3; ++j) {
+                beta2 += 0.5 * (3 * alpha(i, j) * alpha(i, j) -
+                                alpha(i, i) * alpha(j, j));
+              }
+            }
+            return beta2;
+          };
+
+          // Raman Intensity linearly polarized light
+          auto RamanIntensityL = [](const double alpha2, const double beta2) {
+            return 45 * alpha2 + 4 * beta2; // in a.u.
+          };
+          auto DepolarizationRatio = [](const double alpha2,
+                                        const double beta2) {
+            return 3 * beta2 / (45 * alpha2 + 4 * beta2);
+          };
+
           for (int i = 0; i < mode.size(); ++i) {
             auto alpha_i = alpha_qi(_, i);
-            auto alpha2 = alpha_i[0] + alpha_i[4] + alpha_i[8];
+            auto alpha = alpha_i.reshape(3, 3);
+            if (world.rank() == 0) {
+              print("Vibrational mode ", mode[i],
+                    " frequency (cm-1): ", vib_freq[mode[i]]);
+              print("Alpha derivative for mode ", mode[i], " (a.u.): \n",
+                    alpha);
+            }
+
+            auto alpha2 = compute_alpha_mean(alpha);
+            alpha2 = alpha2 * alpha2;
             raman.alpha2.push_back(alpha2);
-            auto beta2 = 0.5 * (pow(alpha_i[0] - alpha_i[4], 2) +
-                                pow(alpha_i[4] - alpha_i[8], 2) +
-                                pow(alpha_i[8] - alpha_i[0], 2) +
-                                6 * (pow(alpha_i[1], 2) + pow(alpha_i[2], 2) +
-                                     pow(alpha_i[5], 2)));
+
+            auto beta2 = compute_beta2(alpha);
             raman.beta2.push_back(beta2);
-            auto Raman_intensity = 45 * alpha2 + 4 * beta2; // in a.u.
+
+            auto Raman_intensity = RamanIntensityL(alpha2, beta2);
             raman.intensities_raman.push_back(Raman_intensity);
-            auto Depolarization_ratio = 3 * beta2 / (45 * alpha2 + 4 * beta2);
-            raman.depolarization_ratios.push_back(Depolarization_ratio);
-            auto DepolarizationIntensity =
-                Depolarization_ratio * Raman_intensity;
+
+            auto dp = DepolarizationRatio(alpha2, beta2);
+            raman.depolarization_ratios.push_back(dp);
+
+            auto DepolarizationIntensity = dp * Raman_intensity;
             raman.intensities_depolarization.push_back(DepolarizationIntensity);
             if (world.rank() == 0) {
-              print(mode[i], "   ", vib_freq[mode[i]], "   ",
-                    alpha2 * unit_amu_toau, "   ", beta2 * unit_amu_toau, "   ",
-                    Raman_intensity * unit_amu_toau, "   ",
-                    DepolarizationIntensity * unit_amu_toau, "   ",
-                    Depolarization_ratio);
+              printf("%4d     %8.2f     %10.6f   %10.6f   %12.6f   %12.6f   "
+                     "%6.6f\n",
+                     mode[i], vib_freq[mode[i]], alpha2 * csg_factor,
+                     beta2 * csg_factor, Raman_intensity * csg_factor,
+                     DepolarizationIntensity * csg_factor, dp);
             }
           }
         }
