@@ -22,9 +22,9 @@ public:
 
   virtual ~ResultsBase() = default;
   /// serialize the results to a JSON object
-  virtual nlohmann::json to_json() const = 0;
+  [[nodiscard]] virtual nlohmann::json to_json() const = 0;
   virtual void from_json(const nlohmann::json &j) = 0;
-  virtual std::string key() const = 0;
+  [[nodiscard]] virtual std::string key() const = 0;
 };
 
 //--tiny helpers
@@ -54,27 +54,27 @@ template <class T> inline Tensor<T> tensor_in(const nlohmann::json &j) {
 /// calculation is finished
 class MetaDataResults : public ResultsBase {
 public:
-  MetaDataResults(World &world) {
+  explicit MetaDataResults(World &world) {
     time_begin = wall_time();
     mpi_size = world.size();
   }
 
   double time_begin = 0.0;
   double time_end = 0.0;
-  std::string finished_at = "";
-  std::string git_hash = "";
+  std::string finished_at;
+  std::string git_hash;
   int mpi_size = -1;
-  std::string host = "";
+  std::string host;
   int nthreads = -1;
 
-  std::string key() const override { return "metadata"; }
+  [[nodiscard]] std::string key() const override { return "metadata"; }
 
   void stop() {
     time_end = wall_time();
     finished_at = time_tag();
   }
 
-  nlohmann::json to_json() const override {
+  [[nodiscard]] nlohmann::json to_json() const override {
     nlohmann::json j;
     // compute timing on-the-fly unless they have been set
     if (time_end == 0.0) {
@@ -110,7 +110,7 @@ public:
   ConvergenceResults() = default;
 
   /// construct from JSON
-  ConvergenceResults(const nlohmann::json &j) {
+  explicit ConvergenceResults(const nlohmann::json &j) {
     converged_for_thresh = j.value("converged_for_thresh", 1.e10);
     converged_for_dconv = j.value("converged_for_dconv", 1.e10);
   }
@@ -122,7 +122,7 @@ public:
     return *this;
   }
 
-  std::string key() const override { return "convergence"; }
+  [[nodiscard]] std::string key() const override { return "convergence"; }
 
   ConvergenceResults &set_converged_thresh(double thresh) {
     converged_for_thresh = thresh;
@@ -134,13 +134,13 @@ public:
     return *this;
   }
 
-  nlohmann::json to_json() const override {
+  [[nodiscard]] nlohmann::json to_json() const override {
     nlohmann::json j;
     j["converged_for_thresh"] = converged_for_thresh;
     j["converged_for_dconv"] = converged_for_dconv;
     return j;
   }
-  void from_json(const nlohmann::json &j) {
+  void from_json(const nlohmann::json &j) override {
     converged_for_thresh = j.value("converged_for_thresh", 1.e10);
     converged_for_dconv = j.value("converged_for_dconv", 1.e10);
   }
@@ -163,9 +163,7 @@ public:
     nsteps = j.value("nsteps", 0);
     final_energy = j.value("final_energy", 0.0);
     max_gradient = j.value("max_gradient", 0.0);
-    rms_gradient = j.value("rms_gradient", 0.0);
     max_step = j.value("max_step", 0.0);
-    rms_step = j.value("rms_step", 0.0);
     if (j.contains("final_geometry"))
       final_geometry.from_json(j.at("final_geometry"));
   }
@@ -177,9 +175,7 @@ public:
     j["nsteps"] = nsteps;
     j["final_energy"] = final_energy;
     j["max_gradient"] = max_gradient;
-    j["rms_gradient"] = rms_gradient;
     j["max_step"] = max_step;
-    j["rms_step"] = rms_step;
     j["final_geometry"] = final_geometry.to_json();
     return j;
   } // from json OptimizationResults
@@ -189,9 +185,7 @@ public:
     nsteps = j.value("nsteps", 0);
     final_energy = j.value("final_energy", 0.0);
     max_gradient = j.value("max_gradient", 0.0);
-    rms_gradient = j.value("rms_gradient", 0.0);
     max_step = j.value("max_step", 0.0);
-    rms_step = j.value("rms_step", 0.0);
     if (j.contains("final_geometry"))
       final_geometry.from_json(j.at("final_geometry"));
   }
@@ -685,7 +679,7 @@ public:
 };
 
 using SCFResultsTuple =
-    std::tuple<SCFResults, PropertyResults, ConvergenceResults>;
+    std::tuple<SCFResults, PropertyResults, ConvergenceResults, OptimizationResults>;
 
 } // namespace madness
 #endif // RESULTS_H

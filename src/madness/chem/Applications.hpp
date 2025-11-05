@@ -129,7 +129,7 @@ public:
       if (has_results(ckpt)) {
         j = read_results(ckpt); // which results are we readin
         try {
-          auto &[scf_r, properties, convergence] = scf_results;
+          auto &[scf_r, properties, convergence, optr] = scf_results;
           scf_r.from_json(j["scf"]);
           properties.from_json(j["properties"]);
           convergence.from_json(j["convergence"]);
@@ -161,6 +161,7 @@ public:
           print("SCF results are valid, no need to rerun");
           print("Ensure we are running on the correct molecule geometry");
         }
+
         auto &mol = params_.get<Molecule>();
         mol.from_json(j["scf"]["molecule"]);
       }
@@ -188,7 +189,8 @@ public:
       results_["scf"] = std::get<0>(scf_results).to_json();
       results_["properties"] = std::get<1>(scf_results).to_json();
       results_["convergence"] = std::get<2>(scf_results).to_json();
-      results_["molecule"] = params_.get<Molecule>().to_json();
+      results_["molecule"] = std::get<0>(scf_results).scf_molecule.to_json();
+      results_["optimization_results"] = std::get<3>(scf_results).to_json();
 
       // write the checkpoint file
       if (world_.rank() == 0) {
@@ -509,7 +511,7 @@ template <typename SCFParams>
 NextAction valid(World &world, const SCFResultsTuple &results,
                  const SCFParams &params) {
   // Take a copy of the parameters
-  auto [sr, pr, cr] = results;
+  auto [sr, pr, cr, optr] = results;
 
   // Required convergence for "final" protocol
   const auto vthresh = params.protocol().back(); // final protocol
@@ -520,6 +522,16 @@ NextAction valid(World &world, const SCFResultsTuple &results,
   const bool need_energy = true;
   const bool need_dipole = params.dipole();
   const bool need_gradient = params.derivatives();
+
+  if (world.rank() == 0) {
+    print("Validating SCF results:");
+    print(" Required protocol threshold: ", vthresh);
+    print(" Required density convergence: ", vdconv);
+    print(" Archive needed: ", archive_needed);
+    print(" Need energy: ", need_energy);
+    print(" Need dipole: ", need_dipole);
+    print(" Need gradient: ", need_gradient);
+  }
 
   // Files/paths
   const std::string archivename = params.prefix();
@@ -535,10 +547,19 @@ NextAction valid(World &world, const SCFResultsTuple &results,
   const bool at_protocol =
       (cr.converged_for_thresh == vthresh && cr.converged_for_dconv == vdconv);
 
-  const auto pjson = pr.to_json();
+  const auto pjson = sr.properties.to_json();
   const bool energy_ok = pjson.contains("energy");
   const bool dipole_ok = pjson.contains("dipole");
   const bool gradient_ok = pjson.contains("gradient");
+
+  if (world.rank() == 0) {
+    print("at_protocol: ", at_protocol);
+    print("archive_needed: ", archive_needed);
+    print("archive_exists: ", archive_exists);
+    print("energy_ok: ", energy_ok);
+    print("dipole_ok: ", dipole_ok);
+    print("gradient_ok: ", gradient_ok);
+  }
 
   // Only require props the user asked for
   const bool all_properties_computed = (need_energy ? energy_ok : true) &&
@@ -554,17 +575,11 @@ NextAction valid(World &world, const SCFResultsTuple &results,
     // check if the optimized geometry is available
     try {
 
-      if (!sr.properties.gradient.has_value()) {
-        gopt_ok = false;
-      } else {
-        Tensor<double> grad = *sr.properties.gradient;
-        double gmax = grad.absmax();
-        double gtol = params.gtol();
-        bool gconv = gmax < gtol;
-        // check gradient convergence
-        if (!gconv) {
-          gopt_ok = false;
-        }
+      double gtol = params.gtol();
+      bool gconv = optr.max_gradient < gtol;
+      // check gradient convergence
+      if (!gconv) {
+        gopt_ok = true;
       }
     } catch (...) {
       gopt_ok = false;
@@ -585,6 +600,7 @@ NextAction valid(World &world, const SCFResultsTuple &results,
     print("archive_needed: ", archive_needed);
     print("archive_exists: ", archive_exists);
     print("all_properties_computed: ", all_properties_computed);
+    print("gopt_ok: ", gopt_ok);
   }
   // with we need to redo we can restart from the exisiting archive
   return archive_exists ? NextAction::Restart : NextAction::Redo;
@@ -619,7 +635,11 @@ struct moldft_lib {
     const auto &molecule = params.get<Molecule>();
     auto params_copy = params;
 
-    SCFResults sr;
+    SCFResultsTuple results;
+    auto &scf_res = std::get<0>(results);
+    auto &opt_res = std::get<3>(results);
+    auto &prop_res = std::get<1>(results);
+    auto &conv_res = std::get<2>(results);
 
     if (next_action_ == NextAction::Ok ||
         next_action_ == NextAction::ReloadOnly) {
@@ -653,9 +673,9 @@ struct moldft_lib {
     // vama
     scf->set_protocol<3>(world, scf->param.protocol()[0]);
     double energy = 0.0;
-    sr.is_opt = scf->param.gopt();
+    scf_res.is_opt = scf->param.gopt();
 
-    if (sr.is_opt) {
+    if (scf_res.is_opt) {
       MolOpt opt(scf->param.gmaxiter(), 0.1, scf->param.gval(),
                  scf->param.gtol(),
                  1e-3, // XTOL
@@ -664,14 +684,15 @@ struct moldft_lib {
                  scf->param.algopt());
 
       MolecularEnergy target(world, *scf);
-      auto new_mol = opt.optimize(scf->molecule, target);
+      opt_res = opt.optimize_app(scf->molecule, target);
+      auto new_mol = opt_res.final_geometry;
 
       Tensor<double> gradient;
       target.energy_and_gradient(new_mol, energy, gradient);
-      sr.scf_molecule = new_mol;
+      scf_res.scf_molecule = new_mol;
 
-      sr.properties.energy = energy;
-      sr.properties.gradient = gradient;
+      scf_res.properties.energy = energy;
+      scf_res.properties.gradient = gradient;
 
       // write out the optimized geometry
       if (world.rank() == 0) {
@@ -687,7 +708,7 @@ struct moldft_lib {
       // energy = E.value(new_mol.get_all_coords().flat());
     } else {
       MolecularEnergy E(world, *scf);
-      sr.scf_molecule = molecule;
+      scf_res.scf_molecule = molecule;
 
       energy = E.value(scf->molecule.get_all_coords().flat());
       if (world.rank() == 0 && scf->param.print_level() > 0)
@@ -705,6 +726,7 @@ struct moldft_lib {
     if (scf->param.derivatives()) {
       grad = scf->derivatives(world, rho);
       scf->e_data.add_gradient(grad);
+      scf_res.properties.gradient = grad;
     }
 
     tensorT dip;
@@ -713,18 +735,17 @@ struct moldft_lib {
 
     scf->do_plots(world);
 
-    ConvergenceResults cr;
-    cr.set_converged_thresh(FunctionDefaults<3>::get_thresh());
-    cr.set_converged_dconv(scf->converged_for_dconv);
-    PropertyResults pr;
-    pr.energy = energy;
-    pr.dipole = dip;
-    pr.gradient = grad;
-    sr.aeps = scf->aeps;
-    sr.beps = scf->beps;
-    sr.properties = pr;
+    conv_res.set_converged_thresh(FunctionDefaults<3>::get_thresh());
+    conv_res.set_converged_dconv(scf->param.dconv());
+    prop_res.energy = energy;
+    prop_res.dipole = dip;
+    prop_res.gradient = grad;
 
-    return {sr, pr, cr};
+    scf_res.aeps = scf->aeps;
+    scf_res.beps = scf->beps;
+    scf_res.properties = prop_res;
+
+    return results;
   }
 
 private:
@@ -781,6 +802,7 @@ struct nemo_lib {
 
   SCFResultsTuple run(World &world, const Params &params,
                       NextAction action = NextAction::Redo) {
+    SCFResultsTuple results;
     auto nm = calc(world, params);
     nm->get_calc()->work_dir = std::filesystem::current_path();
 
@@ -801,8 +823,9 @@ struct nemo_lib {
     if (nm->get_nemo_param().hessian())
       sr.properties.vibrations =
           nm->hessian(nm->get_calc()->molecule.get_all_coords());
+    results = {sr, pr, cr, OptimizationResults()};
 
-    return {sr, pr, cr};
+    return results;
   }
 
 private:
