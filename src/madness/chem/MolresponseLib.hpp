@@ -314,34 +314,44 @@ struct molresponse_lib {
                           response_params.nuclear_directions(), properties);
         raman.polarization_frequencies = response_params.dipole_frequencies();
         properties.save();
+        if(world.rank() == 0) {
+          print("Projecting alpha derivatives onto normal modes...");
+          for (const auto &tensor : alpha_derivatives) {
+            print("Alpha derivative tensor size: ", tensor.dims(), "x");
+            print("Alpha derivative tensor: \n", tensor);
+          }
+        }
+        world.gop.fence();
+
 
         auto nnmodes =
-            normal_modes(_, Slice(mode[0], mode[mode.size() - 1], 1));
+            normal_modes(_, Slice(mode[0], -1, 1));
         raman.normal_modes = nnmodes;
 
         // Slice into Tensor
 
-        if (world.rank() == 0) {
-          print("Normal modes (amu^1/2 * au): \n", normal_modes);
-          print("Vibrational frequencies (cm^-1): \n", vib_freq);
-          print("Normal modes sliced (amu^1/2 * au): \n");
-          print(nnmodes);
-        }
+        // if (world.rank() == 0) {
+        //   print("Normal modes (amu^1/2 * au): \n", normal_modes);
+        //   print("Vibrational frequencies (cm^-1): \n", vib_freq);
+        //   print("Normal modes sliced (amu^1/2 * au): \n");
+        //   print(nnmodes);
+        // }
+        world.gop.fence();
 
         for (const auto &tensor : alpha_derivatives) {
-          if (world.rank() == 0) {
-            print("Vibrational mode frequency (cm-1): ", vib_freq);
-            print("Alpha derivative tensor size: ", tensor.dims(), "x");
-            print("Alpha derivative tensor: \n", tensor);
-          }
+          // if (world.rank() == 0) {
+          //   print("Vibrational mode frequency (cm-1): ", vib_freq);
+          //   print("Alpha derivative tensor size: ", tensor.dims(), "x");
+          //   print("Alpha derivative tensor: \n", tensor);
+          // }
           raman.polarizability_derivatives.push_back(tensor);
 
           auto alpha_qi = inner(tensor, nnmodes);
           raman.polarizability_derivatives_normal_modes.push_back(alpha_qi);
-          if (world.rank() == 0) {
-            print("Alpha derivative projected onto normal modes (a.u.): \n",
-                  alpha_qi);
-          }
+          // if (world.rank() == 0) {
+          //   print("Alpha derivative projected onto normal modes (a.u.): \n",
+          //         alpha_qi);
+          // }
 
           if (world.rank() == 0) {
             print("Mode", "  ", "(cm^-1)", "       ", "α' (a.u.)", "      ",
@@ -378,14 +388,18 @@ struct molresponse_lib {
           };
 
           for (int i = 0; i < mode.size(); ++i) {
-            auto alpha_i = alpha_qi(_, i);
+            auto alpha_i = copy(alpha_qi(_, i));
+            // if(world.rank() == 0) {
+            //   print("Alpha derivative for mode ", mode[i], " (a.u.): \n",
+            //         alpha_i);
+            // }
             auto alpha = alpha_i.reshape(3, 3);
-            if (world.rank() == 0) {
-              print("Vibrational mode ", mode[i],
-                    " frequency (cm-1): ", vib_freq[mode[i]]);
-              print("Alpha derivative for mode ", mode[i], " (a.u.): \n",
-                    alpha);
-            }
+            // if (world.rank() == 0) {
+            //   print("Vibrational mode ", mode[i],
+            //         " frequency (cm-1): ", vib_freq[mode[i]]);
+            //   print("Alpha derivative for mode ", mode[i], " (a.u.): \n",
+            //         alpha);
+            // }
 
             auto alpha2 = compute_alpha_mean(alpha);
             alpha2 = alpha2 * alpha2;
