@@ -1,5 +1,3 @@
-#pragma once
-#include "GroundStateData.hpp"
 #include "ResponseDebugLogger.hpp"
 #include "ResponseDebugLoggerMacros.hpp"
 #include "ResponseIO.hpp"

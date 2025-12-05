@@ -170,16 +170,18 @@ struct molresponse_lib {
           protocol_thresh ==
           calc_params.protocol().back(); // are we at the final protocol?
       for (const auto &state : generated_states.states) {
-        for (size_t freq_idx = 0; freq_idx < state.frequencies.size();
+        auto state_copy = state; // copy to avoid mutating
+        for (size_t freq_idx = 0; freq_idx < state_copy.frequencies.size();
              ++freq_idx) {
-          bool is_saved = response_record.is_saved(state);
+          state_copy.set_frequency_index(freq_idx);
+          bool is_saved = response_record.is_saved(state_copy);
           bool should_solve =
               !is_saved ||
-              (at_final_protocol && !response_record.is_converged(state));
+              (at_final_protocol && !response_record.is_converged(state_copy));
 
           if (world.rank() == 0) {
-            print("Checking state ", state.description(), " at thresh ",
-                  protocol_thresh, " freq ", state.frequencies[freq_idx],
+            print("Checking state ", state_copy.description(), " at thresh ",
+                  protocol_thresh, " freq ", state_copy.frequencies[freq_idx],
                   " is_saved=", is_saved,
                   " at_final_protocol=", at_final_protocol,
                   " should_solve=", should_solve);
@@ -477,7 +479,7 @@ struct molresponse_lib {
             auto depol_int_au = RamanIntensityL(alpha2_au, beta2_au);
             row.pol_int = depol_int_au * csg_factor;
             row.dep_ratio = DepolarizationRatio(alpha2_au, beta2_au);
-            row.depol_int = (*row.dep_ratio) * (*row.depol_int);
+            row.depol_int = (*row.dep_ratio) * (*row.pol_int);
             world.gop.fence();
             raman_rows.push_back(row);
           }
