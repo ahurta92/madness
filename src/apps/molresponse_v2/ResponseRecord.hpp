@@ -326,12 +326,12 @@ public:
       return rows;
     for (auto sit = data_["states"].begin(); sit != data_["states"].end();
          ++sit) {
-      const std::string sid = sit.key();
+      const std::string& sid = sit.key();
       if (!(*sit).contains("protocols"))
         continue;
       const auto &protos = (*sit)["protocols"];
       for (auto pit = protos.begin(); pit != protos.end(); ++pit) {
-        const std::string pkey = pit.key();
+        const std::string& pkey = pit.key();
         const auto &node = pit.value();
         const auto &saved = node.value("saved", json::object());
         const auto &conv = node.value("converged", json::object());
