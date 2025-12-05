@@ -157,21 +157,21 @@ public:
   }
 
   // --- Queries (overloads take doubles; we canonicalize to keys) ---
-  bool is_saved(const std::string &state_id, double protocol,
+  [[nodiscard]] bool is_saved(const std::string &state_id, double protocol,
                 double freq) const {
     return get_flag(state_id, protocol_key(protocol), freq_key(freq), "saved");
   }
-  bool is_converged(const std::string &state_id, double protocol,
+  [[nodiscard]] bool is_converged(const std::string &state_id, double protocol,
                     double freq) const {
     return get_flag(state_id, protocol_key(protocol), freq_key(freq),
                     "converged");
   }
-  bool is_saved(const LinearResponseDescriptor &st) const {
+  [[nodiscard]] bool is_saved(const LinearResponseDescriptor &st) const {
     return get_flag(st.perturbationDescription(),
                     protocol_key(st.current_threshold()),
                     freq_key(st.current_frequency()), "saved");
   }
-  bool is_converged(const LinearResponseDescriptor &st) const {
+  [[nodiscard]] bool is_converged(const LinearResponseDescriptor &st) const {
     return get_flag(st.perturbationDescription(),
                     protocol_key(st.current_threshold()),
                     freq_key(st.current_frequency()), "converged");
@@ -205,7 +205,7 @@ public:
 
   // If converged at multiple protocols, return the most accurate (smallest
   // numeric) protocol key.
-  std::optional<std::string>
+  [[nodiscard]] std::optional<std::string>
   best_converged_protocol(const std::string &state_id, double freq) const {
     if (!data_.contains("states"))
       return std::nullopt;
@@ -236,7 +236,7 @@ public:
   }
 
   // Check saved && converged at *final* protocol for each (state, freq)
-  std::vector<MissingItem>
+  [[nodiscard]] std::vector<MissingItem>
   missing_at_final_protocol(const std::vector<std::string> &state_ids,
                             const std::vector<double> &freqs,
                             const std::string &final_proto_key) const {
@@ -306,7 +306,7 @@ public:
     }
   }
 
-  json to_json() const { return data_; }
+  [[nodiscard]] json to_json() const { return data_; }
 
   // --- Optional: “final_saved” compatibility flag you had ---
   void mark_final_saved(const std::string &state_id, bool flag = true) {
@@ -320,7 +320,7 @@ public:
     std::string state, freq, protocol;
     bool saved = false, converged = false;
   };
-  std::vector<Row> to_rows() const {
+  [[nodiscard]] std::vector<Row> to_rows() const {
     std::vector<Row> rows;
     if (!data_.contains("states"))
       return rows;
@@ -433,7 +433,7 @@ private:
   }
 
   // -------- core flag ops (with canonical keys precomputed) --------
-  bool get_flag(const std::string &sid, const std::string &pkey,
+ [[nodiscard]] bool get_flag(const std::string &sid, const std::string &pkey,
                 const std::string &fkey, const std::string &which) const {
     if (!data_.contains("states"))
       return false;
