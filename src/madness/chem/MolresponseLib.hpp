@@ -45,53 +45,38 @@
 #include <madness/chem/Results.h>
 
 struct molresponse_lib {
-  // -----------------------------------------------------------------------------
-  // Container for structured JSON fragments produced by the workflow
-  // -----------------------------------------------------------------------------
   struct Results {
-    nlohmann::json metadata;             // convergence metadata per state
-    nlohmann::json properties;           // computed α, β, Raman property tables
-    nlohmann::json vibrational_analysis; // vibrational analysis results
-    nlohmann::json raman_spectra;        // Raman spectra results
-    nlohmann::json debug_log;            // debug log of response calculations
+    nlohmann::json metadata;
+    nlohmann::json properties;
+    nlohmann::json vibrational_analysis;
+    nlohmann::json raman_spectra;
+    nlohmann::json debug_log;
   };
+
   static constexpr const char *label() { return "molresponse"; }
 
-  /**
-   * @brief Run the full molecular response & property workflow.
-   *
-   * @param world      The MADNESS world communicator
-   * @param params     Unified parameters containing response and molecule info
-   * @param outdir     Directory where all outputs will be written
-   * @return Results   Structured JSON fragments: metadata + properties
-   */
-  inline static Results run_response(World &world, const Params &params,
-                                     const std::shared_ptr<SCF> &scf_calc,
-                                     const std::filesystem::path &outdir) {
-    // --- configure the ground-state archive location ---
-    const auto &calc_params = params.get<CalculationParameters>();
-    const auto &rp_copy = params.get<ResponseParameters>();
+private:
+  struct GroundContext {
+    Molecule molecule;
+    GroundStateData ground;
+    ResponseManager response_manager;
+    std::string fock_json_file;
+  };
 
-    if (world.rank() == 0) {
-      json response_input_json = {};
-      response_input_json["response"] =
-          rp_copy.to_json_if_precedence("defined");
-      print("response_input_json: ", response_input_json.dump(4));
-      std::ofstream ofs("response.in");
-      write_json_to_input_file(response_input_json, {"response"}, ofs);
-      ofs.close();
-    }
-    world.gop.fence();
-    commandlineparser parser;
-    parser.set_keyval("input", "response.in");
-    if (world.rank() == 0) {
-      ::print("input filename: ", parser.value("input"));
-    }
+  struct StateSolution {
+    GeneratedStateData generated_states;
+    ResponseRecord2 response_record;
+    ResponseDebugLogger debug_logger;
+  };
 
-    auto response_params = ResponseParameters(world, parser);
+  static GroundContext
+  make_ground_context(World &world, const CalculationParameters &calc_params,
+                      const std::shared_ptr<SCF> &scf_calc,
+                      const std::filesystem::path &outdir) {
     auto indir = scf_calc->work_dir;
     auto rel = std::filesystem::relative(indir, outdir);
     auto prox = std::filesystem::proximate(indir, outdir);
+
     if (world.rank() == 0) {
       print("Running MolresponseLib::run_response() in directory: ", outdir);
       print("Ground state archive: ", indir);
@@ -103,9 +88,7 @@ struct molresponse_lib {
     std::string fock_json_file = prox / "moldft.fock.json";
     std::string moldft_checkpt = prox / "moldft.calc_info.json";
     auto relative_archive = prox / archive_name;
-    auto scf_json = nlohmann::json{};
 
-    // moldft calc_info.json
     if (!std::filesystem::exists(moldft_checkpt)) {
       if (world.rank() == 0) {
         print("Error: Missing ground-state checkpoint file: ", moldft_checkpt);
@@ -128,49 +111,46 @@ struct molresponse_lib {
       return mol;
     };
 
-    const auto molecule = read_molecule(moldft_checkpt);
+    Molecule molecule = read_molecule(moldft_checkpt);
     print("Read molecule with ", molecule.natom(), " atoms.");
+
     GroundStateData ground(world, relative_archive.string(), molecule);
     ResponseManager response_manager(world, calc_params);
 
-    if (world.rank() == 0) {
-      print("dipole.frequencies: ", response_params.dipole_frequencies());
-      print("dipole.directions: ", response_params.dipole_directions());
-      print("nuclear.frequencies: ", response_params.nuclear_frequencies());
-      print("nuclear.directions: ", response_params.nuclear_directions());
-      print("requested_properties: ", response_params.requested_properties());
-    }
-    // generate response states
-    StateGenerator state_generator(molecule, calc_params.protocol(),
-                                   ground.isSpinRestricted(), response_params);
+    return GroundContext{std::move(molecule), std::move(ground),
+                         std::move(response_manager),
+                         std::move(fock_json_file)};
+  }
+
+  static StateSolution
+  solve_all_states(World &world, const CalculationParameters &calc_params,
+                   GroundContext &ctx, const ResponseParameters &response_params) {
+    StateGenerator state_generator(ctx.molecule, calc_params.protocol(),
+                                   ctx.ground.isSpinRestricted(),
+                                   response_params);
     auto generated_states = state_generator.generateStates();
+
     if (world.rank() == 0) {
       GeneratedStateData::print_generated_state_map(generated_states.state_map);
     }
     world.gop.fence();
 
-    // initialize metadata
     std::string meta_file = "response_metadata.json";
-
     ResponseRecord2 response_record(world, meta_file);
     response_record.initialize_states(generated_states.states);
-    if (world.rank() == 0) {
 
+    if (world.rank() == 0) {
       response_record.print_summary();
     }
     world.gop.fence();
 
-    // debug logger
     ResponseDebugLogger debug_logger("response_log.json", true);
 
-    // if any state and at any frequency needs solving at this protocol return
-    // true
     auto needs_solving_at_protocol = [&](double protocol_thresh) {
-      bool at_final_protocol =
-          protocol_thresh ==
-          calc_params.protocol().back(); // are we at the final protocol?
+      bool at_final_protocol = protocol_thresh == calc_params.protocol().back();
+
       for (const auto &state : generated_states.states) {
-        auto state_copy = state; // copy to avoid mutating
+        auto state_copy = state;
         for (size_t freq_idx = 0; freq_idx < state_copy.frequencies.size();
              ++freq_idx) {
           state_copy.set_frequency_index(freq_idx);
@@ -186,41 +166,37 @@ struct molresponse_lib {
                   " at_final_protocol=", at_final_protocol,
                   " should_solve=", should_solve);
           }
+
           if (should_solve) {
             return true;
           }
         }
       }
+
       return false;
     };
 
-    // loop over thresholds
     for (double thresh : calc_params.protocol()) {
-
       if (!needs_solving_at_protocol(thresh)) {
         if (world.rank() == 0) {
           madness::print("✓ All states converged at thresh", thresh,
                          "skipping to next protocol.");
         }
-        // advanced threshold for all states
+
         for (auto &state : generated_states.states) {
           state.advance_threshold();
         }
         continue;
       }
 
-      response_manager.setProtocol(world, ground.getL(), thresh);
-      ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
-      ground.computePreliminaries(world, *response_manager.getCoulombOp(),
-                                  response_manager.getVtol(), fock_json_file);
-      // if (world.rank() == 0)
-      //   madness::print("hamiltonian:\n", ground.Hamiltonian);
+      ctx.response_manager.setProtocol(world, ctx.ground.getL(), thresh);
+      ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
+      ctx.ground.computePreliminaries(
+          world, *ctx.response_manager.getCoulombOp(),
+          ctx.response_manager.getVtol(), ctx.fock_json_file);
 
       for (auto &state : generated_states.states) {
-        //     if (state.is_converged || state.current_threshold() != thresh)
-        //     continue;
-
-        computeFrequencyLoop(world, response_manager, state, ground,
+        computeFrequencyLoop(world, ctx.response_manager, state, ctx.ground,
                              response_record, debug_logger);
 
         if (debug_logger.enabled() && world.rank() == 0) {
@@ -232,16 +208,70 @@ struct molresponse_lib {
 
     bool all_are_converged = std::all_of(
         generated_states.states.begin(), generated_states.states.end(),
-        [response_record](const LinearResponseDescriptor &s) {
+        [&response_record](const LinearResponseDescriptor &s) {
           return response_record.is_converged(s);
         });
-    double thresh = calc_params.protocol().back();
-    response_manager.setProtocol(world, ground.getL(), thresh);
-    ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
-    ground.computePreliminaries(world, *response_manager.getCoulombOp(),
-                                response_manager.getVtol(), fock_json_file);
+
+    double final_thresh = calc_params.protocol().back();
+    ctx.response_manager.setProtocol(world, ctx.ground.getL(), final_thresh);
+    ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(),
+                               final_thresh);
+    ctx.ground.computePreliminaries(
+        world, *ctx.response_manager.getCoulombOp(),
+        ctx.response_manager.getVtol(), ctx.fock_json_file);
 
     MADNESS_ASSERT(all_are_converged);
+
+    return StateSolution{std::move(generated_states),
+                         std::move(response_record),
+                         std::move(debug_logger)};
+  }
+
+  /**
+   * @brief Run the full molecular response & property workflow.
+   *
+   * @param world      The MADNESS world communicator
+   * @param params     Unified parameters containing response and molecule info
+   * @param outdir     Directory where all outputs will be written
+   * @return Results   Structured JSON fragments: metadata + properties
+   */
+  inline static Results run_response(World &world, const Params &params,
+                                     const std::shared_ptr<SCF> &scf_calc,
+                                     const std::filesystem::path &outdir) {
+    const auto &calc_params = params.get<CalculationParameters>();
+    const auto &rp_copy = params.get<ResponseParameters>();
+
+    if (world.rank() == 0) {
+      json response_input_json = {};
+      response_input_json["response"] =
+          rp_copy.to_json_if_precedence("defined");
+      print("response_input_json: ", response_input_json.dump(4));
+      std::ofstream ofs("response.in");
+      write_json_to_input_file(response_input_json, {"response"}, ofs);
+      ofs.close();
+    }
+    world.gop.fence();
+    commandlineparser parser;
+    parser.set_keyval("input", "response.in");
+    if (world.rank() == 0) {
+      ::print("input filename: ", parser.value("input"));
+    }
+
+    auto response_params = ResponseParameters(world, parser);
+    GroundContext ground_ctx =
+        make_ground_context(world, calc_params, scf_calc, outdir);
+
+    if (world.rank() == 0) {
+      print("dipole.frequencies: ", response_params.dipole_frequencies());
+      print("dipole.directions: ", response_params.dipole_directions());
+      print("nuclear.frequencies: ", response_params.nuclear_frequencies());
+      print("nuclear.directions: ", response_params.nuclear_directions());
+      print("requested_properties: ", response_params.requested_properties());
+    }
+
+    StateSolution state_solution =
+        solve_all_states(world, calc_params, ground_ctx, response_params);
+
     VibrationalResults vib;
     RamanResults raman;
 
@@ -262,7 +292,8 @@ struct molresponse_lib {
         if (world.rank() == 0) {
           madness::print("▶️ Computing polarizability α...");
         }
-        compute_alpha(world, generated_states.state_map, ground,
+        compute_alpha(world, state_solution.generated_states.state_map,
+                      ground_ctx.ground,
                       response_params.dipole_frequencies(),
                       response_params.dipole_directions(), properties);
         properties.save();
@@ -272,7 +303,7 @@ struct molresponse_lib {
           madness::print("▶️ Computing hyperpolarizability β...");
         }
 
-        compute_hyperpolarizability(world, ground,
+        compute_hyperpolarizability(world, ground_ctx.ground,
                                     response_params.dipole_frequencies(),
                                     dip_dirs, properties);
         properties.save();
@@ -282,7 +313,8 @@ struct molresponse_lib {
                          "-------------------------");
         }
 
-        vib = compute_hessian(world, generated_states.state_map, ground,
+        vib = compute_hessian(world, state_solution.generated_states.state_map,
+                              ground_ctx.ground,
                               response_params.dipole_directions(), scf_calc);
 
         auto unit_amu_toau = std::sqrt(constants::atomic_mass_in_au);
@@ -310,7 +342,8 @@ struct molresponse_lib {
           print(mode[0], mode[mode.size() - 1]);
         }
         auto alpha_derivatives =
-            compute_Raman(world, ground, response_params.dipole_frequencies(),
+            compute_Raman(world, ground_ctx.ground,
+                          response_params.dipole_frequencies(),
                           response_params.dipole_directions(),
                           response_params.nuclear_directions(), properties);
         raman.polarization_frequencies = response_params.dipole_frequencies();
@@ -508,9 +541,9 @@ struct molresponse_lib {
 
     // aggregate JSON results
     Results results;
-    results.metadata = response_record.to_json();
+    results.metadata = state_solution.response_record.to_json();
     results.properties = properties.to_json();
-    results.debug_log = debug_logger.to_json();
+    results.debug_log = state_solution.debug_logger.to_json();
     results.vibrational_analysis = vib.to_json();
     results.raman_spectra = raman.to_json();
     return results;
