@@ -15,8 +15,9 @@
 template <typename ResponseType>
 bool iterate(World &world, const ResponseManager &response_manager,
              const GroundStateData &g_s, const LinearResponseDescriptor &state,
-             ResponseType &response, ResponseDebugLogger &logger,
-             size_t max_iter, double conv_thresh) {
+             const LinearResponsePoint &pt, ResponseType &response,
+             ResponseDebugLogger &logger, size_t max_iter,
+             double conv_thresh) {
   // using Policy = ResponseSolverPolicy<ResponseType>;
 
   auto &rvec = response;
@@ -28,15 +29,16 @@ bool iterate(World &world, const ResponseManager &response_manager,
       dconv * static_cast<double>(std::max(size_t(5.0), g_s.molecule.natom()));
   const auto x_residual_target = density_target * 10.0;
 
-  auto vp = perturbation_vector(world, g_s, state);
+  auto vp = perturbation_vector(world, g_s, pt);
 
   auto &phi0 = g_s.orbitals;
   const auto &orbital_energies = g_s.getEnergies();
 
   // First difference, Make bsh operators is different for each solver
-  auto bsh_ops = make_bsh_operators(
-      world, response_manager, state.current_frequency(), orbital_energies,
-      static_cast<int>(g_s.orbitals.size()), logger, rvec);
+  auto bsh_ops =
+      make_bsh_operators(world, response_manager, pt.frequency(),
+                         orbital_energies,
+                         static_cast<int>(g_s.orbitals.size()), logger, rvec);
 
   response_solver solver(
       response_vector_allocator(world, static_cast<int>(all_x.size())),
@@ -45,10 +47,6 @@ bool iterate(World &world, const ResponseManager &response_manager,
   auto drho = compute_density(world, rvec, phi0);
   functionT drho_old;
 
-  logger.start_state(state);
-  if (world.rank() == 0) {
-    print("Starting state:", state.description(), "\n");
-  }
   for (size_t iter = 0; iter < max_iter; ++iter) {
     logger.begin_iteration(iter);
     drho_old = copy(drho);
@@ -103,178 +101,21 @@ bool iterate(World &world, const ResponseManager &response_manager,
   return false;
 };
 
-inline bool
-solve_response_vector(World &world, const ResponseManager &response_manager,
-                      const GroundStateData &g_s,
-                      const LinearResponseDescriptor &state,
-                      ResponseVector &response_variant, // the std::variant<…>
-                      ResponseDebugLogger &logger, size_t max_iter = 10,
-                      double conv_thresh = 1e-4) {
-  return std::visit(
-      overloaded{// Only wire types that are READY:
-                 [&](StaticRestrictedResponse &vector) {
-                   return iterate(world, response_manager, g_s, state, vector,
-                                  logger, max_iter, conv_thresh);
-                 },
-                 [&](DynamicRestrictedResponse &vector) {
-                   return iterate(world, response_manager, g_s, state, vector,
-                                  logger, max_iter, conv_thresh);
-                 },
-                 [&](auto &) -> bool {
-                   throw std::logic_error(
-                       "This response type isn’t implemented yet");
-                 }},
-      response_variant);
-}
+bool solve_response_vector(World &world, const ResponseManager &response_manager,
+                           const GroundStateData &g_s,
+                           const LinearResponseDescriptor &state,
+                           const LinearResponsePoint &pt,
+                           ResponseVector &response_variant,
+                           ResponseDebugLogger &logger, size_t max_iter,
+                           double conv_thresh);
 
-// return std::visit(overloaded{[&](StaticRestrictedResponse &r) {
-//                                return iterate(world, rm, gs, state, r,
-//                                logger, max_iter, conv_thresh);
-//                              },
-//                              [&](DynamicRestrictedResponse &r) {
-//                                return iterate(world, rm, gs, state, r,
-//                                logger, max_iter, conv_thresh);
-//                              },
-//                              [&](StaticUnrestrictedResponse &r) {
-//                                throw std::runtime_error("Static unrestricted
-//                                response not implemented yet"); return false;
-//                                /*return iterate(world, rm, gs, state, r,
-//                                logger, max_iter,*/
-//                                /*               conv_thresh);*/
-//                              },
-//                              [&](DynamicUnrestrictedResponse &r) {
-//                                throw std::runtime_error("Dynamic unrestricted
-//                                response not implemented yet"); return false;
-//                                /*iterate(world, rm, gs, state, r, logger,
-//                                max_iter,*/
-//                                /*                          conv_thresh);*/
-//                              }},
-//                   response_variant);
+void promote_response_vector(World &world, const ResponseVector &x_in,
+                             ResponseVector &x_out);
 
-inline void promote_response_vector(World &world, const ResponseVector &x_in,
-                                    ResponseVector &x_out) {
-  if (std::holds_alternative<StaticRestrictedResponse>(x_in)) {
-    if (world.rank() == 0) {
-      madness::print("🔁 Promoting static restricted → dynamic restricted");
-    }
-    const auto &prev_resp = std::get<StaticRestrictedResponse>(x_in);
-    DynamicRestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.flatten();
-    x_out = current_resp;
-  } else if (std::holds_alternative<StaticUnrestrictedResponse>(x_in)) {
-    if (world.rank() == 0) {
-
-      madness::print("🔁 Promoting static unrestricted → dynamic unrestricted");
-    }
-    const auto &prev_resp = std::get<StaticUnrestrictedResponse>(x_in);
-
-    DynamicUnrestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.x_beta = copy(world, prev_resp.x_beta);
-    current_resp.y_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_beta = copy(world, prev_resp.x_beta);
-    current_resp.flatten();
-    x_out = current_resp;
-  } else if (std::holds_alternative<DynamicRestrictedResponse>(x_in)) {
-    if (world.rank() == 0) {
-      madness::print("📥 Copying dynamic restricted response");
-    }
-    const auto &prev_resp = std::get<DynamicRestrictedResponse>(x_in);
-
-    DynamicRestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_alpha = copy(world, prev_resp.y_alpha);
-    current_resp.flatten();
-    x_out = current_resp;
-  } else if (std::holds_alternative<DynamicUnrestrictedResponse>(x_in)) {
-    if (world.rank() == 0) {
-      madness::print("📥 Copying dynamic unrestricted response");
-    }
-    const auto &prev_resp = std::get<DynamicUnrestrictedResponse>(x_in);
-
-    DynamicUnrestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.x_beta = copy(world, prev_resp.x_beta);
-    current_resp.y_alpha = copy(world, prev_resp.y_alpha);
-    current_resp.y_beta = copy(world, prev_resp.y_beta);
-    current_resp.flatten();
-    x_out = current_resp;
-  } else {
-    throw std::runtime_error(
-        "Unknown response variant in promote_response_vector");
-  }
-}
-
-inline void computeFrequencyLoop(World &world,
-                                 const ResponseManager &response_manager,
-                                 LinearResponseDescriptor &state_desc,
-                                 const GroundStateData &ground_state,
-                                 ResponseRecord2 &response_record,
-                                 ResponseDebugLogger &logger) {
-
-  bool at_final_protocol = state_desc.at_final_threshold();
-  bool is_unrestricted = !ground_state.isSpinRestricted();
-  auto num_orbitals = static_cast<int>(ground_state.getNumOrbitals());
-
-  ResponseVector previous_response = make_response_vector(
-      num_orbitals, state_desc.is_static(), is_unrestricted);
-  bool have_previous_freq_response = false;
-  auto thresh_index = state_desc.current_thresh_index;
-  ResponseVector x_0 = make_response_vector(
-      num_orbitals, state_desc.is_static(), is_unrestricted);
-  for (size_t i = state_desc.current_frequency_index;
-       i < state_desc.frequencies.size(); i++) {
-    state_desc.set_frequency_index(i);
-    auto freq_index = state_desc.current_frequency_index;
-    bool is_saved =
-        response_record.is_saved(state_desc); // Check if already saved
-    bool should_solve =
-        !is_saved ||
-        (at_final_protocol && !response_record.is_converged(state_desc));
-    if (!should_solve) {
-      continue;
-    }
-    world.gop.fence();
-
-    if (is_saved && load_response_vector(world, num_orbitals, state_desc,
-                                         thresh_index, freq_index, x_0)) {
-    } else if (thresh_index > 0 &&
-               load_response_vector(world, num_orbitals, state_desc,
-                                    thresh_index - 1, freq_index, x_0)) {
-    } else if (!state_desc.is_static()) {
-      if (have_previous_freq_response) {
-      } else {
-        load_response_vector(world, num_orbitals, state_desc, thresh_index,
-                             freq_index - 1, x_0);
-      }
-      world.gop.fence();
-      if (state_desc.is_static(freq_index - 1)) {
-        promote_response_vector(world, x_0, x_0);
-      }
-    } else {
-      x_0 = initialize_guess_vector(world, ground_state, state_desc);
-    }
-    // Run the solver with logging
-    logger.start_state(state_desc);
-    auto max_iter = response_manager.params().maxiter();
-    auto conv_thresh = response_manager.params().dconv();
-    bool converged =
-        solve_response_vector(world, response_manager, ground_state, state_desc,
-                              x_0, logger, max_iter, conv_thresh);
-    if (world.rank() == 0) {
-      logger.print_timing_table(state_desc);
-      logger.print_values_table(state_desc);
-    }
-    world.gop.fence();
-    // save and record the response vector
-    save_response_vector(world, state_desc, x_0);
-    world.gop.fence();
-    response_record.record_status(state_desc, converged);
-
-    previous_response = x_0;
-    have_previous_freq_response = true;
-  }
-  state_desc.set_frequency_index(0);
-}
+void computeFrequencyLoop(World &world, const ResponseManager &response_manager,
+                          const LinearResponseDescriptor &state_desc,
+                          size_t thresh_index,
+                          const GroundStateData &ground_state,
+                          ResponseRecord2 &response_record,
+                          ResponseDebugLogger &logger,
+                          bool at_final_protocol);

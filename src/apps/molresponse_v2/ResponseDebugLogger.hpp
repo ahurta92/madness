@@ -30,14 +30,14 @@ public:
   [[nodiscard]] bool enabled() const { return enabled_; }
   void set_enabled(bool on) { enabled_ = on; }
 
-  // Call at the start of each (state, protocol, frequency) block you’re about
-  // to iterate.
-  void start_state(const LinearResponseDescriptor &state) {
+  // Call at the start of each (state, protocol, frequency) block
+  // you’re about to iterate.
+  void start_state(const LinearResponsePoint &pt) {
     if (!enabled_)
       return;
-    state_key_ = state.description(); // e.g. "mu_x (restricted)"
-    proto_key_ = protocol_key_(state.current_threshold()); // "1e-06"
-    freq_key_ = freq_key(state.current_frequency());       // "0.500"
+    state_key_ = pt.perturbationDescription();
+    proto_key_ = protocol_key_(pt.threshold());
+    freq_key_ = freq_key(pt.frequency());
 
     // Ensure nested shape exists, no copies involved
     auto &node = node_ref_(); // creates and returns the path
@@ -122,12 +122,12 @@ public:
 
   // ——— Pretty printers ——————————————————————————————————————————————
 
-  void print_timing_table(const LinearResponseDescriptor &state) const {
+  void print_timing_table(const LinearResponsePoint &pt) const {
     if (!enabled_)
       return;
-    const auto state_key = state.description();
-    const auto proto_key = protocol_key_(state.current_threshold());
-    const auto fkey = freq_key(state.current_frequency());
+    const auto state_key = pt.perturbationDescription();
+    const auto proto_key = protocol_key_(pt.threshold());
+    const auto fkey = freq_key(pt.frequency());
 
     if (!exists_(state_key, proto_key, fkey))
       return;
@@ -171,12 +171,12 @@ public:
     }
   }
 
-  void print_values_table(const LinearResponseDescriptor &state) const {
+  void print_values_table(const LinearResponsePoint &pt) const {
     if (!enabled_)
       return;
-    const auto state_key = state.description();
-    const auto proto_key = protocol_key_(state.current_threshold());
-    const auto fkey = freq_key(state.current_frequency());
+    const auto state_key = pt.perturbationDescription();
+    const auto proto_key = protocol_key_(pt.threshold());
+    const auto fkey = freq_key(pt.frequency());
 
     if (!exists_(state_key, proto_key, fkey))
       return;

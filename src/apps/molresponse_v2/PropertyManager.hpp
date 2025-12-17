@@ -385,7 +385,7 @@ private:
  * @param pm The property manager to store the computed α tensor.
  */
 void compute_alpha(World &world,
-                   std::map<std::string, LinearResponseDescriptor> &state_map,
+                   const std::map<std::string, LinearResponseDescriptor> &state_map,
                    const GroundStateData &gs,
                    const std::vector<double> &frequencies,
                    const std::string &directions, PropertyManager &pm) {
@@ -439,11 +439,10 @@ void compute_alpha(World &world,
     std::vector<vector_real_function_3d> perturb_vecs(num_directions);
 
     for (size_t j = 0; j < num_directions; ++j) {
-      auto &active_state = state_map.at(direction_keys[j]);
-      active_state.set_frequency_index(ffi);
-      load_response_vector(world, num_orbitals, active_state,
-                           active_state.thresholds.size() - 1, ffi,
-                           load_vector[j]);
+      const auto &active_state = state_map.at(direction_keys[j]);
+      LinearResponsePoint pt{active_state,
+                             active_state.thresholds.size() - 1, ffi};
+      load_response_vector(world, num_orbitals, pt, load_vector[j]);
       response_vecs[j] = get_flat(load_vector[j]);
       perturb_vecs[j] = perturbations[j];
 
@@ -484,7 +483,7 @@ void compute_alpha(World &world,
  */
 [[nodiscard]] VibrationalResults
 compute_hessian(World &world,
-                std::map<std::string, LinearResponseDescriptor> &state_map,
+                const std::map<std::string, LinearResponseDescriptor> &state_map,
                 const GroundStateData &gs, const std::string &directions,
                 const std::shared_ptr<SCF> &scf_calc) {
   const size_t num_directions = directions.size();
@@ -529,15 +528,15 @@ compute_hessian(World &world,
     for (int iaxis = 0; iaxis < 3; ++iaxis) {
       int i = iatom * 3 + iaxis;
 
-      auto &active_state = state_map.at(atom_derivative_keys[i]);
+      const auto &active_state = state_map.at(atom_derivative_keys[i]);
       if (world.rank() == 0) {
         print("Loading response vector for ", atom_derivative_keys[i]);
       }
 
       ResponseVector load_vector;
-      active_state.set_frequency_index(0);
-      load_response_vector(world, num_orbitals, active_state,
-                           active_state.thresholds.size() - 1, 0, load_vector);
+      LinearResponsePoint pt{active_state,
+                             active_state.thresholds.size() - 1, 0};
+      load_response_vector(world, num_orbitals, pt, load_vector);
       auto xi = get_flat(load_vector);
       auto xphi = mul(world, xi, phi0, true);
       auto rho_xi = 4.0 * sum(world, xphi, true);
