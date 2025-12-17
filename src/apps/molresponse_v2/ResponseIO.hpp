@@ -97,3 +97,33 @@ inline bool load_response_vector(World &world, const int &num_orbitals,
 
   return true;
 }
+
+// Convenience overloads for a single LinearResponsePoint
+inline bool load_response_vector(World &world, const int &num_orbitals,
+                                 const LinearResponsePoint &pt,
+                                 ResponseVector &load_response) {
+  struct PointAdapter {
+    const LinearResponsePoint &pt;
+    std::string response_filename(size_t, size_t) const {
+      return pt.response_filename();
+    }
+    bool is_static(size_t) const { return pt.is_static(); }
+    bool is_spin_restricted() const { return pt.is_spin_restricted(); }
+  } adaptor{pt};
+
+  return load_response_vector(world, num_orbitals, adaptor,
+                              /*thresh_index=*/0, /*freq_index=*/0,
+                              load_response);
+}
+
+inline void save_response_vector(World &world, const LinearResponsePoint &pt,
+                                 const ResponseVector &response) {
+  struct PointAdapter {
+    const LinearResponsePoint &pt;
+    std::string response_filename() const {
+      return pt.response_filename();
+    }
+  } adaptor{pt};
+
+  save_response_vector(world, adaptor, response);
+}

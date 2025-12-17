@@ -166,29 +166,18 @@ public:
     return get_flag(state_id, protocol_key(protocol), freq_key(freq),
                     "converged");
   }
-  [[nodiscard]] bool is_saved(const LinearResponseDescriptor &st) const {
-    return get_flag(st.perturbationDescription(),
-                    protocol_key(st.current_threshold()),
-                    freq_key(st.current_frequency()), "saved");
-  }
-  [[nodiscard]] bool is_converged(const LinearResponseDescriptor &st) const {
-    return get_flag(st.perturbationDescription(),
-                    protocol_key(st.current_threshold()),
-                    freq_key(st.current_frequency()), "converged");
-  }
-
   // --- Mutations ---
   void mark_saved(const std::string &state_id, double protocol, double freq) {
     set_flag(state_id, protocol_key(protocol), freq_key(freq), "saved", true);
   }
-  void mark_converged(const std::string &state_id, double protocol, double freq,
-                      bool c) {
+  void mark_converged(const std::string &state_id, double protocol,
+                      double freq, bool c) {
     set_flag(state_id, protocol_key(protocol), freq_key(freq), "converged", c);
   }
-  void record_status(const LinearResponseDescriptor &st, bool c) {
-    const std::string sid = st.perturbationDescription();
-    const std::string p = protocol_key(st.current_threshold());
-    const std::string f = freq_key(st.current_frequency());
+  void record_status(const LinearResponsePoint &pt, bool c) {
+    const std::string sid = pt.perturbationDescription();
+    const std::string p = protocol_key(pt.threshold());
+    const std::string f = freq_key(pt.frequency());
     ensure_protocol(data_, sid, p);
     data_["states"][sid]["protocols"][p]["saved"][f] = true;
     data_["states"][sid]["protocols"][p]["converged"][f] = c;

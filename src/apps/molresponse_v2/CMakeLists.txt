@@ -10,6 +10,9 @@ set(MOLRESPONSE_SOURCES2
     ResponseManager.cpp
     GroundStateData.cpp
     ResponseSolver.cpp
+    ResponseState.cpp
+    ResponseInitializer.cpp
+    FrequencyLoop.cpp
 )
 
 set(MOLRESPONSE_HEADERS2
@@ -42,4 +45,3 @@ add_mad_executable(molresponse2 "molresponse2.cpp" "MADresponse2;MADchem")
 
 # Add install targets for executables
 install(TARGETS molresponse2 test_parameter_manager DESTINATION "${MADNESS_INSTALL_BINDIR}")
-

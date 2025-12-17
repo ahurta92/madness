@@ -281,9 +281,23 @@ int main(int argc, char** argv) {
       std::string prefix = pm.prefix();
       wf.run(prefix);
     }
+    catch(const MadnessException& e)
+    {
+      if (world.rank() == 0)
+      {
+        print_header2("caught a MADNESS exception in the main loop");
+        print(e.what(),e.filename,e.msg,e.line);
+        print_header2("ending program run");
+      }
+    }
     catch (const json::exception& e)
     {
-      std::cout << e.what() << '\n';
+        if (world.rank() == 0)
+        {
+            print_header2("caught a JSON exception in the main loop");
+            print(e.what());
+            print_header2("ending program run");
+        }
     }
 
     catch (std::exception& e)
