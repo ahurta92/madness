@@ -276,9 +276,10 @@ private:
 class CC2Application : public Application, public CC2 {
 public:
   explicit CC2Application(World &w, const Params &p,
-                          const std::shared_ptr<Nemo> reference)
-      : Application(p), world_(w), reference_(reference),
-        CC2(w, p.get<CCParameters>(), p.get<TDHFParameters>(), reference) {}
+                          const std::shared_ptr<Nemo> &reference)
+      : Application(p),
+        CC2(w, p.get<CCParameters>(), p.get<TDHFParameters>(), reference),
+        world_(w), reference_(reference) {}
 
   // print_parameters
   void print_parameters(World &world) const override {
@@ -311,10 +312,10 @@ public:
         ifs >> results_;
         ifs.close();
 
-        bool ok = true;
-        bool needEnergy = true;
-        if (needEnergy && !results_.contains("energy"))
-          ok = false;
+        // bool ok = true;
+        // bool needEnergy = true;
+        // if (needEnergy && !results_.contains("energy"))
+        //   ok = false;
       }
 
       auto rel = std::filesystem::relative(reference_->work_dir, pm.dir());
@@ -340,8 +341,8 @@ class TDHFApplication : public Application, public TDHF {
 public:
   explicit TDHFApplication(World &w, const Params &p,
                            const std::shared_ptr<Nemo> &reference)
-      : Application(p), world_(w), reference_(reference),
-        TDHF(w, p.get<TDHFParameters>(), reference) {}
+      : Application(p), TDHF(w, p.get<TDHFParameters>(), reference), world_(w),
+        reference_(reference) {}
 
   // print_parameters
   void print_parameters(World &world) const override {
@@ -409,8 +410,8 @@ class OEPApplication : public Application, public OEP {
 public:
   explicit OEPApplication(World &w, const Params &p,
                           const std::shared_ptr<Nemo> &reference)
-      : Application(p), world_(w), reference_(reference),
-        OEP(w, p.get<OEP_Parameters>(), reference) {}
+      : Application(p),         OEP(w, p.get<OEP_Parameters>(), reference),
+        world_(w), reference_(reference) {}
 
   // print_parameters
   void print_parameters(World &world) const override {
@@ -627,7 +628,7 @@ struct moldft_lib {
     return calc_;
   }
 
-  void print_parameters() const { calc_->print_parameters(); }
+  static void print_parameters() { Calc::print_parameters(); }
   // params get's changed by SCF constructor
   SCFResultsTuple run(World &world, const Params &params,
                       const NextAction next_action_) {
@@ -695,16 +696,15 @@ struct moldft_lib {
       const double gxtol = std::max(1.0e-5, 2.0 * wf_thresh);
       const double gprec = std::max(1.0e-6, wf_thresh);
 
-      MolOpt opt(
-          scf->param.gmaxiter(), // maximum geometry iterations
-          0.1,                   // maximum step in any Cartesian coordinate
-          etol,                  // energy-change tolerance
-          gxtol,                 // gradient tolerance
-          gxtol,                 // step (Cartesian) tolerance
-          etol,                  // assumed energy precision
-          gprec,    // assumed gradient precision
-          (world.rank() == 0) ? 1 : 0, // print_level
-          scf->param.algopt());
+      MolOpt opt(scf->param.gmaxiter(), // maximum geometry iterations
+                 0.1,   // maximum step in any Cartesian coordinate
+                 etol,  // energy-change tolerance
+                 gxtol, // gradient tolerance
+                 gxtol, // step (Cartesian) tolerance
+                 etol,  // assumed energy precision
+                 gprec, // assumed gradient precision
+                 (world.rank() == 0) ? 1 : 0, // print_level
+                 scf->param.algopt());
 
       MolecularEnergy target(world, *scf);
       opt_res = opt.optimize_app(scf->molecule, target);
