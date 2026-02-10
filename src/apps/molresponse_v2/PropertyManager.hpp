@@ -14,7 +14,6 @@
 
 #include <chrono>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <iomanip>
 #include <madness/chem/vibanal.h>
@@ -22,6 +21,7 @@
 #include <madness/tensor/tensor.h>
 #include <madness/tensor/tensor_json.hpp>
 #include <madness/world/world.h>
+#include <sstream>
 #include <string>
 
 using json = nlohmann::json;
@@ -285,8 +285,7 @@ public:
     size_t N = dirs.size();
     for (size_t i = 0; i < N; ++i) {
       for (size_t j = 0; j < N; ++j) {
-        components comp = {std::format("{}", dirs[i]),
-                           std::format("{}", dirs[j])};
+        components comp = {std::string(1, dirs[i]), std::string(1, dirs[j])};
         PropKey k{"polarizability", comp, omega, std::nullopt};
         PropRow r{
             .property = k.property,
