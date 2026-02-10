@@ -36,7 +36,7 @@ public:
   virtual void print_parameters(World &world) const = 0;
 
   /// check if this calculation has a json with results
-  [[nodiscard]] virtual bool has_results(std::string filename) const {
+  [[nodiscard]] virtual bool has_results(const std::string &filename) const {
     // check if the results file exists
     // return std::filesystem::exists(workdir_ / filename);
     return std::filesystem::exists(filename);
@@ -59,7 +59,7 @@ public:
 
   /// read the results from a json file
   [[nodiscard]] virtual nlohmann::json
-  read_results(std::string filename) const {
+  read_results(const std::string &filename) const {
     if (has_results(filename)) {
       std::ifstream ifs(filename);
       nlohmann::json j;
@@ -113,7 +113,7 @@ public:
   void run(const std::filesystem::path &workdir) override {
     // 1) set up a namedspaced directory for this run
     std::string label = Library::label();
-    PathManager pm(workdir, label.c_str());
+    PathManager pm(workdir, label);
     pm.create();
     {
       world_.gop.fence();
@@ -225,9 +225,9 @@ public:
    * @param ref_dir   Directory of precomputed ground-state (SCF) outputs
    */
   ResponseApplication(World &world, Params params,
-                      const std::shared_ptr<SCF> reference)
+                      const std::shared_ptr<SCF>& reference)
       : world_(world), Application(std::move(params)),
-        reference_(std::move(reference)) {}
+        reference_(reference) {}
 
   // print parameters
   void print_parameters(World &world) const override {
@@ -270,7 +270,7 @@ private:
   nlohmann::json metadata_;
   nlohmann::json properties_;
   std::optional<nlohmann::json> vibrational_analysis_;
-  const std::shared_ptr<SCF> reference_;
+  const std::shared_ptr<SCF>& reference_;
 };
 
 class CC2Application : public Application, public CC2 {
@@ -410,8 +410,8 @@ class OEPApplication : public Application, public OEP {
 public:
   explicit OEPApplication(World &w, const Params &p,
                           const std::shared_ptr<Nemo> &reference)
-      : Application(p),         OEP(w, p.get<OEP_Parameters>(), reference),
-        world_(w), reference_(reference) {}
+      : Application(p), OEP(w, p.get<OEP_Parameters>(), reference), world_(w),
+        reference_(reference) {}
 
   // print_parameters
   void print_parameters(World &world) const override {
@@ -478,10 +478,10 @@ private:
   World &world_;
   std::shared_ptr<Nemo> reference_;
 
-  double energy_;
-  std::optional<Tensor<double>> dipole_;
-  std::optional<Tensor<double>> gradient_;
-  std::optional<real_function_3d> density_;
+  // double energy_;
+  // std::optional<Tensor<double>> dipole_;
+  // std::optional<Tensor<double>> gradient_;
+  // std::optional<real_function_3d> density_;
 };
 
 inline NextAction decide_next_action(bool at_protocol, bool archive_needed,
@@ -634,7 +634,7 @@ struct moldft_lib {
                       const NextAction next_action_) {
     auto moldft_params = params.get<CalculationParameters>();
     const auto &molecule = params.get<Molecule>();
-    auto params_copy = params;
+    const auto &params_copy = params;
 
     SCFResultsTuple results;
     auto &scf_res = std::get<0>(results);
@@ -815,13 +815,13 @@ struct nemo_lib {
     return nemo_;
   }
 
-  NextAction valid(World &world, const SCFResultsTuple &results,
+  static NextAction valid(World &world, const SCFResultsTuple &results,
                    const Params &params) {
     // Take a copy of the parameters
     return ::valid(world, results, params.get<CalculationParameters>());
   }
 
-  void print_parameters() const { nemo_->print_parameters(); }
+  static void print_parameters() { Calc::print_parameters(); }
 
   SCFResultsTuple run(World &world, const Params &params,
                       NextAction action = NextAction::Redo) {
