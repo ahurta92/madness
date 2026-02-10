@@ -1,7 +1,5 @@
 #pragma once
-#include "../../madness/chem/ResponseParameters.hpp"
 #include "InnerContributions.hpp"
-#include "MolecularProperty.hpp"
 #include "Perturbation.hpp"
 #include "ResponseIO.hpp"
 #include "ResponseSolverUtils.hpp"
@@ -16,12 +14,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <madness/chem/vibanal.h>
 #include <madness/external/nlohmann_json/json.hpp>
 #include <madness/tensor/tensor.h>
 #include <madness/tensor/tensor_json.hpp>
 #include <madness/world/world.h>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 using json = nlohmann::json;
@@ -108,6 +108,28 @@ inline void from_json(const json &j, PropRow &r) {
 
 enum class PropertyType { Alpha, Beta, Raman };
 
+inline long checked_size_to_long(std::size_t value, const char *label) {
+  constexpr auto long_max =
+      static_cast<std::size_t>(std::numeric_limits<long>::max());
+  if (value > long_max) {
+    throw std::overflow_error(std::string(label) +
+                              " exceeds representable long range");
+  }
+  return static_cast<long>(value);
+}
+
+inline long checked_long_product(long lhs, long rhs, const char *label) {
+  if (lhs < 0 || rhs < 0) {
+    throw std::overflow_error(std::string(label) +
+                              " received negative tensor extent");
+  }
+  if (lhs != 0 && rhs > std::numeric_limits<long>::max() / lhs) {
+    throw std::overflow_error(std::string(label) +
+                              " exceeds representable long range");
+  }
+  return lhs * rhs;
+}
+
 inline std::string iso_timestamp() {
   using namespace std::chrono;
   auto now = system_clock::now();
@@ -121,13 +143,15 @@ inline madness::Tensor<double> compute_response_inner_product_tensor(
     madness::World &world, const std::vector<vector_real_function_3d> &A_vecs,
     const std::vector<vector_real_function_3d> &B_vecs,
     bool save_contributions = false, const std::string &entry_name = "") {
-  const size_t nA = A_vecs.size();
-  const size_t nB = B_vecs.size();
+  const std::size_t nA = A_vecs.size();
+  const std::size_t nB = B_vecs.size();
   if (nA == 0 || nB == 0)
     throw std::runtime_error("Input vectors must not be empty.");
 
+  const long nA_tensor = checked_size_to_long(nA, "A_vecs.size()");
+  const long nB_tensor = checked_size_to_long(nB, "B_vecs.size()");
   const size_t num_rf = A_vecs[0].size();
-  madness::Tensor<double> result(nA, nB);
+  madness::Tensor<double> result(nA_tensor, nB_tensor);
 
   // if they asked us to save
   json this_entry;
@@ -230,27 +254,29 @@ public:
   }
 
   // Presence checks
-  [[nodiscard]] bool has_alpha(double omega, components comp) const {
+  [[nodiscard]] bool has_alpha(double omega, const components &comp) const {
     PropKey k{"polarizability", comp, omega, std::nullopt};
     auto it = rows_.find(k);
     return it != rows_.end() && it->second.value.has_value();
     return rows_.count(k) != 0;
   }
 
-  [[nodiscard]] bool has_beta(double w1, double w2, components comp) const {
+  [[nodiscard]] bool has_beta(double w1, double w2,
+                              const components &comp) const {
     PropKey k{"hyperpolarizability", comp, w1, w2};
     auto it = rows_.find(k);
     return it != rows_.end() && it->second.value.has_value();
   }
 
-  [[nodiscard]] bool has_raman(double w1, double w2, components comp) const {
+  [[nodiscard]] bool has_raman(double w1, double w2,
+                               const components &comp) const {
     PropKey k{"raman", comp, w1, w2};
     auto it = rows_.find(k);
     return it != rows_.end() && it->second.value.has_value();
   }
 
   [[nodiscard]] std::optional<double> get_raman(double w1, double w2,
-                                                components comp) const {
+                                                const components &comp) const {
     PropKey k{"raman", comp, w1, w2};
     auto it = rows_.find(k);
     if (it != rows_.end() && it->second.value.has_value()) {
@@ -260,7 +286,7 @@ public:
   }
 
   [[nodiscard]] std::optional<double> get_beta(double w1, double w2,
-                                               components comp) const {
+                                               const components &comp) const {
     PropKey k{"hyperpolarizability", comp, w1, w2};
     auto it = rows_.find(k);
     if (it != rows_.end() && it->second.value.has_value()) {
@@ -270,7 +296,7 @@ public:
   }
 
   [[nodiscard]] std::optional<double> get_alpha(double omega,
-                                                components comp) const {
+                                                const components &comp) const {
     PropKey k{"polarizability", comp, omega, std::nullopt};
     auto it = rows_.find(k);
     if (it != rows_.end() && it->second.value.has_value()) {
@@ -282,10 +308,13 @@ public:
   // Insert or overwrite α entries
   void set_alpha(double omega, const madness::Tensor<double> &tensor,
                  const std::string &dirs) {
-    size_t N = dirs.size();
-    for (size_t i = 0; i < N; ++i) {
-      for (size_t j = 0; j < N; ++j) {
-        components comp = {std::string(1, dirs[i]), std::string(1, dirs[j])};
+    const long n_dirs = checked_size_to_long(dirs.size(), "dirs.size()");
+    for (long i = 0; i < n_dirs; ++i) {
+      const auto i_idx = static_cast<std::size_t>(i);
+      for (long j = 0; j < n_dirs; ++j) {
+        const auto j_idx = static_cast<std::size_t>(j);
+        components comp = {std::string(1, dirs[i_idx]),
+                           std::string(1, dirs[j_idx])};
         PropKey k{"polarizability", comp, omega, std::nullopt};
         PropRow r{
             .property = k.property,
@@ -383,14 +412,14 @@ private:
  * for the perturbations.
  * @param pm The property manager to store the computed α tensor.
  */
-void compute_alpha(World &world,
-                   const std::map<std::string, LinearResponseDescriptor> &state_map,
-                   const GroundStateData &gs,
-                   const std::vector<double> &frequencies,
-                   const std::string &directions, PropertyManager &pm) {
-  const size_t num_directions = directions.size();
-  const size_t num_orbitals = gs.getNumOrbitals();
-  const size_t num_frequencies = frequencies.size();
+void compute_alpha(
+    World &world,
+    const std::map<std::string, LinearResponseDescriptor> &state_map,
+    const GroundStateData &gs, const std::vector<double> &frequencies,
+    const std::string &directions, PropertyManager &pm) {
+  const long num_directions = static_cast<long>(directions.size());
+  const long num_orbitals = gs.getNumOrbitals();
+  const long num_frequencies = static_cast<long>(frequencies.size());
   // const bool is_restricted = gs.isSpinRestricted();
 
   // if (world.rank() == 0) {
@@ -437,11 +466,12 @@ void compute_alpha(World &world,
     std::vector<vector_real_function_3d> response_vecs(num_directions);
     std::vector<vector_real_function_3d> perturb_vecs(num_directions);
 
-    for (size_t j = 0; j < num_directions; ++j) {
+    for (long j = 0; j < num_directions; ++j) {
       const auto &active_state = state_map.at(direction_keys[j]);
-      LinearResponsePoint pt{active_state,
-                             active_state.thresholds.size() - 1, ffi};
-      load_response_vector(world, num_orbitals, pt, load_vector[j]);
+      LinearResponsePoint pt{active_state, active_state.thresholds.size() - 1,
+                             ffi};
+      load_response_vector(world, static_cast<int>(num_orbitals), pt,
+                           load_vector[j]);
       response_vecs[j] = get_flat(load_vector[j]);
       perturb_vecs[j] = perturbations[j];
 
@@ -480,17 +510,15 @@ void compute_alpha(World &world,
  * for the perturbations.
  * @param pm The property manager to store the computed α tensor.
  */
-[[nodiscard]] VibrationalResults
-compute_hessian(World &world,
-                const std::map<std::string, LinearResponseDescriptor> &state_map,
-                const GroundStateData &gs, const std::string &directions,
-                const std::shared_ptr<SCF> &scf_calc) {
-  const size_t num_directions = directions.size();
+[[nodiscard]] VibrationalResults compute_hessian(
+    World &world,
+    const std::map<std::string, LinearResponseDescriptor> &state_map,
+    const GroundStateData &gs, const std::string &directions,
+    const std::shared_ptr<SCF> &scf_calc) {
   const size_t num_orbitals = gs.getNumOrbitals();
-  const bool is_restricted = gs.isSpinRestricted();
 
   auto mol = gs.getMolecule();
-  auto natom = mol.natom();
+  long natom = static_cast<long>(mol.natom());
   std::vector<std::string> atom_derivative_keys;
   for (int i = 0; i < natom; ++i) {
     for (const char &dir : directions) {
@@ -523,9 +551,9 @@ compute_hessian(World &world,
 
   Tensor<double> hessian(natom * 3, natom * 3);
   // double alpha_factor = (omega == 0.0) ? -4.0 : -2.0;
-  for (size_t iatom = 0; iatom < natom; ++iatom) {
-    for (int iaxis = 0; iaxis < 3; ++iaxis) {
-      int i = iatom * 3 + iaxis;
+  for (long iatom = 0; iatom < natom; ++iatom) {
+    for (long iaxis = 0; iaxis < 3; ++iaxis) {
+      long i = iatom * 3 + iaxis;
 
       const auto &active_state = state_map.at(atom_derivative_keys[i]);
       if (world.rank() == 0) {
@@ -533,16 +561,17 @@ compute_hessian(World &world,
       }
 
       ResponseVector load_vector;
-      LinearResponsePoint pt{active_state,
-                             active_state.thresholds.size() - 1, 0};
-      load_response_vector(world, num_orbitals, pt, load_vector);
+      LinearResponsePoint pt{active_state, active_state.thresholds.size() - 1,
+                             0};
+      load_response_vector(world, static_cast<int>(num_orbitals), pt,
+                           load_vector);
       auto xi = get_flat(load_vector);
       auto xphi = mul(world, xi, phi0, true);
       auto rho_xi = 4.0 * sum(world, xphi, true);
 
-      for (size_t jatom = 0; jatom < natom; ++jatom) {
-        for (int jaxis = 0; jaxis < 3; ++jaxis) {
-          int j = jatom * 3 + jaxis;
+      for (long jatom = 0; jatom < natom; ++jatom) {
+        for (long jaxis = 0; jaxis < 3; ++jaxis) {
+          long j = jatom * 3 + jaxis;
 
           // skip diagonal elements because they are extremely noisy!
           // use translational symmetry to reconstruct them from other
@@ -550,7 +579,8 @@ compute_hessian(World &world,
           if (i == j)
             continue;
 
-          madchem::MolecularDerivativeFunctor mdf(mol, jatom, jaxis);
+          madchem::MolecularDerivativeFunctor mdf(mol, static_cast<int>(jatom),
+                                                  static_cast<int>(jaxis));
           hessian(i, j) = inner(rho_xi, mdf);
 
           // integration by parts < 0 | H^{YX} | 0 >
@@ -571,13 +601,13 @@ compute_hessian(World &world,
 
     const size_t natom = mol.natom();
 
-    for (size_t iatom = 0; iatom < natom; ++iatom) {
-      for (int iaxis = 0; iaxis < 3; ++iaxis) {
-        int i = iatom * 3 + iaxis;
+    for (long iatom = 0; iatom < natom; ++iatom) {
+      for (long iaxis = 0; iaxis < 3; ++iaxis) {
+        long i = iatom * 3 + iaxis;
 
-        for (size_t jatom = 0; jatom < natom; ++jatom) {
-          for (int jaxis = 0; jaxis < 3; ++jaxis) {
-            int j = jatom * 3 + jaxis;
+        for (long jatom = 0; jatom < natom; ++jatom) {
+          for (long jaxis = 0; jaxis < 3; ++jaxis) {
+            long j = jatom * 3 + jaxis;
 
             double mean = (purified(i, j) + purified(j, i)) * 0.5;
             double diff = 0.5 * fabs(purified(i, j) - purified(j, i));
@@ -600,21 +630,20 @@ compute_hessian(World &world,
     return purified;
   };
 
-  for (size_t i = 0; i < 3 * natom; ++i)
+  for (long i = 0; i < 3 * natom; ++i)
     hessian(i, i) = 0.0;
 
   hessian = purify_hessian(hessian);
   Tensor<double> asymmetric = 0.5 * (hessian - transpose(hessian));
-  const double max_asymmetric = asymmetric.absmax();
   // symmetrize hessian
   hessian += transpose(hessian);
   hessian.scale(0.5);
   // exploit translational symmetry to compute the diagonal elements:
   // translating all atoms in the same direction will make no energy change,
   // therefore the respective sum of hessian matrix elements will be zero:
-  for (size_t i = 0; i < 3 * natom; ++i) {
+  for (long i = 0; i < 3 * natom; ++i) {
     double sum = 0.0;
-    for (size_t j = 0; j < 3 * natom; j += 3)
+    for (long j = 0; j < 3 * natom; j += 3)
       sum += hessian(i, j + (i % 3));
     hessian(i, i) = -sum;
   }
@@ -661,8 +690,9 @@ compute_hessian(World &world,
   // results.intensities = intensities;
   results.reducedmass = reducedmass;
   Tensor<double> M = mol.massweights();
-  Tensor<double> Minv(3 * mol.natom(), 3 * mol.natom());
-  for (size_t i = 0; i < 3 * mol.natom(); ++i)
+  long natoms = static_cast<long>(mol.natom());
+  Tensor<double> Minv(3 * natoms, 3 * natoms);
+  for (long i = 0; i < 3 * natoms; ++i)
     Minv(i, i) = M(i, i);
 
   if (world.rank() == 0) {
@@ -706,7 +736,6 @@ void compute_beta(
 
   // 1) Build a SimpleVBCComputer once
   auto vbc_computer = SimpleVBCComputer(world, gs);
-  using componets = std::vector<std::string>;
 
   // 2) Loop over all freq
   for (auto &freq_b : frequencies.first) {
@@ -717,14 +746,9 @@ void compute_beta(
                                    FunctionDefaults<3>::get_thresh(),
                                    is_spin_restricted);
         auto bc = vbc_state.perturbationDescription();
-        auto pertB = std::get<BType>(B); // get the B perturbation
-        auto pertC = std::get<CType>(C); // get the C perturbation
 
         std::vector<components> abc_string;
         for (auto a : perturbation_A) {
-          auto pertA = std::get<DipolePerturbation>(a);
-          auto dir = pertA.direction;
-
           components comp = {describe_perturbation(a), describe_perturbation(B),
                              describe_perturbation(C)};
           abc_string.push_back(comp);
@@ -849,7 +873,7 @@ void compute_beta(
 
         int aa = 0;
 
-        for (auto comp : abc_string) {
+        for (const auto &comp : abc_string) {
           if (prop_type == PropertyType::Raman) {
 
             pm.set_raman(freq_b, freq_c, comp,
@@ -953,9 +977,18 @@ compute_Raman(World &world, const GroundStateData &gs,
   //
   //
   std::vector<Tensor<double>> raman_tensors;
+  const long dip_dir_count =
+      checked_size_to_long(dip_dirs.size(), "dip_dirs.size()");
+  const long nuc_index_count =
+      checked_size_to_long(nuc_indices.size(), "nuc_indices.size()");
+  const long nuc_dir_count =
+      checked_size_to_long(nuc_dirs.size(), "nuc_dirs.size()");
+  const long raman_rows =
+      checked_long_product(dip_dir_count, dip_dir_count, "raman row extent");
+  const long raman_cols = checked_long_product(nuc_index_count, nuc_dir_count,
+                                               "raman column extent");
   for (auto freq : frequencies) {
-    Tensor<double> raman_tensor(dip_dirs.size() * dip_dirs.size(),
-                                nuc_indices.size() * nuc_dirs.size());
+    Tensor<double> raman_tensor(raman_rows, raman_cols);
     int aa = 0;
     for (char a : dip_dirs) {
       for (char b : dip_dirs) {
@@ -970,7 +1003,7 @@ compute_Raman(World &world, const GroundStateData &gs,
             all_comps.push_back(comp);
             double val = *pm.get_raman(freq, 0.0, comp);
 
-            if (val) {
+            if (val != 0.0) {
               raman_tensor(aa, cc) = val;
             } else {
               raman_tensor(aa, cc) = 0.0;
