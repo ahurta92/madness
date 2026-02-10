@@ -20,26 +20,7 @@ struct ScopedCWD {
 
   ~ScopedCWD() { std::filesystem::current_path(old_cwd); }
 };
-enum class NextAction { Ok, ReloadOnly, Restart, Redo };
 
-// Scoped CWD: changes the current directory to the given one, and restores when
-// the object goes out of scope
-struct ScopedCWD {
-  std::filesystem::path old_cwd;
-
-  explicit ScopedCWD(const std::filesystem::path &new_dir) {
-    old_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(new_dir);
-  }
-
-  ~ScopedCWD() { std::filesystem::current_path(old_cwd); }
-};
-
-class Application {
-public:
-  explicit Application(const Params &p) : params_(p) {}
-
-  virtual ~Application() = default;
 class Application {
 public:
   explicit Application(const Params &p) : params_(p) {}
@@ -48,15 +29,10 @@ public:
 
   // run: write all outputs under the given directory
   virtual void run(const std::filesystem::path &workdir) = 0;
-  // run: write all outputs under the given directory
-  virtual void run(const std::filesystem::path &workdir) = 0;
 
   // optional hook to return a JSON fragment of this app's main results
   [[nodiscard]] virtual nlohmann::json results() const = 0;
-  // optional hook to return a JSON fragment of this app's main results
-  [[nodiscard]] virtual nlohmann::json results() const = 0;
 
-  virtual void print_parameters(World &world) const = 0;
   virtual void print_parameters(World &world) const = 0;
 
   /// check if this calculation has a json with results
@@ -66,20 +42,6 @@ public:
     return std::filesystem::exists(filename);
   }
 
-  [[nodiscard]] virtual bool verify_molecule(const nlohmann::json &j) const {
-    // check if some key parameters of the calculation match:
-    // molecule, box size, nmo_alpha, nmo_beta
-    Molecule mol1 = params_.get<Molecule>();
-    Molecule mol2;
-    mol2.from_json(j["molecule"]);
-    if (not(mol1 == mol2)) {
-      print("molecule mismatch");
-      mol1.print();
-      mol2.print();
-      return false;
-    }
-    return true;
-  }
   [[nodiscard]] virtual bool verify_molecule(const nlohmann::json &j) const {
     // check if some key parameters of the calculation match:
     // molecule, box size, nmo_alpha, nmo_beta
@@ -120,10 +82,6 @@ public:
     return nlohmann::json();
   }
 
-protected:
-  Params params_;
-  nlohmann::json results_;
-};
 protected:
   Params params_;
   nlohmann::json results_;
@@ -254,11 +212,6 @@ private:
   Library lib_; // owns shared_ptr<Engine>
   SCFResultsTuple scf_results;
 };
-private:
-  World &world_;
-  Library lib_; // owns shared_ptr<Engine>
-  SCFResultsTuple scf_results;
-};
 
 /**
  * @brief Wrapper application to run the molresponse workflow
@@ -281,23 +234,7 @@ public:
     if (world.rank() == 0) {
       std::cout << "Response Parameters:" << std::endl;
       params_.get<ResponseParameters>().print("response");
-  // print parameters
-  void print_parameters(World &world) const override {
-    if (world.rank() == 0) {
-      std::cout << "Response Parameters:" << std::endl;
-      params_.get<ResponseParameters>().print("response");
     }
-  }
-
-  /**
-   * @brief Execute response + property workflow, writing into workdir/response
-   */
-  void run(const std::filesystem::path &workdir) override {
-    // create a namespaced subdirectory for response outputs
-    PathManager pm(workdir, Library::label());
-    pm.create();
-    {
-      ScopedCWD scwd(pm.dir());
   }
 
   /**
@@ -311,7 +248,6 @@ public:
       ScopedCWD scwd(pm.dir());
 
       auto res = Library::run_response(world_, params_, reference_, pm.dir());
-      auto res = Library::run_response(world_, params_, reference_, pm.dir());
 
       metadata_ = std::move(res.metadata);
       properties_["response_properties"] = std::move(res.properties);
@@ -319,21 +255,7 @@ public:
       properties_["raman_spectra"] = std::move(res.raman_spectra);
     }
   }
-      metadata_ = std::move(res.metadata);
-      properties_["response_properties"] = std::move(res.properties);
-      properties_["vibrational_analysis"] = std::move(res.vibrational_analysis);
-      properties_["raman_spectra"] = std::move(res.raman_spectra);
-    }
-  }
 
-  /**
-   * @brief Return a JSON fragment summarizing results
-   */
-  [[nodiscard]] nlohmann::json results() const override {
-    return {{"type", "response"},
-            {"metadata", metadata_},
-            {"properties", properties_}};
-  }
   /**
    * @brief Return a JSON fragment summarizing results
    */
@@ -363,10 +285,6 @@ public:
   void print_parameters(World &world) const override {
     if (world.rank() == 0) {
       std::cout << "CC2 Parameters:" << std::endl;
-  // print_parameters
-  void print_parameters(World &world) const override {
-    if (world.rank() == 0) {
-      std::cout << "CC2 Parameters:" << std::endl;
     }
   }
 
@@ -381,31 +299,7 @@ public:
       if (world_.rank() == 0) {
         std::cout << "Running CC2 in " << pm.dir() << std::endl;
       }
-  }
 
-  void run(const std::filesystem::path &workdir) override {
-    // 1) set up a namedspaced directory for this run
-    std::string label = "cc2";
-    PathManager pm(workdir, label);
-    pm.create();
-    world_.gop.fence();
-    {
-      ScopedCWD scwd(pm.dir());
-      if (world_.rank() == 0) {
-        std::cout << "Running CC2 in " << pm.dir() << std::endl;
-      }
-
-      // 2) define the "checkpoint" file
-      auto ckpt = label + "_results.json";
-      print("cc checkpoint file", ckpt);
-      if (std::filesystem::exists(ckpt)) {
-        if (world_.rank() == 0) {
-          std::cout << "Found checkpoint file: " << ckpt << std::endl;
-        }
-        // read the checkpoint file
-        std::ifstream ifs(ckpt);
-        ifs >> results_;
-        ifs.close();
       // 2) define the "checkpoint" file
       auto ckpt = label + "_results.json";
       print("cc checkpoint file", ckpt);
@@ -431,28 +325,13 @@ public:
                   << std::endl;
         std::cout << "Relative path: " << rel << std::endl;
       }
-      auto rel = std::filesystem::relative(reference_->work_dir, pm.dir());
-      if (world_.rank() == 0) {
-        std::cout << "Running cc2 calculation in: " << pm.dir() << std::endl;
-        std::cout << "Ground state archive: " << reference_->work_dir
-                  << std::endl;
-        std::cout << "Relative path: " << rel << std::endl;
-      }
 
-      results_ = this->solve();
-    }
-  }
       results_ = this->solve();
     }
   }
 
   nlohmann::json results() const override { return results_; }
-  nlohmann::json results() const override { return results_; }
 
-private:
-  World &world_;
-  const std::shared_ptr<Nemo> reference_;
-};
 private:
   World &world_;
   const std::shared_ptr<Nemo> reference_;
@@ -490,19 +369,7 @@ public:
         const double time_scf_end = wall_time();
         if (world_.rank() == 0)
           printf(" at time %.1f\n", wall_time());
-      // we could dump params_ to JSON and pass as argv if desired…
-      try {
-        const double time_scf_start = wall_time();
-        this->prepare_calculation();
-        const double time_scf_end = wall_time();
-        if (world_.rank() == 0)
-          printf(" at time %.1f\n", wall_time());
 
-        const double time_cis_start = wall_time();
-        std::vector<CC_vecfunction> roots = this->solve_cis();
-        const double time_cis_end = wall_time();
-        if (world_.rank() == 0)
-          printf(" at time %.1f\n", wall_time());
         const double time_cis_start = wall_time();
         std::vector<CC_vecfunction> roots = this->solve_cis();
         const double time_cis_end = wall_time();
@@ -530,29 +397,7 @@ public:
       }
     }
   }
-        if (world_.rank() == 0) {
-          std::cout << std::setfill(' ');
-          std::cout << "\n\n\n";
-          std::cout << "--------------------------------------------------\n";
-          std::cout << "MRA-CIS ended \n";
-          std::cout << "--------------------------------------------------\n";
-          std::cout << std::setw(25) << "time scf" << " = "
-                    << time_scf_end - time_scf_start << "\n";
-          std::cout << std::setw(25) << "time cis" << " = "
-                    << time_cis_end - time_cis_start << "\n";
-          std::cout << "--------------------------------------------------\n";
-        }
-        auto j = this->analyze(roots);
-        // funnel through CISResults to make sure we have the right format
-        CISResults results(j);
-        results_ = results.to_json();
-      } catch (std::exception &e) {
-        print("Caught exception: ", e.what());
-      }
-    }
-  }
 
-  nlohmann::json results() const override { return results_; }
   nlohmann::json results() const override { return results_; }
 
 private:
@@ -572,10 +417,6 @@ public:
   void print_parameters(World &world) const override {
     if (world.rank() == 0) {
       std::cout << "OEP Parameters:" << std::endl;
-  // print_parameters
-  void print_parameters(World &world) const override {
-    if (world.rank() == 0) {
-      std::cout << "OEP Parameters:" << std::endl;
     }
   }
 
@@ -589,18 +430,6 @@ public:
       if (world_.rank() == 0) {
         std::cout << "Running OEP in " << pm.dir() << std::endl;
       }
-  }
-
-  void run(const std::filesystem::path &workdir) override {
-    // 1) set up a namedspaced directory for this run
-    PathManager pm(workdir, "oep");
-    pm.create();
-    world_.gop.fence();
-    {
-      ScopedCWD scwd(pm.dir());
-      if (world_.rank() == 0) {
-        std::cout << "Running OEP in " << pm.dir() << std::endl;
-      }
 
       // 2) define the "checkpoint" file
       std::string label = "oep";
@@ -616,28 +445,7 @@ public:
         ifs >> j;
         ifs.close();
       }
-      // 2) define the "checkpoint" file
-      std::string label = "oep";
-      auto ckpt = label + "_results.json";
-      print("cc checkpoint file", ckpt);
-      if (std::filesystem::exists(ckpt)) {
-        if (world_.rank() == 0) {
-          std::cout << "Found checkpoint file: " << ckpt << std::endl;
-        }
-        // read the checkpoint file
-        std::ifstream ifs(ckpt);
-        nlohmann::json j;
-        ifs >> j;
-        ifs.close();
-      }
 
-      // we could dump params_ to JSON and pass as argv if desired…
-      try {
-        const double time_scf_start = wall_time();
-        this->value();
-        const double time_scf_end = wall_time();
-        if (world_.rank() == 0)
-          printf(" at time %.1f\n", wall_time());
       // we could dump params_ to JSON and pass as argv if desired…
       try {
         const double time_scf_start = wall_time();
