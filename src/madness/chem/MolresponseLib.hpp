@@ -147,7 +147,7 @@ private:
     }
     world.gop.fence();
 
-    ResponseDebugLogger debug_logger("response_log.json", true);
+    ResponseDebugLogger debug_logger("response_log.json");
 
     auto needs_solving_at_protocol = [&](double protocol_thresh,
                                          size_t thresh_index) {

@@ -13,10 +13,8 @@ public:
   // Pass filename and whether logging is enabled.
   // If you're in MPI, pass rank0_only=true and only construct/use this on rank
   // 0, or set rank0_only=true and call write_to_disk() from all ranks safely.
-  explicit ResponseDebugLogger(std::string filename, bool enabled = false,
-                               bool rank0_only = true)
-      : enabled_(enabled), rank0_only_(rank0_only),
-        filename_(std::move(filename)) {
+  explicit ResponseDebugLogger(std::string filename, bool enabled = false)
+      : enabled_(enabled), filename_(std::move(filename)) {
     if (!enabled_)
       return;
     if (fs::exists(filename_)) {
@@ -93,7 +91,7 @@ public:
   }
 
   // Optional: nothing to do right now, but good for symmetry
-  void finalize_state() {
+  void finalize_state() const {
     if (!enabled_)
       return;
     // no-op; everything is already written into log_data_
@@ -150,8 +148,8 @@ public:
       short_key[name] = name.substr(0, 5);
 
     constexpr int W = 10;
-    std::cout << "\n⏱️ Timing for " << state_key << " | proto=" << proto_key
-              << " | freq=" << freq_key << "\n";
+    std::cout << "\nTiming for " << state_key << " | proto=" << proto_key
+              << " | freq=" << fkey << "\n";
     std::cout << std::setw(6) << "Iter";
     for (auto &n : step_names)
       std::cout << std::setw(W) << short_key[n];
@@ -195,7 +193,7 @@ public:
 
     constexpr int width = 16;
     std::cout << "\n📋 Values for " << state_key << " | proto=" << proto_key
-              << " | freq=" << freq_key << "\n";
+              << " | freq=" << fkey << "\n";
     std::cout << std::setw(6) << "Iter";
     for (auto &n : step_names)
       std::cout << std::setw(width) << n;
@@ -219,7 +217,6 @@ public:
 
 private:
   bool enabled_ = false;
-  bool rank0_only_ = true;
   std::string filename_;
   json log_data_;
 
