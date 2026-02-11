@@ -1275,9 +1275,9 @@ vecfuncT Nemo::make_cphf_constant_term(const size_t iatom, const int iaxis,
 /// @param[in]  iaxis   the coordinate X of iatom to be moved
 /// @return     \frac{\partial}{\partial X_A} \varphi
 vecfuncT Nemo::solve_cphf(const size_t iatom, const int iaxis,
-                          const Tensor<double> fock&, const vecfuncT &guess,
+                          const Tensor<double>& fock, const vecfuncT &guess,
                           const vecfuncT &rhsconst,
-                          const Tensor<double> incomplete_hessian&,
+                          const Tensor<double>& incomplete_hessian,
                           const vecfuncT &parallel, const SCFProtocol &proto,
                           const std::string &xc_data) const {
 
@@ -1314,7 +1314,7 @@ vecfuncT Nemo::solve_cphf(const size_t iatom, const int iaxis,
   for (int i = 0; i < nmo; ++i)
     eps(i) = fock(i, i);
   std::vector<poperatorT> bsh =
-      calc->make_bsh_operators(world, eps, get_calc_param());
+      madness::SCF::make_bsh_operators(world, eps, get_calc_param());
   for (poperatorT &b : bsh)
     b->destructive() = true; // make it memory efficient
 
@@ -1481,7 +1481,7 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
   for (int i = 0; i < nmo; ++i)
     eps(i) = fock(i, i);
   std::vector<poperatorT> bsh =
-      calc->make_bsh_operators(world, eps, get_calc_param());
+      madness::SCF::make_bsh_operators(world, eps, get_calc_param());
   t1.tag("make fock matrix");
 
   // construct the leading and constant term rhs involving the derivative
