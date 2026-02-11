@@ -1119,16 +1119,45 @@ namespace madness {
                const Function<T,NDIM>& a,
                const std::vector< Function<R,NDIM> >& v,
                double tol,
-               bool fence=true) {
+               bool fence=true,
+               bool do_reconstruct=true,
+               bool do_norm_tree=true) {
         PROFILE_BLOCK(Vmulsp);
-        a.reconstruct(false);
-        reconstruct(world, v, false);
-        world.gop.fence();
-        for (unsigned int i=0; i<v.size(); ++i) {
-            v[i].norm_tree(false);
+        if (do_reconstruct) {
+            a.reconstruct(false);
+            reconstruct(world, v, false);
+            world.gop.fence();
         }
-        a.norm_tree();
+        if (do_norm_tree) {
+            for (unsigned int i=0; i<v.size(); ++i) {
+                v[i].norm_tree(false);
+            }
+            a.norm_tree();
+        }
         return vmulXX(a, v, tol, fence);
+    }
+
+    template <typename T, typename R, std::size_t NDIM>
+    std::vector< Function<TENSOR_RESULT_TYPE(T,R), NDIM> >
+    mul_sparse2(World& world,
+               const Function<T,NDIM>& a,
+               const std::vector< Function<R,NDIM> >& v,
+               double tol,
+               bool fence=true,
+               bool do_compress=true,
+               bool do_make_redundant=true) {
+        PROFILE_BLOCK(Vmulsp);
+        //if (do_compress) {
+        //    a.compress(false);
+        //    compress(world, v, false);
+        //    world.gop.fence();
+        //}
+        if (do_make_redundant) {
+            make_redundant(world, v, false);
+            a.make_redundant(false);
+            world.gop.fence();
+        }
+        return vmulXX2(a, v, tol, fence);
     }
 
 
@@ -1195,15 +1224,17 @@ namespace madness {
     mul(World& world,
         const std::vector< Function<T,NDIM> >& a,
         const std::vector< Function<R,NDIM> >& b,
-        bool fence=true) {
+        bool fence=true,
+        bool do_reconstruct=true,
+        bool do_norm_tree=true,
+        double tol=0.0,
+        bool mw_screening=false) {
         PROFILE_BLOCK(Vmulvv);
-        reconstruct(world, a, true);
-        reconstruct(world, b, true);
 //        if (&a != &b) reconstruct(world, b, true); // fails if type(a) != type(b)
 
         std::vector< Function<TENSOR_RESULT_TYPE(T,R),NDIM> > q(a.size());
         for (unsigned int i=0; i<a.size(); ++i) {
-            q[i] = mul(a[i], b[i], false);
+            q[i] = mul(a[i], b[i], false, do_reconstruct, do_norm_tree, tol, mw_screening);
         }
         if (fence) world.gop.fence();
         return q;
@@ -1565,9 +1596,13 @@ namespace madness {
     dot(World& world,
         const std::vector< Function<T,NDIM> >& a,
         const std::vector< Function<R,NDIM> >& b,
-        bool fence=true) {
+        bool fence=true,
+        bool do_reconstruct=true,
+        bool do_norm_tree=true,
+        double tol=0.0,
+        bool mw_screening=false) {
         MADNESS_CHECK(a.size()==b.size());
-        return sum(world,mul(world,a,b,true),fence);
+        return sum(world,mul(world,a,b,true,do_reconstruct,do_norm_tree,tol,mw_screening),fence);
     }
 
 

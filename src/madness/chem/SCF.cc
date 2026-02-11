@@ -1357,7 +1357,15 @@ vecfuncT SCF::apply_potential(World& world, const tensorT& occ,
         K.set_symmetric(true).set_printlevel(param.print_level());
         K.set_macro_task_info(MacroTaskInfo::preset("default"));
 
+        // change truncate mode for sparse multiplication inside xc macrotask
+        //for (unsigned int i=0; i<amo.size(); ++i){
+        //    amo[i].get_impl()->set_truncate_mode(0);
+        //}
         vecfuncT Kamo = K(amo);
+        //for (unsigned int i=0; i<amo.size(); ++i){
+        //    amo[i].get_impl()->set_truncate_mode(1);
+        //}
+
         tensorT excv = inner(world, Kamo, amo);
         double exchf = 0.0;
         for (unsigned long i = 0; i < amo.size(); ++i) {
@@ -1401,17 +1409,48 @@ vecfuncT SCF::apply_potential(World& world, const tensorT& occ,
         gaxpy(world, 1.0, Vpsi, 1.0, gthpseudopotential->apply_potential(world, vloc, amo, occ, enl));
     } else {
         if (tile_Vpsi){
+            vloc.reconstruct();
+            //vloc.make_redundant();
+            //make_redundant(world, amo);
+
             for (size_t ilo=0; ilo<amo.size(); ilo+=ntile) {
                 size_t iend = std::min(ilo+ntile,amo.size());
                 vecfuncT tmpamo(amo.begin()+ilo,amo.begin()+iend);
-                auto tmpVpsi = mul_sparse(world, vloc, tmpamo, vtol);
+               // auto tmpVpsi = mul_sparse(world, vloc, tmpamo, vtol);
+               // for (unsigned int i=0; i<tmpVpsi.size(); ++i){
+               //     print(ilo+i, "V*psi mul_sparse output ", tmpVpsi[i].tree_size());
+               // }
 
-                //truncate tmpVpsi
-                truncate(world, tmpVpsi);
+               // //truncate tmpVpsi
+               // truncate(world, tmpVpsi);
+               // for (unsigned int i=0; i<tmpVpsi.size(); ++i){
+               //     print(ilo+i, "V*psi mul_sparse truncated ", tmpVpsi[i].tree_size());
+               // }
 
                 //put the results into their final home
+                //for (size_t i = ilo; i<iend; ++i){
+                //    Vpsi[i] += tmpVpsi[i-ilo];
+                //}
+
+                //vecfuncT amo_redundant = copy(tmpamo);
+                //vecfuncT tmpVpsi2;
+                //for (unsigned int i=0; i<tmpamo.size(); ++i){
+                //    auto res = mul_sparse_debug(vloc, tmpamo[i], vtol*0.1, true, false, false, true);
+                //    tmpVpsi2.push_back(res);
+                //}
+                auto tmpVpsi2 = mul_sparse2(world, vloc, tmpamo, vtol*0.1, true, false, true);
+
+                for (unsigned int i=0; i<tmpVpsi2.size(); ++i){
+                    print(ilo+i, "V*psi mw_mul output ", tmpVpsi2[i].tree_size()); 
+                }
+
+                truncate(world, tmpVpsi2);
+                for (unsigned int i=0; i<tmpVpsi2.size(); ++i){
+                    print(ilo+i, "V*psi mw_mul truncated ", tmpVpsi2[i].tree_size());
+                }
+
                 for (size_t i = ilo; i<iend; ++i){
-                    Vpsi[i] += tmpVpsi[i-ilo];
+                    Vpsi[i] += tmpVpsi2[i-ilo];
                 }
             }
             END_TIMER(world, "V*psi");
