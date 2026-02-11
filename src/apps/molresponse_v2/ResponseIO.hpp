@@ -56,14 +56,13 @@ inline bool load_response_vector(World &world, const int &num_orbitals,
 
   archive::ParallelInputArchive ar(world, filename.c_str());
   auto current_k = FunctionDefaults<3>::get_k();
-  int loaded_k;
+  int loaded_k{};
 
   ar & loaded_k;
   FunctionDefaults<3>::set_k(loaded_k);
 
   std::visit(
       [&](auto &v) {
-        int i = 0;
         for (auto &f : v.flat) {
           // if (world.rank() == 0) {
           //   print("Loading response vector ", i++);
