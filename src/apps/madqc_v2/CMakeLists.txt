@@ -19,7 +19,7 @@ if (BUILD_TESTING)
     add_scripted_tests(test_cis_symmetry_h2o.py madqc "verylong;applications")
     add_scripted_tests(test_mp2_helium.py madqc "verylong;applications")
     add_scripted_tests(test_lrcc2_helium.py madqc "verylong;applications")
-    # add_scripted_tests(test_response.py madqc "short;applications")
+    add_scripted_tests(test_molresponse_h2o_alpha_beta_z.py madqc "verylong;applications")
     # add_scripted_tests(test_znemo_energy.py madqc "short;applications")
 endif(BUILD_TESTING)
 
