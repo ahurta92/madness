@@ -2,6 +2,7 @@ build*
 vscode_build*
 cmake-build-debug*
 .history*
+*-workspace
 
 # Compiled Object files
 *.slo
