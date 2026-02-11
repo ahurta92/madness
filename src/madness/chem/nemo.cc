@@ -1531,81 +1531,72 @@ std::vector<vecfuncT> Nemo::compute_all_cphf() {
       print("full hessian matrix");
       print(incomplete_hessian + complementary_hessian);
     }
+  }
 
-    // solve the response equations
-    SCFProtocol p(world, get_calc_param());
-    p.start_prec = p.end_prec;
-    p.initialize();
+  // solve the response equations
+  SCFProtocol p(world, get_calc_param());
+  p.start_prec = p.end_prec;
+  p.initialize();
 
-    for (; not p.finished(); ++p) {
-      set_protocol(p.current_prec);
+  for (; not p.finished(); ++p) {
+    set_protocol(p.current_prec);
 
-      if (world.rank() == 0) {
-        printf("\nstarting CPHF equations at time %8.1fs \n", wall_time());
-        print("solving CPHF with the density functional",
-              get_calc_param().xc());
-      }
-
-      // double loop over all nuclear displacements
-      for (int i = 0, iatom = 0; iatom < natom; ++iatom) {
-        for (int iaxis = 0; iaxis < 3; ++iaxis, ++i) {
-          if (xi[i].size() > 0) {
-            for (real_function_3d &xij : xi[i])
-              xij.set_thresh(p.current_prec);
-          }
-          xi[i] = solve_cphf(iatom, iaxis, fock, xi[i], rhsconst[i],
-                             incomplete_hessian, parallel[i], p,
-                             get_calc_param().xc());
-          save_function(xi[i], "xi_guess" + stringify(i));
-        }
-      }
-      if (world.rank() == 0) {
-        printf("\nfinished CPHF equations at time %8.1fs \n", wall_time());
-      }
-
-      std::vector<vecfuncT> full_xi(3 * natom);
-      for (int i = 0; i < 3 * natom; ++i)
-        full_xi[i] = xi[i] - parallel[i];
-      Tensor<double> complementary_hessian =
-          make_incomplete_hessian_response_part(full_xi);
-      if (world.rank() == 0) {
-        print("full hessian matrix");
-        print(incomplete_hessian + complementary_hessian);
-      }
+    if (world.rank() == 0) {
+      printf("\nstarting CPHF equations at time %8.1fs \n", wall_time());
+      print("solving CPHF with the density functional", get_calc_param().xc());
     }
-
-    // reset the initial thresholds
-    set_protocol(get_calc()->param.econv());
-
-    if (world.rank() == 0)
-      print("\nadding the inhomogeneous part to xi\n");
 
     // double loop over all nuclear displacements
     for (int i = 0, iatom = 0; iatom < natom; ++iatom) {
       for (int iaxis = 0; iaxis < 3; ++iaxis, ++i) {
-
-        load_function(xi[i], "xi_guess" + stringify(i));
-        xi[i] -= parallel[i];
-        truncate(world, xi[i]);
-        save_function(xi[i], "xi_" + stringify(i));
+        if (xi[i].size() > 0) {
+          for (real_function_3d &xij : xi[i])
+            xij.set_thresh(p.current_prec);
+        }
+        xi[i] = solve_cphf(iatom, iaxis, fock, xi[i], rhsconst[i],
+                           incomplete_hessian, parallel[i], p,
+                           get_calc_param().xc());
+        save_function(xi[i], "xi_guess" + stringify(i));
       }
     }
-
     if (world.rank() == 0) {
-      printf("finished solving the CPHF equations at time %8.1fs \n",
-             wall_time());
+      printf("\nfinished CPHF equations at time %8.1fs \n", wall_time());
     }
 
-    Tensor<double> xi_norms(4 * natom);
+    std::vector<vecfuncT> full_xi(3 * natom);
     for (int i = 0; i < 3 * natom; ++i)
-      xi_norms(i) = norm2(world, xi[i]);
-    if (world.rank() == 0) {
-      print("norms of the CPHF vectors");
-      print(xi_norms);
-    }
-
-    return xi;
+      full_xi[i] = xi[i] - parallel[i];
+    Tensor<double> complementary_hessian =
+        make_incomplete_hessian_response_part(full_xi);
+      if (world.rank() == 0) {
+    print("full hessian matrix");
+    print(incomplete_hessian + complementary_hessian);
+      }
   }
+
+  // reset the initial thresholds
+  set_protocol(get_calc()->param.econv());
+
+  if (world.rank() == 0)
+    print("\nadding the inhomogeneous part to xi\n");
+
+  // double loop over all nuclear displacements
+  for (int i = 0, iatom = 0; iatom < natom; ++iatom) {
+    for (int iaxis = 0; iaxis < 3; ++iaxis, ++i) {
+
+      load_function(xi[i], "xi_guess" + stringify(i));
+      xi[i] -= parallel[i];
+      truncate(world, xi[i]);
+      save_function(xi[i], "xi_" + stringify(i));
+    }
+  }
+
+  if (world.rank() == 0) {
+    printf("finished solving the CPHF equations at time %8.1fs \n",
+           wall_time());
+  }
+
+  return xi;
 }
 
 vecfuncT Nemo::compute_cphf_parallel_term(const size_t iatom,
