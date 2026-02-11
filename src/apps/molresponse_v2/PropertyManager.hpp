@@ -417,9 +417,9 @@ void compute_alpha(
     const std::map<std::string, LinearResponseDescriptor> &state_map,
     const GroundStateData &gs, const std::vector<double> &frequencies,
     const std::string &directions, PropertyManager &pm) {
-  const long num_directions = static_cast<long>(directions.size());
-  const long num_orbitals = gs.getNumOrbitals();
-  const long num_frequencies = static_cast<long>(frequencies.size());
+  const size_t num_directions = directions.size();
+  const auto num_orbitals = gs.getNumOrbitals();
+  const size_t num_frequencies = frequencies.size();
   // const bool is_restricted = gs.isSpinRestricted();
 
   // if (world.rank() == 0) {
@@ -466,7 +466,7 @@ void compute_alpha(
     std::vector<vector_real_function_3d> response_vecs(num_directions);
     std::vector<vector_real_function_3d> perturb_vecs(num_directions);
 
-    for (long j = 0; j < num_directions; ++j) {
+    for (size_t j = 0; j < num_directions; ++j) {
       const auto &active_state = state_map.at(direction_keys[j]);
       LinearResponsePoint pt{active_state, active_state.thresholds.size() - 1,
                              ffi};
@@ -599,7 +599,7 @@ void compute_alpha(
     Tensor<double> purified = copy(H);
     double maxasymmetric = 0.0;
 
-    const size_t natom = mol.natom();
+    const long natom = static_cast<long>(mol.natom());
 
     for (long iatom = 0; iatom < natom; ++iatom) {
       for (long iaxis = 0; iaxis < 3; ++iaxis) {

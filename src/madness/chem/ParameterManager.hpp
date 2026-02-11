@@ -2,6 +2,7 @@
 #include <madness/chem/CCParameters.h>
 #include <madness/chem/CalculationParameters.h>
 #include <madness/chem/ResponseParameters.hpp>
+#include <madness/chem/TDHF.h>
 #include <madness/chem/oep.h>
 #include <madness/mra/QCCalculationParametersBase.h>
 
@@ -106,7 +107,7 @@ public:
 
   /// "Master" ctor: takes any single intput file, JSON or plain-text
   // ParameterManager(World &w, const path &filename) : world_(w) {
-  ParameterManager(World& w, const commandlineparser& parser) : world_(w), parser_(parser)
+  ParameterManager(World& w, const commandlineparser& parser) : parser_(parser), world_(w)
   {
     // parser_.set_keyval("input", filename);
     //
@@ -251,4 +252,4 @@ private:
 // Define a concrete aliased ParameterManager type
 using Params = ParameterManager<CalculationParameters, ResponseParameters,
                                 Nemo::NemoCalculationParameters, OptimizationParameters,
-                                OEP_Parameters, CCParameters, Molecule>;
+                                OEP_Parameters, CCParameters, TDHFParameters, Molecule>;

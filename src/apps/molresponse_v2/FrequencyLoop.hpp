@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ResponseDebugLogger.hpp"
 #include "ResponseDebugLoggerMacros.hpp"
 #include "ResponseIO.hpp"

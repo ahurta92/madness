@@ -52,6 +52,7 @@
 #include <MoldftLib.hpp>
 #include <MolresponseLib.hpp>
 #include <ParameterManager.hpp>
+#include <WorkflowBuilders.hpp>
 #include <madness_exception.h>
 
 using namespace madness;
@@ -188,14 +189,7 @@ int main(int argc, char **argv) {
         auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
         wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
       } else if (user_workflow == "response") {
-        pm.get<CalculationParameters>().set_derived_value("save", true);
-
-        auto reference =
-            std::make_shared<SCFApplication<moldft_lib>>(world, pm);
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-            std::make_unique<ResponseApplication<molresponse_lib>>(
-                world, pm, reference->calc())));
+        workflow_builders::add_response_workflow_drivers(world, pm, wf);
       } else if (user_workflow == "mp2" or user_workflow == "cc2") {
         // set the tensor type
         TensorType tt = TT_2D;
@@ -244,20 +238,13 @@ int main(int argc, char **argv) {
             "The optimize workflow is currently disabled. Please use the dft + "
             "gopt() application instead.\n";
         MADNESS_EXCEPTION(msg.c_str(), 1);
-        // std::function<std::unique_ptr<Application>(Params)> scfFactory =
-        // [&](Params p) {
-        //   return std::make_unique<SCFApplication<moldft_lib>>(world, p);
-        // };
-        //
-        // pm.get<CalculationParameters>().set_derived_value("derivatives",
-        // true); wf.addDriver(std::make_unique<qcapp::OptimizeDriver>(world,
-        // scfFactory, pm));
       } else {
         static std::string msg =
             "Unknown workflow: " + user_workflow +
             "\nAvailable workflows are: response, mp2, cc2, cis";
         MADNESS_EXCEPTION(msg.c_str(), 1);
       }
+
       std::string prefix = pm.prefix();
       wf.run(prefix);
     } catch (const MadnessException &e) {

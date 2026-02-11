@@ -71,7 +71,7 @@ class NemoBase : public MolecularOptimizationTargetInterface {
 
 public:
 
-	NemoBase(World& w) : world(w) {}
+	explicit NemoBase(World& w) : world(w) {}
 
     virtual ~NemoBase() {}
 
@@ -156,8 +156,8 @@ public:
     };
 
     void construct_nuclear_correlation_factor(const Molecule& molecule,
-			const std::shared_ptr<PotentialManager> pm,
-			const std::pair<std::string,double> ncf_parameter) {
+			const std::shared_ptr<PotentialManager>& pm,
+			const std::pair<std::string,double>& ncf_parameter) {
 
 	    // construct the nuclear correlation factor:
 	    if (not ncf) {

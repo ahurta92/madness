@@ -6,6 +6,17 @@
 
 `molresponse` is a command\u2011line application for computing molecular response properties (e.g. polarizability, hyperpolarizability, Raman) using multiresolution analysis (MRA). It reads a structured input file (INI or JSON), sets up the ground-state calculation, and generates response states based on user-defined perturbations or high-level property requests.
 
+## Preferred Entry Point
+
+The recommended entry point is now:
+
+```console
+madqc --wf=response <input_file>
+```
+
+`molresponse2` is maintained as a compatibility wrapper and runs the same
+response workflow path as `madqc --wf=response`.
+
 ## Usage
 
 .. code-block:: console

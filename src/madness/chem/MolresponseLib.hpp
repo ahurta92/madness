@@ -361,16 +361,16 @@ private:
     };
     bool debug = ctx.world.rank() == 0 && ctx.response_params.print_level() > 1;
     if (debug) {
-      for (int freq_idx = 0; freq_idx < raman.polarization_frequencies.size();
-           ++freq_idx) {
+      for (size_t freq_idx = 0;
+           freq_idx < raman.polarization_frequencies.size(); ++freq_idx) {
         print("Alpha derivatives for frequency ",
               raman.polarization_frequencies[freq_idx], " (a.u.): \n",
               alpha_derivatives[freq_idx]);
       };
     }
     // Compute Normal Mode
-    for (int freq_idx = 0; freq_idx < raman.polarization_frequencies.size();
-         ++freq_idx) {
+    for (size_t freq_idx = 0;
+         freq_idx < raman.polarization_frequencies.size(); ++freq_idx) {
 
       const auto &alpha_dxyz = alpha_derivatives[freq_idx];
       double pol_freq = raman.polarization_frequencies[freq_idx];
@@ -460,14 +460,14 @@ private:
         };
     using RamanModeRow = RamanResults::RamanModeRow;
 
-    for (int freq_idx = 0; freq_idx < raman.polarization_frequencies.size();
-         ++freq_idx) {
+    for (size_t freq_idx = 0;
+         freq_idx < raman.polarization_frequencies.size(); ++freq_idx) {
       auto alpha_qi = raman.polarizability_derivatives_normal_modes[freq_idx];
       vector<RamanModeRow> raman_rows;
-      for (int i = 0; i < mode.size(); ++i) {
+      for (size_t i = 0; i < mode.size(); ++i) {
         RamanModeRow row;
         double vib_freq_i = vib_freq(mode[i]);
-        row.mode = i + 1;
+        row.mode = static_cast<int>(i) + 1;
         row.freq_cm1 = vib_freq_i;
         auto alpha_i = copy(alpha_qi(_, i));
         auto alpha = alpha_i.reshape(3, 3);

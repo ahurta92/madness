@@ -226,8 +226,7 @@ public:
    */
   ResponseApplication(World &world, Params params,
                       const std::shared_ptr<SCF>& reference)
-      : world_(world), Application(std::move(params)),
-        reference_(reference) {}
+      : Application(std::move(params)), world_(world), reference_(reference) {}
 
   // print parameters
   void print_parameters(World &world) const override {
