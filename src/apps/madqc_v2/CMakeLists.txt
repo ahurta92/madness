@@ -4,6 +4,10 @@ add_mad_executable(madqc madqc.cpp "MADchem;MADresponse2")
 add_dependencies(applications-madness madqc)
 
 if (BUILD_TESTING)
+    add_mad_executable(test_workflow_builders test_workflow_builders.cpp "MADchem;MADresponse2")
+    add_dependencies(applications-madness test_workflow_builders)
+    add_test(NAME test_workflow_builders COMMAND test_workflow_builders)
+
     # integration tests
     add_scripted_tests(test_nemo_energy.py madqc "medium;applications")
     add_scripted_tests(test_nemo_localization.py madqc "verylong;applications")

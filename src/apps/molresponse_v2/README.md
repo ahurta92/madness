@@ -28,6 +28,8 @@ For other workflows (`scf`, `nemo`, `cc2`, `cis`, `oep`) use `madqc`.
 Response workflow wiring for both entry points is centralized in:
 
 - `src/madness/chem/WorkflowBuilders.hpp`
+  - full dispatch: `add_workflow_drivers(...)`
+  - response helper: `add_response_workflow_drivers(...)`
 
 Response implementation is centralized in:
 

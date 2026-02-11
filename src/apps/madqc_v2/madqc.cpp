@@ -47,10 +47,7 @@
 #include <madness/misc/info.h>
 #include <madness/world/worldmem.h>
 
-#include <CCLib.hpp>
 #include <Drivers.hpp>
-#include <MoldftLib.hpp>
-#include <MolresponseLib.hpp>
 #include <ParameterManager.hpp>
 #include <WorkflowBuilders.hpp>
 #include <madness_exception.h>
@@ -69,7 +66,7 @@ void help(const std::string &wf) {
   print("  --print_parameters=<group>  : print all parameters and exit");
   print("  --workflow=<name>           : specify the workflow to run (default: "
         "scf)");
-  print("\nAvailable workflows: scf, nemo, response, mp2, cc2, cis, oep");
+  print("\nAvailable workflows: " + workflow_builders::runnable_workflow_list());
   print("Available groups: dft, nemo, response, cc2, cis, oep, geometry");
   print("");
   if (wf == "scf") {
@@ -179,71 +176,7 @@ int main(int argc, char **argv) {
       // read in all parameters from the input file and the command line
       // logic and interdependent parameter follow later
       Params pm(world, parser);
-
-      if (user_workflow == "scf") {
-        auto reference =
-            std::make_shared<SCFApplication<moldft_lib>>(world, pm);
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-      } else if (user_workflow == "nemo") {
-        pm.get<CalculationParameters>().set_derived_value("k", 8);
-        auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-      } else if (user_workflow == "response") {
-        workflow_builders::add_response_workflow_drivers(world, pm, wf);
-      } else if (user_workflow == "mp2" or user_workflow == "cc2") {
-        // set the tensor type
-        TensorType tt = TT_2D;
-        FunctionDefaults<6>::set_tensor_type(tt);
-
-        // do the parameter logic and print parameters
-        auto &calc_param = pm.get<CalculationParameters>();
-        auto &cc_param = pm.get<CCParameters>();
-        auto &molecule = pm.get<Molecule>();
-
-        calc_param.set_derived_value("k", 5);
-        calc_param.set_derived_value("print_level", 2);
-        calc_param.set_derived_value("econv",
-                                     cc_param.get<double>("thresh_6d") * 0.01);
-
-        calc_param.set_derived_values(molecule);
-        cc_param.set_derived_values();
-
-        auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
-        auto ref_calc = reference->calc();
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-            std::make_unique<CC2Application>(world, pm, ref_calc)));
-      } else if (user_workflow == "cis") {
-        auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
-        auto ref_calc = reference->calc();
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-            std::make_unique<TDHFApplication>(world, pm, ref_calc)));
-      } else if (user_workflow == "oep") {
-        // add tight convergence criteria
-        auto &cparam = pm.get<CalculationParameters>();
-        auto convergence_crit =
-            cparam.get<std::vector<std::string>>("convergence_criteria");
-        if (std::find(convergence_crit.begin(), convergence_crit.end(),
-                      "each_energy") == convergence_crit.end()) {
-          convergence_crit.emplace_back("each_energy");
-        }
-        cparam.set_derived_value("convergence_criteria", convergence_crit);
-        auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
-        auto ref_calc = reference->calc();
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-            std::make_unique<OEPApplication>(world, pm, ref_calc)));
-      } else if (user_workflow == "optimize") {
-        std::string msg =
-            "The optimize workflow is currently disabled. Please use the dft + "
-            "gopt() application instead.\n";
-        MADNESS_EXCEPTION(msg.c_str(), 1);
-      } else {
-        static std::string msg =
-            "Unknown workflow: " + user_workflow +
-            "\nAvailable workflows are: response, mp2, cc2, cis";
-        MADNESS_EXCEPTION(msg.c_str(), 1);
-      }
+      workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf);
 
       std::string prefix = pm.prefix();
       wf.run(prefix);
