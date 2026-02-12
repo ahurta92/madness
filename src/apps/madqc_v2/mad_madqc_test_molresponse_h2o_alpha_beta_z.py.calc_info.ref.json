@@ -5,6 +5,14 @@
                 "converged_for_dconv": 0.0001,
                 "converged_for_thresh": 1e-06
             },
+            "convergence_info": {
+                "converged_for_dconv": 0.0001,
+                "converged_for_thresh": 1e-06
+            },
+            "metadata": {
+                "mpi_size": 1
+            },
+            "model": "scf",
             "molecule": {
                 "geometry": [
                     [
@@ -79,12 +87,12 @@
                     "ndim": 1,
                     "size": 3,
                     "vals": [
-                        -1.1610054231310037e-05,
-                        -3.940992150208133e-10,
-                        -0.3897459594761832
+                        -1.0091931318982395e-05,
+                        4.499221507608867e-09,
+                        -0.3897455308789302
                     ]
                 },
-                "energy": -76.06744156342393,
+                "energy": -76.0674415628071,
                 "gradient": {
                     "ndim": -1,
                     "size": 0
@@ -141,12 +149,12 @@
                         "ndim": 1,
                         "size": 3,
                         "vals": [
-                            -1.1610054231310037e-05,
-                            -3.940992150208133e-10,
-                            -0.3897459594761832
+                            -1.0091931318982395e-05,
+                            4.499221507608867e-09,
+                            -0.3897455308789302
                         ]
                     },
-                    "energy": -76.06744156342393,
+                    "energy": -76.0674415628071,
                     "gradient": {
                         "ndim": -1,
                         "size": 0
@@ -159,11 +167,11 @@
                     "ndim": 1,
                     "size": 5,
                     "vals": [
-                        -20.55950197720122,
-                        -0.9715518102557807,
-                        -0.9715515604999756,
-                        -0.7163432476322922,
-                        -0.5106051864168424
+                        -20.55950184018358,
+                        -0.9715515736087315,
+                        -0.9715516601819592,
+                        -0.7163424605365054,
+                        -0.5106058977863284
                     ]
                 },
                 "scf_eigenvalues_b": {
@@ -175,7 +183,26 @@
                     "size": 0
                 },
                 "scf_total_energy": 0.0
-            }
+            },
+            "scf_eigenvalues_a": {
+                "dims": [
+                    5
+                ],
+                "ndim": 1,
+                "size": 5,
+                "vals": [
+                    -20.55950184018358,
+                    -0.9715515736087315,
+                    -0.9715516601819592,
+                    -0.7163424605365054,
+                    -0.5106058977863284
+                ]
+            },
+            "scf_fock_a": {
+                "ndim": -1,
+                "size": 0
+            },
+            "scf_total_energy": 0.0
         },
         {
             "metadata": {
@@ -185,21 +212,25 @@
                             "1e-04": {
                                 "converged": {
                                     "0.000": true,
-                                    "0.020": true
+                                    "0.020": true,
+                                    "0.040": true
                                 },
                                 "saved": {
                                     "0.000": true,
-                                    "0.020": true
+                                    "0.020": true,
+                                    "0.040": true
                                 }
                             },
                             "1e-06": {
                                 "converged": {
                                     "0.000": true,
-                                    "0.020": true
+                                    "0.020": true,
+                                    "0.040": true
                                 },
                                 "saved": {
                                     "0.000": true,
-                                    "0.020": true
+                                    "0.020": true,
+                                    "0.040": true
                                 }
                             }
                         }
@@ -224,7 +255,7 @@
                         "freqB": 0.0,
                         "freqC": 0.0,
                         "property": "hyperpolarizability",
-                        "value": 7.720765998455924
+                        "value": 7.720691632506269
                     },
                     {
                         "component": [
@@ -235,7 +266,7 @@
                         "freqB": 0.0,
                         "freqC": 0.02,
                         "property": "hyperpolarizability",
-                        "value": 7.754461726645366
+                        "value": 7.754293612353886
                     },
                     {
                         "component": [
@@ -246,7 +277,7 @@
                         "freqB": 0.02,
                         "freqC": 0.0,
                         "property": "hyperpolarizability",
-                        "value": 7.754461726645525
+                        "value": 7.754293612354049
                     },
                     {
                         "component": [
@@ -257,7 +288,7 @@
                         "freqB": 0.02,
                         "freqC": 0.02,
                         "property": "hyperpolarizability",
-                        "value": 5.0685410855893345
+                        "value": 7.825356422457752
                     },
                     {
                         "component": [
@@ -266,7 +297,7 @@
                         ],
                         "freqB": 0.0,
                         "property": "polarizability",
-                        "value": 8.532228325133753
+                        "value": 8.532221201234368
                     },
                     {
                         "component": [
@@ -275,7 +306,7 @@
                         ],
                         "freqB": 0.02,
                         "property": "polarizability",
-                        "value": 8.541398917498375
+                        "value": 8.54140820564299
                     }
                 ],
                 "vibrational_analysis": {
