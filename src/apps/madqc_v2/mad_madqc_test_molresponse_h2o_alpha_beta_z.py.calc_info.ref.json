@@ -1,0 +1,288 @@
+{
+    "tasks": [
+        {
+            "convergence": {
+                "converged_for_dconv": 0.0001,
+                "converged_for_thresh": 1e-06
+            },
+            "molecule": {
+                "geometry": [
+                    [
+                        0.0,
+                        0.0,
+                        0.22166487405270968
+                    ],
+                    [
+                        0.0,
+                        1.430900620341511,
+                        -0.8866594962108387
+                    ],
+                    [
+                        0.0,
+                        -1.430900620341511,
+                        -0.8866594962108387
+                    ]
+                ],
+                "parameters": {
+                    "core_type": "none",
+                    "eprec": 1e-06,
+                    "field": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "no_orient": false,
+                    "psp_calc": false,
+                    "pure_ae": true,
+                    "source_name": "test_molresponse_h2o_alpha_beta_z.in",
+                    "source_type": "inputfile",
+                    "symtol": -0.01,
+                    "units": "atomic"
+                },
+                "symbols": [
+                    "O",
+                    "H",
+                    "H"
+                ]
+            },
+            "optimization_results": {
+                "final_energy": 0.0,
+                "final_geometry": {
+                    "geometry": null,
+                    "parameters": {
+                        "core_type": "none",
+                        "eprec": 0.0001,
+                        "field": [
+                            0.0,
+                            0.0,
+                            0.0
+                        ],
+                        "no_orient": false,
+                        "psp_calc": false,
+                        "pure_ae": true,
+                        "source_name": "tbd",
+                        "source_type": "inputfile",
+                        "symtol": -0.01,
+                        "units": "atomic"
+                    },
+                    "symbols": null
+                },
+                "max_gradient": 0.0,
+                "max_step": 0.0,
+                "nsteps": 0
+            },
+            "properties": {
+                "dipole": {
+                    "dims": [
+                        3
+                    ],
+                    "ndim": 1,
+                    "size": 3,
+                    "vals": [
+                        -1.1610054231310037e-05,
+                        -3.940992150208133e-10,
+                        -0.3897459594761832
+                    ]
+                },
+                "energy": -76.06744156342393,
+                "gradient": {
+                    "ndim": -1,
+                    "size": 0
+                }
+            },
+            "scf": {
+                "is_opt": false,
+                "model": "scf",
+                "molecule": {
+                    "geometry": [
+                        [
+                            0.0,
+                            0.0,
+                            0.22166487405270968
+                        ],
+                        [
+                            0.0,
+                            1.430900620341511,
+                            -0.8866594962108387
+                        ],
+                        [
+                            0.0,
+                            -1.430900620341511,
+                            -0.8866594962108387
+                        ]
+                    ],
+                    "parameters": {
+                        "core_type": "none",
+                        "eprec": 1e-06,
+                        "field": [
+                            0.0,
+                            0.0,
+                            0.0
+                        ],
+                        "no_orient": false,
+                        "psp_calc": false,
+                        "pure_ae": true,
+                        "source_name": "test_molresponse_h2o_alpha_beta_z.in",
+                        "source_type": "inputfile",
+                        "symtol": -0.01,
+                        "units": "atomic"
+                    },
+                    "symbols": [
+                        "O",
+                        "H",
+                        "H"
+                    ]
+                },
+                "properties": {
+                    "dipole": {
+                        "dims": [
+                            3
+                        ],
+                        "ndim": 1,
+                        "size": 3,
+                        "vals": [
+                            -1.1610054231310037e-05,
+                            -3.940992150208133e-10,
+                            -0.3897459594761832
+                        ]
+                    },
+                    "energy": -76.06744156342393,
+                    "gradient": {
+                        "ndim": -1,
+                        "size": 0
+                    }
+                },
+                "scf_eigenvalues_a": {
+                    "dims": [
+                        5
+                    ],
+                    "ndim": 1,
+                    "size": 5,
+                    "vals": [
+                        -20.55950197720122,
+                        -0.9715518102557807,
+                        -0.9715515604999756,
+                        -0.7163432476322922,
+                        -0.5106051864168424
+                    ]
+                },
+                "scf_eigenvalues_b": {
+                    "ndim": -1,
+                    "size": 0
+                },
+                "scf_fock_a": {
+                    "ndim": -1,
+                    "size": 0
+                },
+                "scf_total_energy": 0.0
+            }
+        },
+        {
+            "metadata": {
+                "states": {
+                    "Dipole_z": {
+                        "protocols": {
+                            "1e-04": {
+                                "converged": {
+                                    "0.000": true,
+                                    "0.020": true
+                                },
+                                "saved": {
+                                    "0.000": true,
+                                    "0.020": true
+                                }
+                            },
+                            "1e-06": {
+                                "converged": {
+                                    "0.000": true,
+                                    "0.020": true
+                                },
+                                "saved": {
+                                    "0.000": true,
+                                    "0.020": true
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "properties": {
+                "raman_spectra": {
+                    "polarizability_derivatives": [],
+                    "polarizability_derivatives_normal_modes": [],
+                    "polarization_frequencies": [],
+                    "raman_spectra": {},
+                    "vibrational_frequencies": []
+                },
+                "response_properties": [
+                    {
+                        "component": [
+                            "Dipole_z",
+                            "Dipole_z",
+                            "Dipole_z"
+                        ],
+                        "freqB": 0.0,
+                        "freqC": 0.0,
+                        "property": "hyperpolarizability",
+                        "value": 7.720765998455924
+                    },
+                    {
+                        "component": [
+                            "Dipole_z",
+                            "Dipole_z",
+                            "Dipole_z"
+                        ],
+                        "freqB": 0.0,
+                        "freqC": 0.02,
+                        "property": "hyperpolarizability",
+                        "value": 7.754461726645366
+                    },
+                    {
+                        "component": [
+                            "Dipole_z",
+                            "Dipole_z",
+                            "Dipole_z"
+                        ],
+                        "freqB": 0.02,
+                        "freqC": 0.0,
+                        "property": "hyperpolarizability",
+                        "value": 7.754461726645525
+                    },
+                    {
+                        "component": [
+                            "Dipole_z",
+                            "Dipole_z",
+                            "Dipole_z"
+                        ],
+                        "freqB": 0.02,
+                        "freqC": 0.02,
+                        "property": "hyperpolarizability",
+                        "value": 5.0685410855893345
+                    },
+                    {
+                        "component": [
+                            "z",
+                            "z"
+                        ],
+                        "freqB": 0.0,
+                        "property": "polarizability",
+                        "value": 8.532228325133753
+                    },
+                    {
+                        "component": [
+                            "z",
+                            "z"
+                        ],
+                        "freqB": 0.02,
+                        "property": "polarizability",
+                        "value": 8.541398917498375
+                    }
+                ],
+                "vibrational_analysis": {
+                    "au2invcm": 219474.63136314
+                }
+            },
+            "type": "response"
+        }
+    ]
+}

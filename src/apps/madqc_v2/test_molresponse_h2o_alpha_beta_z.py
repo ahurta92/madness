@@ -22,6 +22,17 @@ def response_rows_to_map(rows):
         mapped[key] = None if "value" not in row else float(row["value"])
     return mapped
 
+
+def get_scf_energy(task):
+    # Accept both legacy and nested task schemas.
+    if "properties" in task and "energy" in task["properties"]:
+        return float(task["properties"]["energy"])
+    if "scf_total_energy" in task:
+        return float(task["scf_total_energy"])
+    if "scf" in task and "scf_total_energy" in task["scf"]:
+        return float(task["scf"]["scf_total_energy"])
+    raise KeyError("Could not find SCF energy in task JSON")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="H2O response regression test (alpha/beta, z direction)"
@@ -99,14 +110,18 @@ if __name__ == "__main__":
     # Ground-state checks
     got_scf = got["tasks"][0]
     ref_scf = ref["tasks"][0]
-    if got_scf["model"] != ref_scf["model"]:
-        print("SCF model mismatch:", got_scf["model"], ref_scf["model"])
+    got_model = got_scf.get("model", "scf")
+    ref_model = ref_scf.get("model", "scf")
+    if got_model != ref_model:
+        print("SCF model mismatch:", got_model, ref_model)
         success = False
-    if abs(float(got_scf["properties"]["energy"]) - float(ref_scf["properties"]["energy"])) > 1e-4:
+    got_energy = get_scf_energy(got_scf)
+    ref_energy = get_scf_energy(ref_scf)
+    if abs(got_energy - ref_energy) > 1e-4:
         print(
             "SCF energy mismatch:",
-            got_scf["properties"]["energy"],
-            ref_scf["properties"]["energy"],
+            got_energy,
+            ref_energy,
         )
         success = False
 

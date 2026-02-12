@@ -13,7 +13,7 @@ response
     dipole true
     dipole.directions z
     quadratic true
-    dipole.frequencies 0 0.02
+    dipole.frequencies [0, 0.02]
 end
 molecule
     eprec 1e-6
