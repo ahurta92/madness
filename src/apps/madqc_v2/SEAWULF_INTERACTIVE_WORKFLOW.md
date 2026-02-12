@@ -76,3 +76,42 @@ From `build/`:
 ```bash
 ctest -R molresponse_h2o_alpha_beta_z --output-on-failure
 ```
+
+For fast interactive development on Seawulf, keep the scripted test logic but
+run it with your MPI/NUMA launcher via `MADQC_LAUNCHER`:
+
+```bash
+MADQC_LAUNCHER="mpirun --map-by numa numactl --preferred-many=8-15" \
+MAD_NUM_THREADS=10 \
+ctest -R molresponse_lih_alpha_raman_beta_xyz --output-on-failure
+```
+
+Default CI behavior is unchanged when `MADQC_LAUNCHER` is not set.
+
+## 7) One-time geometry optimization for fixed-response tests
+
+For response regression cases that should not optimize geometry during the test,
+run a one-time SCF optimization in an interactive job and then copy the final
+coordinates into the test input.
+
+Important convergence note:
+for `--optimize`, the geometry tolerances are derived from the **last**
+`dft.protocol` value. Using `protocol=[1.e-4,1.e-6]` can make geometry
+convergence too strict for quick test systems. Use a single-level protocol:
+`protocol=[1.e-4]`.
+
+Example:
+
+```bash
+MAD_NUM_THREADS=10 \
+mpirun --map-by numa numactl --preferred-many=8-15 \
+./build/src/apps/madqc_v2/madqc \
+  --wf=scf \
+  --optimize \
+  --prefix=lih_opt_once \
+  --dft="xc=hf; localize=new; maxiter=20; dconv=1.e-4; protocol=[1.e-4]; gmaxiter=20" \
+  src/apps/madqc_v2/test_molresponse_lih_alpha_raman_beta_xyz.in
+```
+
+Then copy the final optimized coordinates from `lih_opt_once_opt.xyz` into the
+test input geometry block so the scripted test remains a pure response run.
