@@ -128,6 +128,7 @@ inline void add_oep_workflow_drivers(World &world, Params &pm,
 
   auto reference = std::make_shared<SCFApplication<nemo_lib>>(world, pm);
   auto ref_calc = reference->calc();
+  wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
   wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
       std::make_unique<OEPApplication>(world, pm, ref_calc)));
 }

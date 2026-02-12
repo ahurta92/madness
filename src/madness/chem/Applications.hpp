@@ -191,6 +191,14 @@ public:
       results_["convergence"] = std::get<2>(scf_results).to_json();
       results_["molecule"] = std::get<0>(scf_results).scf_molecule.to_json();
       results_["optimization_results"] = std::get<3>(scf_results).to_json();
+      // Backward-compatible top-level fields expected by existing scripted tests.
+      // Keep these in sync with the nested "scf/properties/convergence" schema.
+      results_["model"] = "scf";
+      results_["scf_total_energy"] = results_["scf"]["scf_total_energy"];
+      results_["scf_eigenvalues_a"] = results_["scf"]["scf_eigenvalues_a"];
+      results_["scf_fock_a"] = results_["scf"]["scf_fock_a"];
+      results_["convergence_info"] = results_["convergence"];
+      results_["metadata"] = {{"mpi_size", world_.size()}};
 
       // write the checkpoint file
       if (world_.rank() == 0) {
@@ -225,8 +233,10 @@ public:
    * @param ref_dir   Directory of precomputed ground-state (SCF) outputs
    */
   ResponseApplication(World &world, Params params,
-                      const std::shared_ptr<SCF>& reference)
-      : Application(std::move(params)), world_(world), reference_(reference) {}
+                      std::shared_ptr<SCF> reference)
+      : Application(std::move(params)),
+        world_(world),
+        reference_(std::move(reference)) {}
 
   // print parameters
   void print_parameters(World &world) const override {
@@ -269,7 +279,7 @@ private:
   nlohmann::json metadata_;
   nlohmann::json properties_;
   std::optional<nlohmann::json> vibrational_analysis_;
-  const std::shared_ptr<SCF>& reference_;
+  std::shared_ptr<SCF> reference_;
 };
 
 class CC2Application : public Application, public CC2 {
