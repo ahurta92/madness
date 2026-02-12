@@ -42,6 +42,7 @@
 #include <apps/molresponse_v2/ResponseDebugLogger.hpp>
 #include <apps/molresponse_v2/ResponseManager.hpp>
 #include <apps/molresponse_v2/ResponseRecord.hpp>
+#include <apps/molresponse_v2/StateParallelPlanner.hpp>
 #include <apps/molresponse_v2/StateGenerator.hpp>
 #include <filesystem>
 #include <madness/chem/InputWriter.hpp>
@@ -70,6 +71,7 @@ private:
   struct PlannedStates {
     GeneratedStateData generated_states;
     DerivedStatePlan derived_state_plan;
+    StateParallelPlan state_parallel_plan;
   };
 
   struct SolvedStates {
@@ -202,13 +204,22 @@ private:
         DerivedStatePlanner::build_vbc_driven_quadratic_plan(
             response_params, ctx.molecule, ctx.ground.isSpinRestricted(),
             calc_params.protocol());
+    StateParallelPlan state_parallel_plan = StateParallelPlanner::build(
+        response_params, world.size(), generated_states.states);
     if (world.rank() == 0 && !derived_state_plan.requests.empty()) {
       print("🧩 Planned ", derived_state_plan.requests.size(),
             " VBC-derived quadratic-state requests (scaffolding only).");
     }
+    if (world.rank() == 0 && response_params.state_parallel() != "off") {
+      print("State-parallel plan: mode=", state_parallel_plan.effective_mode,
+            " requested_groups=", state_parallel_plan.requested_groups,
+            " mapping_groups=", state_parallel_plan.mapping_groups,
+            " reason=", state_parallel_plan.reason);
+    }
     world.gop.fence();
     return PlannedStates{std::move(generated_states),
-                         std::move(derived_state_plan)};
+                         std::move(derived_state_plan),
+                         std::move(state_parallel_plan)};
   }
 
   static SolvedStates
@@ -216,25 +227,11 @@ private:
                    GroundContext &ctx,
                    const ResponseParameters &response_params,
                    PlannedStates planned_states) {
-    const auto state_parallel_mode = response_params.state_parallel();
-    const auto requested_groups = response_params.state_parallel_groups();
-    const auto min_states = response_params.state_parallel_min_states();
-    const auto nstates = planned_states.generated_states.states.size();
-    const bool auto_would_enable =
-        (state_parallel_mode == "auto" && requested_groups > 1 &&
-         nstates >= min_states);
-    const bool on_requested =
-        (state_parallel_mode == "on" && requested_groups > 1);
-
-    if (world.rank() == 0 && (state_parallel_mode != "off")) {
-      print("State-parallel request: mode=", state_parallel_mode,
-            " groups=", requested_groups, " nstates=", nstates,
-            " min_states=", min_states);
-      if (auto_would_enable || on_requested) {
-        print("State-parallel solve is not enabled in this path yet; falling "
-              "back to serial state loop. See "
-              "src/apps/molresponse_v2/STATE_PARALLEL_DESIGN.md.");
-      }
+    if (world.rank() == 0 &&
+        planned_states.state_parallel_plan.mapping_groups > 1) {
+      print("State ownership mapping is active across ",
+            planned_states.state_parallel_plan.mapping_groups,
+            " groups, but solve execution remains serial in this stage.");
     }
 
     JsonStateSolvePersistence persistence(world, "response_metadata.json",
@@ -341,6 +338,8 @@ private:
     }
 
     auto metadata = persistence.metadata_json();
+    metadata["state_parallel_planner"] =
+        planned_states.state_parallel_plan.to_json();
     metadata["derived_state_planner"] = {
         {"note",
          "Stage 2b scaffolding only: derived quadratic-state solves are not "
