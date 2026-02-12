@@ -111,12 +111,17 @@ public:
   {
     // parser_.set_keyval("input", filename);
     //
+    const bool user_defined_prefix = parser_.key_exists("user_defined_prefix");
     std::string inputfile = parser.value("input");
-    std::string prefix =
+    std::string prefix_from_input =
         commandlineparser::remove_extension(commandlineparser::base_name(inputfile));
-    if (prefix != "input")
+    if (user_defined_prefix)
     {
-      prefix_ = prefix;
+      prefix_ = parser_.value("prefix");
+    }
+    else if (prefix_from_input != "input")
+    {
+      prefix_ = prefix_from_input;
     }
     else
     {
@@ -135,6 +140,10 @@ public:
     {
       // plain-text file
       initFromText(filename);
+    }
+    if (user_defined_prefix)
+    {
+      get<CalculationParameters>().set_user_defined_value("prefix", prefix_);
     }
     set_derived_values();
   }
@@ -195,18 +204,6 @@ private:
           }
         }(),
         ...);
-
-    std::string inputfile = parser_.value("input");
-    std::string prefix =
-        commandlineparser::remove_extension(commandlineparser::base_name(inputfile));
-    if (prefix != "input")
-    {
-      prefix_ = prefix;
-    }
-    else
-    {
-      prefix_ = "mad";
-    }
 
     all_input_json_ = j;
   }

@@ -86,8 +86,9 @@ private:
       print("Proximate path: ", prox);
     }
 
-    std::string archive_name = "mad.restartdata";
-    std::string fock_json_file = prox / "moldft.fock.json";
+    const auto &prefix = calc_params.prefix();
+    std::string archive_name = prefix + ".restartdata";
+    std::string fock_json_file = (prox / (prefix + ".fock.json")).string();
     std::string moldft_checkpt = prox / "moldft.calc_info.json";
     auto relative_archive = prox / archive_name;
 
@@ -254,8 +255,12 @@ private:
   enum class PropertyType { Alpha, Beta, Raman };
 
   inline static PropertyType parse_property_name(const std::string &raw) {
-    // strip leading/trailing quotes as you already do
-    auto key = raw.substr(1, raw.size() - 2);
+    auto key = raw;
+    if (key.size() >= 2 &&
+        ((key.front() == '"' && key.back() == '"') ||
+         (key.front() == '\'' && key.back() == '\''))) {
+      key = key.substr(1, key.size() - 2);
+    }
     if (key == "polarizability")
       return PropertyType::Alpha;
     if (key == "hyperpolarizability")

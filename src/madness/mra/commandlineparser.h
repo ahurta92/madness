@@ -36,6 +36,7 @@ struct commandlineparser {
             sa >> key;
             val=a.substr(key.size());
             if (key=="input") set_keyval("user_defined_input_file","1");
+            if (key=="prefix") set_keyval("user_defined_prefix","1");
 
             // special treatment for file names: keep captal/lower case
             if (key=="file") set_keyval_keep_case(key,val);

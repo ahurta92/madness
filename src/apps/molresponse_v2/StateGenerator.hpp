@@ -81,8 +81,12 @@ public:
     for (const auto &prop : requested_properties_) {
 
       auto prop_string = std::string(prop);
-      // get rid of first and last characters
-      prop_string = prop_string.substr(1, prop_string.size() - 2);
+      // Some parsers may preserve quotes while others return bare tokens.
+      if (prop_string.size() >= 2 &&
+          ((prop_string.front() == '"' && prop_string.back() == '"') ||
+           (prop_string.front() == '\'' && prop_string.back() == '\''))) {
+        prop_string = prop_string.substr(1, prop_string.size() - 2);
+      }
 
       if (prop_string == "polarizability") {
         prop_type = PropertyType::Alpha;
