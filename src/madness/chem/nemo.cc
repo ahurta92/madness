@@ -39,17 +39,17 @@
 
  */
 
-#include <madness/chem/BSHApply.h>
-#include <madness/chem/Results.h>
-#include <madness/chem/SCFOperators.h>
-#include <madness/chem/localizer.h>
-#include <madness/chem/molecular_optimizer.h>
-#include <madness/chem/nemo.h>
-#include <madness/chem/pcm.h>
-#include <madness/chem/pointgroupsymmetry.h>
-#include <madness/chem/projector.h>
-#include <madness/chem/vibanal.h>
+#include<madness/chem/nemo.h>
+#include<madness/chem/projector.h>
+#include<madness/chem/molecular_optimizer.h>
+#include<madness/chem/SCFOperators.h>
+#include<madness/chem/Results.h>
 #include <madness/constants.h>
+#include<madness/chem/vibanal.h>
+#include<madness/chem/pcm.h>
+#include<madness/chem/pointgroupsymmetry.h>
+#include<madness/chem/BSHApply.h>
+#include<madness/chem/localizer.h>
 #include <madness/mra/macrotaskq.h>
 #include <madness/mra/memory_measurement.h>
 #include <limits>
