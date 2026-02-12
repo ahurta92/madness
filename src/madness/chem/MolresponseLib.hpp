@@ -227,11 +227,30 @@ private:
                    GroundContext &ctx,
                    const ResponseParameters &response_params,
                    PlannedStates planned_states) {
-    if (world.rank() == 0 &&
-        planned_states.state_parallel_plan.mapping_groups > 1) {
+    (void)response_params;
+
+    const auto &state_parallel_plan = planned_states.state_parallel_plan;
+    const bool owner_group_schedule =
+        state_parallel_plan.effective_mode == "owner_group_serial" &&
+        state_parallel_plan.mapping_groups > 1;
+    if (world.rank() == 0 && owner_group_schedule) {
       print("State ownership mapping is active across ",
-            planned_states.state_parallel_plan.mapping_groups,
-            " groups, but solve execution remains serial in this stage.");
+            state_parallel_plan.mapping_groups,
+            " groups; executing deterministic owner-group solve passes "
+            "serially on the universe communicator.");
+    } else if (world.rank() == 0 &&
+               state_parallel_plan.mapping_groups > 1) {
+      print("State ownership mapping is active across ",
+            state_parallel_plan.mapping_groups,
+            " groups; falling back to plain serial state loop.");
+    }
+
+    std::vector<size_t> owner_by_state_index(
+        planned_states.generated_states.states.size(), 0);
+    for (const auto &assignment : state_parallel_plan.assignments) {
+      if (assignment.state_index < owner_by_state_index.size()) {
+        owner_by_state_index[assignment.state_index] = assignment.owner_group;
+      }
     }
 
     JsonStateSolvePersistence persistence(world, "response_metadata.json",
@@ -291,12 +310,35 @@ private:
           world, *ctx.response_manager.getCoulombOp(),
           ctx.response_manager.getVtol(), ctx.fock_json_file);
 
-      for (auto &state : planned_states.generated_states.states) {
-        bool at_final_protocol = (ti + 1 == protocol.size());
+      const bool at_final_protocol = (ti + 1 == protocol.size());
+      auto solve_state_index = [&](size_t state_index) {
+        auto &state = planned_states.generated_states.states[state_index];
         computeFrequencyLoop(world, ctx.response_manager, state, ti, ctx.ground,
-                             persistence,
-                             at_final_protocol);
+                             persistence, at_final_protocol);
         persistence.flush_debug_log(world);
+      };
+
+      if (owner_group_schedule) {
+        for (size_t gid = 0; gid < state_parallel_plan.mapping_groups; ++gid) {
+          if (world.rank() == 0) {
+            print("State solve lane ", gid, "/",
+                  state_parallel_plan.mapping_groups - 1,
+                  " at protocol thresh ", thresh);
+          }
+          for (size_t state_index = 0;
+               state_index < planned_states.generated_states.states.size();
+               ++state_index) {
+            if (owner_by_state_index[state_index] == gid) {
+              solve_state_index(state_index);
+            }
+          }
+        }
+      } else {
+        for (size_t state_index = 0;
+             state_index < planned_states.generated_states.states.size();
+             ++state_index) {
+          solve_state_index(state_index);
+        }
       }
     }
 

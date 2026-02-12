@@ -33,6 +33,7 @@ struct StateParallelPlan {
   size_t num_states = 0;
   size_t world_size = 1;
   bool execution_enabled = false;
+  bool subgroup_parallel_enabled = false;
   std::string reason;
   std::vector<StateAssignment> assignments;
 
@@ -49,6 +50,7 @@ struct StateParallelPlan {
             {"num_states", num_states},
             {"world_size", world_size},
             {"execution_enabled", execution_enabled},
+            {"subgroup_parallel_enabled", subgroup_parallel_enabled},
             {"reason", reason},
             {"assignments", rows}};
   }
@@ -89,12 +91,14 @@ public:
     if (should_plan_parallel_mapping) {
       plan.mapping_groups = plan.requested_groups;
       plan.execution_groups = 1;
-      plan.execution_enabled = false;
-      plan.effective_mode = "planned_serial";
+      plan.execution_enabled = true;
+      plan.subgroup_parallel_enabled = false;
+      plan.effective_mode = "owner_group_serial";
     } else {
       plan.mapping_groups = 1;
       plan.execution_groups = 1;
-      plan.execution_enabled = false;
+      plan.execution_enabled = true;
+      plan.subgroup_parallel_enabled = false;
       plan.effective_mode = "serial";
     }
 
