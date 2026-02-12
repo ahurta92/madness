@@ -54,8 +54,6 @@ public:
     // helper to insert/merge one perturbation+freqs into table
     auto addPerturbation = [&](const Perturbation &p,
                                const std::vector<double> &f) {
-      // build a throwaway ResponseState so we get the exact key
-      LinearResponseDescriptor tmp{p, f, thresholds_, spin_restricted_};
       std::string key = describe_perturbation(p);
       auto &e = table[key];
       // on first visit fill in type+pert
@@ -103,7 +101,7 @@ public:
       if (prop_type == PropertyType::Beta) {
 
         for (size_t b = 0; b < dipole_freqs.size(); ++b)
-          for (size_t c = b; c < dipole_freqs.size(); ++c)
+          for (size_t c = 0; c < dipole_freqs.size(); ++c)
             augmented_dipole_freqs.push_back(dipole_freqs[b] + dipole_freqs[c]);
         std::sort(augmented_dipole_freqs.begin(), augmented_dipole_freqs.end());
         augmented_dipole_freqs.erase(std::unique(augmented_dipole_freqs.begin(),
@@ -121,7 +119,7 @@ public:
         }
       }
 
-      if (prop_type == PropertyType::Alpha) {
+      if (prop_type == PropertyType::Alpha || prop_type == PropertyType::Beta) {
         for (char d : dipole_dirs) {
           addPerturbation(DipolePerturbation{d}, augmented_dipole_freqs);
         }
