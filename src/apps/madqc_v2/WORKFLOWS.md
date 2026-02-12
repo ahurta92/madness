@@ -2,6 +2,8 @@
 
 `madqc` builds execution pipelines through `src/madness/chem/WorkflowBuilders.hpp`.
 
+For personal Seawulf interactive build/test commands, see `src/apps/madqc_v2/SEAWULF_INTERACTIVE_WORKFLOW.md`.
+
 ## Current Architecture
 
 1. `madqc.cpp` parses CLI and creates `Params` + `qcapp::Workflow`.
