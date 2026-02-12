@@ -85,12 +85,12 @@ void computeFrequencyLoop(World &world,
                           const LinearResponseDescriptor &state_desc,
                           size_t thresh_index,
                           const GroundStateData &ground_state,
-                          ResponseRecord2 &response_record,
-                          ResponseDebugLogger &logger,
+                          StateSolvePersistence &persistence,
                           bool at_final_protocol) {
 
   bool is_unrestricted = !ground_state.isSpinRestricted();
   auto num_orbitals = static_cast<int>(ground_state.getNumOrbitals());
+  auto &logger = persistence.logger();
 
   ResponseVector previous_response = make_response_vector(
       num_orbitals, /*is_static=*/state_desc.is_static(0), is_unrestricted);
@@ -108,13 +108,10 @@ void computeFrequencyLoop(World &world,
                      " freq ", pt.frequency());
     }
 
-    bool is_saved = response_record.is_saved(
-        pt.perturbationDescription(), pt.threshold(), pt.frequency());
+    bool is_saved = persistence.is_saved(pt);
     bool should_solve =
         !is_saved ||
-        (at_final_protocol &&
-         !response_record.is_converged(pt.perturbationDescription(),
-                                       pt.threshold(), pt.frequency()));
+        (at_final_protocol && !persistence.is_converged(pt));
     if (!should_solve)
       continue;
 
@@ -172,10 +169,9 @@ void computeFrequencyLoop(World &world,
     // save and record the response vector
     save_response_vector(world, pt, x_0);
     world.gop.fence();
-    response_record.record_status(pt, converged);
+    persistence.record_status(pt, converged);
 
     previous_response = x_0;
     have_previous_freq_response = true;
   }
 }
-

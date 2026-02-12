@@ -3,6 +3,7 @@
 `madqc` builds execution pipelines through `src/madness/chem/WorkflowBuilders.hpp`.
 
 For personal Seawulf interactive build/test commands, see `src/apps/madqc_v2/SEAWULF_INTERACTIVE_WORKFLOW.md`.
+For molresponse state-level subgroup-parallel design notes, see `src/apps/molresponse_v2/STATE_PARALLEL_DESIGN.md`.
 
 ## Current Architecture
 

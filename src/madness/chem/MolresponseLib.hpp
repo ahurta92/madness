@@ -35,6 +35,7 @@
 
 #include "ResponseParameters.hpp"
 #include "madness_exception.h"
+#include <apps/molresponse_v2/FrequencyLoop.hpp>
 #include <apps/molresponse_v2/GroundStateData.hpp>
 #include <apps/molresponse_v2/PropertyManager.hpp>
 #include <apps/molresponse_v2/ResponseDebugLogger.hpp>
@@ -65,10 +66,68 @@ private:
     std::string fock_json_file;
   };
 
-  struct StateSolution {
+  struct PlannedStates {
     GeneratedStateData generated_states;
-    ResponseRecord2 response_record;
-    ResponseDebugLogger debug_logger;
+  };
+
+  struct SolvedStates {
+    PlannedStates planned_states;
+    nlohmann::json metadata;
+    nlohmann::json debug_log;
+  };
+
+  struct PropertyStageOutput {
+    nlohmann::json properties;
+    VibrationalResults vibrational_analysis;
+    RamanResults raman_spectra;
+  };
+
+  class JsonStateSolvePersistence final : public StateSolvePersistence {
+  public:
+    JsonStateSolvePersistence(World &world, const std::string &meta_file,
+                              const std::string &debug_file)
+        : response_record_(world, meta_file), debug_logger_(debug_file) {}
+
+    void initialize_states(const std::vector<LinearResponseDescriptor> &states) {
+      response_record_.initialize_states(states);
+    }
+
+    void print_summary() const { response_record_.print_summary(); }
+
+    [[nodiscard]] bool is_saved(const LinearResponsePoint &pt) const override {
+      return response_record_.is_saved(pt.perturbationDescription(),
+                                       pt.threshold(), pt.frequency());
+    }
+
+    [[nodiscard]] bool
+    is_converged(const LinearResponsePoint &pt) const override {
+      return response_record_.is_converged(pt.perturbationDescription(),
+                                           pt.threshold(), pt.frequency());
+    }
+
+    void record_status(const LinearResponsePoint &pt, bool c) override {
+      response_record_.record_status(pt, c);
+    }
+
+    ResponseDebugLogger &logger() override { return debug_logger_; }
+
+    void flush_debug_log(World &world) override {
+      if (debug_logger_.enabled() && world.rank() == 0) {
+        debug_logger_.write_to_disk();
+      }
+    }
+
+    [[nodiscard]] nlohmann::json metadata_json() const {
+      return response_record_.to_json();
+    }
+
+    [[nodiscard]] nlohmann::json debug_log_json() const {
+      return debug_logger_.to_json();
+    }
+
+  private:
+    ResponseRecord2 response_record_;
+    ResponseDebugLogger debug_logger_;
   };
 
   static GroundContext
@@ -125,10 +184,10 @@ private:
                          std::move(fock_json_file)};
   }
 
-  static StateSolution
-  solve_all_states(World &world, const CalculationParameters &calc_params,
-                   GroundContext &ctx,
-                   const ResponseParameters &response_params) {
+  static PlannedStates
+  plan_required_states(World &world, const CalculationParameters &calc_params,
+                       const GroundContext &ctx,
+                       const ResponseParameters &response_params) {
     StateGenerator state_generator(ctx.molecule, calc_params.protocol(),
                                    ctx.ground.isSpinRestricted(),
                                    response_params);
@@ -138,35 +197,56 @@ private:
       GeneratedStateData::print_generated_state_map(generated_states.state_map);
     }
     world.gop.fence();
+    return PlannedStates{std::move(generated_states)};
+  }
 
-    std::string meta_file = "response_metadata.json";
-    ResponseRecord2 response_record(world, meta_file);
-    response_record.initialize_states(generated_states.states);
+  static SolvedStates
+  solve_all_states(World &world, const CalculationParameters &calc_params,
+                   GroundContext &ctx,
+                   const ResponseParameters &response_params,
+                   PlannedStates planned_states) {
+    const auto state_parallel_mode = response_params.state_parallel();
+    const auto requested_groups = response_params.state_parallel_groups();
+    const auto min_states = response_params.state_parallel_min_states();
+    const auto nstates = planned_states.generated_states.states.size();
+    const bool auto_would_enable =
+        (state_parallel_mode == "auto" && requested_groups > 1 &&
+         nstates >= min_states);
+    const bool on_requested =
+        (state_parallel_mode == "on" && requested_groups > 1);
+
+    if (world.rank() == 0 && (state_parallel_mode != "off")) {
+      print("State-parallel request: mode=", state_parallel_mode,
+            " groups=", requested_groups, " nstates=", nstates,
+            " min_states=", min_states);
+      if (auto_would_enable || on_requested) {
+        print("State-parallel solve is not enabled in this path yet; falling "
+              "back to serial state loop. See "
+              "src/apps/molresponse_v2/STATE_PARALLEL_DESIGN.md.");
+      }
+    }
+
+    JsonStateSolvePersistence persistence(world, "response_metadata.json",
+                                          "response_log.json");
+    persistence.initialize_states(planned_states.generated_states.states);
 
     if (world.rank() == 0) {
-      response_record.print_summary();
+      persistence.print_summary();
     }
     world.gop.fence();
-
-    ResponseDebugLogger debug_logger("response_log.json");
 
     auto needs_solving_at_protocol = [&](double protocol_thresh,
                                          size_t thresh_index) {
       bool at_final_protocol =
           protocol_thresh == calc_params.protocol().back();
 
-      for (const auto &state : generated_states.states) {
+      for (const auto &state : planned_states.generated_states.states) {
         for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
              ++freq_idx) {
           LinearResponsePoint pt{state, thresh_index, freq_idx};
-          bool is_saved =
-              response_record.is_saved(pt.perturbationDescription(),
-                                       pt.threshold(), pt.frequency());
+          bool is_saved = persistence.is_saved(pt);
           bool should_solve =
-              !is_saved ||
-              (at_final_protocol &&
-               !response_record.is_converged(pt.perturbationDescription(),
-                                             pt.threshold(), pt.frequency()));
+              !is_saved || (at_final_protocol && !persistence.is_converged(pt));
 
           if (world.rank() == 0) {
             print("Checking state ", pt.perturbationDescription(),
@@ -203,15 +283,12 @@ private:
           world, *ctx.response_manager.getCoulombOp(),
           ctx.response_manager.getVtol(), ctx.fock_json_file);
 
-      for (auto &state : generated_states.states) {
+      for (auto &state : planned_states.generated_states.states) {
         bool at_final_protocol = (ti + 1 == protocol.size());
-        computeFrequencyLoop(world, ctx.response_manager, state, ti,
-                             ctx.ground, response_record, debug_logger,
+        computeFrequencyLoop(world, ctx.response_manager, state, ti, ctx.ground,
+                             persistence,
                              at_final_protocol);
-
-        if (debug_logger.enabled() && world.rank() == 0) {
-          debug_logger.write_to_disk();
-        }
+        persistence.flush_debug_log(world);
       }
     }
 
@@ -224,11 +301,12 @@ private:
                                     ctx.fock_json_file);
 
     // Verify that all states are converged at the final protocol
+    const size_t final_ti = calc_params.protocol().size() - 1;
     bool all_are_converged = true;
-    for (const auto &state : generated_states.states) {
-      for (double f : state.frequencies) {
-        if (!response_record.is_converged(state.perturbationDescription(),
-                                          final_thresh, f)) {
+    for (const auto &state : planned_states.generated_states.states) {
+      for (size_t fi = 0; fi < state.num_frequencies(); ++fi) {
+        LinearResponsePoint pt{state, final_ti, fi};
+        if (!persistence.is_converged(pt)) {
           all_are_converged = false;
           break;
         }
@@ -239,15 +317,15 @@ private:
 
     MADNESS_ASSERT(all_are_converged);
 
-    return StateSolution{std::move(generated_states),
-                         std::move(response_record), std::move(debug_logger)};
+    return SolvedStates{std::move(planned_states), persistence.metadata_json(),
+                        persistence.debug_log_json()};
   }
 
   struct PropertyContext {
     World &world;
     const ResponseParameters &response_params;
     const GroundContext &ground_ctx;
-    const StateSolution &state_solution;
+    const SolvedStates &solved_states;
     PropertyManager &properties;
     std::shared_ptr<SCF> scf_calc;
   };
@@ -274,7 +352,8 @@ private:
     if (ctx.world.rank() == 0)
       madness::print("▶️ Computing polarizability α...");
 
-    compute_alpha(ctx.world, ctx.state_solution.generated_states.state_map,
+    compute_alpha(ctx.world,
+                  ctx.solved_states.planned_states.generated_states.state_map,
                   ctx.ground_ctx.ground,
                   ctx.response_params.dipole_frequencies(),
                   ctx.response_params.dipole_directions(), ctx.properties);
@@ -303,7 +382,7 @@ private:
     }
 
     vib = compute_hessian(
-        ctx.world, ctx.state_solution.generated_states.state_map,
+        ctx.world, ctx.solved_states.planned_states.generated_states.state_map,
         ctx.ground_ctx.ground, ctx.response_params.dipole_directions(),
         ctx.scf_calc);
 
@@ -499,6 +578,38 @@ private:
     }
   }
 
+  static PropertyStageOutput
+  compute_requested_properties(World &world,
+                               const ResponseParameters &response_params,
+                               const GroundContext &ground_ctx,
+                               const SolvedStates &solved_states,
+                               const std::shared_ptr<SCF> &scf_calc) {
+    VibrationalResults vib;
+    RamanResults raman;
+    PropertyManager properties(world, "properties.json");
+
+    PropertyContext prop_ctx{world,         response_params, ground_ctx,
+                             solved_states, properties,      scf_calc};
+
+    for (const std::string &prop : response_params.requested_properties()) {
+      auto prop_type = parse_property_name(prop);
+      switch (prop_type) {
+      case PropertyType::Alpha:
+        compute_polarizability(prop_ctx);
+        break;
+      case PropertyType::Beta:
+        compute_hyperpolarizability(prop_ctx);
+        break;
+      case PropertyType::Raman:
+        compute_raman(prop_ctx, vib, raman);
+        break;
+      }
+    }
+
+    return PropertyStageOutput{properties.to_json(), std::move(vib),
+                               std::move(raman)};
+  }
+
   public:
 
   /**
@@ -535,34 +646,13 @@ private:
     GroundContext ground_ctx =
         make_ground_context(world, calc_params, scf_calc, outdir);
 
-    StateSolution state_solution =
-        solve_all_states(world, calc_params, ground_ctx, response_params);
-
-    VibrationalResults vib;
-    RamanResults raman;
-
-    // compute requested properties
-    PropertyManager properties(world, "properties.json");
-
-    PropertyContext prop_ctx{world,          response_params, ground_ctx,
-                             state_solution, properties,      scf_calc};
-
-    std::string dip_dirs = response_params.dipole_directions();
-
-    for (const std::string &prop : response_params.requested_properties()) {
-      auto prop_type = parse_property_name(prop);
-      switch (prop_type) {
-      case PropertyType::Alpha:
-        compute_polarizability(prop_ctx);
-        break;
-      case PropertyType::Beta:
-        compute_hyperpolarizability(prop_ctx);
-        break;
-      case PropertyType::Raman:
-        compute_raman(prop_ctx, vib, raman);
-        break;
-      }
-    }
+    PlannedStates planned_states =
+        plan_required_states(world, calc_params, ground_ctx, response_params);
+    SolvedStates solved_states = solve_all_states(
+        world, calc_params, ground_ctx, response_params, std::move(planned_states));
+    PropertyStageOutput property_stage =
+        compute_requested_properties(world, response_params, ground_ctx,
+                                     solved_states, scf_calc);
 
     // finalize & stats
     if (world.rank() == 0) {
@@ -575,11 +665,11 @@ private:
 
     // aggregate JSON results
     Results results;
-    results.metadata = state_solution.response_record.to_json();
-    results.properties = properties.to_json();
-    results.debug_log = state_solution.debug_logger.to_json();
-    results.vibrational_analysis = vib.to_json();
-    results.raman_spectra = raman.to_json();
+    results.metadata = std::move(solved_states.metadata);
+    results.properties = std::move(property_stage.properties);
+    results.debug_log = std::move(solved_states.debug_log);
+    results.vibrational_analysis = property_stage.vibrational_analysis.to_json();
+    results.raman_spectra = property_stage.raman_spectra.to_json();
     return results;
   }
 }; // namespace molresponse_lib

@@ -5,7 +5,6 @@
 #include "ResponseIO.hpp"
 #include "ResponseInitializer.hpp"
 #include "ResponseManager.hpp"
-#include "ResponseRecord.hpp"
 #include "ResponseSolver.hpp"
 #include "ResponseSolverUtils.hpp"
 #include "ResponseState.hpp"
@@ -114,10 +113,20 @@ bool solve_response_vector(World &world, const ResponseManager &response_manager
 void promote_response_vector(World &world, const ResponseVector &x_in,
                              ResponseVector &x_out);
 
+class StateSolvePersistence {
+public:
+  virtual ~StateSolvePersistence() = default;
+  [[nodiscard]] virtual bool is_saved(const LinearResponsePoint &pt) const = 0;
+  [[nodiscard]] virtual bool
+  is_converged(const LinearResponsePoint &pt) const = 0;
+  virtual void record_status(const LinearResponsePoint &pt, bool c) = 0;
+  virtual ResponseDebugLogger &logger() = 0;
+  virtual void flush_debug_log(World &world) = 0;
+};
+
 void computeFrequencyLoop(World &world, const ResponseManager &response_manager,
                           const LinearResponseDescriptor &state_desc,
                           size_t thresh_index,
                           const GroundStateData &ground_state,
-                          ResponseRecord2 &response_record,
-                          ResponseDebugLogger &logger,
+                          StateSolvePersistence &persistence,
                           bool at_final_protocol);
