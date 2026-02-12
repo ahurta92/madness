@@ -85,15 +85,15 @@ public:
       plan.reason = "auto mode disabled: state count below min_states";
     } else if (requested_on || (requested_auto && enough_states)) {
       should_plan_parallel_mapping = true;
-      plan.reason = "ownership mapping planned; subgroup execution not enabled yet";
+      plan.reason = "ownership mapping planned with subgroup execution";
     }
 
     if (should_plan_parallel_mapping) {
       plan.mapping_groups = plan.requested_groups;
-      plan.execution_groups = 1;
+      plan.execution_groups = plan.requested_groups;
       plan.execution_enabled = true;
-      plan.subgroup_parallel_enabled = false;
-      plan.effective_mode = "owner_group_serial";
+      plan.subgroup_parallel_enabled = true;
+      plan.effective_mode = "owner_group_subworld";
     } else {
       plan.mapping_groups = 1;
       plan.execution_groups = 1;

@@ -45,6 +45,9 @@
 #include <apps/molresponse_v2/StateParallelPlanner.hpp>
 #include <apps/molresponse_v2/StateGenerator.hpp>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <madness/mra/macrotaskq.h>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/Results.h>
@@ -65,6 +68,7 @@ private:
     Molecule molecule;
     GroundStateData ground;
     ResponseManager response_manager;
+    std::string archive_file;
     std::string fock_json_file;
   };
 
@@ -134,6 +138,195 @@ private:
     ResponseDebugLogger debug_logger_;
   };
 
+  static std::string group_shard_file(const std::string &filename, size_t gid) {
+    std::filesystem::path in(filename);
+    const auto parent = in.parent_path();
+    const auto stem = in.stem().string();
+    const auto ext = in.extension().string();
+    const auto grouped =
+        ext.empty() ? stem + ".group" + std::to_string(gid)
+                    : stem + ".group" + std::to_string(gid) + ext;
+    if (parent.empty()) {
+      return grouped;
+    }
+    return (parent / grouped).string();
+  }
+
+  static void write_json_file(const std::string &filename,
+                              const nlohmann::json &json_data) {
+    std::ofstream out(filename);
+    if (!out) {
+      throw std::runtime_error("Cannot open " + filename + " for writing");
+    }
+    out << std::setw(2) << json_data << "\n";
+  }
+
+  static nlohmann::json read_json_file_or_object(const std::string &filename) {
+    if (!std::filesystem::exists(filename)) {
+      return nlohmann::json::object();
+    }
+    std::ifstream in(filename);
+    if (!in) {
+      return nlohmann::json::object();
+    }
+    nlohmann::json parsed = nlohmann::json::object();
+    in >> parsed;
+    return parsed;
+  }
+
+  static void merge_state_metadata_json(nlohmann::json &merged,
+                                        const nlohmann::json &shard) {
+    if (!merged.is_object()) {
+      merged = nlohmann::json::object();
+    }
+    if (!merged.contains("states") || !merged["states"].is_object()) {
+      merged["states"] = nlohmann::json::object();
+    }
+    if (!shard.is_object() || !shard.contains("states") ||
+        !shard["states"].is_object()) {
+      return;
+    }
+
+    for (const auto &[state_id, shard_state] : shard["states"].items()) {
+      auto &dst_state = merged["states"][state_id];
+      if (!dst_state.is_object()) {
+        dst_state = nlohmann::json::object();
+      }
+      if (!dst_state.contains("protocols") || !dst_state["protocols"].is_object()) {
+        dst_state["protocols"] = nlohmann::json::object();
+      }
+
+      if (shard_state.contains("final_saved") &&
+          shard_state["final_saved"].is_boolean()) {
+        const bool lhs = dst_state.contains("final_saved") &&
+                         dst_state["final_saved"].is_boolean() &&
+                         dst_state["final_saved"].get<bool>();
+        const bool rhs = shard_state["final_saved"].get<bool>();
+        dst_state["final_saved"] = (lhs || rhs);
+      }
+
+      if (!shard_state.contains("protocols") ||
+          !shard_state["protocols"].is_object()) {
+        continue;
+      }
+
+      for (const auto &[protocol_key, shard_proto] :
+           shard_state["protocols"].items()) {
+        auto &dst_proto = dst_state["protocols"][protocol_key];
+        if (!dst_proto.is_object()) {
+          dst_proto = nlohmann::json::object();
+        }
+        if (!dst_proto.contains("saved") || !dst_proto["saved"].is_object()) {
+          dst_proto["saved"] = nlohmann::json::object();
+        }
+        if (!dst_proto.contains("converged") ||
+            !dst_proto["converged"].is_object()) {
+          dst_proto["converged"] = nlohmann::json::object();
+        }
+
+        auto merge_flag_map = [&](const char *name) {
+          if (!shard_proto.contains(name) || !shard_proto[name].is_object()) {
+            return;
+          }
+          for (const auto &[freq_key, shard_value] : shard_proto[name].items()) {
+            const bool rhs = shard_value.is_boolean() && shard_value.get<bool>();
+            const bool lhs = dst_proto[name].contains(freq_key) &&
+                             dst_proto[name][freq_key].is_boolean() &&
+                             dst_proto[name][freq_key].get<bool>();
+            dst_proto[name][freq_key] = (lhs || rhs);
+          }
+        };
+
+        merge_flag_map("saved");
+        merge_flag_map("converged");
+      }
+    }
+  }
+
+  static void merge_debug_log_recursive(nlohmann::json &dst,
+                                        const nlohmann::json &src) {
+    if (!src.is_object()) {
+      dst = src;
+      return;
+    }
+
+    if (!dst.is_object()) {
+      dst = nlohmann::json::object();
+    }
+
+    for (const auto &[key, src_value] : src.items()) {
+      if (!dst.contains(key)) {
+        dst[key] = src_value;
+        continue;
+      }
+
+      auto &dst_value = dst[key];
+      if (dst_value.is_object() && src_value.is_object()) {
+        merge_debug_log_recursive(dst_value, src_value);
+      } else if (dst_value.is_array() && src_value.is_array()) {
+        for (const auto &entry : src_value) {
+          dst_value.push_back(entry);
+        }
+      } else {
+        dst_value = src_value;
+      }
+    }
+  }
+
+  static void merge_debug_log_json(nlohmann::json &merged,
+                                   const nlohmann::json &shard) {
+    if (!shard.is_object()) {
+      return;
+    }
+    if (!merged.is_object()) {
+      merged = nlohmann::json::object();
+    }
+    merge_debug_log_recursive(merged, shard);
+  }
+
+  static bool point_ready_in_metadata(const nlohmann::json &metadata,
+                                      const LinearResponsePoint &pt,
+                                      bool require_saved,
+                                      bool require_converged) {
+    if (!metadata.is_object() || !metadata.contains("states") ||
+        !metadata["states"].is_object()) {
+      return false;
+    }
+
+    const auto state_key = pt.perturbationDescription();
+    const auto protocol_key = ResponseRecord2::protocol_key(pt.threshold());
+    const auto freq_key = ResponseRecord2::freq_key(pt.frequency());
+
+    const auto states_it = metadata["states"].find(state_key);
+    if (states_it == metadata["states"].end()) {
+      return false;
+    }
+    if (!states_it->contains("protocols") || !(*states_it)["protocols"].is_object()) {
+      return false;
+    }
+    const auto protos_it = (*states_it)["protocols"].find(protocol_key);
+    if (protos_it == (*states_it)["protocols"].end()) {
+      return false;
+    }
+
+    auto check_flag = [&](const char *flag_name, bool required) {
+      if (!required) {
+        return true;
+      }
+      if (!protos_it->contains(flag_name) || !(*protos_it)[flag_name].is_object()) {
+        return false;
+      }
+      const auto values_it = (*protos_it)[flag_name].find(freq_key);
+      if (values_it == (*protos_it)[flag_name].end()) {
+        return false;
+      }
+      return values_it->is_boolean() && values_it->get<bool>();
+    };
+
+    return check_flag("saved", require_saved) &&
+           check_flag("converged", require_converged);
+  }
+
   static GroundContext
   make_ground_context(World &world, const CalculationParameters &calc_params,
                       const std::shared_ptr<SCF> &scf_calc,
@@ -185,6 +378,7 @@ private:
 
     return GroundContext{std::move(molecule), std::move(ground),
                          std::move(response_manager),
+                         relative_archive.string(),
                          std::move(fock_json_file)};
   }
 
@@ -230,10 +424,18 @@ private:
     (void)response_params;
 
     const auto &state_parallel_plan = planned_states.state_parallel_plan;
+    const bool subgroup_parallel_requested =
+        state_parallel_plan.execution_enabled &&
+        state_parallel_plan.subgroup_parallel_enabled &&
+        state_parallel_plan.execution_groups > 1;
     const bool owner_group_schedule =
-        state_parallel_plan.effective_mode == "owner_group_serial" &&
-        state_parallel_plan.mapping_groups > 1;
-    if (world.rank() == 0 && owner_group_schedule) {
+        state_parallel_plan.mapping_groups > 1 &&
+        state_parallel_plan.effective_mode != "serial";
+    if (world.rank() == 0 && subgroup_parallel_requested) {
+      print("State ownership mapping is active across ",
+            state_parallel_plan.mapping_groups,
+            " groups; executing owner-group solves in parallel subworlds.");
+    } else if (world.rank() == 0 && owner_group_schedule) {
       print("State ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
             " groups; executing deterministic owner-group solve passes "
@@ -253,93 +455,280 @@ private:
       }
     }
 
-    JsonStateSolvePersistence persistence(world, "response_metadata.json",
-                                          "response_log.json");
-    persistence.initialize_states(planned_states.generated_states.states);
+    nlohmann::json state_metadata_json = nlohmann::json::object();
+    nlohmann::json debug_log_json = nlohmann::json::object();
 
-    if (world.rank() == 0) {
-      persistence.print_summary();
-    }
-    world.gop.fence();
+    auto run_serial_solve = [&]() {
+      JsonStateSolvePersistence persistence(world, "response_metadata.json",
+                                            "response_log.json");
+      persistence.initialize_states(planned_states.generated_states.states);
 
-    auto needs_solving_at_protocol = [&](double protocol_thresh,
-                                         size_t thresh_index) {
-      bool at_final_protocol =
-          protocol_thresh == calc_params.protocol().back();
-
-      for (const auto &state : planned_states.generated_states.states) {
-        for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
-             ++freq_idx) {
-          LinearResponsePoint pt{state, thresh_index, freq_idx};
-          bool is_saved = persistence.is_saved(pt);
-          bool should_solve =
-              !is_saved || (at_final_protocol && !persistence.is_converged(pt));
-
-          if (world.rank() == 0) {
-            print("Checking state ", pt.perturbationDescription(),
-                  " at thresh ", protocol_thresh, " freq ", pt.frequency(),
-                  " is_saved=", is_saved,
-                  " at_final_protocol=", at_final_protocol,
-                  " should_solve=", should_solve);
-          }
-
-          if (should_solve) {
-            return true;
-          }
-        }
+      if (world.rank() == 0) {
+        persistence.print_summary();
       }
+      world.gop.fence();
 
-      return false;
-    };
+      auto needs_solving_at_protocol = [&](double protocol_thresh,
+                                           size_t thresh_index) {
+        const bool at_final_protocol =
+            protocol_thresh == calc_params.protocol().back();
 
-    const auto &protocol = calc_params.protocol();
-    for (size_t ti = 0; ti < protocol.size(); ++ti) {
-      double thresh = protocol[ti];
+        for (const auto &state : planned_states.generated_states.states) {
+          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+               ++freq_idx) {
+            LinearResponsePoint pt{state, thresh_index, freq_idx};
+            const bool is_saved = persistence.is_saved(pt);
+            const bool should_solve = !is_saved ||
+                                      (at_final_protocol &&
+                                       !persistence.is_converged(pt));
 
-      if (!needs_solving_at_protocol(thresh, ti)) {
-        if (world.rank() == 0) {
-          madness::print("✓ All states converged at thresh", thresh,
-                         "skipping to next protocol.");
-        }
-        continue;
-      }
+            if (world.rank() == 0) {
+              print("Checking state ", pt.perturbationDescription(),
+                    " at thresh ", protocol_thresh, " freq ", pt.frequency(),
+                    " is_saved=", is_saved,
+                    " at_final_protocol=", at_final_protocol,
+                    " should_solve=", should_solve);
+            }
 
-      ctx.response_manager.setProtocol(world, ctx.ground.getL(), thresh);
-      ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
-      ctx.ground.computePreliminaries(
-          world, *ctx.response_manager.getCoulombOp(),
-          ctx.response_manager.getVtol(), ctx.fock_json_file);
-
-      const bool at_final_protocol = (ti + 1 == protocol.size());
-      auto solve_state_index = [&](size_t state_index) {
-        auto &state = planned_states.generated_states.states[state_index];
-        computeFrequencyLoop(world, ctx.response_manager, state, ti, ctx.ground,
-                             persistence, at_final_protocol);
-        persistence.flush_debug_log(world);
-      };
-
-      if (owner_group_schedule) {
-        for (size_t gid = 0; gid < state_parallel_plan.mapping_groups; ++gid) {
-          if (world.rank() == 0) {
-            print("State solve lane ", gid, "/",
-                  state_parallel_plan.mapping_groups - 1,
-                  " at protocol thresh ", thresh);
-          }
-          for (size_t state_index = 0;
-               state_index < planned_states.generated_states.states.size();
-               ++state_index) {
-            if (owner_by_state_index[state_index] == gid) {
-              solve_state_index(state_index);
+            if (should_solve) {
+              return true;
             }
           }
         }
-      } else {
-        for (size_t state_index = 0;
-             state_index < planned_states.generated_states.states.size();
-             ++state_index) {
-          solve_state_index(state_index);
+
+        return false;
+      };
+
+      const auto &protocol = calc_params.protocol();
+      for (size_t ti = 0; ti < protocol.size(); ++ti) {
+        const double thresh = protocol[ti];
+
+        if (!needs_solving_at_protocol(thresh, ti)) {
+          if (world.rank() == 0) {
+            madness::print("✓ All states converged at thresh", thresh,
+                           "skipping to next protocol.");
+          }
+          continue;
+        }
+
+        ctx.response_manager.setProtocol(world, ctx.ground.getL(), thresh);
+        ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
+        ctx.ground.computePreliminaries(
+            world, *ctx.response_manager.getCoulombOp(),
+            ctx.response_manager.getVtol(), ctx.fock_json_file);
+
+        const bool at_final_protocol = (ti + 1 == protocol.size());
+        auto solve_state_index = [&](size_t state_index) {
+          auto &state = planned_states.generated_states.states[state_index];
+          computeFrequencyLoop(world, ctx.response_manager, state, ti,
+                               ctx.ground, persistence, at_final_protocol);
+          persistence.flush_debug_log(world);
+        };
+
+        if (owner_group_schedule) {
+          for (size_t gid = 0; gid < state_parallel_plan.mapping_groups; ++gid) {
+            if (world.rank() == 0) {
+              print("State solve lane ", gid, "/",
+                    state_parallel_plan.mapping_groups - 1,
+                    " at protocol thresh ", thresh);
+            }
+            for (size_t state_index = 0;
+                 state_index < planned_states.generated_states.states.size();
+                 ++state_index) {
+              if (owner_by_state_index[state_index] == gid) {
+                solve_state_index(state_index);
+              }
+            }
+          }
+        } else {
+          for (size_t state_index = 0;
+               state_index < planned_states.generated_states.states.size();
+               ++state_index) {
+            solve_state_index(state_index);
+          }
         }
       }
+
+      state_metadata_json = persistence.metadata_json();
+      debug_log_json = persistence.debug_log_json();
+    };
+
+    bool ran_subgroup_path = false;
+    if (subgroup_parallel_requested) {
+      try {
+        auto subworld_ptr = MacroTaskQ::create_worlds(
+            world, state_parallel_plan.execution_groups);
+        if (!subworld_ptr) {
+          throw std::runtime_error("subworld creation returned null");
+        }
+        World &subworld = *subworld_ptr;
+        const size_t subgroup_id = static_cast<size_t>(
+            world.rank() %
+            static_cast<int>(state_parallel_plan.execution_groups));
+
+        auto old_pmap3 = FunctionDefaults<3>::get_pmap();
+
+        auto restore_pmap = [&]() {
+          FunctionDefaults<3>::set_pmap(old_pmap3);
+        };
+
+        // Molresponse state solves are strictly 3D; only swap the 3D default pmap.
+        FunctionDefaults<3>::set_default_pmap(subworld);
+        try {
+          std::vector<size_t> local_state_indices;
+          local_state_indices.reserve(
+              planned_states.generated_states.states.size() /
+              std::max<size_t>(1, state_parallel_plan.mapping_groups));
+          std::vector<LinearResponseDescriptor> local_states;
+          for (size_t state_index = 0;
+               state_index < planned_states.generated_states.states.size();
+               ++state_index) {
+            if (owner_by_state_index[state_index] == subgroup_id) {
+              local_state_indices.push_back(state_index);
+              local_states.push_back(
+                  planned_states.generated_states.states[state_index]);
+            }
+          }
+
+          const std::string metadata_shard_file =
+              group_shard_file("response_metadata.json", subgroup_id);
+          const std::string debug_shard_file =
+              group_shard_file("response_log.json", subgroup_id);
+          const std::string fock_shard_file =
+              group_shard_file(ctx.fock_json_file, subgroup_id);
+
+          JsonStateSolvePersistence local_persistence(
+              subworld, metadata_shard_file, debug_shard_file);
+          local_persistence.initialize_states(local_states);
+          if (subworld.rank() == 0) {
+            print("State-parallel subgroup ", subgroup_id, " owns ",
+                  local_state_indices.size(), " states.");
+            local_persistence.print_summary();
+          }
+          subworld.gop.fence();
+
+          if (!local_state_indices.empty()) {
+            GroundStateData local_ground(subworld, ctx.archive_file,
+                                         ctx.molecule);
+            ResponseManager local_response_manager(subworld, calc_params);
+
+            auto local_needs_solving_at_protocol = [&](double protocol_thresh,
+                                                       size_t thresh_index) {
+              const bool at_final_protocol =
+                  protocol_thresh == calc_params.protocol().back();
+
+              for (const auto state_index : local_state_indices) {
+                const auto &state =
+                    planned_states.generated_states.states[state_index];
+                for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+                     ++freq_idx) {
+                  LinearResponsePoint pt{state, thresh_index, freq_idx};
+                  const bool is_saved = local_persistence.is_saved(pt);
+                  const bool should_solve =
+                      !is_saved ||
+                      (at_final_protocol && !local_persistence.is_converged(pt));
+                  if (should_solve) {
+                    return true;
+                  }
+                }
+              }
+              return false;
+            };
+
+            const auto &protocol = calc_params.protocol();
+            for (size_t ti = 0; ti < protocol.size(); ++ti) {
+              const double thresh = protocol[ti];
+              if (!local_needs_solving_at_protocol(thresh, ti)) {
+                if (subworld.rank() == 0) {
+                  print("Subgroup ", subgroup_id,
+                        " has no pending states at thresh ", thresh,
+                        "; skipping.");
+                }
+                continue;
+              }
+
+              local_response_manager.setProtocol(subworld, local_ground.getL(),
+                                                 thresh);
+              local_ground.prepareOrbitals(subworld,
+                                           FunctionDefaults<3>::get_k(), thresh);
+              local_ground.computePreliminaries(
+                  subworld, *local_response_manager.getCoulombOp(),
+                  local_response_manager.getVtol(), fock_shard_file);
+
+              const bool at_final_protocol = (ti + 1 == protocol.size());
+              for (const auto state_index : local_state_indices) {
+                auto &state =
+                    planned_states.generated_states.states[state_index];
+                computeFrequencyLoop(subworld, local_response_manager, state,
+                                     ti, local_ground, local_persistence,
+                                     at_final_protocol);
+                local_persistence.flush_debug_log(subworld);
+              }
+            }
+          } else {
+            if (subworld.rank() == 0) {
+              print("Subgroup ", subgroup_id,
+                    " has no owned states; skipping subgroup solve loop.");
+            }
+          }
+
+          local_persistence.flush_debug_log(subworld);
+          subworld.gop.fence();
+          restore_pmap();
+        } catch (...) {
+          restore_pmap();
+          throw;
+        }
+
+        world.gop.fence();
+        if (world.rank() == 0) {
+          nlohmann::json merged_metadata = nlohmann::json::object();
+          nlohmann::json merged_debug_log = nlohmann::json::object();
+          for (size_t gid = 0; gid < state_parallel_plan.execution_groups; ++gid) {
+            const std::string metadata_file =
+                group_shard_file("response_metadata.json", gid);
+            const std::string debug_file =
+                group_shard_file("response_log.json", gid);
+            merge_state_metadata_json(
+                merged_metadata, read_json_file_or_object(metadata_file));
+            merge_debug_log_json(merged_debug_log,
+                                 read_json_file_or_object(debug_file));
+          }
+
+          write_json_file("response_metadata.json", merged_metadata);
+          write_json_file("response_log.json", merged_debug_log);
+          state_metadata_json = std::move(merged_metadata);
+          debug_log_json = std::move(merged_debug_log);
+        }
+
+        std::string metadata_dump;
+        std::string debug_dump;
+        if (world.rank() == 0) {
+          metadata_dump = state_metadata_json.dump();
+          debug_dump = debug_log_json.dump();
+        }
+        world.gop.broadcast_serializable(metadata_dump, 0);
+        world.gop.broadcast_serializable(debug_dump, 0);
+        if (world.rank() != 0) {
+          state_metadata_json = metadata_dump.empty()
+                                    ? nlohmann::json::object()
+                                    : nlohmann::json::parse(metadata_dump);
+          debug_log_json = debug_dump.empty() ? nlohmann::json::object()
+                                              : nlohmann::json::parse(debug_dump);
+        }
+        world.gop.fence();
+
+        ran_subgroup_path = true;
+      } catch (const std::exception &ex) {
+        if (world.rank() == 0) {
+          print("State-parallel subgroup execution failed: ", ex.what(),
+                " Falling back to serial state loop.");
+        }
+      }
+    }
+
+    if (!ran_subgroup_path) {
+      run_serial_solve();
     }
 
     double final_thresh = calc_params.protocol().back();
@@ -356,7 +745,9 @@ private:
     for (const auto &state : planned_states.generated_states.states) {
       for (size_t fi = 0; fi < state.num_frequencies(); ++fi) {
         LinearResponsePoint pt{state, final_ti, fi};
-        if (!persistence.is_converged(pt)) {
+        if (!point_ready_in_metadata(state_metadata_json, pt,
+                                     /*require_saved=*/false,
+                                     /*require_converged=*/true)) {
           all_are_converged = false;
           break;
         }
@@ -371,7 +762,9 @@ private:
         DerivedStatePlanner::evaluate_dependency_gate(
             planned_states.derived_state_plan, planned_states.generated_states,
             final_ti, [&](const LinearResponsePoint &pt) {
-              return persistence.is_saved(pt) && persistence.is_converged(pt);
+              return point_ready_in_metadata(
+                  state_metadata_json, pt, /*require_saved=*/true,
+                  /*require_converged=*/true);
             });
     if (world.rank() == 0 && derived_gate.total_requests > 0) {
       print("Derived-state dependency gate: ready ",
@@ -379,7 +772,7 @@ private:
             " blocked=", derived_gate.blocked_requests);
     }
 
-    auto metadata = persistence.metadata_json();
+    auto metadata = state_metadata_json;
     metadata["state_parallel_planner"] =
         planned_states.state_parallel_plan.to_json();
     metadata["derived_state_planner"] = {
@@ -390,7 +783,7 @@ private:
         {"dependency_gate", derived_gate.to_json()}};
 
     return SolvedStates{std::move(planned_states), std::move(metadata),
-                        persistence.debug_log_json()};
+                        std::move(debug_log_json)};
   }
 
   struct PropertyContext {
