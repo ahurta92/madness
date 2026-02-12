@@ -22,6 +22,7 @@ set(MOLRESPONSE_HEADERS2
     ResponseState.hpp
     ResponseIO.hpp
         ResponseRecord.hpp
+    DerivedStatePlanner.hpp
     FrequencyLoop.hpp
     PropertyManager.hpp
     ResponseSolver.hpp

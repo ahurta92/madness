@@ -35,6 +35,7 @@
 
 #include "ResponseParameters.hpp"
 #include "madness_exception.h"
+#include <apps/molresponse_v2/DerivedStatePlanner.hpp>
 #include <apps/molresponse_v2/FrequencyLoop.hpp>
 #include <apps/molresponse_v2/GroundStateData.hpp>
 #include <apps/molresponse_v2/PropertyManager.hpp>
@@ -68,6 +69,7 @@ private:
 
   struct PlannedStates {
     GeneratedStateData generated_states;
+    DerivedStatePlan derived_state_plan;
   };
 
   struct SolvedStates {
@@ -196,8 +198,17 @@ private:
     if (world.rank() == 0) {
       GeneratedStateData::print_generated_state_map(generated_states.state_map);
     }
+    DerivedStatePlan derived_state_plan =
+        DerivedStatePlanner::build_vbc_driven_quadratic_plan(
+            response_params, ctx.molecule, ctx.ground.isSpinRestricted(),
+            calc_params.protocol());
+    if (world.rank() == 0 && !derived_state_plan.requests.empty()) {
+      print("🧩 Planned ", derived_state_plan.requests.size(),
+            " VBC-derived quadratic-state requests (scaffolding only).");
+    }
     world.gop.fence();
-    return PlannedStates{std::move(generated_states)};
+    return PlannedStates{std::move(generated_states),
+                         std::move(derived_state_plan)};
   }
 
   static SolvedStates
@@ -317,7 +328,27 @@ private:
 
     MADNESS_ASSERT(all_are_converged);
 
-    return SolvedStates{std::move(planned_states), persistence.metadata_json(),
+    DerivedStateGateReport derived_gate =
+        DerivedStatePlanner::evaluate_dependency_gate(
+            planned_states.derived_state_plan, planned_states.generated_states,
+            final_ti, [&](const LinearResponsePoint &pt) {
+              return persistence.is_saved(pt) && persistence.is_converged(pt);
+            });
+    if (world.rank() == 0 && derived_gate.total_requests > 0) {
+      print("Derived-state dependency gate: ready ",
+            derived_gate.ready_requests, "/", derived_gate.total_requests,
+            " blocked=", derived_gate.blocked_requests);
+    }
+
+    auto metadata = persistence.metadata_json();
+    metadata["derived_state_planner"] = {
+        {"note",
+         "Stage 2b scaffolding only: derived quadratic-state solves are not "
+         "executed yet."},
+        {"plan", planned_states.derived_state_plan.to_json()},
+        {"dependency_gate", derived_gate.to_json()}};
+
+    return SolvedStates{std::move(planned_states), std::move(metadata),
                         persistence.debug_log_json()};
   }
 
