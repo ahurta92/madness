@@ -7,11 +7,13 @@
 #include <madness/external/nlohmann_json/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <iomanip>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -35,6 +37,10 @@ struct DerivedStateRequest {
   std::string vbc_source_id;
   double target_frequency = 0.0;
   double threshold = 0.0;
+  std::string source_b_perturbation;
+  std::string source_c_perturbation;
+  double source_b_frequency = 0.0;
+  double source_c_frequency = 0.0;
   std::vector<DerivedStateDependency> dependencies;
 
   [[nodiscard]] json to_json() const {
@@ -47,6 +53,10 @@ struct DerivedStateRequest {
             {"vbc_source", vbc_source_id},
             {"target_frequency", target_frequency},
             {"threshold", threshold},
+            {"source_b_perturbation", source_b_perturbation},
+            {"source_c_perturbation", source_c_perturbation},
+            {"source_b_frequency", source_b_frequency},
+            {"source_c_frequency", source_c_frequency},
             {"dependencies", deps}};
   }
 };
@@ -216,7 +226,85 @@ public:
     return report;
   }
 
+  static VBCResponseState make_vbc_state(const DerivedStateRequest &req,
+                                         bool spin_restricted) {
+    const auto b_desc =
+        !req.source_b_perturbation.empty()
+            ? req.source_b_perturbation
+            : (req.dependencies.empty()
+                   ? std::string{}
+                   : req.dependencies.front().perturbation_description);
+    const auto c_desc =
+        !req.source_c_perturbation.empty()
+            ? req.source_c_perturbation
+            : (req.dependencies.size() < 2
+                   ? std::string{}
+                   : req.dependencies[1].perturbation_description);
+
+    const double freq_b = !req.source_b_perturbation.empty()
+                              ? req.source_b_frequency
+                              : (req.dependencies.empty()
+                                     ? req.source_b_frequency
+                                     : req.dependencies.front().frequency);
+    const double freq_c = !req.source_c_perturbation.empty()
+                              ? req.source_c_frequency
+                              : (req.dependencies.size() < 2
+                                     ? req.source_c_frequency
+                                     : req.dependencies[1].frequency);
+
+    if (b_desc.empty() || c_desc.empty()) {
+      throw std::runtime_error("Derived request " + req.derived_state_id +
+                               " is missing VBC source dependencies");
+    }
+
+    return VBCResponseState(parse_perturbation(b_desc),
+                            parse_perturbation(c_desc), freq_b, freq_c,
+                            req.threshold, spin_restricted);
+  }
+
 private:
+  static char canonical_direction(char raw) {
+    return static_cast<char>(
+        std::tolower(static_cast<unsigned char>(raw)));
+  }
+
+  static Perturbation parse_perturbation(const std::string &description) {
+    if (description.rfind("Dipole_", 0) == 0) {
+      if (description.size() < std::string("Dipole_x").size()) {
+        throw std::runtime_error("Invalid dipole perturbation description: " +
+                                 description);
+      }
+      return DipolePerturbation{canonical_direction(description.back())};
+    }
+
+    if (description.rfind("Nuc_", 0) == 0) {
+      if (description.size() < std::string("Nuc_0x").size()) {
+        throw std::runtime_error("Invalid nuclear perturbation description: " +
+                                 description);
+      }
+      const std::string atom_token =
+          description.substr(4, description.size() - 5);
+      if (atom_token.empty()) {
+        throw std::runtime_error("Missing atom index in perturbation: " +
+                                 description);
+      }
+      const int atom_index = std::stoi(atom_token);
+      return NuclearDisplacementPerturbation{
+          atom_index, canonical_direction(description.back())};
+    }
+
+    if (description.rfind("Mag_", 0) == 0) {
+      if (description.size() < std::string("Mag_x").size()) {
+        throw std::runtime_error("Invalid magnetic perturbation description: " +
+                                 description);
+      }
+      return MagneticPerturbation{canonical_direction(description.back())};
+    }
+
+    throw std::runtime_error("Unsupported perturbation description: " +
+                             description);
+  }
+
   static std::string canonical_property(const std::string &raw) {
     if (raw.size() >= 2 &&
         ((raw.front() == '"' && raw.back() == '"') ||
@@ -255,6 +343,10 @@ private:
     req.vbc_source_id = vbc_state.response_filename();
     req.target_frequency = freq_b + freq_c;
     req.threshold = threshold;
+    req.source_b_perturbation = describe_perturbation(b);
+    req.source_c_perturbation = describe_perturbation(c);
+    req.source_b_frequency = freq_b;
+    req.source_c_frequency = freq_c;
     req.dependencies = {{describe_perturbation(b), freq_b},
                         {describe_perturbation(c), freq_c}};
     plan.requests.push_back(std::move(req));

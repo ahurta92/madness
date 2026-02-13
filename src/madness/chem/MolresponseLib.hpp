@@ -44,6 +44,7 @@
 #include <apps/molresponse_v2/ResponseRecord.hpp>
 #include <apps/molresponse_v2/StateParallelPlanner.hpp>
 #include <apps/molresponse_v2/StateGenerator.hpp>
+#include <apps/molresponse_v2/VBCMacrotask.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -772,15 +773,196 @@ private:
             " blocked=", derived_gate.blocked_requests);
     }
 
+    nlohmann::json derived_execution = {
+        {"attempted", false},
+        {"mode", "none_ready"},
+        {"execution_groups", 1},
+        {"ready_requests", derived_gate.ready_requests},
+        {"blocked_requests", derived_gate.blocked_requests},
+        {"completed_requests", 0},
+        {"failed_requests", 0}};
+
+    std::vector<size_t> ready_request_indices;
+    ready_request_indices.reserve(planned_states.derived_state_plan.requests.size());
+    for (size_t i = 0; i < planned_states.derived_state_plan.requests.size(); ++i) {
+      if (i < derived_gate.entries.size() && derived_gate.entries[i].ready) {
+        ready_request_indices.push_back(i);
+      }
+    }
+
+    if (!ready_request_indices.empty()) {
+      const size_t derived_owner_groups =
+          subgroup_parallel_requested
+              ? state_parallel_plan.execution_groups
+              : std::max<size_t>(1, state_parallel_plan.mapping_groups);
+      std::vector<size_t> owner_by_ready_index(ready_request_indices.size(), 0);
+      for (size_t i = 0; i < ready_request_indices.size(); ++i) {
+        owner_by_ready_index[i] = i % derived_owner_groups;
+      }
+
+      derived_execution["attempted"] = true;
+      derived_execution["execution_groups"] = derived_owner_groups;
+
+      auto run_request = [&](World &exec_world, const GroundStateData &ground,
+                             const DerivedStateRequest &req,
+                             SimpleVBCComputer &vbc_computer, long &completed,
+                             long &failed) {
+        try {
+          VBCResponseState vbc_state = DerivedStatePlanner::make_vbc_state(
+              req, ground.isSpinRestricted());
+          vbc_computer.compute_and_save(vbc_state);
+          if (exec_world.rank() == 0) {
+            ++completed;
+          }
+        } catch (const std::exception &ex) {
+          if (exec_world.rank() == 0) {
+            ++failed;
+            print("Derived-state request ", req.derived_state_id,
+                  " failed during VBC solve: ", ex.what());
+          }
+        }
+      };
+
+      bool ran_subgroup_derived = false;
+      if (subgroup_parallel_requested && derived_owner_groups > 1) {
+        derived_execution["mode"] = "owner_group_subworld";
+        try {
+          auto subworld_ptr = MacroTaskQ::create_worlds(
+              world, state_parallel_plan.execution_groups);
+          if (!subworld_ptr) {
+            throw std::runtime_error("derived subworld creation returned null");
+          }
+
+          World &subworld = *subworld_ptr;
+          const size_t subgroup_id = static_cast<size_t>(
+              world.rank() %
+              static_cast<int>(state_parallel_plan.execution_groups));
+
+          auto old_pmap3 = FunctionDefaults<3>::get_pmap();
+          auto restore_pmap = [&]() { FunctionDefaults<3>::set_pmap(old_pmap3); };
+
+          long local_completed = 0;
+          long local_failed = 0;
+          FunctionDefaults<3>::set_default_pmap(subworld);
+          try {
+            std::vector<size_t> local_ready_positions;
+            local_ready_positions.reserve(
+                ready_request_indices.size() /
+                std::max<size_t>(1, derived_owner_groups));
+            for (size_t pos = 0; pos < ready_request_indices.size(); ++pos) {
+              if (owner_by_ready_index[pos] == subgroup_id) {
+                local_ready_positions.push_back(pos);
+              }
+            }
+
+            if (!local_ready_positions.empty()) {
+              GroundStateData local_ground(subworld, ctx.archive_file, ctx.molecule);
+              ResponseManager local_response_manager(subworld, calc_params);
+              local_response_manager.setProtocol(subworld, local_ground.getL(),
+                                                 final_thresh);
+              local_ground.prepareOrbitals(subworld,
+                                           FunctionDefaults<3>::get_k(),
+                                           final_thresh);
+
+              SimpleVBCComputer local_vbc_computer(subworld, local_ground);
+              for (const auto pos : local_ready_positions) {
+                const auto &req = planned_states.derived_state_plan
+                                      .requests[ready_request_indices[pos]];
+                run_request(subworld, local_ground, req, local_vbc_computer,
+                            local_completed, local_failed);
+              }
+            } else if (subworld.rank() == 0) {
+              print("Derived-state subgroup ", subgroup_id,
+                    " has no owned ready requests.");
+            }
+
+            subworld.gop.fence();
+            restore_pmap();
+          } catch (...) {
+            restore_pmap();
+            throw;
+          }
+
+          if (subworld.rank() != 0) {
+            local_completed = 0;
+            local_failed = 0;
+          }
+          world.gop.sum(local_completed);
+          world.gop.sum(local_failed);
+          derived_execution["completed_requests"] = local_completed;
+          derived_execution["failed_requests"] = local_failed;
+          world.gop.fence();
+          ran_subgroup_derived = true;
+        } catch (const std::exception &ex) {
+          if (world.rank() == 0) {
+            print("Derived-state subgroup execution failed: ", ex.what(),
+                  " Falling back to serial derived-state loop.");
+          }
+        }
+      }
+
+      if (!ran_subgroup_derived) {
+        derived_execution["mode"] =
+            (owner_group_schedule && derived_owner_groups > 1)
+                ? "owner_group_serial_lanes"
+                : "serial";
+        if (world.rank() == 0 &&
+            derived_execution["mode"].get<std::string>() ==
+                "owner_group_serial_lanes") {
+          print("Derived-state ownership mapping is active across ",
+                derived_owner_groups,
+                " groups; executing deterministic derived-state passes "
+                "serially on the universe communicator.");
+        }
+
+        long local_completed = 0;
+        long local_failed = 0;
+        SimpleVBCComputer serial_vbc_computer(world, ctx.ground);
+        if (owner_group_schedule && derived_owner_groups > 1) {
+          for (size_t gid = 0; gid < derived_owner_groups; ++gid) {
+            if (world.rank() == 0) {
+              print("Derived-state solve lane ", gid, "/",
+                    derived_owner_groups - 1);
+            }
+            for (size_t pos = 0; pos < ready_request_indices.size(); ++pos) {
+              if (owner_by_ready_index[pos] != gid) {
+                continue;
+              }
+              const auto &req = planned_states.derived_state_plan
+                                    .requests[ready_request_indices[pos]];
+              run_request(world, ctx.ground, req, serial_vbc_computer,
+                          local_completed, local_failed);
+            }
+          }
+        } else {
+          for (const auto idx : ready_request_indices) {
+            const auto &req = planned_states.derived_state_plan.requests[idx];
+            run_request(world, ctx.ground, req, serial_vbc_computer,
+                        local_completed, local_failed);
+          }
+        }
+
+        if (world.rank() != 0) {
+          local_completed = 0;
+          local_failed = 0;
+        }
+        world.gop.sum(local_completed);
+        world.gop.sum(local_failed);
+        derived_execution["completed_requests"] = local_completed;
+        derived_execution["failed_requests"] = local_failed;
+      }
+    }
+
     auto metadata = state_metadata_json;
     metadata["state_parallel_planner"] =
         planned_states.state_parallel_plan.to_json();
     metadata["derived_state_planner"] = {
         {"note",
-         "Stage 2b scaffolding only: derived quadratic-state solves are not "
-         "executed yet."},
+         "Stage 2c: ready VBC-derived requests are executed before property "
+         "assembly; blocked requests remain gated."},
         {"plan", planned_states.derived_state_plan.to_json()},
-        {"dependency_gate", derived_gate.to_json()}};
+        {"dependency_gate", derived_gate.to_json()},
+        {"execution", derived_execution}};
 
     return SolvedStates{std::move(planned_states), std::move(metadata),
                         std::move(debug_log_json)};
@@ -1075,6 +1257,130 @@ private:
                                std::move(raman)};
   }
 
+  static PropertyStageOutput
+  compute_requested_properties_with_property_group(
+      World &world, const CalculationParameters &calc_params,
+      const ResponseParameters &response_params, const GroundContext &ground_ctx,
+      const SolvedStates &solved_states, const std::shared_ptr<SCF> &scf_calc) {
+    const auto &state_parallel_plan = solved_states.planned_states.state_parallel_plan;
+    const bool subgroup_property_mode =
+        state_parallel_plan.execution_enabled &&
+        state_parallel_plan.subgroup_parallel_enabled &&
+        state_parallel_plan.execution_groups > 1;
+
+    if (!subgroup_property_mode) {
+      return compute_requested_properties(world, response_params, ground_ctx,
+                                          solved_states, scf_calc);
+    }
+
+    const size_t property_group = response_params.state_parallel_property_group();
+    if (property_group >= state_parallel_plan.execution_groups) {
+      if (world.rank() == 0) {
+        print("State-parallel property subgroup id ", property_group,
+              " is out of range for execution_groups=",
+              state_parallel_plan.execution_groups,
+              ". Falling back to world property stage.");
+      }
+      return compute_requested_properties(world, response_params, ground_ctx,
+                                          solved_states, scf_calc);
+    }
+
+    if (world.rank() == 0) {
+      print("Property stage: executing on subgroup ", property_group, "/",
+            state_parallel_plan.execution_groups - 1);
+    }
+
+    try {
+      auto subworld_ptr = MacroTaskQ::create_worlds(
+          world, state_parallel_plan.execution_groups);
+      if (!subworld_ptr) {
+        throw std::runtime_error("property subworld creation returned null");
+      }
+
+      World &subworld = *subworld_ptr;
+      const size_t subgroup_id = static_cast<size_t>(
+          world.rank() %
+          static_cast<int>(state_parallel_plan.execution_groups));
+      const bool in_property_group = (subgroup_id == property_group);
+
+      auto old_pmap3 = FunctionDefaults<3>::get_pmap();
+      auto restore_pmap = [&]() { FunctionDefaults<3>::set_pmap(old_pmap3); };
+
+      std::string properties_dump;
+      std::string vib_dump;
+      std::string raman_dump;
+
+      // Property assembly uses 3D response objects; only swap the 3D pmap.
+      FunctionDefaults<3>::set_default_pmap(subworld);
+      try {
+        if (in_property_group) {
+          const auto &protocol = calc_params.protocol();
+          const double final_thresh = protocol.empty()
+                                          ? FunctionDefaults<3>::get_thresh()
+                                          : protocol.back();
+          const std::string property_fock_file =
+              group_shard_file(ground_ctx.fock_json_file, property_group);
+
+          GroundStateData local_ground(subworld, ground_ctx.archive_file,
+                                       ground_ctx.molecule);
+          ResponseManager local_response_manager(subworld, calc_params);
+          local_response_manager.setProtocol(subworld, local_ground.getL(),
+                                             final_thresh);
+          local_ground.prepareOrbitals(subworld, FunctionDefaults<3>::get_k(),
+                                       final_thresh);
+          local_ground.computePreliminaries(
+              subworld, *local_response_manager.getCoulombOp(),
+              local_response_manager.getVtol(), property_fock_file);
+
+          GroundContext local_ground_ctx{
+              ground_ctx.molecule, std::move(local_ground),
+              std::move(local_response_manager), ground_ctx.archive_file,
+              property_fock_file};
+
+          PropertyStageOutput subgroup_output = compute_requested_properties(
+              subworld, response_params, local_ground_ctx, solved_states,
+              scf_calc);
+          if (subworld.rank() == 0) {
+            properties_dump = subgroup_output.properties.dump();
+            vib_dump = subgroup_output.vibrational_analysis.to_json().dump();
+            raman_dump = subgroup_output.raman_spectra.to_json().dump();
+          }
+        }
+        subworld.gop.fence();
+        restore_pmap();
+      } catch (...) {
+        restore_pmap();
+        throw;
+      }
+
+      const int property_world_root = static_cast<int>(property_group);
+      world.gop.broadcast_serializable(properties_dump, property_world_root);
+      world.gop.broadcast_serializable(vib_dump, property_world_root);
+      world.gop.broadcast_serializable(raman_dump, property_world_root);
+
+      PropertyStageOutput stage_output;
+      stage_output.properties = properties_dump.empty()
+                                    ? nlohmann::json::object()
+                                    : nlohmann::json::parse(properties_dump);
+      if (!vib_dump.empty()) {
+        stage_output.vibrational_analysis.from_json(
+            nlohmann::json::parse(vib_dump));
+      }
+      if (!raman_dump.empty()) {
+        stage_output.raman_spectra.from_json(nlohmann::json::parse(raman_dump));
+      }
+      world.gop.fence();
+      return stage_output;
+    } catch (const std::exception &ex) {
+      if (world.rank() == 0) {
+        print("State-parallel property subgroup execution failed: ", ex.what(),
+              " Falling back to world property stage.");
+      }
+      return compute_requested_properties(world, response_params, ground_ctx,
+                                          solved_states, scf_calc);
+    }
+  }
+
   public:
 
   /**
@@ -1116,8 +1422,9 @@ private:
     SolvedStates solved_states = solve_all_states(
         world, calc_params, ground_ctx, response_params, std::move(planned_states));
     PropertyStageOutput property_stage =
-        compute_requested_properties(world, response_params, ground_ctx,
-                                     solved_states, scf_calc);
+        compute_requested_properties_with_property_group(
+            world, calc_params, response_params, ground_ctx, solved_states,
+            scf_calc);
 
     // finalize & stats
     if (world.rank() == 0) {
