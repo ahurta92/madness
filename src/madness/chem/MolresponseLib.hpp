@@ -455,6 +455,21 @@ private:
         owner_by_state_index[assignment.state_index] = assignment.owner_group;
       }
     }
+    const auto &linear_states = planned_states.generated_states.states;
+    std::vector<size_t> state_point_offsets(linear_states.size() + 1, 0);
+    for (size_t i = 0; i < linear_states.size(); ++i) {
+      state_point_offsets[i + 1] =
+          state_point_offsets[i] + linear_states[i].num_frequencies();
+    }
+    auto point_owner_group = [&](size_t state_index, size_t freq_index,
+                                 size_t owner_groups) -> size_t {
+      if (owner_groups <= 1) {
+        return 0;
+      }
+      const size_t linear_point_index =
+          state_point_offsets[state_index] + freq_index;
+      return linear_point_index % owner_groups;
+    };
 
     nlohmann::json state_metadata_json = nlohmann::json::object();
     nlohmann::json debug_log_json = nlohmann::json::object();
@@ -474,7 +489,7 @@ private:
         const bool at_final_protocol =
             protocol_thresh == calc_params.protocol().back();
 
-        for (const auto &state : planned_states.generated_states.states) {
+        for (const auto &state : linear_states) {
           for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
                ++freq_idx) {
             LinearResponsePoint pt{state, thresh_index, freq_idx};
@@ -519,14 +534,46 @@ private:
             ctx.response_manager.getVtol(), ctx.fock_json_file);
 
         const bool at_final_protocol = (ti + 1 == protocol.size());
-        auto solve_state_index = [&](size_t state_index) {
-          auto &state = planned_states.generated_states.states[state_index];
+        auto solve_state = [&](size_t state_index) {
+          auto &state = linear_states[state_index];
           computeFrequencyLoop(world, ctx.response_manager, state, ti,
                                ctx.ground, persistence, at_final_protocol);
           persistence.flush_debug_log(world);
         };
+        auto solve_state_frequency = [&](size_t state_index,
+                                        size_t freq_index) {
+          const auto &state = linear_states[state_index];
+          LinearResponseDescriptor single_frequency_state(
+              state.perturbation, {state.frequency(freq_index)},
+              state.thresholds, state.spin_restricted);
+          computeFrequencyLoop(world, ctx.response_manager,
+                               single_frequency_state, ti, ctx.ground,
+                               persistence, at_final_protocol);
+          persistence.flush_debug_log(world);
+        };
 
-        if (owner_group_schedule) {
+        if (owner_group_schedule && ti > 0) {
+          for (size_t gid = 0; gid < state_parallel_plan.mapping_groups; ++gid) {
+            if (world.rank() == 0) {
+              print("State-frequency solve lane ", gid, "/",
+                    state_parallel_plan.mapping_groups - 1,
+                    " at protocol thresh ", thresh);
+            }
+            for (size_t state_index = 0;
+                 state_index < linear_states.size();
+                 ++state_index) {
+              const auto &state = linear_states[state_index];
+              for (size_t freq_index = 0; freq_index < state.num_frequencies();
+                   ++freq_index) {
+                if (point_owner_group(state_index, freq_index,
+                                      state_parallel_plan.mapping_groups) ==
+                    gid) {
+                  solve_state_frequency(state_index, freq_index);
+                }
+              }
+            }
+          }
+        } else if (owner_group_schedule) {
           for (size_t gid = 0; gid < state_parallel_plan.mapping_groups; ++gid) {
             if (world.rank() == 0) {
               print("State solve lane ", gid, "/",
@@ -534,18 +581,17 @@ private:
                     " at protocol thresh ", thresh);
             }
             for (size_t state_index = 0;
-                 state_index < planned_states.generated_states.states.size();
-                 ++state_index) {
+                 state_index < linear_states.size(); ++state_index) {
               if (owner_by_state_index[state_index] == gid) {
-                solve_state_index(state_index);
+                solve_state(state_index);
               }
             }
           }
         } else {
           for (size_t state_index = 0;
-               state_index < planned_states.generated_states.states.size();
+               state_index < linear_states.size();
                ++state_index) {
-            solve_state_index(state_index);
+            solve_state(state_index);
           }
         }
       }
@@ -577,17 +623,41 @@ private:
         FunctionDefaults<3>::set_default_pmap(subworld);
         try {
           std::vector<size_t> local_state_indices;
+          std::vector<bool> local_state_used(linear_states.size(), false);
           local_state_indices.reserve(
-              planned_states.generated_states.states.size() /
+              linear_states.size() /
               std::max<size_t>(1, state_parallel_plan.mapping_groups));
-          std::vector<LinearResponseDescriptor> local_states;
           for (size_t state_index = 0;
-               state_index < planned_states.generated_states.states.size();
+               state_index < linear_states.size();
                ++state_index) {
-            if (owner_by_state_index[state_index] == subgroup_id) {
+            const bool owns_state_at_first_protocol =
+                owner_by_state_index[state_index] == subgroup_id;
+            bool owns_any_point_after_first_protocol = false;
+            if (state_parallel_plan.mapping_groups > 1) {
+              const auto &state = linear_states[state_index];
+              for (size_t freq_index = 0; freq_index < state.num_frequencies();
+                   ++freq_index) {
+                if (point_owner_group(state_index, freq_index,
+                                      state_parallel_plan.mapping_groups) ==
+                    subgroup_id) {
+                  owns_any_point_after_first_protocol = true;
+                  break;
+                }
+              }
+            }
+            if (owns_state_at_first_protocol) {
               local_state_indices.push_back(state_index);
-              local_states.push_back(
-                  planned_states.generated_states.states[state_index]);
+            }
+            if (owns_state_at_first_protocol ||
+                owns_any_point_after_first_protocol) {
+              local_state_used[state_index] = true;
+            }
+          }
+          std::vector<LinearResponseDescriptor> local_states;
+          for (size_t state_index = 0; state_index < linear_states.size();
+               ++state_index) {
+            if (local_state_used[state_index]) {
+              local_states.push_back(linear_states[state_index]);
             }
           }
 
@@ -603,12 +673,14 @@ private:
           local_persistence.initialize_states(local_states);
           if (subworld.rank() == 0) {
             print("State-parallel subgroup ", subgroup_id, " owns ",
-                  local_state_indices.size(), " states.");
+                  local_state_indices.size(),
+                  " protocol-0 states and ", local_states.size(),
+                  " active states across all protocols.");
             local_persistence.print_summary();
           }
           subworld.gop.fence();
 
-          if (!local_state_indices.empty()) {
+          if (!local_states.empty()) {
             GroundStateData local_ground(subworld, ctx.archive_file,
                                          ctx.molecule);
             ResponseManager local_response_manager(subworld, calc_params);
@@ -618,18 +690,40 @@ private:
               const bool at_final_protocol =
                   protocol_thresh == calc_params.protocol().back();
 
-              for (const auto state_index : local_state_indices) {
-                const auto &state =
-                    planned_states.generated_states.states[state_index];
-                for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
-                     ++freq_idx) {
-                  LinearResponsePoint pt{state, thresh_index, freq_idx};
-                  const bool is_saved = local_persistence.is_saved(pt);
-                  const bool should_solve =
-                      !is_saved ||
-                      (at_final_protocol && !local_persistence.is_converged(pt));
-                  if (should_solve) {
-                    return true;
+              auto point_needs_solving = [&](const LinearResponseDescriptor &state,
+                                             size_t freq_idx) {
+                LinearResponsePoint pt{state, thresh_index, freq_idx};
+                const bool is_saved = local_persistence.is_saved(pt);
+                const bool should_solve =
+                    !is_saved ||
+                    (at_final_protocol && !local_persistence.is_converged(pt));
+                return should_solve;
+              };
+
+              if (thresh_index == 0 || state_parallel_plan.mapping_groups <= 1) {
+                for (const auto state_index : local_state_indices) {
+                  const auto &state = linear_states[state_index];
+                  for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+                       ++freq_idx) {
+                    if (point_needs_solving(state, freq_idx)) {
+                      return true;
+                    }
+                  }
+                }
+              } else {
+                for (size_t state_index = 0; state_index < linear_states.size();
+                     ++state_index) {
+                  const auto &state = linear_states[state_index];
+                  for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+                       ++freq_idx) {
+                    if (point_owner_group(state_index, freq_idx,
+                                          state_parallel_plan.mapping_groups) !=
+                        subgroup_id) {
+                      continue;
+                    }
+                    if (point_needs_solving(state, freq_idx)) {
+                      return true;
+                    }
                   }
                 }
               }
@@ -645,6 +739,10 @@ private:
                         " has no pending states at thresh ", thresh,
                         "; skipping.");
                 }
+                // Keep protocol progression globally lock-step across all
+                // subgroups because ti>0 points may depend on ti-1 files
+                // produced by other owners.
+                world.gop.fence();
                 continue;
               }
 
@@ -657,14 +755,43 @@ private:
                   local_response_manager.getVtol(), fock_shard_file);
 
               const bool at_final_protocol = (ti + 1 == protocol.size());
-              for (const auto state_index : local_state_indices) {
-                auto &state =
-                    planned_states.generated_states.states[state_index];
-                computeFrequencyLoop(subworld, local_response_manager, state,
-                                     ti, local_ground, local_persistence,
-                                     at_final_protocol);
-                local_persistence.flush_debug_log(subworld);
+              if (ti == 0 || state_parallel_plan.mapping_groups <= 1) {
+                for (const auto state_index : local_state_indices) {
+                  auto &state = linear_states[state_index];
+                  computeFrequencyLoop(subworld, local_response_manager, state,
+                                       ti, local_ground, local_persistence,
+                                       at_final_protocol);
+                  local_persistence.flush_debug_log(subworld);
+                }
+              } else {
+                if (subworld.rank() == 0) {
+                  print("Subgroup ", subgroup_id,
+                        " solving independent state-frequency points at thresh ",
+                        thresh, ".");
+                }
+                for (size_t state_index = 0; state_index < linear_states.size();
+                     ++state_index) {
+                  const auto &state = linear_states[state_index];
+                  for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+                       ++freq_idx) {
+                    if (point_owner_group(state_index, freq_idx,
+                                          state_parallel_plan.mapping_groups) !=
+                        subgroup_id) {
+                      continue;
+                    }
+                    LinearResponseDescriptor single_frequency_state(
+                        state.perturbation, {state.frequency(freq_idx)},
+                        state.thresholds, state.spin_restricted);
+                    computeFrequencyLoop(subworld, local_response_manager,
+                                         single_frequency_state, ti,
+                                         local_ground, local_persistence,
+                                         at_final_protocol);
+                    local_persistence.flush_debug_log(subworld);
+                  }
+                }
               }
+              // ti+1 must not begin until every subgroup has finished ti.
+              world.gop.fence();
             }
           } else {
             if (subworld.rank() == 0) {
