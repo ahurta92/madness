@@ -57,6 +57,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
     initialize<size_t>(
         "state_parallel_property_group", 0,
         "subgroup id used for property assembly in state-parallel mode");
+    initialize<size_t>(
+        "state_parallel_point_start_protocol", 1,
+        "first protocol index where state-parallel mode may fan out by "
+        "state-frequency point ownership");
     //** if properites are requested, then one should specify directions,
     // frequencies, and atom_indices(for nuclear response) */
     initialize<bool>("property", false, "Compute properties");
@@ -132,6 +136,9 @@ public:
   }
   [[nodiscard]] size_t state_parallel_property_group() const {
     return get<size_t>("state_parallel_property_group");
+  }
+  [[nodiscard]] size_t state_parallel_point_start_protocol() const {
+    return get<size_t>("state_parallel_point_start_protocol");
   }
   [[nodiscard]] std::vector<double> dipole_frequencies() const {
     return get<std::vector<double>>("dipole.frequencies");

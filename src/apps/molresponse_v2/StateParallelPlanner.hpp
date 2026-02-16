@@ -9,11 +9,28 @@
 
 #include <madness/external/nlohmann_json/json.hpp>
 
+/*
+Developer Overview
+- Purpose: Convert user knobs (off/auto/on + group count) into a deterministic
+  state-level scheduling plan.
+- Strategy: Validate requested group configuration, decide effective mode, then
+  assign each generated linear state to an owner group via round-robin.
+- Protocol policy: In parallel mode, begin with state ownership and optionally
+  switch to point ownership at response.state_parallel_point_start_protocol.
+- Output contract: Return a pure metadata plan (mapping + execution settings +
+  per-state ownership) consumed by MolresponseLib solve stages.
+- Design note: Mapping and execution group counts are kept explicit so we can
+  preserve deterministic ownership even when execution falls back to serial.
+*/
+
 using json = nlohmann::json;
 
 struct StateAssignment {
+  // Index into GeneratedStateData::states.
   size_t state_index = 0;
+  // Human-readable perturbation key (for logs/JSON only).
   std::string perturbation;
+  // Deterministic owner lane for this state.
   size_t owner_group = 0;
 
   [[nodiscard]] json to_json() const {
@@ -24,18 +41,42 @@ struct StateAssignment {
 };
 
 struct StateParallelPlan {
+  // Raw user knob from response.state_parallel.
   std::string requested_mode = "off";
+  // Planner-selected mode used by the solver.
   std::string effective_mode = "serial";
+  // Raw user knob from response.state_parallel_groups.
   size_t requested_groups = 1;
+  // Number of ownership lanes used for deterministic work partitioning.
   size_t mapping_groups = 1;
+  // Number of subworlds created for execution.
   size_t execution_groups = 1;
+  // First protocol index that may switch from state-ownership to point-ownership.
+  size_t point_parallel_start_protocol_index = 1;
+  // Human-readable description of the protocol ownership policy.
+  std::string frequency_partition_policy = "state_then_point";
+  // Auto-mode threshold: minimum state count before enabling parallel mapping.
   size_t min_states = 1;
+  // Number of generated linear states considered by the planner.
   size_t num_states = 0;
+  // Size of the universe communicator.
   size_t world_size = 1;
+  // True when the solve stage is allowed to run via planner output.
   bool execution_enabled = false;
+  // True when execution uses macrotask subworlds instead of single-world serial.
   bool subgroup_parallel_enabled = false;
+  // Diagnostic reason describing why a mode was chosen.
   std::string reason;
+  // Per-state ownership map used by solve_all_states.
   std::vector<StateAssignment> assignments;
+
+  [[nodiscard]] bool
+  use_state_ownership_for_protocol(size_t protocol_index) const {
+    if (mapping_groups <= 1) {
+      return true;
+    }
+    return protocol_index < point_parallel_start_protocol_index;
+  }
 
   [[nodiscard]] json to_json() const {
     json rows = json::array();
@@ -46,6 +87,9 @@ struct StateParallelPlan {
             {"requested_groups", requested_groups},
             {"mapping_groups", mapping_groups},
             {"execution_groups", execution_groups},
+            {"point_parallel_start_protocol_index",
+             point_parallel_start_protocol_index},
+            {"frequency_partition_policy", frequency_partition_policy},
             {"min_states", min_states},
             {"num_states", num_states},
             {"world_size", world_size},
@@ -94,12 +138,20 @@ public:
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = true;
       plan.effective_mode = "owner_group_subworld";
+      plan.point_parallel_start_protocol_index =
+          params.state_parallel_point_start_protocol();
+      plan.frequency_partition_policy =
+          plan.point_parallel_start_protocol_index == 0
+              ? "point_from_t0"
+              : "state_then_point";
     } else {
       plan.mapping_groups = 1;
       plan.execution_groups = 1;
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = false;
       plan.effective_mode = "serial";
+      plan.point_parallel_start_protocol_index = 0;
+      plan.frequency_partition_policy = "state_only";
     }
 
     plan.assignments.reserve(states.size());

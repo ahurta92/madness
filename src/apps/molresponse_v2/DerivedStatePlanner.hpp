@@ -19,10 +19,25 @@
 #include <unordered_set>
 #include <vector>
 
+/*
+Developer Overview
+- Purpose: Build and gate derived quadratic-state requests (currently VBC-driven)
+  from response inputs before property assembly.
+- Planning algorithm: Expand requested properties into (A,B,C,wb,wc) tuples,
+  deduplicate by stable derived_state_id, and store dependencies on linear
+  response points for B(wb) and C(wc).
+- Dependency gate: For each request, verify that required linear points exist
+  and are marked ready by the caller-provided predicate.
+- Execution bridge: Reconstruct VBCResponseState from request metadata so solve
+  code can run derived requests without re-deriving tuple logic.
+*/
+
 using json = nlohmann::json;
 
 struct DerivedStateDependency {
+  // Perturbation label of the linear state dependency (e.g. Dipole_x).
   std::string perturbation_description;
+  // Frequency for the dependency point that must be available.
   double frequency = 0.0;
 
   [[nodiscard]] json to_json() const {
@@ -32,15 +47,22 @@ struct DerivedStateDependency {
 };
 
 struct DerivedStateRequest {
+  // Stable ID used in logs/metadata for this derived-state request.
   std::string derived_state_id;
+  // Target perturbation for the derived solve (the "A" in A(B,C)).
   std::string target_perturbation;
+  // Backing VBC response filename key produced from (B,C,wb,wc).
   std::string vbc_source_id;
+  // Frequency for the target derived state (wb + wc).
   double target_frequency = 0.0;
+  // Protocol threshold used when creating the derived state object.
   double threshold = 0.0;
+  // Explicit source perturbations/frequencies used to reconstruct VBC state.
   std::string source_b_perturbation;
   std::string source_c_perturbation;
   double source_b_frequency = 0.0;
   double source_c_frequency = 0.0;
+  // Dependency gate inputs that must be converged before this request runs.
   std::vector<DerivedStateDependency> dependencies;
 
   [[nodiscard]] json to_json() const {
@@ -62,6 +84,7 @@ struct DerivedStateRequest {
 };
 
 struct DerivedStatePlan {
+  // All derived requests discovered from input/property expansion.
   std::vector<DerivedStateRequest> requests;
 
   [[nodiscard]] json to_json() const {
@@ -73,8 +96,11 @@ struct DerivedStatePlan {
 };
 
 struct DerivedStateGateEntry {
+  // Mirrors DerivedStateRequest::derived_state_id.
   std::string derived_state_id;
+  // True only if every dependency was found and marked ready.
   bool ready = false;
+  // Missing points explaining why this request is blocked.
   std::vector<DerivedStateDependency> missing_dependencies;
 
   [[nodiscard]] json to_json() const {
@@ -88,10 +114,12 @@ struct DerivedStateGateEntry {
 };
 
 struct DerivedStateGateReport {
+  // Summary counters for dependency-gate diagnostics.
   size_t total_requests = 0;
   size_t ready_requests = 0;
   size_t blocked_requests = 0;
   size_t total_missing_dependencies = 0;
+  // Per-request gate status aligned with plan.requests order.
   std::vector<DerivedStateGateEntry> entries;
 
   [[nodiscard]] bool all_ready() const { return blocked_requests == 0; }

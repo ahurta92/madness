@@ -53,6 +53,22 @@
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/Results.h>
 
+/*
+Developer Overview
+- Orchestration file for molresponse, structured as three stages:
+  1) bootstrap + planning, 2) state solves, 3) property assembly.
+- Stage 1: read ground/checkpoint context, generate linear states, build derived
+  request plan, and build state-parallel ownership/execution plan.
+- Stage 2: solve linear states over protocol thresholds; at ti==0 owner mapping
+  stays state-oriented, then later thresholds can fan out by frequency-point.
+  When subgroup mode is enabled, work runs in macrotask subworlds with shard
+  metadata/log merge and synchronization barriers between protocol steps.
+- Stage 2c: evaluate derived-state dependency gate and execute ready requests
+  before property assembly (serial or subgroup lanes).
+- Stage 3: compute requested properties (alpha/beta/raman) with optional
+  property-group execution and broadcast of assembled outputs.
+*/
+
 struct molresponse_lib {
   struct Results {
     nlohmann::json metadata;
@@ -66,27 +82,39 @@ struct molresponse_lib {
 
 private:
   struct GroundContext {
+    // Molecule read from checkpoint; reused across all response stages.
     Molecule molecule;
+    // Ground-state object used to build and solve response states.
     GroundStateData ground;
+    // Runtime manager configured from response input.
     ResponseManager response_manager;
+    // Archive and Fock filenames resolved for this run directory.
     std::string archive_file;
     std::string fock_json_file;
   };
 
   struct PlannedStates {
+    // Linear states generated directly from requested perturbations.
     GeneratedStateData generated_states;
+    // Derived-state requests (currently VBC-driven scaffolding/execution).
     DerivedStatePlan derived_state_plan;
+    // Ownership and subgroup execution plan for Stage 2.
     StateParallelPlan state_parallel_plan;
   };
 
   struct SolvedStates {
+    // Carries full planning context forward into property stage.
     PlannedStates planned_states;
+    // Merged response metadata after linear + derived execution.
     nlohmann::json metadata;
+    // Combined debug log (including subgroup shards when used).
     nlohmann::json debug_log;
   };
 
   struct PropertyStageOutput {
+    // Aggregated property JSON (alpha/beta/raman blocks).
     nlohmann::json properties;
+    // Vibrational artifacts needed for Raman post-processing/output.
     VibrationalResults vibrational_analysis;
     RamanResults raman_spectra;
   };
@@ -403,12 +431,16 @@ private:
         response_params, world.size(), generated_states.states);
     if (world.rank() == 0 && !derived_state_plan.requests.empty()) {
       print("🧩 Planned ", derived_state_plan.requests.size(),
-            " VBC-derived quadratic-state requests (scaffolding only).");
+            " VBC-derived quadratic-state requests.");
     }
     if (world.rank() == 0 && response_params.state_parallel() != "off") {
       print("State-parallel plan: mode=", state_parallel_plan.effective_mode,
             " requested_groups=", state_parallel_plan.requested_groups,
             " mapping_groups=", state_parallel_plan.mapping_groups,
+            " point_parallel_start_protocol_index=",
+            state_parallel_plan.point_parallel_start_protocol_index,
+            " frequency_policy=",
+            state_parallel_plan.frequency_partition_policy,
             " reason=", state_parallel_plan.reason);
     }
     world.gop.fence();
@@ -448,6 +480,7 @@ private:
             " groups; falling back to plain serial state loop.");
     }
 
+    // Fast lookup: state_index -> owner group from planner assignment table.
     std::vector<size_t> owner_by_state_index(
         planned_states.generated_states.states.size(), 0);
     for (const auto &assignment : state_parallel_plan.assignments) {
@@ -456,11 +489,15 @@ private:
       }
     }
     const auto &linear_states = planned_states.generated_states.states;
+    // Prefix sum of per-state frequency counts. This lets us map
+    // (state_index, freq_index) -> globally ordered point index.
     std::vector<size_t> state_point_offsets(linear_states.size() + 1, 0);
     for (size_t i = 0; i < linear_states.size(); ++i) {
       state_point_offsets[i + 1] =
           state_point_offsets[i] + linear_states[i].num_frequencies();
     }
+    // Point-level ownership is used after protocol step 0 so frequency points
+    // from one state can fan out across groups.
     auto point_owner_group = [&](size_t state_index, size_t freq_index,
                                  size_t owner_groups) -> size_t {
       if (owner_groups <= 1) {
@@ -700,7 +737,10 @@ private:
                 return should_solve;
               };
 
-              if (thresh_index == 0 || state_parallel_plan.mapping_groups <= 1) {
+              const bool use_state_ownership_for_thresh =
+                  state_parallel_plan.use_state_ownership_for_protocol(
+                      thresh_index);
+              if (use_state_ownership_for_thresh) {
                 for (const auto state_index : local_state_indices) {
                   const auto &state = linear_states[state_index];
                   for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
@@ -755,7 +795,9 @@ private:
                   local_response_manager.getVtol(), fock_shard_file);
 
               const bool at_final_protocol = (ti + 1 == protocol.size());
-              if (ti == 0 || state_parallel_plan.mapping_groups <= 1) {
+              const bool use_state_ownership_for_ti =
+                  state_parallel_plan.use_state_ownership_for_protocol(ti);
+              if (use_state_ownership_for_ti) {
                 for (const auto state_index : local_state_indices) {
                   auto &state = linear_states[state_index];
                   computeFrequencyLoop(subworld, local_response_manager, state,
@@ -900,6 +942,7 @@ private:
             " blocked=", derived_gate.blocked_requests);
     }
 
+    // Execution summary persisted under metadata["derived_state_planner"].
     nlohmann::json derived_execution = {
         {"attempted", false},
         {"mode", "none_ready"},
@@ -909,6 +952,7 @@ private:
         {"completed_requests", 0},
         {"failed_requests", 0}};
 
+    // Plan indices that passed the dependency gate at the final threshold.
     std::vector<size_t> ready_request_indices;
     ready_request_indices.reserve(planned_states.derived_state_plan.requests.size());
     for (size_t i = 0; i < planned_states.derived_state_plan.requests.size(); ++i) {
@@ -922,6 +966,7 @@ private:
           subgroup_parallel_requested
               ? state_parallel_plan.execution_groups
               : std::max<size_t>(1, state_parallel_plan.mapping_groups);
+      // Deterministic lane assignment for ready derived requests.
       std::vector<size_t> owner_by_ready_index(ready_request_indices.size(), 0);
       for (size_t i = 0; i < ready_request_indices.size(); ++i) {
         owner_by_ready_index[i] = i % derived_owner_groups;
@@ -1096,11 +1141,17 @@ private:
   }
 
   struct PropertyContext {
+    // Universe world used for property assembly.
     World &world;
+    // Parsed response inputs (frequencies, directions, requested properties).
     const ResponseParameters &response_params;
+    // Ground-state objects and managers prepared in Stage 1.
     const GroundContext &ground_ctx;
+    // Solved-state metadata/map produced by Stage 2.
     const SolvedStates &solved_states;
+    // Property accumulator/writer.
     PropertyManager &properties;
+    // Optional SCF handle needed by Raman/hessian routines.
     std::shared_ptr<SCF> scf_calc;
   };
 
