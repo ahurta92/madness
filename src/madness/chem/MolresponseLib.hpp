@@ -59,8 +59,9 @@ Developer Overview
   1) bootstrap + planning, 2) state solves, 3) property assembly.
 - Stage 1: read ground/checkpoint context, generate linear states, build derived
   request plan, and build state-parallel ownership/execution plan.
-- Stage 2: solve linear states over protocol thresholds; at ti==0 owner mapping
-  stays state-oriented, then later thresholds can fan out by frequency-point.
+- Stage 2: solve linear states over protocol thresholds; fresh runs start
+  state-oriented, then later thresholds can fan out by frequency-point.
+  Restart runs with complete protocol-0 saved data may promote fanout to ti==0.
   When subgroup mode is enabled, work runs in macrotask subworlds with shard
   metadata/log merge and synchronization barriers between protocol steps.
 - Stage 2c: evaluate derived-state dependency gate and execute ready requests
@@ -512,6 +513,51 @@ private:
       return linear_point_index % owner_groups;
     };
 
+    size_t runtime_point_parallel_start_protocol_index =
+        state_parallel_plan.point_parallel_start_protocol_index;
+    bool restart_point_parallel_promoted = false;
+    bool restart_protocol0_saved_complete = false;
+    if (owner_group_schedule &&
+        state_parallel_plan.point_parallel_start_protocol_index == 1 &&
+        !calc_params.protocol().empty()) {
+      if (world.rank() == 0) {
+        const nlohmann::json existing_metadata =
+            read_json_file_or_object("response_metadata.json");
+        restart_protocol0_saved_complete = true;
+        for (const auto &state : linear_states) {
+          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+               ++freq_idx) {
+            LinearResponsePoint pt{state, 0, freq_idx};
+            if (!point_ready_in_metadata(existing_metadata, pt,
+                                         /*require_saved=*/true,
+                                         /*require_converged=*/false)) {
+              restart_protocol0_saved_complete = false;
+              break;
+            }
+          }
+          if (!restart_protocol0_saved_complete) {
+            break;
+          }
+        }
+      }
+      world.gop.broadcast_serializable(restart_protocol0_saved_complete, 0);
+      if (restart_protocol0_saved_complete) {
+        runtime_point_parallel_start_protocol_index = 0;
+        restart_point_parallel_promoted = true;
+        if (world.rank() == 0) {
+          print("State-parallel restart detected: protocol-0 points are saved; "
+                "enabling point ownership from protocol index 0.");
+        }
+      }
+    }
+
+    auto use_state_ownership_for_protocol_runtime = [&](size_t protocol_index) {
+      if (state_parallel_plan.mapping_groups <= 1) {
+        return true;
+      }
+      return protocol_index < runtime_point_parallel_start_protocol_index;
+    };
+
     nlohmann::json state_metadata_json = nlohmann::json::object();
     nlohmann::json debug_log_json = nlohmann::json::object();
 
@@ -593,7 +639,8 @@ private:
           persistence.flush_debug_log(world);
         };
 
-        if (owner_group_schedule && ti > 0) {
+        if (owner_group_schedule &&
+            !use_state_ownership_for_protocol_runtime(ti)) {
           for (size_t gid = 0; gid < state_parallel_plan.mapping_groups;
                ++gid) {
             if (world.rank() == 0) {
@@ -739,8 +786,7 @@ private:
                   };
 
               const bool use_state_ownership_for_thresh =
-                  state_parallel_plan.use_state_ownership_for_protocol(
-                      thresh_index);
+                  use_state_ownership_for_protocol_runtime(thresh_index);
               if (use_state_ownership_for_thresh) {
                 for (const auto state_index : local_state_indices) {
                   const auto &state = linear_states[state_index];
@@ -797,7 +843,7 @@ private:
 
               const bool at_final_protocol = (ti + 1 == protocol.size());
               const bool use_state_ownership_for_ti =
-                  state_parallel_plan.use_state_ownership_for_protocol(ti);
+                  use_state_ownership_for_protocol_runtime(ti);
               if (use_state_ownership_for_ti) {
                 for (const auto state_index : local_state_indices) {
                   auto &state = linear_states[state_index];
@@ -1135,6 +1181,11 @@ private:
     auto metadata = state_metadata_json;
     metadata["state_parallel_planner"] =
         planned_states.state_parallel_plan.to_json();
+    metadata["state_parallel_runtime"] = {
+        {"effective_point_parallel_start_protocol_index",
+         runtime_point_parallel_start_protocol_index},
+        {"restart_protocol0_saved_complete", restart_protocol0_saved_complete},
+        {"restart_point_parallel_promoted", restart_point_parallel_promoted}};
     metadata["derived_state_planner"] = {
         {"note",
          "Stage 2c: ready VBC-derived requests are executed before property "
