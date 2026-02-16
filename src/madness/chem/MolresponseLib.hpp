@@ -517,9 +517,11 @@ private:
         state_parallel_plan.point_parallel_start_protocol_index;
     bool restart_point_parallel_promoted = false;
     bool restart_protocol0_saved_complete = false;
-    if (owner_group_schedule &&
-        state_parallel_plan.point_parallel_start_protocol_index == 1 &&
-        !calc_params.protocol().empty()) {
+    const bool has_protocol_thresholds = !calc_params.protocol().empty();
+    const bool restart_promotion_candidate =
+        owner_group_schedule && has_protocol_thresholds &&
+        state_parallel_plan.point_parallel_start_protocol_index == 1;
+    if (restart_promotion_candidate) {
       if (world.rank() == 0) {
         const nlohmann::json existing_metadata =
             read_json_file_or_object("response_metadata.json");
@@ -541,14 +543,17 @@ private:
         }
       }
       world.gop.broadcast_serializable(restart_protocol0_saved_complete, 0);
-      if (restart_protocol0_saved_complete) {
-        runtime_point_parallel_start_protocol_index = 0;
-        restart_point_parallel_promoted = true;
-        if (world.rank() == 0) {
-          print("State-parallel restart detected: protocol-0 points are saved; "
-                "enabling point ownership from protocol index 0.");
-        }
-      }
+    }
+    runtime_point_parallel_start_protocol_index =
+        state_parallel_plan.effective_point_parallel_start_protocol_index(
+            owner_group_schedule, has_protocol_thresholds,
+            restart_protocol0_saved_complete);
+    restart_point_parallel_promoted =
+        runtime_point_parallel_start_protocol_index !=
+        state_parallel_plan.point_parallel_start_protocol_index;
+    if (restart_point_parallel_promoted && world.rank() == 0) {
+      print("State-parallel restart detected: protocol-0 points are saved; "
+            "enabling point ownership from protocol index 0.");
     }
 
     auto use_state_ownership_for_protocol_runtime = [&](size_t protocol_index) {

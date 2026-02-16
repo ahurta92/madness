@@ -78,6 +78,22 @@ struct StateParallelPlan {
     return protocol_index < point_parallel_start_protocol_index;
   }
 
+  // Runtime override used by the solver: on restart, protocol-0 can promote to
+  // point ownership when protocol-0 points are already saved.
+  [[nodiscard]] size_t effective_point_parallel_start_protocol_index(
+      bool owner_group_schedule, bool has_protocol_thresholds,
+      bool restart_protocol0_saved_complete) const {
+    if (mapping_groups <= 1) {
+      return 0;
+    }
+    if (owner_group_schedule && has_protocol_thresholds &&
+        point_parallel_start_protocol_index == 1 &&
+        restart_protocol0_saved_complete) {
+      return 0;
+    }
+    return point_parallel_start_protocol_index;
+  }
+
   [[nodiscard]] json to_json() const {
     json rows = json::array();
     for (const auto &a : assignments)
