@@ -4,6 +4,7 @@
 
 #include <array>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -86,11 +87,34 @@ int main() {
       std::cerr << "expected state_then_point frequency policy for "
                    "point_start=1\n";
     }
+    if (plan.num_points != 6) {
+      ok = false;
+      std::cerr << "expected 6 linear response points for 3 states x 2 "
+                   "frequencies\n";
+    }
+    if (plan.effective_point_groups != 6) {
+      ok = false;
+      std::cerr << "expected effective point groups to cap at number of points "
+                   "(6)\n";
+    }
     if (!plan.use_state_ownership_for_protocol(0) ||
         plan.use_state_ownership_for_protocol(1)) {
       ok = false;
       std::cerr << "planner protocol ownership boundary incorrect for "
                    "point_start=1\n";
+    }
+
+    PointOwnershipScheduler point_scheduler(states, plan.effective_point_groups);
+    std::set<size_t> owners;
+    for (size_t state_index = 0; state_index < states.size(); ++state_index) {
+      for (size_t freq_index = 0;
+           freq_index < states[state_index].num_frequencies(); ++freq_index) {
+        owners.insert(point_scheduler.owner_group(state_index, freq_index));
+      }
+    }
+    if (owners.size() != 6) {
+      ok = false;
+      std::cerr << "expected all 6 point-owner lanes to be used\n";
     }
 
     const size_t restart_effective =
@@ -139,9 +163,38 @@ int main() {
       ok = false;
       std::cerr << "expected point_from_t0 frequency policy for point_start=0\n";
     }
+    if (plan.num_points != 4) {
+      ok = false;
+      std::cerr << "expected 4 linear response points for 2 states x 2 "
+                   "frequencies\n";
+    }
+    if (plan.effective_point_groups != 4) {
+      ok = false;
+      std::cerr << "expected point group cap to 4 points for point_start=0 "
+                   "scenario\n";
+    }
     if (plan.use_state_ownership_for_protocol(0)) {
       ok = false;
       std::cerr << "point_start=0 should disable state ownership at protocol 0\n";
+    }
+  }
+
+  {
+    ResponseParameters params;
+    params.set_user_defined_value<std::string>("state_parallel", "on");
+    params.set_user_defined_value<size_t>("state_parallel_groups", 8);
+    params.set_user_defined_value<size_t>("state_parallel_min_states", 1);
+    params.set_user_defined_value<size_t>("state_parallel_point_start_protocol",
+                                          1);
+
+    const std::vector<LinearResponseDescriptor> states = {
+        make_dipole_state('x'),
+    };
+    const auto plan = StateParallelPlanner::build(params, 32, states);
+    if (plan.effective_point_groups != 2) {
+      ok = false;
+      std::cerr << "single-state point-group cap should be 2 for two "
+                   "frequencies\n";
     }
   }
 

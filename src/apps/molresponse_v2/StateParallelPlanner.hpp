@@ -59,8 +59,12 @@ struct StateParallelPlan {
   size_t min_states = 1;
   // Number of generated linear states considered by the planner.
   size_t num_states = 0;
+  // Number of (state,frequency) points across all linear states.
+  size_t num_points = 0;
   // Size of the universe communicator.
   size_t world_size = 1;
+  // Point-ownership lane count after capping by available points.
+  size_t effective_point_groups = 1;
   // True when the solve stage is allowed to run via planner output.
   bool execution_enabled = false;
   // True when execution uses macrotask subworlds instead of single-world serial.
@@ -108,12 +112,47 @@ struct StateParallelPlan {
             {"frequency_partition_policy", frequency_partition_policy},
             {"min_states", min_states},
             {"num_states", num_states},
+            {"num_points", num_points},
             {"world_size", world_size},
+            {"effective_point_groups", effective_point_groups},
             {"execution_enabled", execution_enabled},
             {"subgroup_parallel_enabled", subgroup_parallel_enabled},
             {"reason", reason},
             {"assignments", rows}};
   }
+};
+
+class PointOwnershipScheduler {
+public:
+  PointOwnershipScheduler(const std::vector<LinearResponseDescriptor> &states,
+                          size_t owner_groups)
+      : owner_groups_(std::max<size_t>(1, owner_groups)),
+        state_point_offsets_(states.size() + 1, 0) {
+    for (size_t i = 0; i < states.size(); ++i) {
+      state_point_offsets_[i + 1] =
+          state_point_offsets_[i] + states[i].num_frequencies();
+    }
+  }
+
+  [[nodiscard]] size_t owner_groups() const { return owner_groups_; }
+
+  [[nodiscard]] size_t num_points() const {
+    return state_point_offsets_.empty() ? 0 : state_point_offsets_.back();
+  }
+
+  [[nodiscard]] size_t owner_group(size_t state_index,
+                                   size_t freq_index) const {
+    if (owner_groups_ <= 1) {
+      return 0;
+    }
+    const size_t linear_point_index =
+        state_point_offsets_[state_index] + freq_index;
+    return linear_point_index % owner_groups_;
+  }
+
+private:
+  size_t owner_groups_ = 1;
+  std::vector<size_t> state_point_offsets_;
 };
 
 class StateParallelPlanner {
@@ -126,6 +165,9 @@ public:
     plan.requested_groups = std::max<size_t>(1, params.state_parallel_groups());
     plan.min_states = params.state_parallel_min_states();
     plan.num_states = states.size();
+    for (const auto &state : states) {
+      plan.num_points += state.num_frequencies();
+    }
     plan.world_size = world_size;
 
     const bool requested_on = (plan.requested_mode == "on");
@@ -160,6 +202,14 @@ public:
           plan.point_parallel_start_protocol_index == 0
               ? "point_from_t0"
               : "state_then_point";
+      plan.effective_point_groups =
+          plan.num_points == 0
+              ? 1
+              : std::min(plan.mapping_groups,
+                         std::max<size_t>(1, plan.num_points));
+      if (plan.effective_point_groups < plan.mapping_groups) {
+        plan.reason += "; point ownership lanes capped by available points";
+      }
     } else {
       plan.mapping_groups = 1;
       plan.execution_groups = 1;
@@ -168,6 +218,7 @@ public:
       plan.effective_mode = "serial";
       plan.point_parallel_start_protocol_index = 0;
       plan.frequency_partition_policy = "state_only";
+      plan.effective_point_groups = 1;
     }
 
     plan.assignments.reserve(states.size());

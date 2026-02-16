@@ -444,6 +444,8 @@ private:
           "State-parallel plan: mode=", state_parallel_plan.effective_mode,
           " requested_groups=", state_parallel_plan.requested_groups,
           " mapping_groups=", state_parallel_plan.mapping_groups,
+          " effective_point_groups=",
+          state_parallel_plan.effective_point_groups,
           " point_parallel_start_protocol_index=",
           state_parallel_plan.point_parallel_start_protocol_index,
           " frequency_policy=", state_parallel_plan.frequency_partition_policy,
@@ -453,6 +455,110 @@ private:
     return PlannedStates{std::move(generated_states),
                          std::move(derived_state_plan),
                          std::move(state_parallel_plan)};
+  }
+
+  struct RuntimePointOwnershipPolicy {
+    size_t point_parallel_start_protocol_index = 0;
+    bool restart_protocol0_saved_complete = false;
+    bool restart_point_parallel_promoted = false;
+  };
+
+  static std::vector<size_t>
+  build_owner_by_state_index(const std::vector<LinearResponseDescriptor> &states,
+                             const StateParallelPlan &state_parallel_plan) {
+    std::vector<size_t> owner_by_state_index(states.size(), 0);
+    for (const auto &assignment : state_parallel_plan.assignments) {
+      if (assignment.state_index < owner_by_state_index.size()) {
+        owner_by_state_index[assignment.state_index] = assignment.owner_group;
+      }
+    }
+    return owner_by_state_index;
+  }
+
+  static RuntimePointOwnershipPolicy compute_runtime_point_ownership_policy(
+      World &world, const CalculationParameters &calc_params,
+      const StateParallelPlan &state_parallel_plan,
+      const std::vector<LinearResponseDescriptor> &linear_states,
+      bool owner_group_schedule) {
+    RuntimePointOwnershipPolicy runtime_policy;
+    runtime_policy.point_parallel_start_protocol_index =
+        state_parallel_plan.point_parallel_start_protocol_index;
+
+    const bool has_protocol_thresholds = !calc_params.protocol().empty();
+    const bool restart_promotion_candidate =
+        owner_group_schedule && has_protocol_thresholds &&
+        state_parallel_plan.point_parallel_start_protocol_index == 1;
+    if (restart_promotion_candidate) {
+      if (world.rank() == 0) {
+        const nlohmann::json existing_metadata =
+            read_json_file_or_object("response_metadata.json");
+        runtime_policy.restart_protocol0_saved_complete = true;
+        for (const auto &state : linear_states) {
+          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+               ++freq_idx) {
+            LinearResponsePoint pt{state, 0, freq_idx};
+            if (!point_ready_in_metadata(existing_metadata, pt,
+                                         /*require_saved=*/true,
+                                         /*require_converged=*/false)) {
+              runtime_policy.restart_protocol0_saved_complete = false;
+              break;
+            }
+          }
+          if (!runtime_policy.restart_protocol0_saved_complete) {
+            break;
+          }
+        }
+      }
+      world.gop.broadcast_serializable(
+          runtime_policy.restart_protocol0_saved_complete, 0);
+    }
+
+    runtime_policy.point_parallel_start_protocol_index =
+        state_parallel_plan.effective_point_parallel_start_protocol_index(
+            owner_group_schedule, has_protocol_thresholds,
+            runtime_policy.restart_protocol0_saved_complete);
+    runtime_policy.restart_point_parallel_promoted =
+        runtime_policy.point_parallel_start_protocol_index !=
+        state_parallel_plan.point_parallel_start_protocol_index;
+    return runtime_policy;
+  }
+
+  static void build_local_state_workset(
+      const std::vector<LinearResponseDescriptor> &linear_states,
+      const std::vector<size_t> &owner_by_state_index,
+      const PointOwnershipScheduler &point_scheduler, size_t subgroup_id,
+      size_t mapping_groups, std::vector<size_t> &local_state_indices,
+      std::vector<LinearResponseDescriptor> &local_states) {
+    local_state_indices.clear();
+    local_states.clear();
+    local_state_indices.reserve(
+        linear_states.size() / std::max<size_t>(1, mapping_groups));
+    local_states.reserve(linear_states.size());
+
+    const size_t point_owner_groups = point_scheduler.owner_groups();
+    for (size_t state_index = 0; state_index < linear_states.size();
+         ++state_index) {
+      const bool owns_state_at_first_protocol =
+          owner_by_state_index[state_index] == subgroup_id;
+      bool owns_any_point_after_first_protocol = false;
+      if (point_owner_groups > 1) {
+        const auto &state = linear_states[state_index];
+        for (size_t freq_index = 0; freq_index < state.num_frequencies();
+             ++freq_index) {
+          if (point_scheduler.owner_group(state_index, freq_index) ==
+              subgroup_id) {
+            owns_any_point_after_first_protocol = true;
+            break;
+          }
+        }
+      }
+      if (owns_state_at_first_protocol) {
+        local_state_indices.push_back(state_index);
+      }
+      if (owns_state_at_first_protocol || owns_any_point_after_first_protocol) {
+        local_states.push_back(linear_states[state_index]);
+      }
+    }
   }
 
   static SolvedStates
@@ -485,72 +591,23 @@ private:
             " groups; falling back to plain serial state loop.");
     }
 
-    // Fast lookup: state_index -> owner group from planner assignment table.
-    std::vector<size_t> owner_by_state_index(
-        planned_states.generated_states.states.size(), 0);
-    for (const auto &assignment : state_parallel_plan.assignments) {
-      if (assignment.state_index < owner_by_state_index.size()) {
-        owner_by_state_index[assignment.state_index] = assignment.owner_group;
-      }
-    }
     const auto &linear_states = planned_states.generated_states.states;
-    // Prefix sum of per-state frequency counts. This lets us map
-    // (state_index, freq_index) -> globally ordered point index.
-    std::vector<size_t> state_point_offsets(linear_states.size() + 1, 0);
-    for (size_t i = 0; i < linear_states.size(); ++i) {
-      state_point_offsets[i + 1] =
-          state_point_offsets[i] + linear_states[i].num_frequencies();
-    }
-    // Point-level ownership is used after protocol step 0 so frequency points
-    // from one state can fan out across groups.
-    auto point_owner_group = [&](size_t state_index, size_t freq_index,
-                                 size_t owner_groups) -> size_t {
-      if (owner_groups <= 1) {
-        return 0;
-      }
-      const size_t linear_point_index =
-          state_point_offsets[state_index] + freq_index;
-      return linear_point_index % owner_groups;
-    };
+    const auto owner_by_state_index =
+        build_owner_by_state_index(linear_states, state_parallel_plan);
+    PointOwnershipScheduler point_scheduler(
+        linear_states, state_parallel_plan.effective_point_groups);
+    const size_t point_owner_groups = point_scheduler.owner_groups();
 
-    size_t runtime_point_parallel_start_protocol_index =
-        state_parallel_plan.point_parallel_start_protocol_index;
-    bool restart_point_parallel_promoted = false;
-    bool restart_protocol0_saved_complete = false;
-    const bool has_protocol_thresholds = !calc_params.protocol().empty();
-    const bool restart_promotion_candidate =
-        owner_group_schedule && has_protocol_thresholds &&
-        state_parallel_plan.point_parallel_start_protocol_index == 1;
-    if (restart_promotion_candidate) {
-      if (world.rank() == 0) {
-        const nlohmann::json existing_metadata =
-            read_json_file_or_object("response_metadata.json");
-        restart_protocol0_saved_complete = true;
-        for (const auto &state : linear_states) {
-          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
-               ++freq_idx) {
-            LinearResponsePoint pt{state, 0, freq_idx};
-            if (!point_ready_in_metadata(existing_metadata, pt,
-                                         /*require_saved=*/true,
-                                         /*require_converged=*/false)) {
-              restart_protocol0_saved_complete = false;
-              break;
-            }
-          }
-          if (!restart_protocol0_saved_complete) {
-            break;
-          }
-        }
-      }
-      world.gop.broadcast_serializable(restart_protocol0_saved_complete, 0);
-    }
-    runtime_point_parallel_start_protocol_index =
-        state_parallel_plan.effective_point_parallel_start_protocol_index(
-            owner_group_schedule, has_protocol_thresholds,
-            restart_protocol0_saved_complete);
-    restart_point_parallel_promoted =
-        runtime_point_parallel_start_protocol_index !=
-        state_parallel_plan.point_parallel_start_protocol_index;
+    const RuntimePointOwnershipPolicy runtime_policy =
+        compute_runtime_point_ownership_policy(
+            world, calc_params, state_parallel_plan, linear_states,
+            owner_group_schedule);
+    const size_t runtime_point_parallel_start_protocol_index =
+        runtime_policy.point_parallel_start_protocol_index;
+    const bool restart_point_parallel_promoted =
+        runtime_policy.restart_point_parallel_promoted;
+    const bool restart_protocol0_saved_complete =
+        runtime_policy.restart_protocol0_saved_complete;
     if (restart_point_parallel_promoted && world.rank() == 0) {
       print("State-parallel restart detected: protocol-0 points are saved; "
             "enabling point ownership from protocol index 0.");
@@ -646,11 +703,10 @@ private:
 
         if (owner_group_schedule &&
             !use_state_ownership_for_protocol_runtime(ti)) {
-          for (size_t gid = 0; gid < state_parallel_plan.mapping_groups;
-               ++gid) {
+          for (size_t gid = 0; gid < point_owner_groups; ++gid) {
             if (world.rank() == 0) {
               print("State-frequency solve lane ", gid, "/",
-                    state_parallel_plan.mapping_groups - 1,
+                    point_owner_groups - 1,
                     " at protocol thresh ", thresh);
             }
             for (size_t state_index = 0; state_index < linear_states.size();
@@ -658,8 +714,7 @@ private:
               const auto &state = linear_states[state_index];
               for (size_t freq_index = 0; freq_index < state.num_frequencies();
                    ++freq_index) {
-                if (point_owner_group(state_index, freq_index,
-                                      state_parallel_plan.mapping_groups) ==
+                if (point_scheduler.owner_group(state_index, freq_index) ==
                     gid) {
                   solve_state_frequency(state_index, freq_index);
                 }
@@ -715,42 +770,11 @@ private:
         FunctionDefaults<3>::set_default_pmap(subworld);
         try {
           std::vector<size_t> local_state_indices;
-          std::vector<bool> local_state_used(linear_states.size(), false);
-          local_state_indices.reserve(
-              linear_states.size() /
-              std::max<size_t>(1, state_parallel_plan.mapping_groups));
-          for (size_t state_index = 0; state_index < linear_states.size();
-               ++state_index) {
-            const bool owns_state_at_first_protocol =
-                owner_by_state_index[state_index] == subgroup_id;
-            bool owns_any_point_after_first_protocol = false;
-            if (state_parallel_plan.mapping_groups > 1) {
-              const auto &state = linear_states[state_index];
-              for (size_t freq_index = 0; freq_index < state.num_frequencies();
-                   ++freq_index) {
-                if (point_owner_group(state_index, freq_index,
-                                      state_parallel_plan.mapping_groups) ==
-                    subgroup_id) {
-                  owns_any_point_after_first_protocol = true;
-                  break;
-                }
-              }
-            }
-            if (owns_state_at_first_protocol) {
-              local_state_indices.push_back(state_index);
-            }
-            if (owns_state_at_first_protocol ||
-                owns_any_point_after_first_protocol) {
-              local_state_used[state_index] = true;
-            }
-          }
           std::vector<LinearResponseDescriptor> local_states;
-          for (size_t state_index = 0; state_index < linear_states.size();
-               ++state_index) {
-            if (local_state_used[state_index]) {
-              local_states.push_back(linear_states[state_index]);
-            }
-          }
+          build_local_state_workset(
+              linear_states, owner_by_state_index, point_scheduler, subgroup_id,
+              state_parallel_plan.mapping_groups, local_state_indices,
+              local_states);
 
           const std::string metadata_shard_file =
               group_shard_file("response_metadata.json", subgroup_id);
@@ -808,8 +832,7 @@ private:
                   const auto &state = linear_states[state_index];
                   for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
                        ++freq_idx) {
-                    if (point_owner_group(state_index, freq_idx,
-                                          state_parallel_plan.mapping_groups) !=
+                    if (point_scheduler.owner_group(state_index, freq_idx) !=
                         subgroup_id) {
                       continue;
                     }
@@ -869,8 +892,7 @@ private:
                   const auto &state = linear_states[state_index];
                   for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
                        ++freq_idx) {
-                    if (point_owner_group(state_index, freq_idx,
-                                          state_parallel_plan.mapping_groups) !=
+                    if (point_scheduler.owner_group(state_index, freq_idx) !=
                         subgroup_id) {
                       continue;
                     }
@@ -1187,6 +1209,7 @@ private:
     metadata["state_parallel_planner"] =
         planned_states.state_parallel_plan.to_json();
     metadata["state_parallel_runtime"] = {
+        {"effective_point_groups", point_owner_groups},
         {"effective_point_parallel_start_protocol_index",
          runtime_point_parallel_start_protocol_index},
         {"restart_protocol0_saved_complete", restart_protocol0_saved_complete},

@@ -8,11 +8,11 @@ This targets workloads where many states are independent and memory pressure per
 
 ## Current Constraints (from code)
 
-1. State solving is currently serial in `src/madness/chem/MolresponseLib.hpp` (`solve_all_states`).
+1. `solve_all_states` in `src/madness/chem/MolresponseLib.hpp` has grown large and now mixes planning, runtime policy, subgroup orchestration, and metadata merge in one function body.
 2. `ResponseRecord2` writes a shared JSON file with communicator collectives, so one global writer from multiple groups is unsafe.
 3. `ResponseDebugLogger` currently writes a single log file (`response_log.json`), also unsafe for multiple groups.
 4. Response vectors are stored with `ParallelOutputArchive` in `src/apps/molresponse_v2/ResponseIO.hpp`; load/save behavior depends on communicator shape.
-5. Frequency continuation is state-local in `computeFrequencyLoop(...)`, so frequencies for a given state must remain on the same group.
+5. Frequency continuation in `computeFrequencyLoop(...)` is protocol-local. At `ti>0`, each `(state,frequency)` point can restart from its own `ti-1` data, so post-`ti0` point fanout is valid.
 
 ## Proposed Execution Model
 
@@ -45,8 +45,12 @@ Assign each state once:
 - static round-robin: `owner = state_index % groups`
 
 Each subgroup only solves states it owns.
+During point mode (`protocol_index >= state_parallel_point_start_protocol`), ownership switches to deterministic point ownership:
 
-Important: all frequencies of an owned state stay in that same subgroup.
+- `point_owner = linear_point_index % effective_point_groups`
+- `effective_point_groups = min(mapping_groups, num_points)`
+
+This avoids idle point lanes when requested groups exceed available `(state,frequency)` points.
 
 ### 4) Per-group ground/response contexts
 
@@ -77,12 +81,13 @@ Then serialize property results/metadata and broadcast to universe rank 0 for fi
 ## Data Flow Sketch
 
 1. Generate all states once (same as now).
-2. Partition states across groups.
-3. Each group loops protocols and solves only owned states.
-4. Each group writes shard metadata/log.
-5. Universe rank 0 merges shards.
-6. Property group computes alpha/beta/raman.
-7. Final JSON outputs are emitted as today.
+2. Build state ownership and point ownership lane counts in planner metadata.
+3. For each protocol: run state ownership before point-start threshold, then point ownership after threshold.
+4. On restart, if all protocol-0 points are already saved, promote point ownership to protocol index 0.
+5. Each subgroup writes shard metadata/log.
+6. Universe rank 0 merges shards.
+7. Property group computes alpha/beta/raman.
+8. Final JSON outputs are emitted as today.
 
 ## Failure Handling / Fallback
 
@@ -149,3 +154,4 @@ Track wall time and peak memory per rank.
 
 - This design keeps the current solver internals (`computeFrequencyLoop` + response vector restart logic) unchanged.
 - Major risk is archive communicator compatibility across solve and property phases; the property-group step is meant to isolate this safely.
+- Ongoing readability refactor: continue splitting `solve_all_states` into focused helpers (runtime ownership policy, local workset construction, serial/subgroup execution blocks) without changing numerical behavior.
