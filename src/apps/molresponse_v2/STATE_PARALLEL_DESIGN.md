@@ -155,3 +155,6 @@ Track wall time and peak memory per rank.
 - This design keeps the current solver internals (`computeFrequencyLoop` + response vector restart logic) unchanged.
 - Major risk is archive communicator compatibility across solve and property phases; the property-group step is meant to isolate this safely.
 - Ongoing readability refactor: continue splitting `solve_all_states` into focused helpers (runtime ownership policy, local workset construction, serial/subgroup execution blocks) without changing numerical behavior.
+- Current checkpoint: serial and subgroup state-solve loops are extracted into dedicated helper routines so `solve_all_states` primarily orchestrates planning, execution mode selection, and downstream derived/property stages.
+- Current checkpoint: derived-state dependency-gate + execution path is also extracted into a helper, reducing `solve_all_states` responsibility to stage orchestration and metadata assembly.
+- Current checkpoint: final-protocol validation and stage-2 metadata assembly are extracted into helpers, further narrowing `solve_all_states` to high-level orchestration.
