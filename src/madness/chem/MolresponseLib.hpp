@@ -562,18 +562,47 @@ private:
   }
 
   struct StateSolveScheduleContext {
+    // True when subgroup solve path is enabled and requested.
+    bool subgroup_parallel_requested = false;
+    // True when deterministic owner-lane scheduling is active.
+    bool owner_group_schedule = false;
     // Planner output (group counts, mode, protocol switch threshold).
     const StateParallelPlan &state_parallel_plan;
     // Full set of linear states generated in Stage 1.
     const std::vector<LinearResponseDescriptor> &linear_states;
     // state_index -> owner lane for protocol ranges using state ownership.
-    const std::vector<size_t> &owner_by_state_index;
+    std::vector<size_t> owner_by_state_index;
     // Deterministic (state,freq) -> owner lane mapping for point ownership.
-    const PointOwnershipScheduler &point_scheduler;
-    // True when owner-lane scheduling is active (serial lanes or subworld lanes).
-    bool owner_group_schedule = false;
+    PointOwnershipScheduler point_scheduler;
     // Runtime protocol index where state-ownership switches to point-ownership.
     size_t runtime_point_parallel_start_protocol_index = 0;
+    // Restart diagnostics propagated to stage metadata.
+    bool restart_point_parallel_promoted = false;
+    bool restart_protocol0_saved_complete = false;
+
+    StateSolveScheduleContext(
+        bool subgroup_parallel_requested_, bool owner_group_schedule_,
+        const StateParallelPlan &state_parallel_plan_,
+        const std::vector<LinearResponseDescriptor> &linear_states_,
+        std::vector<size_t> owner_by_state_index_, size_t effective_point_groups,
+        size_t runtime_point_parallel_start_protocol_index_,
+        bool restart_point_parallel_promoted_,
+        bool restart_protocol0_saved_complete_)
+        : subgroup_parallel_requested(subgroup_parallel_requested_),
+          owner_group_schedule(owner_group_schedule_),
+          state_parallel_plan(state_parallel_plan_),
+          linear_states(linear_states_),
+          owner_by_state_index(std::move(owner_by_state_index_)),
+          point_scheduler(linear_states_, effective_point_groups),
+          runtime_point_parallel_start_protocol_index(
+              runtime_point_parallel_start_protocol_index_),
+          restart_point_parallel_promoted(restart_point_parallel_promoted_),
+          restart_protocol0_saved_complete(
+              restart_protocol0_saved_complete_) {}
+
+    [[nodiscard]] size_t point_owner_groups() const {
+      return point_scheduler.owner_groups();
+    }
   };
 
   // Runtime policy gate shared by serial and subgroup paths.
@@ -587,6 +616,68 @@ private:
       return true;
     }
     return protocol_index < ctx.runtime_point_parallel_start_protocol_index;
+  }
+
+  static void
+  print_state_solve_execution_mode(World &world,
+                                   const StateParallelPlan &state_parallel_plan,
+                                   bool subgroup_parallel_requested,
+                                   bool owner_group_schedule) {
+    if (world.rank() == 0 && subgroup_parallel_requested) {
+      print("State ownership mapping is active across ",
+            state_parallel_plan.mapping_groups,
+            " groups; executing owner-group solves in parallel subworlds.");
+    } else if (world.rank() == 0 && owner_group_schedule) {
+      print("State ownership mapping is active across ",
+            state_parallel_plan.mapping_groups,
+            " groups; executing deterministic owner-group solve passes "
+            "serially on the universe communicator.");
+    } else if (world.rank() == 0 && state_parallel_plan.mapping_groups > 1) {
+      print("State ownership mapping is active across ",
+            state_parallel_plan.mapping_groups,
+            " groups; falling back to plain serial state loop.");
+    }
+  }
+
+  // Build runtime scheduling context for stage-2 linear solves:
+  // - picks subgroup vs serial-lane mode flags,
+  // - constructs owner maps/schedulers,
+  // - applies restart-aware protocol switch policy.
+  static StateSolveScheduleContext
+  build_state_solve_schedule_context(World &world,
+                                     const CalculationParameters &calc_params,
+                                     const PlannedStates &planned_states) {
+    const auto &state_parallel_plan = planned_states.state_parallel_plan;
+    const bool subgroup_parallel_requested =
+        state_parallel_plan.execution_enabled &&
+        state_parallel_plan.subgroup_parallel_enabled &&
+        state_parallel_plan.execution_groups > 1;
+    const bool owner_group_schedule =
+        state_parallel_plan.mapping_groups > 1 &&
+        state_parallel_plan.effective_mode != "serial";
+    print_state_solve_execution_mode(world, state_parallel_plan,
+                                     subgroup_parallel_requested,
+                                     owner_group_schedule);
+
+    const auto &linear_states = planned_states.generated_states.states;
+    auto owner_by_state_index =
+        build_owner_by_state_index(linear_states, state_parallel_plan);
+    const RuntimePointOwnershipPolicy runtime_policy =
+        compute_runtime_point_ownership_policy(
+            world, calc_params, state_parallel_plan, linear_states,
+            owner_group_schedule);
+    if (runtime_policy.restart_point_parallel_promoted && world.rank() == 0) {
+      print("State-parallel restart detected: protocol-0 points are saved; "
+            "enabling point ownership from protocol index 0.");
+    }
+
+    return StateSolveScheduleContext(
+        subgroup_parallel_requested, owner_group_schedule, state_parallel_plan,
+        linear_states, std::move(owner_by_state_index),
+        state_parallel_plan.effective_point_groups,
+        runtime_policy.point_parallel_start_protocol_index,
+        runtime_policy.restart_point_parallel_promoted,
+        runtime_policy.restart_protocol0_saved_complete);
   }
 
   static void execute_serial_state_solve(
@@ -675,7 +766,7 @@ private:
           !use_state_ownership_for_protocol_runtime(schedule_ctx, ti)) {
         // Point mode: route independent (state,freq) points to deterministic
         // owner lanes.
-        const size_t point_owner_groups = schedule_ctx.point_scheduler.owner_groups();
+        const size_t point_owner_groups = schedule_ctx.point_owner_groups();
         for (size_t gid = 0; gid < point_owner_groups; ++gid) {
           if (world.rank() == 0) {
             print("State-frequency solve lane ", gid, "/",
@@ -1227,20 +1318,19 @@ private:
   // restart diagnostics.
   static nlohmann::json build_state_stage_metadata(
       const PlannedStates &planned_states, const nlohmann::json &state_metadata,
-      size_t point_owner_groups,
-      size_t runtime_point_parallel_start_protocol_index,
-      bool restart_protocol0_saved_complete,
-      bool restart_point_parallel_promoted,
+      const StateSolveScheduleContext &schedule_ctx,
       const DerivedExecutionResult &derived_result) {
     auto metadata = state_metadata;
     metadata["state_parallel_planner"] =
         planned_states.state_parallel_plan.to_json();
     metadata["state_parallel_runtime"] = {
-        {"effective_point_groups", point_owner_groups},
+        {"effective_point_groups", schedule_ctx.point_owner_groups()},
         {"effective_point_parallel_start_protocol_index",
-         runtime_point_parallel_start_protocol_index},
-        {"restart_protocol0_saved_complete", restart_protocol0_saved_complete},
-        {"restart_point_parallel_promoted", restart_point_parallel_promoted}};
+         schedule_ctx.runtime_point_parallel_start_protocol_index},
+        {"restart_protocol0_saved_complete",
+         schedule_ctx.restart_protocol0_saved_complete},
+        {"restart_point_parallel_promoted",
+         schedule_ctx.restart_point_parallel_promoted}};
     metadata["derived_state_planner"] = {
         {"note",
          "Stage 2c: ready VBC-derived requests are executed before property "
@@ -1262,62 +1352,15 @@ private:
     (void)response_params;
 
     // Stage 2a setup: build runtime ownership schedule and restart-aware policy.
-    const auto &state_parallel_plan = planned_states.state_parallel_plan;
-    const bool subgroup_parallel_requested =
-        state_parallel_plan.execution_enabled &&
-        state_parallel_plan.subgroup_parallel_enabled &&
-        state_parallel_plan.execution_groups > 1;
-    const bool owner_group_schedule =
-        state_parallel_plan.mapping_groups > 1 &&
-        state_parallel_plan.effective_mode != "serial";
-    if (world.rank() == 0 && subgroup_parallel_requested) {
-      print("State ownership mapping is active across ",
-            state_parallel_plan.mapping_groups,
-            " groups; executing owner-group solves in parallel subworlds.");
-    } else if (world.rank() == 0 && owner_group_schedule) {
-      print("State ownership mapping is active across ",
-            state_parallel_plan.mapping_groups,
-            " groups; executing deterministic owner-group solve passes "
-            "serially on the universe communicator.");
-    } else if (world.rank() == 0 && state_parallel_plan.mapping_groups > 1) {
-      print("State ownership mapping is active across ",
-            state_parallel_plan.mapping_groups,
-            " groups; falling back to plain serial state loop.");
-    }
-
-    const auto &linear_states = planned_states.generated_states.states;
-    const auto owner_by_state_index =
-        build_owner_by_state_index(linear_states, state_parallel_plan);
-    PointOwnershipScheduler point_scheduler(
-        linear_states, state_parallel_plan.effective_point_groups);
-    const size_t point_owner_groups = point_scheduler.owner_groups();
-
-    const RuntimePointOwnershipPolicy runtime_policy =
-        compute_runtime_point_ownership_policy(
-            world, calc_params, state_parallel_plan, linear_states,
-            owner_group_schedule);
-    const size_t runtime_point_parallel_start_protocol_index =
-        runtime_policy.point_parallel_start_protocol_index;
-    const bool restart_point_parallel_promoted =
-        runtime_policy.restart_point_parallel_promoted;
-    const bool restart_protocol0_saved_complete =
-        runtime_policy.restart_protocol0_saved_complete;
-    if (restart_point_parallel_promoted && world.rank() == 0) {
-      print("State-parallel restart detected: protocol-0 points are saved; "
-            "enabling point ownership from protocol index 0.");
-    }
-
-    const StateSolveScheduleContext schedule_ctx{
-        state_parallel_plan, linear_states, owner_by_state_index,
-        point_scheduler, owner_group_schedule,
-        runtime_point_parallel_start_protocol_index};
+    const StateSolveScheduleContext schedule_ctx =
+        build_state_solve_schedule_context(world, calc_params, planned_states);
 
     nlohmann::json state_metadata_json = nlohmann::json::object();
     nlohmann::json debug_log_json = nlohmann::json::object();
 
     // Stage 2b linear solve: subgroup path first, serial fallback second.
     bool ran_subgroup_path = false;
-    if (subgroup_parallel_requested) {
+    if (schedule_ctx.subgroup_parallel_requested) {
       ran_subgroup_path = execute_subgroup_state_solve(
           world, calc_params, ctx, schedule_ctx, state_metadata_json,
           debug_log_json);
@@ -1333,15 +1376,12 @@ private:
     // Stage 2c derived solve: dependency-gated execution + summary metadata.
     const DerivedExecutionResult derived_result = execute_derived_state_requests(
         world, calc_params, ctx, planned_states, state_metadata_json,
-        subgroup_parallel_requested, owner_group_schedule,
+        schedule_ctx.subgroup_parallel_requested, schedule_ctx.owner_group_schedule,
         final_state.threshold_index, final_state.threshold);
 
     // Stage 2 metadata assembly for downstream property stage.
     auto metadata = build_state_stage_metadata(
-        planned_states, state_metadata_json, point_owner_groups,
-        runtime_point_parallel_start_protocol_index,
-        restart_protocol0_saved_complete, restart_point_parallel_promoted,
-        derived_result);
+        planned_states, state_metadata_json, schedule_ctx, derived_result);
 
     return SolvedStates{std::move(planned_states), std::move(metadata),
                         std::move(debug_log_json)};
