@@ -479,7 +479,7 @@ private:
     };
 
     Molecule molecule = read_molecule(moldft_checkpt);
-    print("Read molecule with ", molecule.natom(), " atoms.");
+    //print("Read molecule with ", molecule.natom(), " atoms.");
 
     GroundStateData ground(world, relative_archive.string(), molecule);
     ResponseManager response_manager(world, calc_params);
