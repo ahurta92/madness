@@ -49,6 +49,9 @@ struct StateParallelPlan {
   size_t requested_groups = 1;
   // Number of ownership lanes used for deterministic work partitioning.
   size_t mapping_groups = 1;
+  // Number of groups that participate in state ownership (protocol-0 warmup).
+  // Capped by number of states; remaining groups can join in point ownership.
+  size_t state_owner_groups = 1;
   // Number of subworlds created for execution.
   size_t execution_groups = 1;
   // First protocol index that may switch from state-ownership to point-ownership.
@@ -106,6 +109,7 @@ struct StateParallelPlan {
             {"effective_mode", effective_mode},
             {"requested_groups", requested_groups},
             {"mapping_groups", mapping_groups},
+            {"state_owner_groups", state_owner_groups},
             {"execution_groups", execution_groups},
             {"point_parallel_start_protocol_index",
              point_parallel_start_protocol_index},
@@ -192,6 +196,8 @@ public:
 
     if (should_plan_parallel_mapping) {
       plan.mapping_groups = plan.requested_groups;
+      plan.state_owner_groups =
+          std::min(plan.mapping_groups, std::max<size_t>(1, plan.num_states));
       plan.execution_groups = plan.requested_groups;
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = true;
@@ -210,8 +216,13 @@ public:
       if (plan.effective_point_groups < plan.mapping_groups) {
         plan.reason += "; point ownership lanes capped by available points";
       }
+      if (plan.state_owner_groups < plan.mapping_groups) {
+        plan.reason +=
+            "; protocol-0 warmup uses a subset of groups until point ownership";
+      }
     } else {
       plan.mapping_groups = 1;
+      plan.state_owner_groups = 1;
       plan.execution_groups = 1;
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = false;
@@ -223,7 +234,7 @@ public:
 
     plan.assignments.reserve(states.size());
     for (size_t i = 0; i < states.size(); ++i) {
-      const auto owner = i % plan.mapping_groups;
+      const auto owner = i % plan.state_owner_groups;
       plan.assignments.push_back(
           StateAssignment{i, states[i].perturbationDescription(), owner});
     }

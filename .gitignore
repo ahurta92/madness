@@ -70,3 +70,9 @@ compile_commands
 diff.txt
 newdiff.txt
 .vscode/settings.json
+
+# Local response workflow artifacts
+mad.in
+tmp_h2o_*.in
+tmp_h2o_validation/
+tmp_state_parallel_scaling/

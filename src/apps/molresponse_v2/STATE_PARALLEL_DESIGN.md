@@ -43,6 +43,8 @@ Use `MacroTaskQ::create_worlds(universe, groups)` from `src/madness/mra/macrotas
 Assign each state once:
 
 - static round-robin: `owner = state_index % groups`
+- protocol-0 warmup owner lanes: `state_owner_groups = min(groups, num_states)`
+- static round-robin during warmup: `owner = state_index % state_owner_groups`
 
 Each subgroup only solves states it owns.
 During point mode (`protocol_index >= state_parallel_point_start_protocol`), ownership switches to deterministic point ownership:
@@ -51,6 +53,7 @@ During point mode (`protocol_index >= state_parallel_point_start_protocol`), own
 - `effective_point_groups = min(mapping_groups, num_points)`
 
 This avoids idle point lanes when requested groups exceed available `(state,frequency)` points.
+It also allows runs with `groups > states` to keep extra groups idle at protocol-0 and then activate them for point ownership after protocol-0 restart data is available.
 
 ### 4) Per-group ground/response contexts
 
@@ -163,3 +166,11 @@ Track wall time and peak memory per rank.
 - Current checkpoint: per-point linear solve timings (`wall_seconds`, `cpu_seconds`) are persisted in `response_metadata` and merged from subgroup shards into canonical metadata.
 - Current checkpoint: derived-request timing aggregation is captured in `derived_state_planner.execution.request_timings` for both subgroup and serial fallback lanes.
 - Current checkpoint: serial vs parallel parity checks on H2O indicate alpha is close, while beta/Raman still show non-trivial drift; next work is reproducibility isolation (parallel-vs-parallel, then stage-by-stage divergence localization).
+
+## Refactor TODO Backlog
+
+- Extract a dedicated stage-2 orchestrator component from `MolresponseLib.hpp` to reduce `solve_all_states` coupling.
+- Unify serial/subgroup scheduling loops around a shared work-item generator to remove duplicated protocol/frequency ownership logic.
+- Split `computeFrequencyLoop(...)` into focused helpers (`should_solve`, `initial_guess`, `solve_point`, `persist_point`) and remove `goto`-based flow.
+- Split `StateParallelPlan` into smaller types (`planner config`, `planner decision`, `runtime adjustment`) to separate static policy from restart/runtime overrides.
+- Continue trimming direct logging from solver internals by routing through structured metadata/debug sinks where possible.

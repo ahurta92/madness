@@ -515,6 +515,7 @@ private:
           "State-parallel plan: mode=", state_parallel_plan.effective_mode,
           " requested_groups=", state_parallel_plan.requested_groups,
           " mapping_groups=", state_parallel_plan.mapping_groups,
+          " state_owner_groups=", state_parallel_plan.state_owner_groups,
           " effective_point_groups=",
           state_parallel_plan.effective_point_groups,
           " point_parallel_start_protocol_index=",
@@ -697,11 +698,15 @@ private:
     if (world.rank() == 0 && subgroup_parallel_requested) {
       print("State ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
-            " groups; executing owner-group solves in parallel subworlds.");
+            " groups (protocol-0 owner groups=",
+            state_parallel_plan.state_owner_groups,
+            "); executing owner-group solves in parallel subworlds.");
     } else if (world.rank() == 0 && owner_group_schedule) {
       print("State ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
-            " groups; executing deterministic owner-group solve passes "
+            " groups (protocol-0 owner groups=",
+            state_parallel_plan.state_owner_groups,
+            "); executing deterministic owner-group solve passes "
             "serially on the universe communicator.");
     } else if (world.rank() == 0 && state_parallel_plan.mapping_groups > 1) {
       print("State ownership mapping is active across ",
@@ -857,11 +862,12 @@ private:
         }
       } else if (schedule_ctx.owner_group_schedule) {
         // State mode: keep all frequencies for an owned state on one lane.
-        for (size_t gid = 0; gid < schedule_ctx.state_parallel_plan.mapping_groups;
+        for (size_t gid = 0;
+             gid < schedule_ctx.state_parallel_plan.state_owner_groups;
              ++gid) {
           if (world.rank() == 0) {
             print("State solve lane ", gid, "/",
-                  schedule_ctx.state_parallel_plan.mapping_groups - 1,
+                  schedule_ctx.state_parallel_plan.state_owner_groups - 1,
                   " at protocol thresh ", thresh);
           }
           for (size_t state_index = 0;
