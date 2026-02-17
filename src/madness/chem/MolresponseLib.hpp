@@ -715,6 +715,36 @@ private:
     return !is_saved || (at_final_protocol && !persistence.is_converged(pt));
   }
 
+  static LinearResponseDescriptor
+  make_single_frequency_state(const LinearResponseDescriptor &state,
+                              size_t freq_index) {
+    return LinearResponseDescriptor(state.perturbation,
+                                    {state.frequency(freq_index)},
+                                    state.thresholds, state.spin_restricted);
+  }
+
+  template <typename NeedsFn, typename SkipFn, typename PrepareFn,
+            typename ExecuteFn, typename FinalizeFn>
+  static void run_protocol_threshold_loop(const std::vector<double> &protocol,
+                                          NeedsFn &&needs_solving_at_protocol,
+                                          SkipFn &&on_skip_protocol,
+                                          PrepareFn &&prepare_protocol,
+                                          ExecuteFn &&execute_protocol_work,
+                                          FinalizeFn &&finalize_protocol) {
+    for (size_t ti = 0; ti < protocol.size(); ++ti) {
+      const double thresh = protocol[ti];
+      if (!needs_solving_at_protocol(thresh, ti)) {
+        on_skip_protocol(thresh, ti);
+        continue;
+      }
+
+      prepare_protocol(thresh, ti);
+      const bool at_final_protocol = (ti + 1 == protocol.size());
+      execute_protocol_work(thresh, ti, at_final_protocol);
+      finalize_protocol(thresh, ti);
+    }
+  }
+
   static void
   print_state_solve_execution_mode(World &world,
                                    const StateParallelPlan &state_parallel_plan,
@@ -829,79 +859,83 @@ private:
     };
 
     const auto &protocol = calc_params.protocol();
-    for (size_t ti = 0; ti < protocol.size(); ++ti) {
-      const double thresh = protocol[ti];
-
-      if (!needs_solving_at_protocol(thresh, ti)) {
-        if (world.rank() == 0) {
-          madness::print("✓ All states converged at thresh", thresh,
-                         "skipping to next protocol.");
-        }
-        continue;
-      }
-
-      ctx.response_manager.setProtocol(world, ctx.ground.getL(), thresh);
-      ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
-      ctx.ground.computePreliminaries(world, *ctx.response_manager.getCoulombOp(),
-                                      ctx.response_manager.getVtol(),
-                                      ctx.fock_json_file);
-
-      const bool at_final_protocol = (ti + 1 == protocol.size());
-      auto solve_state = [&](size_t state_index) {
-        auto &state = schedule_ctx.linear_states[state_index];
-        computeFrequencyLoop(world, ctx.response_manager, state, ti, ctx.ground,
-                             persistence, at_final_protocol);
-        persistence.flush_debug_log(world);
-      };
-      auto solve_state_frequency = [&](size_t state_index, size_t freq_index) {
-        const auto &state = schedule_ctx.linear_states[state_index];
-        LinearResponseDescriptor single_frequency_state(
-            state.perturbation, {state.frequency(freq_index)}, state.thresholds,
-            state.spin_restricted);
-        computeFrequencyLoop(world, ctx.response_manager, single_frequency_state,
-                             ti, ctx.ground, persistence, at_final_protocol);
-        persistence.flush_debug_log(world);
-      };
-
-      if (schedule_ctx.owner_group_schedule &&
-          !use_state_ownership_for_protocol_runtime(schedule_ctx, ti)) {
-        // Point mode: route independent (state,freq) points to deterministic
-        // owner lanes.
-        const size_t point_owner_groups = schedule_ctx.point_owner_groups();
-        for (size_t gid = 0; gid < point_owner_groups; ++gid) {
+    auto solve_state = [&](size_t state_index, size_t thresh_index,
+                           bool at_final_protocol) {
+      auto &state = schedule_ctx.linear_states[state_index];
+      computeFrequencyLoop(world, ctx.response_manager, state, thresh_index,
+                           ctx.ground, persistence, at_final_protocol);
+      persistence.flush_debug_log(world);
+    };
+    auto solve_state_frequency = [&](size_t state_index, size_t freq_index,
+                                     size_t thresh_index,
+                                     bool at_final_protocol) {
+      const auto &state = schedule_ctx.linear_states[state_index];
+      const auto single_frequency_state =
+          make_single_frequency_state(state, freq_index);
+      computeFrequencyLoop(world, ctx.response_manager, single_frequency_state,
+                           thresh_index, ctx.ground, persistence,
+                           at_final_protocol);
+      persistence.flush_debug_log(world);
+    };
+    run_protocol_threshold_loop(
+        protocol, needs_solving_at_protocol,
+        [&](double thresh, size_t /*thresh_index*/) {
           if (world.rank() == 0) {
-            print("State-frequency solve lane ", gid, "/",
-                  point_owner_groups - 1, " at protocol thresh ", thresh);
+            madness::print("✓ All states converged at thresh", thresh,
+                           "skipping to next protocol.");
           }
-          for_each_owned_point_in_point_mode(
-              schedule_ctx, gid, [&](size_t state_index, size_t freq_index) {
-                solve_state_frequency(state_index, freq_index);
-              });
-        }
-      } else if (schedule_ctx.owner_group_schedule) {
-        // State mode: keep all frequencies for an owned state on one lane.
-        for (size_t gid = 0;
-             gid < schedule_ctx.state_parallel_plan.state_owner_groups;
-             ++gid) {
-          if (world.rank() == 0) {
-            print("State solve lane ", gid, "/",
-                  schedule_ctx.state_parallel_plan.state_owner_groups - 1,
-                  " at protocol thresh ", thresh);
-          }
-          for (size_t state_index = 0;
-               state_index < schedule_ctx.linear_states.size(); ++state_index) {
-            if (schedule_ctx.owner_by_state_index[state_index] == gid) {
-              solve_state(state_index);
+        },
+        [&](double thresh, size_t /*thresh_index*/) {
+          ctx.response_manager.setProtocol(world, ctx.ground.getL(), thresh);
+          ctx.ground.prepareOrbitals(world, FunctionDefaults<3>::get_k(), thresh);
+          ctx.ground.computePreliminaries(world,
+                                          *ctx.response_manager.getCoulombOp(),
+                                          ctx.response_manager.getVtol(),
+                                          ctx.fock_json_file);
+        },
+        [&](double thresh, size_t ti, bool at_final_protocol) {
+          (void)thresh;
+          if (schedule_ctx.owner_group_schedule &&
+              !use_state_ownership_for_protocol_runtime(schedule_ctx, ti)) {
+            // Point mode: route independent (state,freq) points to deterministic
+            // owner lanes.
+            const size_t point_owner_groups = schedule_ctx.point_owner_groups();
+            for (size_t gid = 0; gid < point_owner_groups; ++gid) {
+              if (world.rank() == 0) {
+                print("State-frequency solve lane ", gid, "/",
+                      point_owner_groups - 1, " at protocol thresh ", thresh);
+              }
+              for_each_owned_point_in_point_mode(
+                  schedule_ctx, gid, [&](size_t state_index, size_t freq_index) {
+                    solve_state_frequency(state_index, freq_index, ti,
+                                          at_final_protocol);
+                  });
+            }
+          } else if (schedule_ctx.owner_group_schedule) {
+            // State mode: keep all frequencies for an owned state on one lane.
+            for (size_t gid = 0;
+                 gid < schedule_ctx.state_parallel_plan.state_owner_groups;
+                 ++gid) {
+              if (world.rank() == 0) {
+                print("State solve lane ", gid, "/",
+                      schedule_ctx.state_parallel_plan.state_owner_groups - 1,
+                      " at protocol thresh ", thresh);
+              }
+              for (size_t state_index = 0;
+                   state_index < schedule_ctx.linear_states.size(); ++state_index) {
+                if (schedule_ctx.owner_by_state_index[state_index] == gid) {
+                  solve_state(state_index, ti, at_final_protocol);
+                }
+              }
+            }
+          } else {
+            for (size_t state_index = 0;
+                 state_index < schedule_ctx.linear_states.size(); ++state_index) {
+              solve_state(state_index, ti, at_final_protocol);
             }
           }
-        }
-      } else {
-        for (size_t state_index = 0; state_index < schedule_ctx.linear_states.size();
-             ++state_index) {
-          solve_state(state_index);
-        }
-      }
-    }
+        },
+        [&](double /*thresh*/, size_t /*thresh_index*/) {});
 
     state_metadata_json = persistence.metadata_json();
     debug_log_json = persistence.debug_log_json();
@@ -1011,61 +1045,63 @@ private:
           };
 
           const auto &protocol = calc_params.protocol();
-          for (size_t ti = 0; ti < protocol.size(); ++ti) {
-            const double thresh = protocol[ti];
-            if (!local_needs_solving_at_protocol(thresh, ti)) {
-              if (subworld.rank() == 0) {
-                print("Subgroup ", subgroup_id, " has no pending states at thresh ",
-                      thresh, "; skipping.");
-              }
-              // Keep protocol progression globally lock-step across all
-              // subgroups because ti>0 points may depend on ti-1 files
-              // produced by other owners.
-              world.gop.fence();
-              continue;
-            }
-
-            local_response_manager.setProtocol(subworld, local_ground.getL(),
-                                               thresh);
-            local_ground.prepareOrbitals(subworld, FunctionDefaults<3>::get_k(),
-                                         thresh);
-            local_ground.computePreliminaries(
-                subworld, *local_response_manager.getCoulombOp(),
-                local_response_manager.getVtol(), fock_shard_file);
-
-            const bool at_final_protocol = (ti + 1 == protocol.size());
-            const bool use_state_ownership_for_ti =
-                use_state_ownership_for_protocol_runtime(schedule_ctx, ti);
-            if (use_state_ownership_for_ti) {
-              for (const auto state_index : local_state_indices) {
-                auto &state = schedule_ctx.linear_states[state_index];
-                computeFrequencyLoop(subworld, local_response_manager, state, ti,
-                                     local_ground, local_persistence,
-                                     at_final_protocol);
-                local_persistence.flush_debug_log(subworld);
-              }
-            } else {
-              if (subworld.rank() == 0) {
-                print("Subgroup ", subgroup_id,
-                      " solving independent state-frequency points at thresh ",
-                      thresh, ".");
-              }
-              for_each_owned_point_in_point_mode(
-                  schedule_ctx, subgroup_id,
-                  [&](size_t state_index, size_t freq_idx) {
-                    const auto &state = schedule_ctx.linear_states[state_index];
-                    LinearResponseDescriptor single_frequency_state(
-                        state.perturbation, {state.frequency(freq_idx)},
-                        state.thresholds, state.spin_restricted);
-                    computeFrequencyLoop(subworld, local_response_manager,
-                                         single_frequency_state, ti, local_ground,
-                                         local_persistence, at_final_protocol);
+          run_protocol_threshold_loop(
+              protocol, local_needs_solving_at_protocol,
+              [&](double thresh, size_t /*thresh_index*/) {
+                if (subworld.rank() == 0) {
+                  print("Subgroup ", subgroup_id,
+                        " has no pending states at thresh ", thresh,
+                        "; skipping.");
+                }
+                // Keep protocol progression globally lock-step across all
+                // subgroups because ti>0 points may depend on ti-1 files
+                // produced by other owners.
+                world.gop.fence();
+              },
+              [&](double thresh, size_t /*thresh_index*/) {
+                local_response_manager.setProtocol(subworld, local_ground.getL(),
+                                                   thresh);
+                local_ground.prepareOrbitals(subworld, FunctionDefaults<3>::get_k(),
+                                             thresh);
+                local_ground.computePreliminaries(
+                    subworld, *local_response_manager.getCoulombOp(),
+                    local_response_manager.getVtol(), fock_shard_file);
+              },
+              [&](double thresh, size_t ti, bool at_final_protocol) {
+                const bool use_state_ownership_for_ti =
+                    use_state_ownership_for_protocol_runtime(schedule_ctx, ti);
+                if (use_state_ownership_for_ti) {
+                  for (const auto state_index : local_state_indices) {
+                    auto &state = schedule_ctx.linear_states[state_index];
+                    computeFrequencyLoop(subworld, local_response_manager, state,
+                                         ti, local_ground, local_persistence,
+                                         at_final_protocol);
                     local_persistence.flush_debug_log(subworld);
-                  });
-            }
-            // ti+1 must not begin until every subgroup has finished ti.
-            world.gop.fence();
-          }
+                  }
+                } else {
+                  if (subworld.rank() == 0) {
+                    print("Subgroup ", subgroup_id,
+                          " solving independent state-frequency points at thresh ",
+                          thresh, ".");
+                  }
+                  for_each_owned_point_in_point_mode(
+                      schedule_ctx, subgroup_id,
+                      [&](size_t state_index, size_t freq_idx) {
+                        const auto &state = schedule_ctx.linear_states[state_index];
+                        const auto single_frequency_state =
+                            make_single_frequency_state(state, freq_idx);
+                        computeFrequencyLoop(
+                            subworld, local_response_manager,
+                            single_frequency_state, ti, local_ground,
+                            local_persistence, at_final_protocol);
+                        local_persistence.flush_debug_log(subworld);
+                      });
+                }
+              },
+              [&](double /*thresh*/, size_t /*thresh_index*/) {
+                // ti+1 must not begin until every subgroup has finished ti.
+                world.gop.fence();
+              });
         } else if (subworld.rank() == 0) {
           print("Subgroup ", subgroup_id,
                 " has no owned states; skipping subgroup solve loop.");
