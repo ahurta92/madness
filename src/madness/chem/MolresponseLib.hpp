@@ -774,6 +774,18 @@ private:
     }
   }
 
+  template <typename PersistenceT, typename StateT>
+  static void run_frequency_loop_with_flush(
+      World &exec_world, ResponseManager &response_manager,
+      const StateT &state_for_compute, size_t thresh_index,
+      GroundStateData &ground_state, PersistenceT &persistence,
+      bool at_final_protocol) {
+    computeFrequencyLoop(exec_world, response_manager, state_for_compute,
+                         thresh_index, ground_state, persistence,
+                         at_final_protocol);
+    persistence.flush_debug_log(exec_world);
+  }
+
   // Shared work dispatcher for ownership-aware linear state scheduling.
   // It handles both modes:
   // - state mode: one lane owns all frequencies of each state
@@ -969,9 +981,9 @@ private:
     auto solve_state = [&](size_t state_index, size_t thresh_index,
                            bool at_final_protocol) {
       auto &state = schedule_ctx.linear_states[state_index];
-      computeFrequencyLoop(world, ctx.response_manager, state, thresh_index,
-                           ctx.ground, persistence, at_final_protocol);
-      persistence.flush_debug_log(world);
+      run_frequency_loop_with_flush(world, ctx.response_manager, state,
+                                    thresh_index, ctx.ground, persistence,
+                                    at_final_protocol);
     };
     auto solve_state_frequency = [&](size_t state_index, size_t freq_index,
                                      size_t thresh_index,
@@ -979,10 +991,9 @@ private:
       const auto &state = schedule_ctx.linear_states[state_index];
       const auto single_frequency_state =
           make_single_frequency_state(state, freq_index);
-      computeFrequencyLoop(world, ctx.response_manager, single_frequency_state,
-                           thresh_index, ctx.ground, persistence,
-                           at_final_protocol);
-      persistence.flush_debug_log(world);
+      run_frequency_loop_with_flush(world, ctx.response_manager,
+                                    single_frequency_state, thresh_index,
+                                    ctx.ground, persistence, at_final_protocol);
     };
     run_protocol_threshold_loop(
         protocol, needs_solving_at_protocol,
@@ -1154,20 +1165,18 @@ private:
                     },
                     [&](size_t state_index) {
                       auto &state = schedule_ctx.linear_states[state_index];
-                      computeFrequencyLoop(subworld, local_response_manager,
-                                           state, ti, local_ground,
-                                           local_persistence, at_final_protocol);
-                      local_persistence.flush_debug_log(subworld);
+                      run_frequency_loop_with_flush(
+                          subworld, local_response_manager, state, ti,
+                          local_ground, local_persistence, at_final_protocol);
                     },
                     [&](size_t state_index, size_t freq_idx) {
                       const auto &state = schedule_ctx.linear_states[state_index];
                       const auto single_frequency_state =
                           make_single_frequency_state(state, freq_idx);
-                      computeFrequencyLoop(subworld, local_response_manager,
-                                           single_frequency_state, ti,
-                                           local_ground, local_persistence,
-                                           at_final_protocol);
-                      local_persistence.flush_debug_log(subworld);
+                      run_frequency_loop_with_flush(
+                          subworld, local_response_manager,
+                          single_frequency_state, ti, local_ground,
+                          local_persistence, at_final_protocol);
                     });
               },
               [&](double /*thresh*/, size_t /*thresh_index*/) {
