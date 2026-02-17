@@ -117,27 +117,29 @@ void computeFrequencyLoop(World &world,
 
     world.gop.fence();
 
-    if (is_saved &&
-        load_response_vector(world, num_orbitals, pt, x_0)) {
-      // loaded at same protocol/frequency
-    } else if (thresh_index > 0) {
-      LinearResponsePoint coarser_pt{state_desc, thresh_index - 1,
-                                     freq_index};
-      if (!load_response_vector(world, num_orbitals, coarser_pt, x_0)) {
-        goto try_prev_freq;
-      }
-    } else {
-    try_prev_freq:
+    bool loaded_guess = false;
+    if (is_saved) {
+      loaded_guess = load_response_vector(world, num_orbitals, pt, x_0);
+    }
+    if (!loaded_guess && thresh_index > 0) {
+      LinearResponsePoint coarser_pt{state_desc, thresh_index - 1, freq_index};
+      loaded_guess = load_response_vector(world, num_orbitals, coarser_pt, x_0);
+    }
+
+    if (!loaded_guess) {
       if (!pt.is_static()) {
-          LinearResponsePoint prev_freq_pt{state_desc, thresh_index,
-                                           freq_index - 1};
         if (have_previous_freq_response) {
           x_0 = previous_response;
-          // if previous was static, promote
-          if (prev_freq_pt.is_static()) {
-            promote_response_vector(world, previous_response, x_0);
+          if (freq_index > 0) {
+            LinearResponsePoint prev_freq_pt{state_desc, thresh_index,
+                                             freq_index - 1};
+            if (prev_freq_pt.is_static()) {
+              promote_response_vector(world, previous_response, x_0);
+            }
           }
         } else if (freq_index > 0) {
+          LinearResponsePoint prev_freq_pt{state_desc, thresh_index,
+                                           freq_index - 1};
           if (load_response_vector(world, num_orbitals, prev_freq_pt, x_0)) {
             world.gop.fence();
             if (prev_freq_pt.is_static()) {
