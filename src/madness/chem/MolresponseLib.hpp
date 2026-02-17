@@ -1183,9 +1183,19 @@ private:
                 // ti+1 must not begin until every subgroup has finished ti.
                 world.gop.fence();
               });
-        } else if (subworld.rank() == 0) {
-          print("Subgroup ", subgroup_id,
-                " has no owned states; skipping subgroup solve loop.");
+        } else {
+          if (subworld.rank() == 0) {
+            print("Subgroup ", subgroup_id,
+                  " has no owned states; participating in protocol "
+                  "synchronization only.");
+          }
+          // Keep protocol fences balanced with active subgroups. When a subgroup
+          // owns no states (e.g., more groups than points), it still must enter
+          // one global fence per protocol threshold to avoid deadlock.
+          const auto &protocol = calc_params.protocol();
+          for (size_t ti = 0; ti < protocol.size(); ++ti) {
+            world.gop.fence();
+          }
         }
 
         local_persistence.flush_debug_log(subworld);
