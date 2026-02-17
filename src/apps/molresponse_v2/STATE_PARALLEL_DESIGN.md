@@ -159,3 +159,7 @@ Track wall time and peak memory per rank.
 - Current checkpoint: derived-state dependency-gate + execution path is also extracted into a helper, reducing `solve_all_states` responsibility to stage orchestration and metadata assembly.
 - Current checkpoint: final-protocol validation and stage-2 metadata assembly are extracted into helpers, further narrowing `solve_all_states` to high-level orchestration.
 - Current checkpoint: stage-2 setup/logging and runtime scheduling policy construction are extracted into a dedicated schedule-context builder to keep ownership policy logic centralized.
+- Current checkpoint: state-parallel subgroup console logs are isolated into per-group files (`response_console.group<gid>.log`) to reduce output contention and improve traceability.
+- Current checkpoint: per-point linear solve timings (`wall_seconds`, `cpu_seconds`) are persisted in `response_metadata` and merged from subgroup shards into canonical metadata.
+- Current checkpoint: derived-request timing aggregation is captured in `derived_state_planner.execution.request_timings` for both subgroup and serial fallback lanes.
+- Current checkpoint: serial vs parallel parity checks on H2O indicate alpha is close, while beta/Raman still show non-trivial drift; next work is reproducibility isolation (parallel-vs-parallel, then stage-by-stage divergence localization).

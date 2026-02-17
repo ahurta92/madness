@@ -48,6 +48,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/Results.h>
@@ -148,6 +149,11 @@ private:
       response_record_.record_status(pt, c);
     }
 
+    void record_timing(const LinearResponsePoint &pt, double wall_seconds,
+                       double cpu_seconds) override {
+      response_record_.record_timing(pt, wall_seconds, cpu_seconds);
+    }
+
     ResponseDebugLogger &logger() override { return debug_logger_; }
 
     void flush_debug_log(World &world) override {
@@ -182,6 +188,58 @@ private:
     }
     return (parent / grouped).string();
   }
+
+  static std::string group_console_file(size_t gid) {
+    return group_shard_file("response_console.log", gid);
+  }
+
+  static std::string group_derived_timing_file(size_t gid) {
+    return group_shard_file("derived_request_timings.json", gid);
+  }
+
+  class ScopedRankLogRedirect final {
+  public:
+    ScopedRankLogRedirect(bool enabled, const std::string &filename,
+                          const std::string &header = "")
+        : enabled_(enabled) {
+      if (!enabled_) {
+        return;
+      }
+      sink_.open(filename, std::ios::out | std::ios::app);
+      if (!sink_) {
+        return;
+      }
+
+      old_cout_ = std::cout.rdbuf(sink_.rdbuf());
+      old_cerr_ = std::cerr.rdbuf(sink_.rdbuf());
+      active_ = true;
+      if (!header.empty()) {
+        std::cout << "\n=== " << header << " ===\n";
+      }
+    }
+
+    ~ScopedRankLogRedirect() { restore(); }
+    ScopedRankLogRedirect(const ScopedRankLogRedirect &) = delete;
+    ScopedRankLogRedirect &operator=(const ScopedRankLogRedirect &) = delete;
+
+  private:
+    void restore() {
+      if (!active_) {
+        return;
+      }
+      std::cout.flush();
+      std::cerr.flush();
+      std::cout.rdbuf(old_cout_);
+      std::cerr.rdbuf(old_cerr_);
+      active_ = false;
+    }
+
+    bool enabled_ = false;
+    bool active_ = false;
+    std::ofstream sink_;
+    std::streambuf *old_cout_ = nullptr;
+    std::streambuf *old_cerr_ = nullptr;
+  };
 
   static void write_json_file(const std::string &filename,
                               const nlohmann::json &json_data) {
@@ -255,6 +313,10 @@ private:
             !dst_proto["converged"].is_object()) {
           dst_proto["converged"] = nlohmann::json::object();
         }
+        if (!dst_proto.contains("timings") ||
+            !dst_proto["timings"].is_object()) {
+          dst_proto["timings"] = nlohmann::json::object();
+        }
 
         auto merge_flag_map = [&](const char *name) {
           if (!shard_proto.contains(name) || !shard_proto[name].is_object()) {
@@ -273,6 +335,15 @@ private:
 
         merge_flag_map("saved");
         merge_flag_map("converged");
+        if (shard_proto.contains("timings") &&
+            shard_proto["timings"].is_object()) {
+          for (const auto &[freq_key, timing_value] :
+               shard_proto["timings"].items()) {
+            if (!dst_proto["timings"].contains(freq_key)) {
+              dst_proto["timings"][freq_key] = timing_value;
+            }
+          }
+        }
       }
     }
   }
@@ -830,6 +901,9 @@ private:
       World &subworld = *subworld_ptr;
       const size_t subgroup_id = static_cast<size_t>(
           world.rank() % static_cast<int>(state_parallel_plan.execution_groups));
+      ScopedRankLogRedirect subgroup_console_redirect(
+          subworld.rank() == 0, group_console_file(subgroup_id),
+          "stage2-linear subgroup=" + std::to_string(subgroup_id));
 
       auto old_pmap3 = FunctionDefaults<3>::get_pmap();
       auto restore_pmap = [&]() { FunctionDefaults<3>::set_pmap(old_pmap3); };
@@ -1044,17 +1118,27 @@ private:
     }
   }
 
-  static void run_derived_request(World &exec_world,
-                                  const GroundStateData &ground,
-                                  const DerivedStateRequest &req,
-                                  SimpleVBCComputer &vbc_computer,
-                                  long &completed, long &failed) {
+  struct DerivedRequestTiming {
+    bool success = false;
+    double wall_seconds = 0.0;
+    double cpu_seconds = 0.0;
+  };
+
+  static DerivedRequestTiming
+  run_derived_request(World &exec_world, const GroundStateData &ground,
+                      const DerivedStateRequest &req,
+                      SimpleVBCComputer &vbc_computer, long &completed,
+                      long &failed) {
     // Single derived-request runner used by both subgroup and serial fallback
     // execution paths.
+    const double start_wall = madness::wall_time();
+    const double start_cpu = madness::cpu_time();
+    DerivedRequestTiming timing;
     try {
       VBCResponseState vbc_state =
           DerivedStatePlanner::make_vbc_state(req, ground.isSpinRestricted());
       vbc_computer.compute_and_save(vbc_state);
+      timing.success = true;
       if (exec_world.rank() == 0) {
         ++completed;
       }
@@ -1065,6 +1149,9 @@ private:
               " failed during VBC solve: ", ex.what());
       }
     }
+    timing.wall_seconds = madness::wall_time() - start_wall;
+    timing.cpu_seconds = madness::cpu_time() - start_cpu;
+    return timing;
   }
 
   struct DerivedExecutionResult {
@@ -1113,7 +1200,10 @@ private:
         {"ready_requests", derived_gate.ready_requests},
         {"blocked_requests", derived_gate.blocked_requests},
         {"completed_requests", 0},
-        {"failed_requests", 0}};
+        {"failed_requests", 0},
+        {"total_wall_seconds", 0.0},
+        {"total_cpu_seconds", 0.0},
+        {"request_timings", nlohmann::json::array()}};
 
     // Plan indices that passed the dependency gate at the final threshold.
     std::vector<size_t> ready_request_indices;
@@ -1153,12 +1243,20 @@ private:
           const size_t subgroup_id = static_cast<size_t>(
               world.rank() %
               static_cast<int>(state_parallel_plan.execution_groups));
+          ScopedRankLogRedirect subgroup_console_redirect(
+              subworld.rank() == 0, group_console_file(subgroup_id),
+              "stage2-derived subgroup=" + std::to_string(subgroup_id));
+          const std::string timing_shard_file =
+              group_derived_timing_file(subgroup_id);
 
           auto old_pmap3 = FunctionDefaults<3>::get_pmap();
           auto restore_pmap = [&]() { FunctionDefaults<3>::set_pmap(old_pmap3); };
 
           long local_completed = 0;
           long local_failed = 0;
+          double local_wall_seconds = 0.0;
+          double local_cpu_seconds = 0.0;
+          nlohmann::json local_request_timings = nlohmann::json::array();
           FunctionDefaults<3>::set_default_pmap(subworld);
           try {
             std::vector<size_t> local_ready_positions;
@@ -1185,15 +1283,28 @@ private:
                 const auto &req =
                     planned_states.derived_state_plan
                         .requests[ready_request_indices[pos]];
-                run_derived_request(subworld, local_ground, req,
-                                    local_vbc_computer, local_completed,
-                                    local_failed);
+                const auto timing = run_derived_request(
+                    subworld, local_ground, req, local_vbc_computer,
+                    local_completed, local_failed);
+                if (subworld.rank() == 0) {
+                  local_wall_seconds += timing.wall_seconds;
+                  local_cpu_seconds += timing.cpu_seconds;
+                  local_request_timings.push_back(
+                      {{"derived_state_id", req.derived_state_id},
+                       {"owner_group", subgroup_id},
+                       {"success", timing.success},
+                       {"wall_seconds", timing.wall_seconds},
+                       {"cpu_seconds", timing.cpu_seconds}});
+                }
               }
             } else if (subworld.rank() == 0) {
               print("Derived-state subgroup ", subgroup_id,
                     " has no owned ready requests.");
             }
 
+            if (subworld.rank() == 0) {
+              write_json_file(timing_shard_file, local_request_timings);
+            }
             subworld.gop.fence();
             restore_pmap();
           } catch (...) {
@@ -1204,11 +1315,50 @@ private:
           if (subworld.rank() != 0) {
             local_completed = 0;
             local_failed = 0;
+            local_wall_seconds = 0.0;
+            local_cpu_seconds = 0.0;
           }
           world.gop.sum(local_completed);
           world.gop.sum(local_failed);
+          world.gop.sum(local_wall_seconds);
+          world.gop.sum(local_cpu_seconds);
           derived_execution["completed_requests"] = local_completed;
           derived_execution["failed_requests"] = local_failed;
+          derived_execution["total_wall_seconds"] = local_wall_seconds;
+          derived_execution["total_cpu_seconds"] = local_cpu_seconds;
+          if (world.rank() == 0) {
+            print("Derived-state timing summary: completed=", local_completed,
+                  " failed=", local_failed, " wall=", local_wall_seconds,
+                  "s cpu=", local_cpu_seconds, "s");
+          }
+
+          world.gop.fence();
+          nlohmann::json merged_request_timings = nlohmann::json::array();
+          if (world.rank() == 0) {
+            for (size_t gid = 0; gid < derived_owner_groups; ++gid) {
+              const auto shard =
+                  read_json_file_or_object(group_derived_timing_file(gid));
+              if (!shard.is_array()) {
+                continue;
+              }
+              for (const auto &entry : shard) {
+                merged_request_timings.push_back(entry);
+              }
+            }
+          }
+          std::string request_timing_dump;
+          if (world.rank() == 0) {
+            request_timing_dump = merged_request_timings.dump();
+          }
+          world.gop.broadcast_serializable(request_timing_dump, 0);
+          if (world.rank() != 0) {
+            merged_request_timings = request_timing_dump.empty()
+                                         ? nlohmann::json::array()
+                                         : nlohmann::json::parse(
+                                               request_timing_dump);
+          }
+          derived_execution["request_timings"] =
+              std::move(merged_request_timings);
           world.gop.fence();
           ran_subgroup_derived = true;
         } catch (const std::exception &ex) {
@@ -1237,6 +1387,9 @@ private:
 
         long local_completed = 0;
         long local_failed = 0;
+        double local_wall_seconds = 0.0;
+        double local_cpu_seconds = 0.0;
+        nlohmann::json request_timings = nlohmann::json::array();
         SimpleVBCComputer serial_vbc_computer(world, ctx.ground);
         if (owner_group_schedule && derived_owner_groups > 1) {
           for (size_t gid = 0; gid < derived_owner_groups; ++gid) {
@@ -1250,27 +1403,71 @@ private:
               }
               const auto &req = planned_states.derived_state_plan
                                     .requests[ready_request_indices[pos]];
-              run_derived_request(world, ctx.ground, req, serial_vbc_computer,
-                                  local_completed, local_failed);
+              const auto timing = run_derived_request(
+                  world, ctx.ground, req, serial_vbc_computer, local_completed,
+                  local_failed);
+              if (world.rank() == 0) {
+                local_wall_seconds += timing.wall_seconds;
+                local_cpu_seconds += timing.cpu_seconds;
+                request_timings.push_back({{"derived_state_id", req.derived_state_id},
+                                           {"owner_group", gid},
+                                           {"success", timing.success},
+                                           {"wall_seconds", timing.wall_seconds},
+                                           {"cpu_seconds", timing.cpu_seconds}});
+              }
             }
           }
         } else {
           for (const auto idx : ready_request_indices) {
             const auto &req = planned_states.derived_state_plan.requests[idx];
-            run_derived_request(world, ctx.ground, req, serial_vbc_computer,
-                                local_completed, local_failed);
+            const auto timing =
+                run_derived_request(world, ctx.ground, req, serial_vbc_computer,
+                                    local_completed, local_failed);
+            if (world.rank() == 0) {
+              local_wall_seconds += timing.wall_seconds;
+              local_cpu_seconds += timing.cpu_seconds;
+              request_timings.push_back({{"derived_state_id", req.derived_state_id},
+                                         {"owner_group", 0},
+                                         {"success", timing.success},
+                                         {"wall_seconds", timing.wall_seconds},
+                                         {"cpu_seconds", timing.cpu_seconds}});
+            }
           }
         }
 
         if (world.rank() != 0) {
           local_completed = 0;
           local_failed = 0;
+          local_wall_seconds = 0.0;
+          local_cpu_seconds = 0.0;
         }
         world.gop.sum(local_completed);
         world.gop.sum(local_failed);
+        world.gop.sum(local_wall_seconds);
+        world.gop.sum(local_cpu_seconds);
         derived_execution["completed_requests"] = local_completed;
         derived_execution["failed_requests"] = local_failed;
+        derived_execution["total_wall_seconds"] = local_wall_seconds;
+        derived_execution["total_cpu_seconds"] = local_cpu_seconds;
+        if (world.rank() == 0) {
+          print("Derived-state timing summary: completed=", local_completed,
+                " failed=", local_failed, " wall=", local_wall_seconds,
+                "s cpu=", local_cpu_seconds, "s");
+        }
+        derived_execution["request_timings"] = std::move(request_timings);
       }
+    }
+
+    std::string derived_execution_dump;
+    if (world.rank() == 0) {
+      derived_execution_dump = derived_execution.dump();
+    }
+    world.gop.broadcast_serializable(derived_execution_dump, 0);
+    if (world.rank() != 0) {
+      derived_execution =
+          derived_execution_dump.empty()
+              ? nlohmann::json::object()
+              : nlohmann::json::parse(derived_execution_dump);
     }
 
     return DerivedExecutionResult{std::move(derived_gate),
@@ -1331,6 +1528,15 @@ private:
          schedule_ctx.restart_protocol0_saved_complete},
         {"restart_point_parallel_promoted",
          schedule_ctx.restart_point_parallel_promoted}};
+    if (schedule_ctx.state_parallel_plan.execution_groups > 1) {
+      nlohmann::json group_console_logs = nlohmann::json::array();
+      for (size_t gid = 0;
+           gid < schedule_ctx.state_parallel_plan.execution_groups; ++gid) {
+        group_console_logs.push_back(group_console_file(gid));
+      }
+      metadata["state_parallel_runtime"]["group_console_logs"] =
+          std::move(group_console_logs);
+    }
     metadata["derived_state_planner"] = {
         {"note",
          "Stage 2c: ready VBC-derived requests are executed before property "

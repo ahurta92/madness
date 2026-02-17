@@ -198,5 +198,24 @@ int main() {
     }
   }
 
+  {
+    LinearResponseDescriptor dedup_state(
+        DipolePerturbation{'x'},
+        {0.0, 0.1, 0.06 + 0.06, 0.1 + 0.02},
+        {1.0e-3, 1.0e-4}, true);
+
+    if (dedup_state.num_frequencies() != 3) {
+      ok = false;
+      std::cerr
+          << "frequency canonicalization should deduplicate near-identical "
+             "floating-point frequencies that map to the same filename key\n";
+    }
+
+    if (dedup_state.frequency_map.find(0.12) == dedup_state.frequency_map.end()) {
+      ok = false;
+      std::cerr << "expected canonical 0.120 frequency key in frequency_map\n";
+    }
+  }
+
   return ok ? 0 : 1;
 }

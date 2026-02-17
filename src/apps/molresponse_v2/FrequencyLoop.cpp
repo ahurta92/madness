@@ -156,14 +156,24 @@ void computeFrequencyLoop(World &world,
 
     // Run the solver with logging
     logger.start_state(pt);
+    const double state_wall_start = madness::wall_time();
+    const double state_cpu_start = madness::cpu_time();
     auto max_iter = response_manager.params().maxiter();
     auto conv_thresh = response_manager.params().dconv();
     bool converged = solve_response_vector(world, response_manager,
                                            ground_state, state_desc, pt, x_0,
                                            logger, max_iter, conv_thresh);
+    const double state_wall_seconds = madness::wall_time() - state_wall_start;
+    const double state_cpu_seconds = madness::cpu_time() - state_cpu_start;
+    persistence.record_timing(pt, state_wall_seconds, state_cpu_seconds);
     if (world.rank() == 0) {
       logger.print_timing_table(pt);
       logger.print_values_table(pt);
+      madness::print("⏱️ State timing for ", pt.perturbationDescription(),
+                     " at thresh ", pt.threshold(),
+                     " freq ", pt.frequency(),
+                     " wall=", state_wall_seconds,
+                     "s cpu=", state_cpu_seconds, "s");
     }
     world.gop.fence();
     // save and record the response vector

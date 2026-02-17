@@ -184,6 +184,21 @@ public:
     write();
   }
 
+  void record_timing(const LinearResponsePoint &pt, double wall_seconds,
+                     double cpu_seconds) {
+    const std::string sid = pt.perturbationDescription();
+    const std::string p = protocol_key(pt.threshold());
+    const std::string f = freq_key(pt.frequency());
+    ensure_protocol(data_, sid, p);
+    auto &node = data_["states"][sid]["protocols"][p];
+    if (!node.contains("timings") || !node["timings"].is_object()) {
+      node["timings"] = json::object();
+    }
+    node["timings"][f] = {{"wall_seconds", wall_seconds},
+                          {"cpu_seconds", cpu_seconds}};
+    write();
+  }
+
   // --- Property gating helpers ---
   static std::string
   final_protocol_key_from(const std::vector<double> &protos) {

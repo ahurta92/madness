@@ -120,6 +120,8 @@ public:
   [[nodiscard]] virtual bool
   is_converged(const LinearResponsePoint &pt) const = 0;
   virtual void record_status(const LinearResponsePoint &pt, bool c) = 0;
+  virtual void record_timing(const LinearResponsePoint &pt, double wall_seconds,
+                             double cpu_seconds) = 0;
   virtual ResponseDebugLogger &logger() = 0;
   virtual void flush_debug_log(World &world) = 0;
 };

@@ -4,7 +4,9 @@
 #include "Perturbation.hpp"
 #include "ResponseState.hpp"
 
+#include <algorithm>
 #include <molecule.h>
+#include <numeric>
 #include <set>
 #include <string>
 
@@ -48,6 +50,17 @@ class StateGenerator {
         };
         std::map<std::string, Entry> table;
 
+        auto canonicalize_freq_list = [](const std::vector<double>& freqs) {
+            std::vector<double> canonical;
+            canonical.reserve(freqs.size());
+            for (const double raw : freqs) {
+                canonical.push_back(canonicalize_response_frequency(raw));
+            }
+            std::sort(canonical.begin(), canonical.end());
+            canonical.erase(std::unique(canonical.begin(), canonical.end()), canonical.end());
+            return canonical;
+        };
+
         // helper to insert/merge one perturbation+freqs into table
         auto addPerturbation = [&](const Perturbation& p, const std::vector<double>& f) {
             std::string key = describe_perturbation(p);
@@ -56,18 +69,20 @@ class StateGenerator {
             if (e.freqs.empty()) {
                 e.pert = p;
             }
-            // merge in all f into the set
-            e.freqs.insert(f.begin(), f.end());
+            // merge in all f into the set using canonicalized frequency keys
+            for (const double raw_frequency : f) {
+                e.freqs.insert(canonicalize_response_frequency(raw_frequency));
+            }
         };
 
         auto dipole_dirs = rp.dipole_directions();
-        auto dipole_freqs = rp.dipole_frequencies();
+        auto dipole_freqs = canonicalize_freq_list(rp.dipole_frequencies());
         auto natoms = molecule_.natom();
 
         vector<int> nuclear_atom_indices(natoms);
         std::iota(nuclear_atom_indices.begin(), nuclear_atom_indices.end(), 0);
         auto nuclear_directions = rp.nuclear_directions();
-        auto nuclear_freqs = rp.nuclear_frequencies();
+        auto nuclear_freqs = canonicalize_freq_list(rp.nuclear_frequencies());
 
         enum class PropertyType { Alpha, Hessian, Beta, Raman };
 
@@ -97,7 +112,8 @@ class StateGenerator {
 
                 for (size_t b = 0; b < dipole_freqs.size(); ++b)
                     for (size_t c = 0; c < dipole_freqs.size(); ++c)
-                        augmented_dipole_freqs.push_back(dipole_freqs[b] + dipole_freqs[c]);
+                        augmented_dipole_freqs.push_back(
+                            canonicalize_response_frequency(dipole_freqs[b] + dipole_freqs[c]));
                 std::sort(augmented_dipole_freqs.begin(), augmented_dipole_freqs.end());
                 augmented_dipole_freqs.erase(std::unique(augmented_dipole_freqs.begin(), augmented_dipole_freqs.end()),
                                              augmented_dipole_freqs.end());

@@ -159,7 +159,13 @@ public:
       need_raman = need_raman || (p == "raman");
     }
 
-    const auto dipole_freqs = response_params.dipole_frequencies();
+    auto dipole_freqs = response_params.dipole_frequencies();
+    for (double &freq : dipole_freqs) {
+      freq = canonicalize_response_frequency(freq);
+    }
+    std::sort(dipole_freqs.begin(), dipole_freqs.end());
+    dipole_freqs.erase(std::unique(dipole_freqs.begin(), dipole_freqs.end()),
+                       dipole_freqs.end());
     const auto dipole_dirs = response_params.dipole_directions();
 
     if (need_beta) {
@@ -358,6 +364,8 @@ private:
                           const Perturbation &a, const Perturbation &b,
                           const Perturbation &c, double freq_b, double freq_c,
                           double threshold, bool spin_restricted) {
+    freq_b = canonicalize_response_frequency(freq_b);
+    freq_c = canonicalize_response_frequency(freq_c);
     const std::string request_id = make_request_id(a, b, c, freq_b, freq_c);
     if (!seen_ids.insert(request_id).second) {
       return;

@@ -1,4 +1,5 @@
 ﻿#include "ResponseState.hpp"
+#include <algorithm>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LinearResponseDescriptor
@@ -8,7 +9,16 @@ LinearResponseDescriptor::LinearResponseDescriptor(
     Perturbation pert, const std::vector<double> &freq,
     const std::vector<double> &thresh, bool spin_restricted_in)
     : perturbation(pert), spin_restricted(spin_restricted_in),
-      frequencies(freq), thresholds(thresh) {
+      thresholds(thresh) {
+  frequencies.reserve(freq.size());
+  for (const double raw_frequency : freq) {
+    frequencies.push_back(canonicalize_response_frequency(raw_frequency));
+  }
+  std::sort(frequencies.begin(), frequencies.end());
+  frequencies.erase(std::unique(frequencies.begin(), frequencies.end()),
+                    frequencies.end());
+
+  frequency_map.clear();
   for (size_t i = 0; i < frequencies.size(); ++i) {
     frequency_map[frequencies[i]] = i;
   }
@@ -41,7 +51,7 @@ bool LinearResponseDescriptor::is_spin_restricted() const {
 std::string LinearResponseDescriptor::make_key(double thresh,
                                                double freq) const {
   std::ostringstream oss;
-  double f = std::clamp(freq, 0.0, 100.0);
+  double f = canonicalize_response_frequency(std::clamp(freq, 0.0, 100.0));
 
   oss << describe_perturbation(perturbation)
       << "_f" << std::fixed << std::setprecision(3) << f
@@ -139,8 +149,8 @@ std::string SecondOrderResponseDescriptor::make_key(double f1, double f2,
                                                     double thr) const {
   std::ostringstream oss;
 
-  f1 = std::clamp(f1, 0.0, 100.0);
-  f2 = std::clamp(f2, 0.0, 100.0);
+  f1 = canonicalize_response_frequency(std::clamp(f1, 0.0, 100.0));
+  f2 = canonicalize_response_frequency(std::clamp(f2, 0.0, 100.0));
 
   oss << prefix() << describe_perturbation(perturbations_.first) << "_"
       << describe_perturbation(perturbations_.second) << "_f" << std::fixed
@@ -264,4 +274,3 @@ vector_real_function_3d perturbation_vector(World &, GroundStateData const &,
                                             XBCResponseState const &) {
   return {};
 }
-
