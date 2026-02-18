@@ -127,8 +127,11 @@ private:
   class JsonStateSolvePersistence final : public StateSolvePersistence {
   public:
     JsonStateSolvePersistence(World &world, const std::string &meta_file,
-                              const std::string &debug_file)
-        : response_record_(world, meta_file), debug_logger_(debug_file) {}
+                              const std::string &debug_file,
+                              nlohmann::json baseline_metadata =
+                                  nlohmann::json::object())
+        : response_record_(world, meta_file), debug_logger_(debug_file),
+          baseline_metadata_(std::move(baseline_metadata)) {}
 
     void
     initialize_states(const std::vector<LinearResponseDescriptor> &states) {
@@ -139,13 +142,15 @@ private:
 
     [[nodiscard]] bool is_saved(const LinearResponsePoint &pt) const override {
       return response_record_.is_saved(pt.perturbationDescription(),
-                                       pt.threshold(), pt.frequency());
+                                       pt.threshold(), pt.frequency()) ||
+             point_ready_in_baseline(pt, /*require_converged=*/false);
     }
 
     [[nodiscard]] bool
     is_converged(const LinearResponsePoint &pt) const override {
       return response_record_.is_converged(pt.perturbationDescription(),
-                                           pt.threshold(), pt.frequency());
+                                           pt.threshold(), pt.frequency()) ||
+             point_ready_in_baseline(pt, /*require_converged=*/true);
     }
 
     void record_status(const LinearResponsePoint &pt, bool c) override {
@@ -174,8 +179,51 @@ private:
     }
 
   private:
+    [[nodiscard]] bool
+    point_ready_in_baseline(const LinearResponsePoint &pt,
+                            bool require_converged) const {
+      if (!baseline_metadata_.is_object() ||
+          !baseline_metadata_.contains("states") ||
+          !baseline_metadata_["states"].is_object()) {
+        return false;
+      }
+      const std::string state_key = pt.perturbationDescription();
+      const std::string protocol_key = ResponseRecord2::protocol_key(pt.threshold());
+      const std::string freq_key = ResponseRecord2::freq_key(pt.frequency());
+
+      const auto states_it = baseline_metadata_["states"].find(state_key);
+      if (states_it == baseline_metadata_["states"].end() ||
+          !states_it->contains("protocols") ||
+          !(*states_it)["protocols"].is_object()) {
+        return false;
+      }
+      const auto protos_it = (*states_it)["protocols"].find(protocol_key);
+      if (protos_it == (*states_it)["protocols"].end()) {
+        return false;
+      }
+      if (!protos_it->contains("saved") || !(*protos_it)["saved"].is_object()) {
+        return false;
+      }
+      const auto saved_it = (*protos_it)["saved"].find(freq_key);
+      if (saved_it == (*protos_it)["saved"].end() ||
+          !saved_it->is_boolean() || !saved_it->get<bool>()) {
+        return false;
+      }
+      if (!require_converged) {
+        return true;
+      }
+      if (!protos_it->contains("converged") ||
+          !(*protos_it)["converged"].is_object()) {
+        return false;
+      }
+      const auto converged_it = (*protos_it)["converged"].find(freq_key);
+      return converged_it != (*protos_it)["converged"].end() &&
+             converged_it->is_boolean() && converged_it->get<bool>();
+    }
+
     ResponseRecord2 response_record_;
     ResponseDebugLogger debug_logger_;
+    nlohmann::json baseline_metadata_;
   };
 
   static std::string group_shard_file(const std::string &filename, size_t gid) {
@@ -264,6 +312,21 @@ private:
     nlohmann::json parsed = nlohmann::json::object();
     in >> parsed;
     return parsed;
+  }
+
+  static nlohmann::json
+  broadcast_json_object(World &world, nlohmann::json payload,
+                        int root_rank = 0) {
+    std::string payload_dump;
+    if (world.rank() == root_rank) {
+      payload_dump = payload.dump();
+    }
+    world.gop.broadcast_serializable(payload_dump, root_rank);
+    if (payload_dump.empty()) {
+      return nlohmann::json::object();
+    }
+    return nlohmann::json::parse(payload_dump, nullptr,
+                                 /*allow_exceptions=*/true);
   }
 
   static void merge_state_metadata_json(nlohmann::json &merged,
@@ -532,10 +595,25 @@ private:
                          std::move(state_parallel_plan)};
   }
 
+  struct ProtocolExecutionPolicy {
+    bool use_state_mode = true;
+    size_t active_groups = 1;
+    size_t pending_states = 0;
+    size_t pending_points = 0;
+
+    [[nodiscard]] nlohmann::json to_json() const {
+      return {{"use_state_mode", use_state_mode},
+              {"active_groups", active_groups},
+              {"pending_states", pending_states},
+              {"pending_points", pending_points}};
+    }
+  };
+
   struct RuntimePointOwnershipPolicy {
     size_t point_parallel_start_protocol_index = 0;
     bool restart_protocol0_saved_complete = false;
     bool restart_point_parallel_promoted = false;
+    std::vector<ProtocolExecutionPolicy> protocol_policies;
   };
 
   static std::vector<size_t>
@@ -548,6 +626,88 @@ private:
       }
     }
     return owner_by_state_index;
+  }
+
+  static std::vector<ProtocolExecutionPolicy>
+  build_protocol_execution_policy(World &world,
+                                  const CalculationParameters &calc_params,
+                                  const StateParallelPlan &state_parallel_plan,
+                                  const std::vector<LinearResponseDescriptor>
+                                      &linear_states,
+                                  bool owner_group_schedule,
+                                  size_t point_parallel_start_protocol_index) {
+    const auto &protocol = calc_params.protocol();
+    std::vector<ProtocolExecutionPolicy> protocol_policies(protocol.size());
+    if (protocol.empty()) {
+      return protocol_policies;
+    }
+
+    if (world.rank() == 0) {
+      const nlohmann::json existing_metadata =
+          read_json_file_or_object("response_metadata.json");
+      const size_t point_owner_groups =
+          std::max<size_t>(1, state_parallel_plan.effective_point_groups);
+      for (size_t ti = 0; ti < protocol.size(); ++ti) {
+        ProtocolExecutionPolicy policy;
+        policy.use_state_mode =
+            !owner_group_schedule || ti < point_parallel_start_protocol_index;
+        const bool at_final_protocol = (ti + 1 == protocol.size());
+
+        for (const auto &state : linear_states) {
+          bool state_has_pending = false;
+          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+               ++freq_idx) {
+            LinearResponsePoint pt{state, ti, freq_idx};
+            const bool point_ready = point_ready_in_metadata(
+                existing_metadata, pt, /*require_saved=*/true,
+                /*require_converged=*/at_final_protocol);
+            if (!point_ready) {
+              ++policy.pending_points;
+              state_has_pending = true;
+            }
+          }
+          if (state_has_pending) {
+            ++policy.pending_states;
+          }
+        }
+
+        if (!owner_group_schedule || policy.pending_points == 0) {
+          policy.active_groups = 1;
+        } else if (policy.use_state_mode) {
+          policy.active_groups = std::max<size_t>(
+              1, std::min(state_parallel_plan.state_owner_groups,
+                          policy.pending_states));
+        } else {
+          policy.active_groups = std::max<size_t>(
+              1, std::min(point_owner_groups, policy.pending_points));
+        }
+        protocol_policies[ti] = policy;
+      }
+    }
+
+    nlohmann::json payload = nlohmann::json::array();
+    if (world.rank() == 0) {
+      for (const auto &policy : protocol_policies) {
+        payload.push_back(policy.to_json());
+      }
+    }
+    payload = broadcast_json_object(world, std::move(payload), 0);
+    if (!payload.is_array()) {
+      return protocol_policies;
+    }
+    protocol_policies.clear();
+    protocol_policies.reserve(payload.size());
+    for (const auto &entry : payload) {
+      ProtocolExecutionPolicy policy;
+      if (entry.is_object()) {
+        policy.use_state_mode = entry.value("use_state_mode", true);
+        policy.active_groups = std::max<size_t>(1, entry.value("active_groups", 1));
+        policy.pending_states = entry.value("pending_states", size_t(0));
+        policy.pending_points = entry.value("pending_points", size_t(0));
+      }
+      protocol_policies.push_back(policy);
+    }
+    return protocol_policies;
   }
 
   static RuntimePointOwnershipPolicy compute_runtime_point_ownership_policy(
@@ -595,6 +755,9 @@ private:
     runtime_policy.restart_point_parallel_promoted =
         runtime_policy.point_parallel_start_protocol_index !=
         state_parallel_plan.point_parallel_start_protocol_index;
+    runtime_policy.protocol_policies = build_protocol_execution_policy(
+        world, calc_params, state_parallel_plan, linear_states,
+        owner_group_schedule, runtime_policy.point_parallel_start_protocol_index);
     return runtime_policy;
   }
 
@@ -654,6 +817,8 @@ private:
     // Restart diagnostics propagated to stage metadata.
     bool restart_point_parallel_promoted = false;
     bool restart_protocol0_saved_complete = false;
+    // Runtime per-protocol mode + active owner groups after restart analysis.
+    std::vector<ProtocolExecutionPolicy> runtime_protocol_policies;
 
     StateSolveScheduleContext(
         bool subgroup_parallel_requested_, bool owner_group_schedule_,
@@ -662,7 +827,8 @@ private:
         std::vector<size_t> owner_by_state_index_, size_t effective_point_groups,
         size_t runtime_point_parallel_start_protocol_index_,
         bool restart_point_parallel_promoted_,
-        bool restart_protocol0_saved_complete_)
+        bool restart_protocol0_saved_complete_,
+        std::vector<ProtocolExecutionPolicy> runtime_protocol_policies_)
         : subgroup_parallel_requested(subgroup_parallel_requested_),
           owner_group_schedule(owner_group_schedule_),
           state_parallel_plan(state_parallel_plan_),
@@ -673,10 +839,26 @@ private:
               runtime_point_parallel_start_protocol_index_),
           restart_point_parallel_promoted(restart_point_parallel_promoted_),
           restart_protocol0_saved_complete(
-              restart_protocol0_saved_complete_) {}
+              restart_protocol0_saved_complete_),
+          runtime_protocol_policies(std::move(runtime_protocol_policies_)) {}
 
     [[nodiscard]] size_t point_owner_groups() const {
       return point_scheduler.owner_groups();
+    }
+
+    [[nodiscard]] ProtocolExecutionPolicy
+    protocol_policy(size_t protocol_index) const {
+      if (protocol_index < runtime_protocol_policies.size()) {
+        return runtime_protocol_policies[protocol_index];
+      }
+      ProtocolExecutionPolicy fallback;
+      fallback.use_state_mode =
+          protocol_index < runtime_point_parallel_start_protocol_index;
+      fallback.active_groups = fallback.use_state_mode
+                                   ? std::max<size_t>(
+                                         1, state_parallel_plan.state_owner_groups)
+                                   : std::max<size_t>(1, point_owner_groups());
+      return fallback;
     }
   };
 
@@ -690,7 +872,15 @@ private:
     if (ctx.state_parallel_plan.mapping_groups <= 1) {
       return true;
     }
-    return protocol_index < ctx.runtime_point_parallel_start_protocol_index;
+    return ctx.protocol_policy(protocol_index).use_state_mode;
+  }
+
+  static size_t active_owner_groups_for_protocol_runtime(
+      const StateSolveScheduleContext &ctx, size_t protocol_index) {
+    if (ctx.state_parallel_plan.mapping_groups <= 1) {
+      return 1;
+    }
+    return std::max<size_t>(1, ctx.protocol_policy(protocol_index).active_groups);
   }
 
   template <typename PointFn>
@@ -728,6 +918,23 @@ private:
                       bool at_final_protocol) {
     const bool is_saved = persistence.is_saved(pt);
     return !is_saved || (at_final_protocol && !persistence.is_converged(pt));
+  }
+
+  static bool point_needs_solving_from_metadata(
+      const nlohmann::json &metadata, const LinearResponsePoint &pt,
+      bool at_final_protocol) {
+    const bool is_saved = point_ready_in_metadata(metadata, pt,
+                                                  /*require_saved=*/true,
+                                                  /*require_converged=*/false);
+    if (!is_saved) {
+      return true;
+    }
+    if (!at_final_protocol) {
+      return false;
+    }
+    return !point_ready_in_metadata(metadata, pt,
+                                    /*require_saved=*/true,
+                                    /*require_converged=*/true);
   }
 
   template <typename PointNeedsFn>
@@ -850,34 +1057,79 @@ private:
       size_t lane_begin, size_t lane_end,
       const std::vector<size_t> *single_lane_state_indices,
       PointNeedsFn &&point_needs_solving_fn) {
+    (void)single_lane_state_indices;
     PendingProtocolManifest manifest;
     manifest.use_state_mode =
         use_state_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
-    dispatch_owned_work_for_protocol(
-        schedule_ctx, thresh_index, lane_begin, lane_end,
-        single_lane_state_indices,
-        [&](size_t /*lane_id*/, bool /*use_state_mode*/) {},
-        [&](size_t state_index) {
-          const auto &state = schedule_ctx.linear_states[state_index];
-          bool state_has_pending = false;
-          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
-               ++freq_idx) {
-            if (point_needs_solving_fn(state, freq_idx)) {
-              state_has_pending = true;
-              manifest.pending_points.push_back({state_index, freq_idx});
-            }
-          }
-          if (state_has_pending) {
-            manifest.pending_state_indices.push_back(state_index);
-          }
-        },
-        [&](size_t state_index, size_t freq_index) {
-          const auto &state = schedule_ctx.linear_states[state_index];
-          if (point_needs_solving_fn(state, freq_index)) {
-            manifest.pending_points.push_back({state_index, freq_index});
-          }
-        });
+    const size_t active_groups =
+        active_owner_groups_for_protocol_runtime(schedule_ctx, thresh_index);
+    const size_t lane_end_clamped = std::min(lane_end, active_groups);
+    if (lane_begin >= lane_end_clamped) {
+      return manifest;
+    }
+
+    std::vector<PendingPointWorkItem> pending_points_all;
+    std::vector<size_t> pending_state_indices_all;
+    pending_points_all.reserve(schedule_ctx.linear_states.size());
+    pending_state_indices_all.reserve(schedule_ctx.linear_states.size());
+    for (size_t state_index = 0; state_index < schedule_ctx.linear_states.size();
+         ++state_index) {
+      const auto &state = schedule_ctx.linear_states[state_index];
+      bool state_has_pending = false;
+      for (size_t freq_idx = 0; freq_idx < state.num_frequencies(); ++freq_idx) {
+        if (point_needs_solving_fn(state, freq_idx)) {
+          state_has_pending = true;
+          pending_points_all.push_back({state_index, freq_idx});
+        }
+      }
+      if (state_has_pending) {
+        pending_state_indices_all.push_back(state_index);
+      }
+    }
+
+    if (manifest.use_state_mode) {
+      std::vector<char> owned_states(schedule_ctx.linear_states.size(), 0);
+      for (size_t idx = 0; idx < pending_state_indices_all.size(); ++idx) {
+        const size_t owner_lane = idx % active_groups;
+        if (owner_lane >= lane_begin && owner_lane < lane_end_clamped) {
+          const size_t state_index = pending_state_indices_all[idx];
+          manifest.pending_state_indices.push_back(state_index);
+          owned_states[state_index] = 1;
+        }
+      }
+      for (const auto &pending_point : pending_points_all) {
+        if (owned_states[pending_point.state_index]) {
+          manifest.pending_points.push_back(pending_point);
+        }
+      }
+    } else {
+      for (size_t idx = 0; idx < pending_points_all.size(); ++idx) {
+        const size_t owner_lane = idx % active_groups;
+        if (owner_lane >= lane_begin && owner_lane < lane_end_clamped) {
+          manifest.pending_points.push_back(pending_points_all[idx]);
+        }
+      }
+      for (const auto &pending_point : manifest.pending_points) {
+        if (manifest.pending_state_indices.empty() ||
+            manifest.pending_state_indices.back() != pending_point.state_index) {
+          manifest.pending_state_indices.push_back(pending_point.state_index);
+        }
+      }
+    }
     return manifest;
+  }
+
+  static PendingProtocolManifest build_pending_manifest_from_metadata(
+      const StateSolveScheduleContext &schedule_ctx, size_t thresh_index,
+      size_t lane_begin, size_t lane_end, const nlohmann::json &metadata,
+      bool at_final_protocol) {
+    auto needs_solving = [&](const LinearResponseDescriptor &state,
+                             size_t freq_idx) {
+      LinearResponsePoint pt{state, thresh_index, freq_idx};
+      return point_needs_solving_from_metadata(metadata, pt, at_final_protocol);
+    };
+    return build_pending_work_manifest(schedule_ctx, thresh_index, lane_begin,
+                                       lane_end, nullptr, needs_solving);
   }
 
   static void
@@ -936,6 +1188,16 @@ private:
       print("State-parallel restart detected: protocol-0 points are saved; "
             "enabling point ownership from protocol index 0.");
     }
+    if (world.rank() == 0 && !runtime_policy.protocol_policies.empty()) {
+      for (size_t ti = 0; ti < runtime_policy.protocol_policies.size(); ++ti) {
+        const auto &policy = runtime_policy.protocol_policies[ti];
+        print("Protocol policy ti=", ti, " mode=",
+              policy.use_state_mode ? "state" : "point",
+              " active_groups=", policy.active_groups,
+              " pending_states=", policy.pending_states,
+              " pending_points=", policy.pending_points);
+      }
+    }
 
     return StateSolveScheduleContext(
         subgroup_parallel_requested, owner_group_schedule, state_parallel_plan,
@@ -943,7 +1205,8 @@ private:
         state_parallel_plan.effective_point_groups,
         runtime_policy.point_parallel_start_protocol_index,
         runtime_policy.restart_point_parallel_promoted,
-        runtime_policy.restart_protocol0_saved_complete);
+        runtime_policy.restart_protocol0_saved_complete,
+        std::move(runtime_policy.protocol_policies));
   }
 
   static void execute_serial_state_solve(
@@ -995,11 +1258,8 @@ private:
                                              serial_point_needs_solving);
       }
 
-      const size_t lane_count = use_state_ownership_for_protocol_runtime(
-                                    schedule_ctx, thresh_index)
-                                    ? schedule_ctx.state_parallel_plan
-                                          .state_owner_groups
-                                    : schedule_ctx.point_owner_groups();
+      const size_t lane_count =
+          active_owner_groups_for_protocol_runtime(schedule_ctx, thresh_index);
       const auto manifest =
           build_pending_work_manifest(schedule_ctx, thresh_index, 0, lane_count,
                                       nullptr, serial_point_needs_solving);
@@ -1051,9 +1311,7 @@ private:
           }
 
           const size_t lane_count =
-              use_state_ownership_for_protocol_runtime(schedule_ctx, ti)
-                  ? schedule_ctx.state_parallel_plan.state_owner_groups
-                  : schedule_ctx.point_owner_groups();
+              active_owner_groups_for_protocol_runtime(schedule_ctx, ti);
           PendingProtocolManifest manifest;
           if (pending_manifest_by_ti[ti].has_value()) {
             manifest = *pending_manifest_by_ti[ti];
@@ -1099,6 +1357,12 @@ private:
     // 2) solve local ownership shards in each subgroup,
     // 3) merge subgroup metadata/debug shards on world rank 0 and broadcast.
     const auto &state_parallel_plan = schedule_ctx.state_parallel_plan;
+    nlohmann::json baseline_state_metadata = nlohmann::json::object();
+    if (world.rank() == 0) {
+      baseline_state_metadata = read_json_file_or_object("response_metadata.json");
+    }
+    baseline_state_metadata =
+        broadcast_json_object(world, std::move(baseline_state_metadata), 0);
     try {
       auto subworld_ptr = MacroTaskQ::create_worlds(
           world, state_parallel_plan.execution_groups);
@@ -1134,7 +1398,8 @@ private:
             group_shard_file(ctx.fock_json_file, subgroup_id);
 
         JsonStateSolvePersistence local_persistence(
-            subworld, metadata_shard_file, debug_shard_file);
+            subworld, metadata_shard_file, debug_shard_file,
+            baseline_state_metadata);
         local_persistence.initialize_states(local_states);
         if (subworld.rank() == 0) {
           print("State-parallel subgroup ", subgroup_id, " owns ",
@@ -1151,23 +1416,19 @@ private:
           const auto &protocol = calc_params.protocol();
           std::vector<std::optional<PendingProtocolManifest>>
               local_pending_manifest_by_ti(protocol.size());
+          std::vector<char> local_manifest_ready(protocol.size(), 0);
           auto local_needs_solving_at_protocol = [&](double protocol_thresh,
                                                      size_t thresh_index) {
-            // Local "needs solve" probe mirrors the serial path, but filtered
-            // by this subgroup's ownership mode (state lane or point lane).
+            if (local_manifest_ready[thresh_index] != 0) {
+              return local_pending_manifest_by_ti[thresh_index]->has_work();
+            }
             const bool at_final_protocol =
                 protocol_thresh == calc_params.protocol().back();
-
-            auto local_point_needs_solving =
-                [&](const LinearResponseDescriptor &state, size_t freq_idx) {
-                  LinearResponsePoint pt{state, thresh_index, freq_idx};
-                  return point_needs_solving(local_persistence, pt,
-                                             at_final_protocol);
-                };
-            const auto manifest = build_pending_work_manifest(
+            const auto manifest = build_pending_manifest_from_metadata(
                 schedule_ctx, thresh_index, subgroup_id, subgroup_id + 1,
-                &local_state_indices, local_point_needs_solving);
+                baseline_state_metadata, at_final_protocol);
             local_pending_manifest_by_ti[thresh_index] = manifest;
+            local_manifest_ready[thresh_index] = 1;
             return manifest.has_work();
           };
 
@@ -1198,16 +1459,11 @@ private:
                 if (local_pending_manifest_by_ti[ti].has_value()) {
                   manifest = *local_pending_manifest_by_ti[ti];
                 } else {
-                  auto local_point_needs_solving =
-                      [&](const LinearResponseDescriptor &state,
-                          size_t freq_idx) {
-                        LinearResponsePoint pt{state, ti, freq_idx};
-                        return point_needs_solving(local_persistence, pt,
-                                                   at_final_protocol);
-                      };
-                  manifest = build_pending_work_manifest(
+                  manifest = build_pending_manifest_from_metadata(
                       schedule_ctx, ti, subgroup_id, subgroup_id + 1,
-                      &local_state_indices, local_point_needs_solving);
+                      baseline_state_metadata, at_final_protocol);
+                  local_pending_manifest_by_ti[ti] = manifest;
+                  local_manifest_ready[ti] = 1;
                 }
                 if (subworld.rank() == 0) {
                   print("Subgroup ", subgroup_id, " protocol ", ti,
@@ -1726,6 +1982,12 @@ private:
          schedule_ctx.restart_protocol0_saved_complete},
         {"restart_point_parallel_promoted",
          schedule_ctx.restart_point_parallel_promoted}};
+    nlohmann::json protocol_policy = nlohmann::json::array();
+    for (const auto &policy : schedule_ctx.runtime_protocol_policies) {
+      protocol_policy.push_back(policy.to_json());
+    }
+    metadata["state_parallel_runtime"]["protocol_execution_policy"] =
+        std::move(protocol_policy);
     if (schedule_ctx.state_parallel_plan.execution_groups > 1) {
       nlohmann::json group_console_logs = nlohmann::json::array();
       for (size_t gid = 0;
