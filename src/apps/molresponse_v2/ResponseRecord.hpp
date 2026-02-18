@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <madness/external/nlohmann_json/json.hpp>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -197,6 +198,34 @@ public:
     node["timings"][f] = {{"wall_seconds", wall_seconds},
                           {"cpu_seconds", cpu_seconds}};
     write();
+  }
+
+  void record_restart_provenance(
+      const LinearResponsePoint &pt, const std::string &source_kind,
+      bool loaded_from_disk, bool promoted_from_static,
+      const std::optional<double> &source_protocol,
+      const std::optional<double> &source_frequency) {
+    const std::string sid = pt.perturbationDescription();
+    const std::string p = protocol_key(pt.threshold());
+    const std::string f = freq_key(pt.frequency());
+    ensure_protocol(data_, sid, p);
+    auto &node = data_["states"][sid]["protocols"][p];
+    if (!node.contains("restart_provenance") ||
+        !node["restart_provenance"].is_object()) {
+      node["restart_provenance"] = json::object();
+    }
+    json provenance = {{"kind", source_kind},
+                       {"loaded_from_disk", loaded_from_disk},
+                       {"promoted_from_static", promoted_from_static},
+                       {"source_protocol", nullptr},
+                       {"source_frequency", nullptr}};
+    if (source_protocol.has_value()) {
+      provenance["source_protocol"] = protocol_key(*source_protocol);
+    }
+    if (source_frequency.has_value()) {
+      provenance["source_frequency"] = freq_key(*source_frequency);
+    }
+    node["restart_provenance"][f] = std::move(provenance);
   }
 
   // --- Property gating helpers ---
@@ -410,7 +439,9 @@ private:
     auto &protos = root["states"][sid]["protocols"];
     if (!protos.contains(pkey)) {
       protos[pkey] = json::object(
-          {{"saved", json::object()}, {"converged", json::object()}});
+          {{"saved", json::object()},
+           {"converged", json::object()},
+           {"restart_provenance", json::object()}});
     }
   }
 

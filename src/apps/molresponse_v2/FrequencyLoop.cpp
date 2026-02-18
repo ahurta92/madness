@@ -117,33 +117,62 @@ void computeFrequencyLoop(World &world,
 
     world.gop.fence();
 
+    std::string restart_source_kind = "initial_guess";
+    std::optional<double> source_protocol;
+    std::optional<double> source_frequency;
+    bool loaded_from_disk = false;
+    bool promoted_from_static = false;
+
     bool loaded_guess = false;
     if (is_saved) {
       loaded_guess = load_response_vector(world, num_orbitals, pt, x_0);
+      if (loaded_guess) {
+        restart_source_kind = "same_protocol_archive";
+        source_protocol = pt.threshold();
+        source_frequency = pt.frequency();
+        loaded_from_disk = true;
+      }
     }
     if (!loaded_guess && thresh_index > 0) {
       LinearResponsePoint coarser_pt{state_desc, thresh_index - 1, freq_index};
       loaded_guess = load_response_vector(world, num_orbitals, coarser_pt, x_0);
+      if (loaded_guess) {
+        restart_source_kind = "coarser_protocol_archive";
+        source_protocol = coarser_pt.threshold();
+        source_frequency = coarser_pt.frequency();
+        loaded_from_disk = true;
+      }
     }
 
     if (!loaded_guess) {
       if (!pt.is_static()) {
         if (have_previous_freq_response) {
           x_0 = previous_response;
+          restart_source_kind = "previous_frequency_memory";
+          source_protocol = pt.threshold();
+          if (freq_index > 0) {
+            source_frequency = state_desc.frequency(freq_index - 1);
+          }
           if (freq_index > 0) {
             LinearResponsePoint prev_freq_pt{state_desc, thresh_index,
                                              freq_index - 1};
             if (prev_freq_pt.is_static()) {
               promote_response_vector(world, previous_response, x_0);
+              promoted_from_static = true;
             }
           }
         } else if (freq_index > 0) {
           LinearResponsePoint prev_freq_pt{state_desc, thresh_index,
                                            freq_index - 1};
           if (load_response_vector(world, num_orbitals, prev_freq_pt, x_0)) {
+            restart_source_kind = "previous_frequency_archive";
+            source_protocol = prev_freq_pt.threshold();
+            source_frequency = prev_freq_pt.frequency();
+            loaded_from_disk = true;
             world.gop.fence();
             if (prev_freq_pt.is_static()) {
               promote_response_vector(world, x_0, x_0);
+              promoted_from_static = true;
             }
           } else {
             x_0 = initialize_guess_vector(world, ground_state, pt);
@@ -168,6 +197,9 @@ void computeFrequencyLoop(World &world,
     const double state_wall_seconds = madness::wall_time() - state_wall_start;
     const double state_cpu_seconds = madness::cpu_time() - state_cpu_start;
     persistence.record_timing(pt, state_wall_seconds, state_cpu_seconds);
+    persistence.record_restart_provenance(
+        pt, restart_source_kind, loaded_from_disk, promoted_from_static,
+        source_protocol, source_frequency);
     if (world.rank() == 0) {
       logger.print_timing_table(pt);
       logger.print_values_table(pt);
@@ -176,6 +208,11 @@ void computeFrequencyLoop(World &world,
                      " freq ", pt.frequency(),
                      " wall=", state_wall_seconds,
                      "s cpu=", state_cpu_seconds, "s");
+      madness::print("↩️ Restart source for ", pt.perturbationDescription(),
+                     " at thresh ", pt.threshold(), " freq ", pt.frequency(),
+                     ": kind=", restart_source_kind,
+                     " loaded_from_disk=", loaded_from_disk,
+                     " promoted_from_static=", promoted_from_static);
     }
     world.gop.fence();
     // save and record the response vector

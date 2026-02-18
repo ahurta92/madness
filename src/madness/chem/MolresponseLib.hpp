@@ -162,6 +162,16 @@ private:
       response_record_.record_timing(pt, wall_seconds, cpu_seconds);
     }
 
+    void record_restart_provenance(
+        const LinearResponsePoint &pt, const std::string &source_kind,
+        bool loaded_from_disk, bool promoted_from_static,
+        const std::optional<double> &source_protocol,
+        const std::optional<double> &source_frequency) override {
+      response_record_.record_restart_provenance(
+          pt, source_kind, loaded_from_disk, promoted_from_static,
+          source_protocol, source_frequency);
+    }
+
     ResponseDebugLogger &logger() override { return debug_logger_; }
 
     void flush_debug_log(World &world) override {
@@ -383,6 +393,10 @@ private:
             !dst_proto["timings"].is_object()) {
           dst_proto["timings"] = nlohmann::json::object();
         }
+        if (!dst_proto.contains("restart_provenance") ||
+            !dst_proto["restart_provenance"].is_object()) {
+          dst_proto["restart_provenance"] = nlohmann::json::object();
+        }
 
         auto merge_flag_map = [&](const char *name) {
           if (!shard_proto.contains(name) || !shard_proto[name].is_object()) {
@@ -407,6 +421,15 @@ private:
                shard_proto["timings"].items()) {
             if (!dst_proto["timings"].contains(freq_key)) {
               dst_proto["timings"][freq_key] = timing_value;
+            }
+          }
+        }
+        if (shard_proto.contains("restart_provenance") &&
+            shard_proto["restart_provenance"].is_object()) {
+          for (const auto &[freq_key, provenance_value] :
+               shard_proto["restart_provenance"].items()) {
+            if (!dst_proto["restart_provenance"].contains(freq_key)) {
+              dst_proto["restart_provenance"][freq_key] = provenance_value;
             }
           }
         }
@@ -647,6 +670,8 @@ private:
           read_json_file_or_object("response_metadata.json");
       const size_t point_owner_groups =
           std::max<size_t>(1, state_parallel_plan.effective_point_groups);
+      const size_t state_owner_groups =
+          std::max<size_t>(1, state_parallel_plan.state_owner_groups);
       for (size_t ti = 0; ti < protocol.size(); ++ti) {
         ProtocolExecutionPolicy policy;
         policy.use_state_mode =
@@ -671,12 +696,20 @@ private:
           }
         }
 
+        // Phase-0 policy:
+        // - if protocol-0 still has pending points, keep strict state ownership
+        //   regardless of requested point-start protocol.
+        // - if protocol-0 is complete (restart), runtime may use point mode.
+        if (owner_group_schedule && ti == 0 && policy.pending_points > 0) {
+          policy.use_state_mode = true;
+        }
+
         if (!owner_group_schedule || policy.pending_points == 0) {
           policy.active_groups = 1;
         } else if (policy.use_state_mode) {
-          policy.active_groups = std::max<size_t>(
-              1, std::min(state_parallel_plan.state_owner_groups,
-                          policy.pending_states));
+          // Keep full state-owner lanes active so fixed owner mapping remains
+          // stable across restarts/partial completion.
+          policy.active_groups = state_owner_groups;
         } else {
           policy.active_groups = std::max<size_t>(
               1, std::min(point_owner_groups, policy.pending_points));
@@ -1089,10 +1122,11 @@ private:
 
     if (manifest.use_state_mode) {
       std::vector<char> owned_states(schedule_ctx.linear_states.size(), 0);
-      for (size_t idx = 0; idx < pending_state_indices_all.size(); ++idx) {
-        const size_t owner_lane = idx % active_groups;
+      for (const auto state_index : pending_state_indices_all) {
+        const size_t owner_lane =
+            schedule_ctx.owner_by_state_index[state_index] %
+            std::max<size_t>(1, active_groups);
         if (owner_lane >= lane_begin && owner_lane < lane_end_clamped) {
-          const size_t state_index = pending_state_indices_all[idx];
           manifest.pending_state_indices.push_back(state_index);
           owned_states[state_index] = 1;
         }
@@ -1196,6 +1230,22 @@ private:
               " active_groups=", policy.active_groups,
               " pending_states=", policy.pending_states,
               " pending_points=", policy.pending_points);
+      }
+      if (runtime_policy.protocol_policies[0].use_state_mode &&
+          runtime_policy.protocol_policies[0].pending_points > 0) {
+        print("Protocol-0 state-chain ownership (state -> owner_group):");
+        const size_t max_rows_to_print = 64;
+        const size_t rows_to_print =
+            std::min(max_rows_to_print, state_parallel_plan.assignments.size());
+        for (size_t i = 0; i < rows_to_print; ++i) {
+          const auto &assignment = state_parallel_plan.assignments[i];
+          print("  ", assignment.perturbation, " -> ", assignment.owner_group);
+        }
+        if (state_parallel_plan.assignments.size() > rows_to_print) {
+          print("  ... ",
+                state_parallel_plan.assignments.size() - rows_to_print,
+                " additional states omitted");
+        }
       }
     }
 

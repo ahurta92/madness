@@ -9,6 +9,9 @@
 #include "ResponseSolverUtils.hpp"
 #include "ResponseState.hpp"
 
+#include <optional>
+#include <string>
+
 #include <madness/world/world.h>
 #define NOT_IMPLEMENTED_THROW                                                  \
   throw std::runtime_error("This solver is not yet implemented.");
@@ -122,6 +125,11 @@ public:
   virtual void record_status(const LinearResponsePoint &pt, bool c) = 0;
   virtual void record_timing(const LinearResponsePoint &pt, double wall_seconds,
                              double cpu_seconds) = 0;
+  virtual void record_restart_provenance(
+      const LinearResponsePoint &pt, const std::string &source_kind,
+      bool loaded_from_disk, bool promoted_from_static,
+      const std::optional<double> &source_protocol,
+      const std::optional<double> &source_frequency) = 0;
   virtual ResponseDebugLogger &logger() = 0;
   virtual void flush_debug_log(World &world) = 0;
 };
