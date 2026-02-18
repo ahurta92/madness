@@ -50,6 +50,8 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <optional>
+#include <utility>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/Results.h>
@@ -824,37 +826,58 @@ private:
     }
   }
 
+  struct PendingPointWorkItem {
+    size_t state_index = 0;
+    size_t freq_index = 0;
+  };
+
+  struct PendingProtocolManifest {
+    // Ownership mode used for this protocol index.
+    bool use_state_mode = true;
+    // State-level work list for state ownership mode.
+    std::vector<size_t> pending_state_indices;
+    // Point-level work list for point ownership mode.
+    std::vector<PendingPointWorkItem> pending_points;
+
+    [[nodiscard]] bool has_work() const {
+      return !pending_state_indices.empty() || !pending_points.empty();
+    }
+  };
+
   template <typename PointNeedsFn>
-  static bool any_owned_point_needs_solving_for_protocol(
+  static PendingProtocolManifest build_pending_work_manifest(
       const StateSolveScheduleContext &schedule_ctx, size_t thresh_index,
       size_t lane_begin, size_t lane_end,
       const std::vector<size_t> *single_lane_state_indices,
       PointNeedsFn &&point_needs_solving_fn) {
-    bool found_any = false;
+    PendingProtocolManifest manifest;
+    manifest.use_state_mode =
+        use_state_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
     dispatch_owned_work_for_protocol(
         schedule_ctx, thresh_index, lane_begin, lane_end,
         single_lane_state_indices,
         [&](size_t /*lane_id*/, bool /*use_state_mode*/) {},
         [&](size_t state_index) {
-          if (found_any)
-            return;
           const auto &state = schedule_ctx.linear_states[state_index];
-          for (size_t freq_idx = 0; freq_idx < state.num_frequencies(); ++freq_idx) {
+          bool state_has_pending = false;
+          for (size_t freq_idx = 0; freq_idx < state.num_frequencies();
+               ++freq_idx) {
             if (point_needs_solving_fn(state, freq_idx)) {
-              found_any = true;
-              return;
+              state_has_pending = true;
+              manifest.pending_points.push_back({state_index, freq_idx});
             }
+          }
+          if (state_has_pending) {
+            manifest.pending_state_indices.push_back(state_index);
           }
         },
         [&](size_t state_index, size_t freq_index) {
-          if (found_any)
-            return;
           const auto &state = schedule_ctx.linear_states[state_index];
           if (point_needs_solving_fn(state, freq_index)) {
-            found_any = true;
+            manifest.pending_points.push_back({state_index, freq_index});
           }
         });
-    return found_any;
+    return manifest;
   }
 
   static void
@@ -940,6 +963,10 @@ private:
     }
     world.gop.fence();
 
+    const auto &protocol = calc_params.protocol();
+    std::vector<std::optional<PendingProtocolManifest>> pending_manifest_by_ti(
+        protocol.size());
+
     auto needs_solving_at_protocol = [&](double protocol_thresh,
                                          size_t thresh_index) {
       // A protocol threshold is considered "active" when at least one point is
@@ -968,16 +995,18 @@ private:
                                              serial_point_needs_solving);
       }
 
-      const size_t lane_count =
-          use_state_ownership_for_protocol_runtime(schedule_ctx, thresh_index)
-              ? schedule_ctx.state_parallel_plan.state_owner_groups
-              : schedule_ctx.point_owner_groups();
-      return any_owned_point_needs_solving_for_protocol(
-          schedule_ctx, thresh_index, 0, lane_count, nullptr,
-          serial_point_needs_solving);
+      const size_t lane_count = use_state_ownership_for_protocol_runtime(
+                                    schedule_ctx, thresh_index)
+                                    ? schedule_ctx.state_parallel_plan
+                                          .state_owner_groups
+                                    : schedule_ctx.point_owner_groups();
+      const auto manifest =
+          build_pending_work_manifest(schedule_ctx, thresh_index, 0, lane_count,
+                                      nullptr, serial_point_needs_solving);
+      pending_manifest_by_ti[thresh_index] = manifest;
+      return manifest.has_work();
     };
 
-    const auto &protocol = calc_params.protocol();
     auto solve_state = [&](size_t state_index, size_t thresh_index,
                            bool at_final_protocol) {
       auto &state = schedule_ctx.linear_states[state_index];
@@ -1025,26 +1054,35 @@ private:
               use_state_ownership_for_protocol_runtime(schedule_ctx, ti)
                   ? schedule_ctx.state_parallel_plan.state_owner_groups
                   : schedule_ctx.point_owner_groups();
-          dispatch_owned_work_for_protocol(
-              schedule_ctx, ti, 0, lane_count, nullptr,
-              [&](size_t lane_id, bool use_state_mode) {
-                if (world.rank() != 0)
-                  return;
-                if (use_state_mode) {
-                  print("State solve lane ", lane_id, "/", lane_count - 1,
-                        " at protocol thresh ", thresh);
-                } else {
-                  print("State-frequency solve lane ", lane_id, "/",
-                        lane_count - 1, " at protocol thresh ", thresh);
-                }
-              },
-              [&](size_t state_index) {
-                solve_state(state_index, ti, at_final_protocol);
-              },
-              [&](size_t state_index, size_t freq_index) {
-                solve_state_frequency(state_index, freq_index, ti,
-                                      at_final_protocol);
-              });
+          PendingProtocolManifest manifest;
+          if (pending_manifest_by_ti[ti].has_value()) {
+            manifest = *pending_manifest_by_ti[ti];
+          } else {
+            auto serial_point_needs_solving =
+                [&](const LinearResponseDescriptor &state, size_t freq_idx) {
+                  LinearResponsePoint pt{state, ti, freq_idx};
+                  return point_needs_solving(persistence, pt, at_final_protocol);
+                };
+            manifest = build_pending_work_manifest(schedule_ctx, ti, 0,
+                                                   lane_count, nullptr,
+                                                   serial_point_needs_solving);
+          }
+          if (world.rank() == 0) {
+            print("Protocol ", ti, " pending owned states=",
+                  manifest.pending_state_indices.size(),
+                  " pending owned points=", manifest.pending_points.size(),
+                  " mode=", manifest.use_state_mode ? "state" : "point");
+          }
+          if (manifest.use_state_mode) {
+            for (const auto state_index : manifest.pending_state_indices) {
+              solve_state(state_index, ti, at_final_protocol);
+            }
+          } else {
+            for (const auto &work_item : manifest.pending_points) {
+              solve_state_frequency(work_item.state_index, work_item.freq_index,
+                                    ti, at_final_protocol);
+            }
+          }
         },
         [&](double /*thresh*/, size_t /*thresh_index*/) {});
 
@@ -1110,6 +1148,9 @@ private:
           GroundStateData local_ground(subworld, ctx.archive_file, ctx.molecule);
           ResponseManager local_response_manager(subworld, calc_params);
 
+          const auto &protocol = calc_params.protocol();
+          std::vector<std::optional<PendingProtocolManifest>>
+              local_pending_manifest_by_ti(protocol.size());
           auto local_needs_solving_at_protocol = [&](double protocol_thresh,
                                                      size_t thresh_index) {
             // Local "needs solve" probe mirrors the serial path, but filtered
@@ -1123,12 +1164,13 @@ private:
                   return point_needs_solving(local_persistence, pt,
                                              at_final_protocol);
                 };
-            return any_owned_point_needs_solving_for_protocol(
+            const auto manifest = build_pending_work_manifest(
                 schedule_ctx, thresh_index, subgroup_id, subgroup_id + 1,
                 &local_state_indices, local_point_needs_solving);
+            local_pending_manifest_by_ti[thresh_index] = manifest;
+            return manifest.has_work();
           };
 
-          const auto &protocol = calc_params.protocol();
           run_protocol_threshold_loop(
               protocol, local_needs_solving_at_protocol,
               [&](double thresh, size_t /*thresh_index*/) {
@@ -1152,32 +1194,51 @@ private:
                     local_response_manager.getVtol(), fock_shard_file);
               },
               [&](double thresh, size_t ti, bool at_final_protocol) {
-                dispatch_owned_work_for_protocol(
-                    schedule_ctx, ti, subgroup_id, subgroup_id + 1,
-                    &local_state_indices,
-                    [&](size_t /*lane_id*/, bool use_state_mode) {
-                      if (!use_state_mode && subworld.rank() == 0) {
-                        print("Subgroup ", subgroup_id,
-                              " solving independent state-frequency points at "
-                              "thresh ",
-                              thresh, ".");
-                      }
-                    },
-                    [&](size_t state_index) {
-                      auto &state = schedule_ctx.linear_states[state_index];
-                      run_frequency_loop_with_flush(
-                          subworld, local_response_manager, state, ti,
-                          local_ground, local_persistence, at_final_protocol);
-                    },
-                    [&](size_t state_index, size_t freq_idx) {
-                      const auto &state = schedule_ctx.linear_states[state_index];
-                      const auto single_frequency_state =
-                          make_single_frequency_state(state, freq_idx);
-                      run_frequency_loop_with_flush(
-                          subworld, local_response_manager,
-                          single_frequency_state, ti, local_ground,
-                          local_persistence, at_final_protocol);
-                    });
+                PendingProtocolManifest manifest;
+                if (local_pending_manifest_by_ti[ti].has_value()) {
+                  manifest = *local_pending_manifest_by_ti[ti];
+                } else {
+                  auto local_point_needs_solving =
+                      [&](const LinearResponseDescriptor &state,
+                          size_t freq_idx) {
+                        LinearResponsePoint pt{state, ti, freq_idx};
+                        return point_needs_solving(local_persistence, pt,
+                                                   at_final_protocol);
+                      };
+                  manifest = build_pending_work_manifest(
+                      schedule_ctx, ti, subgroup_id, subgroup_id + 1,
+                      &local_state_indices, local_point_needs_solving);
+                }
+                if (subworld.rank() == 0) {
+                  print("Subgroup ", subgroup_id, " protocol ", ti,
+                        " pending states=",
+                        manifest.pending_state_indices.size(),
+                        " pending points=", manifest.pending_points.size(),
+                        " mode=", manifest.use_state_mode ? "state" : "point");
+                }
+                if (!manifest.use_state_mode && subworld.rank() == 0) {
+                  print("Subgroup ", subgroup_id,
+                        " solving independent state-frequency points at thresh ",
+                        thresh, ".");
+                }
+                if (manifest.use_state_mode) {
+                  for (const auto state_index : manifest.pending_state_indices) {
+                    auto &state = schedule_ctx.linear_states[state_index];
+                    run_frequency_loop_with_flush(
+                        subworld, local_response_manager, state, ti,
+                        local_ground, local_persistence, at_final_protocol);
+                  }
+                } else {
+                  for (const auto &work_item : manifest.pending_points) {
+                    const auto &state =
+                        schedule_ctx.linear_states[work_item.state_index];
+                    const auto single_frequency_state =
+                        make_single_frequency_state(state, work_item.freq_index);
+                    run_frequency_loop_with_flush(
+                        subworld, local_response_manager, single_frequency_state,
+                        ti, local_ground, local_persistence, at_final_protocol);
+                  }
+                }
               },
               [&](double /*thresh*/, size_t /*thresh_index*/) {
                 // ti+1 must not begin until every subgroup has finished ti.
@@ -2056,6 +2117,12 @@ private:
             state_parallel_plan.execution_groups - 1);
     }
 
+    std::string properties_dump;
+    std::string vib_dump;
+    std::string raman_dump;
+    bool local_property_stage_failed = false;
+    std::string local_property_stage_error;
+
     try {
       auto subworld_ptr = MacroTaskQ::create_worlds(
           world, state_parallel_plan.execution_groups);
@@ -2072,9 +2139,8 @@ private:
       auto old_pmap3 = FunctionDefaults<3>::get_pmap();
       auto restore_pmap = [&]() { FunctionDefaults<3>::set_pmap(old_pmap3); };
 
-      std::string properties_dump;
-      std::string vib_dump;
-      std::string raman_dump;
+      bool local_subgroup_failed = false;
+      std::string local_subgroup_error;
 
       // Property assembly uses 3D response objects; only swap the 3D pmap.
       FunctionDefaults<3>::set_default_pmap(subworld);
@@ -2112,39 +2178,69 @@ private:
             raman_dump = subgroup_output.raman_spectra.to_json().dump();
           }
         }
-        subworld.gop.fence();
-        restore_pmap();
+      } catch (const std::exception &ex) {
+        local_subgroup_failed = true;
+        local_subgroup_error = ex.what();
       } catch (...) {
-        restore_pmap();
-        throw;
+        local_subgroup_failed = true;
+        local_subgroup_error =
+            "unknown exception during subgroup property execution";
       }
 
-      const int property_world_root = static_cast<int>(property_group);
-      world.gop.broadcast_serializable(properties_dump, property_world_root);
-      world.gop.broadcast_serializable(vib_dump, property_world_root);
-      world.gop.broadcast_serializable(raman_dump, property_world_root);
+      long subgroup_failed_flag = local_subgroup_failed ? 1 : 0;
+      subworld.gop.max(subgroup_failed_flag);
+      restore_pmap();
 
-      PropertyStageOutput stage_output;
-      stage_output.properties = properties_dump.empty()
-                                    ? nlohmann::json::object()
-                                    : nlohmann::json::parse(properties_dump);
-      if (!vib_dump.empty()) {
-        stage_output.vibrational_analysis.from_json(
-            nlohmann::json::parse(vib_dump));
+      if (subgroup_failed_flag != 0) {
+        local_property_stage_failed = true;
+        if (local_subgroup_failed && !local_subgroup_error.empty()) {
+          local_property_stage_error = std::move(local_subgroup_error);
+        }
       }
-      if (!raman_dump.empty()) {
-        stage_output.raman_spectra.from_json(nlohmann::json::parse(raman_dump));
-      }
-      world.gop.fence();
-      return stage_output;
     } catch (const std::exception &ex) {
+      local_property_stage_failed = true;
+      local_property_stage_error = ex.what();
+    } catch (...) {
+      local_property_stage_failed = true;
+      local_property_stage_error =
+          "unknown exception during property subgroup setup";
+    }
+
+    long any_property_failure = local_property_stage_failed ? 1 : 0;
+    world.gop.max(any_property_failure);
+    if (any_property_failure != 0) {
       if (world.rank() == 0) {
-        print("State-parallel property subgroup execution failed: ", ex.what(),
-              " Falling back to world property stage.");
+        if (!local_property_stage_error.empty()) {
+          print("State-parallel property subgroup execution failed: ",
+                local_property_stage_error,
+                " Falling back to world property stage.");
+        } else {
+          print("State-parallel property subgroup execution failed on at least "
+                "one rank. Falling back to world property stage.");
+        }
       }
       return compute_requested_properties(world, response_params, ground_ctx,
                                           solved_states, scf_calc);
     }
+
+    const int property_world_root = static_cast<int>(property_group);
+    world.gop.broadcast_serializable(properties_dump, property_world_root);
+    world.gop.broadcast_serializable(vib_dump, property_world_root);
+    world.gop.broadcast_serializable(raman_dump, property_world_root);
+
+    PropertyStageOutput stage_output;
+    stage_output.properties = properties_dump.empty()
+                                  ? nlohmann::json::object()
+                                  : nlohmann::json::parse(properties_dump);
+    if (!vib_dump.empty()) {
+      stage_output.vibrational_analysis.from_json(
+          nlohmann::json::parse(vib_dump));
+    }
+    if (!raman_dump.empty()) {
+      stage_output.raman_spectra.from_json(nlohmann::json::parse(raman_dump));
+    }
+    world.gop.fence();
+    return stage_output;
   }
 
 public:

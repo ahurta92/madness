@@ -76,3 +76,4 @@ mad.in
 tmp_h2o_*.in
 tmp_h2o_validation/
 tmp_state_parallel_scaling/
+test_molresponse/

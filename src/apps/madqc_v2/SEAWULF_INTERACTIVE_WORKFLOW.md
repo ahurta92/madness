@@ -16,9 +16,34 @@ Preferred queue order:
 - `hbm-1tb-long-96core`
 
 Fallback queue order (when HBM is busy):
+
 - `short-96core`
 - `medium-96core`
 - `long-96core`
+
+More fallback queue options (when 96-core queues are busy):
+
+- `short-40core`
+- `debug-40core` (1hr limit, but good for quick checks)
+- `medium-40core` for more nodes and time when needed
+- `long-40core` for more nodes and time when needed
+
+On the 40-core machines use more nodes with fewer tasks per node, e.g. `--nodes=2 --ntasks-per-node=4` to keep NUMA mapping effective.
+
+On these systems i've built `madqc` in a build-40core-intelmpi directory.  We first source the load_40core.sh script, then configure the building using
+
+```cmake
+cmake ../ \
+  -DMADNESS_TASK_BACKEND=TBB \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+```
+
+After building, we run using the same environment, which happens to use intel mpi instead of openmpi.  Example madqc run on 40-core system on 8 nodes with 2 tasks per node:
+
+```bash
+mpirun --ppn 2 -np 8 /gpfs/projects/rjh/adrian/development/madness-worktrees/raman_branch_no_mul_sparse/build-40core-intelmpi/src/apps/madqc_v2/madqc --wf=response --input=tmp_h2o_alpha_beta_xyz_statepar16_f6.in
+```bash 
 
 Example allocation:
 
