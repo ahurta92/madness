@@ -2,9 +2,15 @@
 
 ## Goal
 
-Reduce wall time for response-property workloads by solving independent linear-response states concurrently on independent MPI processor groups (subworlds), while preserving existing numerical behavior.
+Reduce wall time for response-property workloads by solving independent linear-response channels concurrently on independent MPI processor groups (subworlds), while preserving existing numerical behavior.
 
-This targets workloads where many states are independent and memory pressure per subworld remains acceptable.
+This targets workloads where many channels are independent and memory pressure per subworld remains acceptable.
+
+## Terminology
+
+- Perturbation channel: one perturbation descriptor (e.g. `Dipole_x`).
+- Frequency series: ordered frequencies solved for one perturbation channel.
+- Channel point: one `(channel, frequency, protocol)` solve target.
 
 ## Current Constraints (from code)
 
@@ -38,22 +44,22 @@ Use `MacroTaskQ::create_worlds(universe, groups)` from `src/madness/mra/macrotas
 - `subgroup_id = universe.rank() % groups`
 - each subgroup has local communicator and independent collectives
 
-### 3) Deterministic state ownership
+### 3) Deterministic channel ownership
 
-Assign each state once:
+Assign each channel once:
 
-- static round-robin: `owner = state_index % groups`
-- protocol-0 warmup owner lanes: `state_owner_groups = min(groups, num_states)`
-- static round-robin during warmup: `owner = state_index % state_owner_groups`
+- static round-robin: `owner = channel_index % groups`
+- protocol-0 warmup owner lanes: `channel_owner_groups = min(groups, num_channels)`
+- static round-robin during warmup: `owner = channel_index % channel_owner_groups`
 
-Each subgroup only solves states it owns.
+Each subgroup only solves channels it owns.
 During point mode (`protocol_index >= state_parallel_point_start_protocol`), ownership switches to deterministic point ownership:
 
 - `point_owner = linear_point_index % effective_point_groups`
 - `effective_point_groups = min(mapping_groups, num_points)`
 
-This avoids idle point lanes when requested groups exceed available `(state,frequency)` points.
-It also allows runs with `groups > states` to keep extra groups idle at protocol-0 and then activate them for point ownership after protocol-0 restart data is available.
+This avoids idle point lanes when requested groups exceed available `(channel,frequency)` points.
+It also allows runs with `groups > channels` to keep extra groups idle at protocol-0 and then activate them for point ownership after protocol-0 restart data is available.
 
 ### 4) Per-group ground/response contexts
 
@@ -83,14 +89,54 @@ Then serialize property results/metadata and broadcast to universe rank 0 for fi
 
 ## Data Flow Sketch
 
-1. Generate all states once (same as now).
-2. Build state ownership and point ownership lane counts in planner metadata.
-3. For each protocol: run state ownership before point-start threshold, then point ownership after threshold.
+1. Generate all channels once (same as now).
+2. Build channel ownership and point ownership lane counts in planner metadata.
+3. For each protocol: run channel-series ownership before point-start threshold, then point ownership after threshold.
 4. On restart, if all protocol-0 points are already saved, promote point ownership to protocol index 0.
 5. Each subgroup writes shard metadata/log.
 6. Universe rank 0 merges shards.
 7. Property group computes alpha/beta/raman.
 8. Final JSON outputs are emitted as today.
+
+## Current Allocation Model (By Stage)
+
+The three execution stages do not yet use the exact same allocation strategy:
+
+1. Stage 2b (linear channel solves):
+- Protocol-aware deterministic ownership.
+- Protocol 0 favors channel-series ownership.
+- Later protocols can switch to channel-point ownership.
+- Restart metadata controls pending manifests and runtime mode gates.
+
+2. Stage 2c (derived/VBC requests):
+- Deterministic round-robin ownership over ready derived requests.
+- Owner map is static per ready-request list (`owner = ready_index % groups`).
+- No dynamic request stealing yet in this stage.
+
+3. Stage 3 (property components + downstream assembly):
+- Two-phase model:
+- Phase A: distributed component precompute (beta/raman components) across all subgroups.
+- Phase A uses dynamic task claiming via per-task lock files so subgroups can grab remaining component work.
+- Phase B: property-group downstream assembly/final reporting from merged component tables.
+
+So the short answer is: no, all three stages are not allocated in the same way yet.
+Current direction is intentional: Stage 3 now has dynamic component work pickup, while Stage 2b/2c are still deterministic-owner policies.
+
+## Offline Validation (Queue Down)
+
+When queues are unavailable, validate component scheduling artifacts offline:
+
+```bash
+python3 src/apps/molresponse_v2/validate_property_component_claims.py \
+  --run-dir <run_root> \
+  --strict
+```
+
+What it checks:
+- claim lock coverage: each claimed component task maps to at least one output row,
+- partial outputs: claimed tasks missing some inferred A-components,
+- duplicate component rows across subgroup shards,
+- optional duplicate VBC writes across subgroup console logs.
 
 ## Failure Handling / Fallback
 
@@ -98,7 +144,7 @@ Force fallback to serial mode when:
 
 - requested groups <= 1
 - requested groups > `world.size()`
-- state count too small (`auto` mode)
+- channel count too small (`auto` mode)
 - subgroup setup fails
 
 When fallback occurs, print an explicit reason on rank 0.
@@ -108,11 +154,11 @@ When fallback occurs, print an explicit reason on rank 0.
 ### PR1: Infrastructure and safe scaffolding
 
 - Add new `ResponseParameters` knobs.
-- Add group planner utility (state ownership, validation).
+- Add group planner utility (channel ownership, validation).
 - Add metadata/log shard merge helpers.
 - Keep solve path serial by default (`off`).
 
-### PR2: Parallel state solve path
+### PR2: Parallel channel solve path
 
 - Add subgroup execution branch in `solve_all_states`.
 - Add subgroup-local context setup and shard outputs.
@@ -130,7 +176,7 @@ When fallback occurs, print an explicit reason on rank 0.
 
 1. Compare serial vs grouped `response_metadata.json` for saved/converged coverage.
 2. Compare alpha/beta/raman values within tolerances on existing molresponse tests.
-3. Verify restart behavior (partially solved states) still works.
+3. Verify restart behavior (partially solved channels) still works.
 
 ### Performance
 
@@ -167,6 +213,9 @@ Track wall time and peak memory per rank.
 - Current checkpoint: per-point restart provenance (`kind`, source protocol/frequency, disk/promotion flags) is persisted in `response_metadata` and merged from subgroup shards.
 - Current checkpoint: derived-request timing aggregation is captured in `derived_state_planner.execution.request_timings` for both subgroup and serial fallback lanes.
 - Current checkpoint: serial vs parallel parity checks on H2O indicate alpha is close, while beta/Raman still show non-trivial drift; next work is reproducibility isolation (parallel-vs-parallel, then stage-by-stage divergence localization).
+- Testing status (February 20, 2026): in progress. Queue-backed end-to-end
+  validation for the newest property-component scheduling changes is still
+  pending.
 
 ## Refactor TODO Backlog
 

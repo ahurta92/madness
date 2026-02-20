@@ -12,30 +12,38 @@
 /*
 Developer Overview
 - Purpose: Convert user knobs (off/auto/on + group count) into a deterministic
-  state-level scheduling plan.
+  perturbation-channel scheduling plan.
+- Terminology used in this file:
+  - perturbation channel: one perturbation descriptor
+  - frequency series: ordered frequencies attached to one channel
+  - channel point: one (channel, frequency, protocol) work item
 - Strategy: Validate requested group configuration, decide effective mode, then
-  assign each generated linear state to an owner group via round-robin.
+  assign each generated linear response channel to an owner group via
+  round-robin.
 - Protocol policy: In parallel mode, begin with state ownership and optionally
-  switch to point ownership at response.state_parallel_point_start_protocol.
+  switch to independent channel-point ownership at
+  response.state_parallel_point_start_protocol.
 - Output contract: Return a pure metadata plan (mapping + execution settings +
-  per-state ownership) consumed by MolresponseLib solve stages.
+  per-channel ownership) consumed by MolresponseLib solve stages.
 - Design note: Mapping and execution group counts are kept explicit so we can
   preserve deterministic ownership even when execution falls back to serial.
 */
 
 using json = nlohmann::json;
 
-struct StateAssignment {
-  // Index into GeneratedStateData::states.
-  size_t state_index = 0;
-  // Human-readable perturbation key (for logs/JSON only).
-  std::string perturbation;
-  // Deterministic owner lane for this state.
+struct PerturbationChannelAssignment {
+  // Index into GeneratedStateData::states (one entry per perturbation channel).
+  size_t channel_index = 0;
+  // Human-readable channel key (for logs/JSON only).
+  std::string channel_label;
+  // Deterministic owner lane for this channel.
   size_t owner_group = 0;
 
   [[nodiscard]] json to_json() const {
-    return {{"state_index", state_index},
-            {"perturbation", perturbation},
+    return {{"channel_index", channel_index},
+            {"channel_label", channel_label},
+            // Legacy key kept for downstream tooling compatibility.
+            {"perturbation", channel_label},
             {"owner_group", owner_group}};
   }
 };
@@ -49,19 +57,21 @@ struct StateParallelPlan {
   size_t requested_groups = 1;
   // Number of ownership lanes used for deterministic work partitioning.
   size_t mapping_groups = 1;
-  // Number of groups that participate in state ownership (protocol-0 warmup).
-  // Capped by number of states; remaining groups can join in point ownership.
-  size_t state_owner_groups = 1;
+  // Number of groups that participate in channel-series ownership
+  // (protocol-0 warmup). Capped by number of channels; remaining groups can
+  // join in channel-point ownership.
+  size_t channel_owner_groups = 1;
   // Number of subworlds created for execution.
   size_t execution_groups = 1;
-  // First protocol index that may switch from state-ownership to point-ownership.
+  // First protocol index that may switch from channel-series ownership to
+  // channel-point ownership.
   size_t point_parallel_start_protocol_index = 1;
   // Human-readable description of the protocol ownership policy.
-  std::string frequency_partition_policy = "state_then_point";
+  std::string frequency_partition_policy = "channel_series_then_point";
   // Auto-mode threshold: minimum state count before enabling parallel mapping.
   size_t min_states = 1;
-  // Number of generated linear states considered by the planner.
-  size_t num_states = 0;
+  // Number of generated perturbation channels considered by the planner.
+  size_t num_channels = 0;
   // Number of (state,frequency) points across all linear states.
   size_t num_points = 0;
   // Size of the universe communicator.
@@ -74,11 +84,11 @@ struct StateParallelPlan {
   bool subgroup_parallel_enabled = false;
   // Diagnostic reason describing why a mode was chosen.
   std::string reason;
-  // Per-state ownership map used by solve_all_states.
-  std::vector<StateAssignment> assignments;
+  // Per-channel ownership map used by solve_all_states.
+  std::vector<PerturbationChannelAssignment> channel_assignments;
 
   [[nodiscard]] bool
-  use_state_ownership_for_protocol(size_t protocol_index) const {
+  use_channel_series_ownership_for_protocol(size_t protocol_index) const {
     if (mapping_groups <= 1) {
       return true;
     }
@@ -86,7 +96,7 @@ struct StateParallelPlan {
   }
 
   // Runtime override used by the solver: on restart, protocol-0 can promote to
-  // point ownership when protocol-0 points are already saved.
+  // channel-point ownership when protocol-0 points are already saved.
   [[nodiscard]] size_t effective_point_parallel_start_protocol_index(
       bool owner_group_schedule, bool has_protocol_thresholds,
       bool restart_protocol0_saved_complete) const {
@@ -103,25 +113,31 @@ struct StateParallelPlan {
 
   [[nodiscard]] json to_json() const {
     json rows = json::array();
-    for (const auto &a : assignments)
+    for (const auto &a : channel_assignments)
       rows.push_back(a.to_json());
     return {{"requested_mode", requested_mode},
             {"effective_mode", effective_mode},
             {"requested_groups", requested_groups},
             {"mapping_groups", mapping_groups},
-            {"state_owner_groups", state_owner_groups},
+            {"channel_owner_groups", channel_owner_groups},
+            // Legacy key kept for downstream tooling compatibility.
+            {"state_owner_groups", channel_owner_groups},
             {"execution_groups", execution_groups},
             {"point_parallel_start_protocol_index",
              point_parallel_start_protocol_index},
             {"frequency_partition_policy", frequency_partition_policy},
             {"min_states", min_states},
-            {"num_states", num_states},
+            {"num_channels", num_channels},
+            // Legacy key kept for downstream tooling compatibility.
+            {"num_states", num_channels},
             {"num_points", num_points},
             {"world_size", world_size},
             {"effective_point_groups", effective_point_groups},
             {"execution_enabled", execution_enabled},
             {"subgroup_parallel_enabled", subgroup_parallel_enabled},
             {"reason", reason},
+            {"channel_assignments", rows},
+            // Legacy key kept for downstream tooling compatibility.
             {"assignments", rows}};
   }
 };
@@ -144,13 +160,13 @@ public:
     return state_point_offsets_.empty() ? 0 : state_point_offsets_.back();
   }
 
-  [[nodiscard]] size_t owner_group(size_t state_index,
+  [[nodiscard]] size_t owner_group(size_t channel_index,
                                    size_t freq_index) const {
     if (owner_groups_ <= 1) {
       return 0;
     }
     const size_t linear_point_index =
-        state_point_offsets_[state_index] + freq_index;
+        state_point_offsets_[channel_index] + freq_index;
     return linear_point_index % owner_groups_;
   }
 
@@ -168,7 +184,7 @@ public:
     plan.requested_mode = params.state_parallel();
     plan.requested_groups = std::max<size_t>(1, params.state_parallel_groups());
     plan.min_states = params.state_parallel_min_states();
-    plan.num_states = states.size();
+    plan.num_channels = states.size();
     for (const auto &state : states) {
       plan.num_points += state.num_frequencies();
     }
@@ -176,7 +192,7 @@ public:
 
     const bool requested_on = (plan.requested_mode == "on");
     const bool requested_auto = (plan.requested_mode == "auto");
-    const bool enough_states = (plan.num_states >= plan.min_states);
+    const bool enough_channels = (plan.num_channels >= plan.min_states);
     const bool groups_valid = (plan.requested_groups > 1) &&
                               (plan.requested_groups <= plan.world_size);
 
@@ -187,17 +203,17 @@ public:
     } else if (!groups_valid) {
       plan.reason =
           "invalid group request (must be >1 and <= world size); using serial";
-    } else if (requested_auto && !enough_states) {
-      plan.reason = "auto mode disabled: state count below min_states";
-    } else if (requested_on || (requested_auto && enough_states)) {
+    } else if (requested_auto && !enough_channels) {
+      plan.reason = "auto mode disabled: channel count below min_states";
+    } else if (requested_on || (requested_auto && enough_channels)) {
       should_plan_parallel_mapping = true;
       plan.reason = "ownership mapping planned with subgroup execution";
     }
 
     if (should_plan_parallel_mapping) {
       plan.mapping_groups = plan.requested_groups;
-      plan.state_owner_groups =
-          std::min(plan.mapping_groups, std::max<size_t>(1, plan.num_states));
+      plan.channel_owner_groups =
+          std::min(plan.mapping_groups, std::max<size_t>(1, plan.num_channels));
       plan.execution_groups = plan.requested_groups;
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = true;
@@ -206,37 +222,40 @@ public:
           params.state_parallel_point_start_protocol();
       plan.frequency_partition_policy =
           plan.point_parallel_start_protocol_index == 0
-              ? "point_from_t0"
-              : "state_then_point";
+              ? "channel_point_from_t0"
+              : "channel_series_then_point";
       plan.effective_point_groups =
           plan.num_points == 0
               ? 1
               : std::min(plan.mapping_groups,
                          std::max<size_t>(1, plan.num_points));
       if (plan.effective_point_groups < plan.mapping_groups) {
-        plan.reason += "; point ownership lanes capped by available points";
-      }
-      if (plan.state_owner_groups < plan.mapping_groups) {
         plan.reason +=
-            "; protocol-0 warmup uses a subset of groups until point ownership";
+            "; channel-point ownership lanes capped by available points";
+      }
+      if (plan.channel_owner_groups < plan.mapping_groups) {
+        plan.reason +=
+            "; protocol-0 warmup uses a subset of groups until channel-point ownership";
       }
     } else {
       plan.mapping_groups = 1;
-      plan.state_owner_groups = 1;
+      plan.channel_owner_groups = 1;
       plan.execution_groups = 1;
       plan.execution_enabled = true;
       plan.subgroup_parallel_enabled = false;
       plan.effective_mode = "serial";
       plan.point_parallel_start_protocol_index = 0;
-      plan.frequency_partition_policy = "state_only";
+      plan.frequency_partition_policy = "channel_series_only";
       plan.effective_point_groups = 1;
     }
 
-    plan.assignments.reserve(states.size());
+    plan.channel_assignments.reserve(states.size());
     for (size_t i = 0; i < states.size(); ++i) {
-      const auto owner = i % plan.state_owner_groups;
-      plan.assignments.push_back(
-          StateAssignment{i, states[i].perturbationDescription(), owner});
+      const auto owner = i % plan.channel_owner_groups;
+      plan.channel_assignments.push_back(
+          PerturbationChannelAssignment{i,
+                                        states[i].perturbationDescription(),
+                                        owner});
     }
     return plan;
   }

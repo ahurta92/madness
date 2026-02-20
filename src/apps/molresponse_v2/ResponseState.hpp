@@ -94,6 +94,13 @@ struct LinearResponsePoint {
   [[nodiscard]] std::string perturbationDescription() const;
 };
 
+// Terminology aliases used by state-parallel scheduling code:
+// - PerturbationChannelDescriptor: one perturbation channel with a
+//   frequency series across protocol levels.
+// - ChannelPoint: one (channel, frequency, protocol) solve target.
+using PerturbationChannelDescriptor = LinearResponseDescriptor;
+using ChannelPoint = LinearResponsePoint;
+
 struct SecondOrderResponseDescriptor : public AbstractResponseDescriptor {
   std::pair<Perturbation, Perturbation> perturbations_;
   std::pair<double, double> frequencies_;

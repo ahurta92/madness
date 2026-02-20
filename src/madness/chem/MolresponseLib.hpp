@@ -61,6 +61,10 @@
 Developer Overview
 - Orchestration file for molresponse, structured as three stages:
   1) bootstrap + planning, 2) state solves, 3) property assembly.
+- Terminology used in this file:
+  - perturbation channel: one perturbation descriptor (e.g. Dipole_x)
+  - frequency series: ordered frequencies for one perturbation channel
+  - channel point: one (channel, frequency, protocol) solve target
 - Stage 1: read ground/checkpoint context, generate linear states, build derived
   request plan, and build state-parallel ownership/execution plan.
 - Stage 2: solve linear states over protocol thresholds; fresh runs start
@@ -604,7 +608,7 @@ private:
           "State-parallel plan: mode=", state_parallel_plan.effective_mode,
           " requested_groups=", state_parallel_plan.requested_groups,
           " mapping_groups=", state_parallel_plan.mapping_groups,
-          " state_owner_groups=", state_parallel_plan.state_owner_groups,
+          " channel_owner_groups=", state_parallel_plan.channel_owner_groups,
           " effective_point_groups=",
           state_parallel_plan.effective_point_groups,
           " point_parallel_start_protocol_index=",
@@ -619,15 +623,19 @@ private:
   }
 
   struct ProtocolExecutionPolicy {
-    bool use_state_mode = true;
+    bool use_channel_series_mode = true;
     size_t active_groups = 1;
-    size_t pending_states = 0;
+    size_t pending_channels = 0;
     size_t pending_points = 0;
 
     [[nodiscard]] nlohmann::json to_json() const {
-      return {{"use_state_mode", use_state_mode},
+      return {{"use_channel_series_mode", use_channel_series_mode},
+              // Legacy key kept for downstream tooling compatibility.
+              {"use_state_mode", use_channel_series_mode},
               {"active_groups", active_groups},
-              {"pending_states", pending_states},
+              {"pending_channels", pending_channels},
+              // Legacy key kept for downstream tooling compatibility.
+              {"pending_states", pending_channels},
               {"pending_points", pending_points}};
     }
   };
@@ -640,15 +648,16 @@ private:
   };
 
   static std::vector<size_t>
-  build_owner_by_state_index(const std::vector<LinearResponseDescriptor> &states,
+  build_owner_by_channel_index(const std::vector<LinearResponseDescriptor> &states,
                              const StateParallelPlan &state_parallel_plan) {
-    std::vector<size_t> owner_by_state_index(states.size(), 0);
-    for (const auto &assignment : state_parallel_plan.assignments) {
-      if (assignment.state_index < owner_by_state_index.size()) {
-        owner_by_state_index[assignment.state_index] = assignment.owner_group;
+    std::vector<size_t> owner_by_channel_index(states.size(), 0);
+    for (const auto &assignment : state_parallel_plan.channel_assignments) {
+      if (assignment.channel_index < owner_by_channel_index.size()) {
+        owner_by_channel_index[assignment.channel_index] =
+            assignment.owner_group;
       }
     }
-    return owner_by_state_index;
+    return owner_by_channel_index;
   }
 
   static std::vector<ProtocolExecutionPolicy>
@@ -670,11 +679,11 @@ private:
           read_json_file_or_object("response_metadata.json");
       const size_t point_owner_groups =
           std::max<size_t>(1, state_parallel_plan.effective_point_groups);
-      const size_t state_owner_groups =
-          std::max<size_t>(1, state_parallel_plan.state_owner_groups);
+      const size_t channel_owner_groups =
+          std::max<size_t>(1, state_parallel_plan.channel_owner_groups);
       for (size_t ti = 0; ti < protocol.size(); ++ti) {
         ProtocolExecutionPolicy policy;
-        policy.use_state_mode =
+        policy.use_channel_series_mode =
             !owner_group_schedule || ti < point_parallel_start_protocol_index;
         const bool at_final_protocol = (ti + 1 == protocol.size());
 
@@ -692,7 +701,7 @@ private:
             }
           }
           if (state_has_pending) {
-            ++policy.pending_states;
+            ++policy.pending_channels;
           }
         }
 
@@ -701,15 +710,15 @@ private:
         //   regardless of requested point-start protocol.
         // - if protocol-0 is complete (restart), runtime may use point mode.
         if (owner_group_schedule && ti == 0 && policy.pending_points > 0) {
-          policy.use_state_mode = true;
+          policy.use_channel_series_mode = true;
         }
 
         if (!owner_group_schedule || policy.pending_points == 0) {
           policy.active_groups = 1;
-        } else if (policy.use_state_mode) {
+        } else if (policy.use_channel_series_mode) {
           // Keep full state-owner lanes active so fixed owner mapping remains
           // stable across restarts/partial completion.
-          policy.active_groups = state_owner_groups;
+          policy.active_groups = channel_owner_groups;
         } else {
           policy.active_groups = std::max<size_t>(
               1, std::min(point_owner_groups, policy.pending_points));
@@ -733,9 +742,13 @@ private:
     for (const auto &entry : payload) {
       ProtocolExecutionPolicy policy;
       if (entry.is_object()) {
-        policy.use_state_mode = entry.value("use_state_mode", true);
+        policy.use_channel_series_mode =
+            entry.value("use_channel_series_mode",
+                        entry.value("use_state_mode", true));
         policy.active_groups = std::max<size_t>(1, entry.value("active_groups", 1));
-        policy.pending_states = entry.value("pending_states", size_t(0));
+        policy.pending_channels =
+            entry.value("pending_channels",
+                        entry.value("pending_states", size_t(0)));
         policy.pending_points = entry.value("pending_points", size_t(0));
       }
       protocol_policies.push_back(policy);
@@ -794,40 +807,40 @@ private:
     return runtime_policy;
   }
 
-  static void build_local_state_workset(
+  static void build_local_channel_workset(
       const std::vector<LinearResponseDescriptor> &linear_states,
-      const std::vector<size_t> &owner_by_state_index,
+      const std::vector<size_t> &owner_by_channel_index,
       const PointOwnershipScheduler &point_scheduler, size_t subgroup_id,
-      size_t mapping_groups, std::vector<size_t> &local_state_indices,
-      std::vector<LinearResponseDescriptor> &local_states) {
-    local_state_indices.clear();
-    local_states.clear();
-    local_state_indices.reserve(
+      size_t mapping_groups, std::vector<size_t> &local_channel_indices,
+      std::vector<LinearResponseDescriptor> &local_channels) {
+    local_channel_indices.clear();
+    local_channels.clear();
+    local_channel_indices.reserve(
         linear_states.size() / std::max<size_t>(1, mapping_groups));
-    local_states.reserve(linear_states.size());
+    local_channels.reserve(linear_states.size());
 
     const size_t point_owner_groups = point_scheduler.owner_groups();
-    for (size_t state_index = 0; state_index < linear_states.size();
-         ++state_index) {
-      const bool owns_state_at_first_protocol =
-          owner_by_state_index[state_index] == subgroup_id;
+    for (size_t channel_index = 0; channel_index < linear_states.size();
+         ++channel_index) {
+      const bool owns_channel_at_first_protocol =
+          owner_by_channel_index[channel_index] == subgroup_id;
       bool owns_any_point_after_first_protocol = false;
       if (point_owner_groups > 1) {
-        const auto &state = linear_states[state_index];
-        for (size_t freq_index = 0; freq_index < state.num_frequencies();
+        const auto &channel = linear_states[channel_index];
+        for (size_t freq_index = 0; freq_index < channel.num_frequencies();
              ++freq_index) {
-          if (point_scheduler.owner_group(state_index, freq_index) ==
+          if (point_scheduler.owner_group(channel_index, freq_index) ==
               subgroup_id) {
             owns_any_point_after_first_protocol = true;
             break;
           }
         }
       }
-      if (owns_state_at_first_protocol) {
-        local_state_indices.push_back(state_index);
+      if (owns_channel_at_first_protocol) {
+        local_channel_indices.push_back(channel_index);
       }
-      if (owns_state_at_first_protocol || owns_any_point_after_first_protocol) {
-        local_states.push_back(linear_states[state_index]);
+      if (owns_channel_at_first_protocol || owns_any_point_after_first_protocol) {
+        local_channels.push_back(linear_states[channel_index]);
       }
     }
   }
@@ -841,11 +854,14 @@ private:
     const StateParallelPlan &state_parallel_plan;
     // Full set of linear states generated in Stage 1.
     const std::vector<LinearResponseDescriptor> &linear_states;
-    // state_index -> owner lane for protocol ranges using state ownership.
-    std::vector<size_t> owner_by_state_index;
-    // Deterministic (state,freq) -> owner lane mapping for point ownership.
+    // channel_index -> owner lane for protocol ranges using channel-series
+    // ownership.
+    std::vector<size_t> owner_by_channel_index;
+    // Deterministic (channel,freq) -> owner lane mapping for channel-point
+    // ownership.
     PointOwnershipScheduler point_scheduler;
-    // Runtime protocol index where state-ownership switches to point-ownership.
+    // Runtime protocol index where channel-series ownership switches to
+    // channel-point ownership.
     size_t runtime_point_parallel_start_protocol_index = 0;
     // Restart diagnostics propagated to stage metadata.
     bool restart_point_parallel_promoted = false;
@@ -857,7 +873,7 @@ private:
         bool subgroup_parallel_requested_, bool owner_group_schedule_,
         const StateParallelPlan &state_parallel_plan_,
         const std::vector<LinearResponseDescriptor> &linear_states_,
-        std::vector<size_t> owner_by_state_index_, size_t effective_point_groups,
+        std::vector<size_t> owner_by_channel_index_, size_t effective_point_groups,
         size_t runtime_point_parallel_start_protocol_index_,
         bool restart_point_parallel_promoted_,
         bool restart_protocol0_saved_complete_,
@@ -866,7 +882,7 @@ private:
           owner_group_schedule(owner_group_schedule_),
           state_parallel_plan(state_parallel_plan_),
           linear_states(linear_states_),
-          owner_by_state_index(std::move(owner_by_state_index_)),
+          owner_by_channel_index(std::move(owner_by_channel_index_)),
           point_scheduler(linear_states_, effective_point_groups),
           runtime_point_parallel_start_protocol_index(
               runtime_point_parallel_start_protocol_index_),
@@ -885,11 +901,11 @@ private:
         return runtime_protocol_policies[protocol_index];
       }
       ProtocolExecutionPolicy fallback;
-      fallback.use_state_mode =
+      fallback.use_channel_series_mode =
           protocol_index < runtime_point_parallel_start_protocol_index;
-      fallback.active_groups = fallback.use_state_mode
+      fallback.active_groups = fallback.use_channel_series_mode
                                    ? std::max<size_t>(
-                                         1, state_parallel_plan.state_owner_groups)
+                                         1, state_parallel_plan.channel_owner_groups)
                                    : std::max<size_t>(1, point_owner_groups());
       return fallback;
     }
@@ -897,15 +913,15 @@ private:
 
   // Runtime policy gate shared by serial and subgroup paths.
   // For protocol indices below the runtime switch threshold we keep all
-  // frequencies of a state together; after the switch threshold we fan out by
-  // independent state-frequency points.
+  // frequencies of a channel together; after the switch threshold we fan out by
+  // independent channel-frequency points.
   static bool
-  use_state_ownership_for_protocol_runtime(const StateSolveScheduleContext &ctx,
+  use_channel_series_ownership_for_protocol_runtime(const StateSolveScheduleContext &ctx,
                                            size_t protocol_index) {
     if (ctx.state_parallel_plan.mapping_groups <= 1) {
       return true;
     }
-    return ctx.protocol_policy(protocol_index).use_state_mode;
+    return ctx.protocol_policy(protocol_index).use_channel_series_mode;
   }
 
   static size_t active_owner_groups_for_protocol_runtime(
@@ -935,11 +951,11 @@ private:
 
   template <typename StateFn>
   static void
-  for_each_owned_state_in_state_mode(const StateSolveScheduleContext &schedule_ctx,
+  for_each_owned_channel_in_channel_series_mode(const StateSolveScheduleContext &schedule_ctx,
                                      size_t lane_id, StateFn &&fn) {
     for (size_t state_index = 0; state_index < schedule_ctx.linear_states.size();
          ++state_index) {
-      if (schedule_ctx.owner_by_state_index[state_index] == lane_id) {
+      if (schedule_ctx.owner_by_channel_index[state_index] == lane_id) {
         fn(state_index);
       }
     }
@@ -1041,18 +1057,18 @@ private:
       const std::vector<size_t> *single_lane_state_indices,
       LaneBeginFn &&on_lane_begin, SolveStateFn &&solve_state,
       SolvePointFn &&solve_state_frequency) {
-    const bool use_state_mode =
-        use_state_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
+    const bool use_channel_series_mode =
+        use_channel_series_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
     const bool single_lane = (lane_end == lane_begin + 1);
     for (size_t lane_id = lane_begin; lane_id < lane_end; ++lane_id) {
-      on_lane_begin(lane_id, use_state_mode);
-      if (use_state_mode) {
+      on_lane_begin(lane_id, use_channel_series_mode);
+      if (use_channel_series_mode) {
         if (single_lane && single_lane_state_indices != nullptr) {
           for (const auto state_index : *single_lane_state_indices) {
             solve_state(state_index);
           }
         } else {
-          for_each_owned_state_in_state_mode(
+          for_each_owned_channel_in_channel_series_mode(
               schedule_ctx, lane_id, [&](size_t state_index) {
                 solve_state(state_index);
               });
@@ -1073,14 +1089,14 @@ private:
 
   struct PendingProtocolManifest {
     // Ownership mode used for this protocol index.
-    bool use_state_mode = true;
+    bool use_channel_series_mode = true;
     // State-level work list for state ownership mode.
-    std::vector<size_t> pending_state_indices;
+    std::vector<size_t> pending_channel_indices;
     // Point-level work list for point ownership mode.
     std::vector<PendingPointWorkItem> pending_points;
 
     [[nodiscard]] bool has_work() const {
-      return !pending_state_indices.empty() || !pending_points.empty();
+      return !pending_channel_indices.empty() || !pending_points.empty();
     }
   };
 
@@ -1092,8 +1108,8 @@ private:
       PointNeedsFn &&point_needs_solving_fn) {
     (void)single_lane_state_indices;
     PendingProtocolManifest manifest;
-    manifest.use_state_mode =
-        use_state_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
+    manifest.use_channel_series_mode =
+        use_channel_series_ownership_for_protocol_runtime(schedule_ctx, thresh_index);
     const size_t active_groups =
         active_owner_groups_for_protocol_runtime(schedule_ctx, thresh_index);
     const size_t lane_end_clamped = std::min(lane_end, active_groups);
@@ -1102,9 +1118,9 @@ private:
     }
 
     std::vector<PendingPointWorkItem> pending_points_all;
-    std::vector<size_t> pending_state_indices_all;
+    std::vector<size_t> pending_channel_indices_all;
     pending_points_all.reserve(schedule_ctx.linear_states.size());
-    pending_state_indices_all.reserve(schedule_ctx.linear_states.size());
+    pending_channel_indices_all.reserve(schedule_ctx.linear_states.size());
     for (size_t state_index = 0; state_index < schedule_ctx.linear_states.size();
          ++state_index) {
       const auto &state = schedule_ctx.linear_states[state_index];
@@ -1116,18 +1132,18 @@ private:
         }
       }
       if (state_has_pending) {
-        pending_state_indices_all.push_back(state_index);
+        pending_channel_indices_all.push_back(state_index);
       }
     }
 
-    if (manifest.use_state_mode) {
+    if (manifest.use_channel_series_mode) {
       std::vector<char> owned_states(schedule_ctx.linear_states.size(), 0);
-      for (const auto state_index : pending_state_indices_all) {
+      for (const auto state_index : pending_channel_indices_all) {
         const size_t owner_lane =
-            schedule_ctx.owner_by_state_index[state_index] %
+            schedule_ctx.owner_by_channel_index[state_index] %
             std::max<size_t>(1, active_groups);
         if (owner_lane >= lane_begin && owner_lane < lane_end_clamped) {
-          manifest.pending_state_indices.push_back(state_index);
+          manifest.pending_channel_indices.push_back(state_index);
           owned_states[state_index] = 1;
         }
       }
@@ -1144,9 +1160,9 @@ private:
         }
       }
       for (const auto &pending_point : manifest.pending_points) {
-        if (manifest.pending_state_indices.empty() ||
-            manifest.pending_state_indices.back() != pending_point.state_index) {
-          manifest.pending_state_indices.push_back(pending_point.state_index);
+        if (manifest.pending_channel_indices.empty() ||
+            manifest.pending_channel_indices.back() != pending_point.state_index) {
+          manifest.pending_channel_indices.push_back(pending_point.state_index);
         }
       }
     }
@@ -1172,22 +1188,22 @@ private:
                                    bool subgroup_parallel_requested,
                                    bool owner_group_schedule) {
     if (world.rank() == 0 && subgroup_parallel_requested) {
-      print("State ownership mapping is active across ",
+      print("Channel-series ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
             " groups (protocol-0 owner groups=",
-            state_parallel_plan.state_owner_groups,
+            state_parallel_plan.channel_owner_groups,
             "); executing owner-group solves in parallel subworlds.");
     } else if (world.rank() == 0 && owner_group_schedule) {
-      print("State ownership mapping is active across ",
+      print("Channel-series ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
             " groups (protocol-0 owner groups=",
-            state_parallel_plan.state_owner_groups,
+            state_parallel_plan.channel_owner_groups,
             "); executing deterministic owner-group solve passes "
             "serially on the universe communicator.");
     } else if (world.rank() == 0 && state_parallel_plan.mapping_groups > 1) {
-      print("State ownership mapping is active across ",
+      print("Channel-series ownership mapping is active across ",
             state_parallel_plan.mapping_groups,
-            " groups; falling back to plain serial state loop.");
+            " groups; falling back to plain serial channel loop.");
     }
   }
 
@@ -1212,38 +1228,39 @@ private:
                                      owner_group_schedule);
 
     const auto &linear_states = planned_states.generated_states.states;
-    auto owner_by_state_index =
-        build_owner_by_state_index(linear_states, state_parallel_plan);
+    auto owner_by_channel_index =
+        build_owner_by_channel_index(linear_states, state_parallel_plan);
     const RuntimePointOwnershipPolicy runtime_policy =
         compute_runtime_point_ownership_policy(
             world, calc_params, state_parallel_plan, linear_states,
             owner_group_schedule);
     if (runtime_policy.restart_point_parallel_promoted && world.rank() == 0) {
       print("State-parallel restart detected: protocol-0 points are saved; "
-            "enabling point ownership from protocol index 0.");
+            "enabling channel-point ownership from protocol index 0.");
     }
     if (world.rank() == 0 && !runtime_policy.protocol_policies.empty()) {
       for (size_t ti = 0; ti < runtime_policy.protocol_policies.size(); ++ti) {
         const auto &policy = runtime_policy.protocol_policies[ti];
         print("Protocol policy ti=", ti, " mode=",
-              policy.use_state_mode ? "state" : "point",
+              policy.use_channel_series_mode ? "channel_series"
+                                             : "channel_point",
               " active_groups=", policy.active_groups,
-              " pending_states=", policy.pending_states,
+              " pending_channels=", policy.pending_channels,
               " pending_points=", policy.pending_points);
       }
-      if (runtime_policy.protocol_policies[0].use_state_mode &&
+      if (runtime_policy.protocol_policies[0].use_channel_series_mode &&
           runtime_policy.protocol_policies[0].pending_points > 0) {
-        print("Protocol-0 state-chain ownership (state -> owner_group):");
+        print("Protocol-0 channel-series ownership (channel -> owner_group):");
         const size_t max_rows_to_print = 64;
         const size_t rows_to_print =
-            std::min(max_rows_to_print, state_parallel_plan.assignments.size());
+            std::min(max_rows_to_print, state_parallel_plan.channel_assignments.size());
         for (size_t i = 0; i < rows_to_print; ++i) {
-          const auto &assignment = state_parallel_plan.assignments[i];
-          print("  ", assignment.perturbation, " -> ", assignment.owner_group);
+          const auto &assignment = state_parallel_plan.channel_assignments[i];
+          print("  ", assignment.channel_label, " -> ", assignment.owner_group);
         }
-        if (state_parallel_plan.assignments.size() > rows_to_print) {
+        if (state_parallel_plan.channel_assignments.size() > rows_to_print) {
           print("  ... ",
-                state_parallel_plan.assignments.size() - rows_to_print,
+                state_parallel_plan.channel_assignments.size() - rows_to_print,
                 " additional states omitted");
         }
       }
@@ -1251,7 +1268,7 @@ private:
 
     return StateSolveScheduleContext(
         subgroup_parallel_requested, owner_group_schedule, state_parallel_plan,
-        linear_states, std::move(owner_by_state_index),
+        linear_states, std::move(owner_by_channel_index),
         state_parallel_plan.effective_point_groups,
         runtime_policy.point_parallel_start_protocol_index,
         runtime_policy.restart_point_parallel_promoted,
@@ -1376,13 +1393,15 @@ private:
                                                    serial_point_needs_solving);
           }
           if (world.rank() == 0) {
-            print("Protocol ", ti, " pending owned states=",
-                  manifest.pending_state_indices.size(),
+            print("Protocol ", ti, " pending owned channels=",
+                  manifest.pending_channel_indices.size(),
                   " pending owned points=", manifest.pending_points.size(),
-                  " mode=", manifest.use_state_mode ? "state" : "point");
+                  " mode=", manifest.use_channel_series_mode
+                                 ? "channel_series"
+                                 : "channel_point");
           }
-          if (manifest.use_state_mode) {
-            for (const auto state_index : manifest.pending_state_indices) {
+          if (manifest.use_channel_series_mode) {
+            for (const auto state_index : manifest.pending_channel_indices) {
               solve_state(state_index, ti, at_final_protocol);
             }
           } else {
@@ -1433,12 +1452,12 @@ private:
       // pmap.
       FunctionDefaults<3>::set_default_pmap(subworld);
       try {
-        std::vector<size_t> local_state_indices;
-        std::vector<LinearResponseDescriptor> local_states;
-        build_local_state_workset(
-            schedule_ctx.linear_states, schedule_ctx.owner_by_state_index,
-            schedule_ctx.point_scheduler, subgroup_id,
-            state_parallel_plan.mapping_groups, local_state_indices, local_states);
+        std::vector<size_t> local_channel_indices;
+        std::vector<LinearResponseDescriptor> local_channels;
+        build_local_channel_workset(
+            schedule_ctx.linear_states, schedule_ctx.owner_by_channel_index,
+            schedule_ctx.point_scheduler, subgroup_id, state_parallel_plan.mapping_groups,
+            local_channel_indices, local_channels);
 
         const std::string metadata_shard_file =
             group_shard_file("response_metadata.json", subgroup_id);
@@ -1450,16 +1469,16 @@ private:
         JsonStateSolvePersistence local_persistence(
             subworld, metadata_shard_file, debug_shard_file,
             baseline_state_metadata);
-        local_persistence.initialize_states(local_states);
+        local_persistence.initialize_states(local_channels);
         if (subworld.rank() == 0) {
           print("State-parallel subgroup ", subgroup_id, " owns ",
-                local_state_indices.size(), " protocol-0 states and ",
-                local_states.size(), " active states across all protocols.");
+                local_channel_indices.size(), " protocol-0 channels and ",
+                local_channels.size(), " active channels across all protocols.");
           local_persistence.print_summary();
         }
         subworld.gop.fence();
 
-        if (!local_states.empty()) {
+        if (!local_channels.empty()) {
           GroundStateData local_ground(subworld, ctx.archive_file, ctx.molecule);
           ResponseManager local_response_manager(subworld, calc_params);
 
@@ -1487,7 +1506,7 @@ private:
               [&](double thresh, size_t /*thresh_index*/) {
                 if (subworld.rank() == 0) {
                   print("Subgroup ", subgroup_id,
-                        " has no pending states at thresh ", thresh,
+                        " has no pending channels at thresh ", thresh,
                         "; skipping.");
                 }
                 // Keep protocol progression globally lock-step across all
@@ -1517,18 +1536,20 @@ private:
                 }
                 if (subworld.rank() == 0) {
                   print("Subgroup ", subgroup_id, " protocol ", ti,
-                        " pending states=",
-                        manifest.pending_state_indices.size(),
+                        " pending channels=",
+                        manifest.pending_channel_indices.size(),
                         " pending points=", manifest.pending_points.size(),
-                        " mode=", manifest.use_state_mode ? "state" : "point");
+                        " mode=", manifest.use_channel_series_mode
+                                      ? "channel_series"
+                                      : "channel_point");
                 }
-                if (!manifest.use_state_mode && subworld.rank() == 0) {
+                if (!manifest.use_channel_series_mode && subworld.rank() == 0) {
                   print("Subgroup ", subgroup_id,
-                        " solving independent state-frequency points at thresh ",
+                        " solving independent channel-frequency points at thresh ",
                         thresh, ".");
                 }
-                if (manifest.use_state_mode) {
-                  for (const auto state_index : manifest.pending_state_indices) {
+                if (manifest.use_channel_series_mode) {
+                  for (const auto state_index : manifest.pending_channel_indices) {
                     auto &state = schedule_ctx.linear_states[state_index];
                     run_frequency_loop_with_flush(
                         subworld, local_response_manager, state, ti,
@@ -1553,11 +1574,12 @@ private:
         } else {
           if (subworld.rank() == 0) {
             print("Subgroup ", subgroup_id,
-                  " has no owned states; participating in protocol "
+                  " has no owned channels; participating in protocol "
                   "synchronization only.");
           }
           // Keep protocol fences balanced with active subgroups. When a subgroup
-          // owns no states (e.g., more groups than points), it still must enter
+          // owns no channels (e.g., more groups than points), it still must
+          // enter
           // one global fence per protocol threshold to avoid deadlock.
           const auto &protocol = calc_params.protocol();
           for (size_t ti = 0; ti < protocol.size(); ++ti) {
@@ -2424,9 +2446,184 @@ private:
                                           solved_states, scf_calc);
     }
 
+    const auto requested_has = [&](PropertyType needle) {
+      for (const auto &prop : response_params.requested_properties()) {
+        if (parse_property_name(prop) == needle) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const bool request_beta_components = requested_has(PropertyType::Beta);
+    const bool request_raman_components = requested_has(PropertyType::Raman);
+
+    if (request_beta_components || request_raman_components) {
+      if (world.rank() == 0) {
+        print("Property stage: distributed component precompute enabled "
+              "(beta=",
+              request_beta_components ? "on" : "off",
+              ", raman=", request_raman_components ? "on" : "off",
+              ") across ", state_parallel_plan.execution_groups, " subgroups.");
+      }
+
+      std::string component_claim_prefix;
+      if (world.rank() == 0) {
+        component_claim_prefix =
+            (std::filesystem::path("property_component_claims") /
+             ("run_" + iso_timestamp()))
+                .string();
+      }
+      world.gop.broadcast_serializable(component_claim_prefix, 0);
+
+      bool local_component_stage_failed = false;
+      std::string local_component_stage_error;
+      try {
+        auto component_subworld_ptr = MacroTaskQ::create_worlds(
+            world, state_parallel_plan.execution_groups);
+        if (!component_subworld_ptr) {
+          throw std::runtime_error(
+              "property component subworld creation returned null");
+        }
+
+        World &component_subworld = *component_subworld_ptr;
+        const size_t component_subgroup_id = static_cast<size_t>(
+            world.rank() %
+            static_cast<int>(state_parallel_plan.execution_groups));
+
+        auto old_component_pmap3 = FunctionDefaults<3>::get_pmap();
+        auto restore_component_pmap = [&]() {
+          FunctionDefaults<3>::set_pmap(old_component_pmap3);
+        };
+
+        bool local_subgroup_component_failed = false;
+        std::string local_subgroup_component_error;
+
+        FunctionDefaults<3>::set_default_pmap(component_subworld);
+        try {
+          const auto &protocol = calc_params.protocol();
+          const double final_thresh = protocol.empty()
+                                          ? FunctionDefaults<3>::get_thresh()
+                                          : protocol.back();
+          const std::string component_fock_file =
+              group_shard_file(ground_ctx.fock_json_file, component_subgroup_id);
+          const std::string component_shard_file =
+              group_shard_file("properties_components.json", component_subgroup_id);
+
+          if (component_subworld.rank() == 0) {
+            std::error_code ec;
+            std::filesystem::remove(component_shard_file, ec);
+          }
+          component_subworld.gop.fence();
+
+          GroundStateData component_ground(component_subworld,
+                                           ground_ctx.archive_file,
+                                           ground_ctx.molecule);
+          ResponseManager component_response_manager(component_subworld,
+                                                     calc_params);
+          component_response_manager.setProtocol(component_subworld,
+                                                 component_ground.getL(),
+                                                 final_thresh);
+          component_ground.prepareOrbitals(component_subworld,
+                                          FunctionDefaults<3>::get_k(),
+                                          final_thresh);
+          component_ground.computePreliminaries(
+              component_subworld, *component_response_manager.getCoulombOp(),
+              component_response_manager.getVtol(), component_fock_file);
+
+          PropertyManager component_properties(component_subworld,
+                                              component_shard_file);
+
+          if (request_beta_components) {
+            ::compute_hyperpolarizability(
+                component_subworld, component_ground,
+                response_params.dipole_frequencies(),
+                response_params.dipole_directions(), component_properties,
+                component_claim_prefix + ".beta", component_subgroup_id);
+          }
+          if (request_raman_components) {
+            ::compute_Raman_components(
+                component_subworld, component_ground,
+                response_params.dipole_frequencies(),
+                response_params.dipole_directions(),
+                response_params.nuclear_directions(), component_properties,
+                component_claim_prefix + ".raman", component_subgroup_id);
+          }
+          component_properties.save();
+        } catch (const std::exception &ex) {
+          local_subgroup_component_failed = true;
+          local_subgroup_component_error = ex.what();
+        } catch (...) {
+          local_subgroup_component_failed = true;
+          local_subgroup_component_error =
+              "unknown exception during component precompute";
+        }
+
+        long subgroup_component_failed_flag =
+            local_subgroup_component_failed ? 1 : 0;
+        component_subworld.gop.max(subgroup_component_failed_flag);
+        restore_component_pmap();
+
+        if (subgroup_component_failed_flag != 0) {
+          local_component_stage_failed = true;
+          if (local_subgroup_component_failed &&
+              !local_subgroup_component_error.empty()) {
+            local_component_stage_error =
+                std::move(local_subgroup_component_error);
+          }
+        }
+      } catch (const std::exception &ex) {
+        local_component_stage_failed = true;
+        local_component_stage_error = ex.what();
+      } catch (...) {
+        local_component_stage_failed = true;
+        local_component_stage_error =
+            "unknown exception during component stage setup";
+      }
+
+      long any_component_failure = local_component_stage_failed ? 1 : 0;
+      world.gop.max(any_component_failure);
+      if (any_component_failure != 0) {
+        if (world.rank() == 0) {
+          if (!local_component_stage_error.empty()) {
+            print("State-parallel component stage failed: ",
+                  local_component_stage_error,
+                  " Falling back to world property stage.");
+          } else {
+            print("State-parallel component stage failed on at least one "
+                  "rank. Falling back to world property stage.");
+          }
+        }
+        return compute_requested_properties(world, response_params, ground_ctx,
+                                            solved_states, scf_calc);
+      }
+
+      if (world.rank() == 0) {
+        nlohmann::json merged_components = nlohmann::json::array();
+        const auto baseline = read_json_file_or_object("properties.json");
+        if (baseline.is_array()) {
+          for (const auto &row : baseline) {
+            merged_components.push_back(row);
+          }
+        }
+        for (size_t gid = 0; gid < state_parallel_plan.execution_groups; ++gid) {
+          const auto shard = read_json_file_or_object(
+              group_shard_file("properties_components.json", gid));
+          if (!shard.is_array()) {
+            continue;
+          }
+          for (const auto &row : shard) {
+            merged_components.push_back(row);
+          }
+        }
+        write_json_file("properties.json", merged_components);
+      }
+      world.gop.fence();
+    }
+
     if (world.rank() == 0) {
-      print("Property stage: executing on subgroup ", property_group, "/",
-            state_parallel_plan.execution_groups - 1);
+      print("Property stage: executing downstream assembly on subgroup ",
+            property_group, "/", state_parallel_plan.execution_groups - 1);
     }
 
     std::string properties_dump;
@@ -2558,6 +2755,10 @@ private:
 public:
   /**
    * @brief Run the full molecular response & property workflow.
+   *
+   * 1. Builds contexts and plans states
+   * 2. Solves all linear and derived states
+   * 3. Computes requested properties
    *
    * @param world      The MADNESS world communicator
    * @param params     Unified parameters containing response and molecule info
