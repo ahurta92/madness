@@ -36,6 +36,7 @@
 #include "ResponseParameters.hpp"
 #include "madness_exception.h"
 #include <apps/molresponse_v2/DerivedStatePlanner.hpp>
+#include <apps/molresponse_v2/ExcitedStateBundleSolver.hpp>
 #include <apps/molresponse_v2/FrequencyLoop.hpp>
 #include <apps/molresponse_v2/GroundStateData.hpp>
 #include <apps/molresponse_v2/PropertyManager.hpp>
@@ -51,6 +52,7 @@
 #include <iostream>
 #include <numeric>
 #include <optional>
+#include <memory>
 #include <utility>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
@@ -1729,14 +1731,23 @@ private:
     }
   }
 
+  [[nodiscard]] static std::unique_ptr<ExcitedStateBundleSolver>
+  make_excited_state_bundle_solver_adapter() {
+    return std::make_unique<ExcitedStateBundleNoopSolver>();
+  }
+
   static ExcitedExecutionResult execute_excited_state_bundle_stage(
       World &world, const PlannedStates &planned_states,
       nlohmann::json &state_metadata_json) {
     const auto &plan = planned_states.excited_state_bundle_plan;
+    auto solver_adapter = make_excited_state_bundle_solver_adapter();
+    const std::string solver_adapter_name =
+        solver_adapter ? solver_adapter->name() : "null_adapter";
 
     nlohmann::json execution = {
         {"attempted", false},
         {"mode", plan.enabled ? "scaffold_only" : "disabled"},
+        {"solver_adapter", solver_adapter_name},
         {"enabled", plan.enabled},
         {"owner_group", plan.owner_group},
         {"protocol_count", plan.protocols.size()},
@@ -1774,7 +1785,9 @@ private:
       double total_cpu_seconds = 0.0;
       nlohmann::json protocol_events = nlohmann::json::array();
 
-      for (const double threshold : plan.protocols) {
+      for (size_t protocol_index = 0; protocol_index < plan.protocols.size();
+           ++protocol_index) {
+        const double threshold = plan.protocols[protocol_index];
         const double protocol_wall_start = madness::wall_time();
         const double protocol_cpu_start = madness::cpu_time();
         const std::string protocol_key = ResponseRecord2::protocol_key(threshold);
@@ -1782,24 +1795,54 @@ private:
         ensure_excited_protocol_placeholder_node(node);
         ++ready_protocol_placeholders;
 
-        const bool saved = node["saved"].get<bool>();
-        const bool converged = node["converged"].get<bool>();
+        bool saved = node["saved"].get<bool>();
+        bool converged = node["converged"].get<bool>();
 
         std::string stage_status = "placeholder_pending_solver";
         bool protocol_attempted = false;
         bool protocol_failed = false;
+        bool protocol_skipped = false;
+        bool protocol_restart_reused = false;
+        std::vector<double> protocol_energies;
 
         if (!plan.enabled) {
           stage_status = "disabled_skip";
-          ++skipped_protocols;
+          protocol_skipped = true;
+          protocol_restart_reused = false;
         } else if (saved && converged) {
           stage_status = "restart_ready_skip";
-          ++restart_ready_protocols;
-          ++skipped_protocols;
+          protocol_skipped = true;
+          protocol_restart_reused = true;
         } else {
-          // Phase-3 scaffold behavior: keep placeholder state unresolved.
-          protocol_attempted = true;
-          ++pending_protocols;
+          ExcitedBundleProtocolInput protocol_input;
+          protocol_input.threshold = threshold;
+          protocol_input.protocol_index = protocol_index;
+          protocol_input.restart_saved = saved;
+          protocol_input.restart_converged = converged;
+          protocol_input.owner_group = plan.owner_group;
+          protocol_input.tda = plan.tda;
+          protocol_input.num_states = plan.num_states;
+          protocol_input.guess_max_iter = plan.guess_max_iter;
+          protocol_input.maxiter = plan.maxiter;
+          protocol_input.maxsub = plan.maxsub;
+          ExcitedBundleProtocolResult protocol_result;
+          if (solver_adapter) {
+            protocol_result = solver_adapter->solve_protocol(world, protocol_input);
+          } else {
+            protocol_result.stage_status = "solver_adapter_missing";
+            protocol_result.failed = true;
+          }
+          protocol_attempted = protocol_result.attempted;
+          protocol_failed = protocol_result.failed;
+          protocol_skipped = protocol_result.skipped;
+          protocol_restart_reused = protocol_result.restart_reused;
+          stage_status = protocol_result.stage_status;
+          saved = protocol_result.saved;
+          converged = protocol_result.converged;
+          protocol_energies = std::move(protocol_result.energies);
+          if (stage_status.empty()) {
+            stage_status = "placeholder_pending_solver";
+          }
         }
 
         const double protocol_wall_seconds =
@@ -1809,10 +1852,25 @@ private:
         total_wall_seconds += protocol_wall_seconds;
         total_cpu_seconds += protocol_cpu_seconds;
 
+        node["saved"] = saved;
+        node["converged"] = converged;
         node["timings"]["wall_seconds"] = protocol_wall_seconds;
         node["timings"]["cpu_seconds"] = protocol_cpu_seconds;
         node["stage_status"] = stage_status;
         node["owner_group"] = plan.owner_group;
+        if (!protocol_energies.empty()) {
+          node["energies"] = protocol_energies;
+        }
+
+        if (protocol_restart_reused) {
+          ++restart_ready_protocols;
+        }
+        if (protocol_skipped) {
+          ++skipped_protocols;
+        }
+        if (!protocol_skipped && !protocol_failed && !converged) {
+          ++pending_protocols;
+        }
 
         if (protocol_failed) {
           ++failed_protocols;
@@ -1825,8 +1883,11 @@ private:
              {"saved", saved},
              {"converged", converged},
              {"attempted", protocol_attempted},
-             {"failed", protocol_failed},
+              {"failed", protocol_failed},
+             {"skipped", protocol_skipped},
+             {"restart_reused", protocol_restart_reused},
              {"stage_status", stage_status},
+             {"energies", protocol_energies},
              {"wall_seconds", protocol_wall_seconds},
              {"cpu_seconds", protocol_cpu_seconds}});
       }
