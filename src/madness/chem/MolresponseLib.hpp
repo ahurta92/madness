@@ -1687,10 +1687,99 @@ private:
     nlohmann::json execution;
   };
 
+  struct ExcitedExecutionResult {
+    // Execution summary JSON written into response metadata.
+    nlohmann::json execution;
+  };
+
   struct FinalProtocolState {
     double threshold = 0.0;
     size_t threshold_index = 0;
   };
+
+  static void ensure_excited_protocol_placeholder_node(
+      nlohmann::json &protocol_node) {
+    if (!protocol_node.is_object()) {
+      protocol_node = nlohmann::json::object();
+    }
+    if (!protocol_node.contains("saved") || !protocol_node["saved"].is_boolean()) {
+      protocol_node["saved"] = false;
+    }
+    if (!protocol_node.contains("converged") ||
+        !protocol_node["converged"].is_boolean()) {
+      protocol_node["converged"] = false;
+    }
+    if (!protocol_node.contains("timings") ||
+        !protocol_node["timings"].is_object()) {
+      protocol_node["timings"] =
+          nlohmann::json{{"wall_seconds", 0.0}, {"cpu_seconds", 0.0}};
+    } else {
+      if (!protocol_node["timings"].contains("wall_seconds") ||
+          !protocol_node["timings"]["wall_seconds"].is_number()) {
+        protocol_node["timings"]["wall_seconds"] = 0.0;
+      }
+      if (!protocol_node["timings"].contains("cpu_seconds") ||
+          !protocol_node["timings"]["cpu_seconds"].is_number()) {
+        protocol_node["timings"]["cpu_seconds"] = 0.0;
+      }
+    }
+    if (!protocol_node.contains("energies") ||
+        !protocol_node["energies"].is_array()) {
+      protocol_node["energies"] = nlohmann::json::array();
+    }
+  }
+
+  static ExcitedExecutionResult execute_excited_state_bundle_stage(
+      World &world, const PlannedStates &planned_states,
+      nlohmann::json &state_metadata_json) {
+    const auto &plan = planned_states.excited_state_bundle_plan;
+
+    nlohmann::json execution = {
+        {"attempted", false},
+        {"mode", plan.enabled ? "scaffold_only" : "disabled"},
+        {"enabled", plan.enabled},
+        {"owner_group", plan.owner_group},
+        {"protocol_count", plan.protocols.size()},
+        {"ready_protocol_placeholders", 0},
+        {"completed_protocols", 0},
+        {"failed_protocols", 0},
+        {"total_wall_seconds", 0.0},
+        {"total_cpu_seconds", 0.0}};
+
+    if (world.rank() == 0) {
+      if (!state_metadata_json.is_object()) {
+        state_metadata_json = nlohmann::json::object();
+      }
+      if (!state_metadata_json.contains("excited_states") ||
+          !state_metadata_json["excited_states"].is_object()) {
+        state_metadata_json["excited_states"] = nlohmann::json::object();
+      }
+      auto &excited = state_metadata_json["excited_states"];
+      excited["plan"] = plan.to_json();
+      if (!excited.contains("protocols") || !excited["protocols"].is_object()) {
+        excited["protocols"] = nlohmann::json::object();
+      }
+
+      for (const double threshold : plan.protocols) {
+        const std::string protocol_key = ResponseRecord2::protocol_key(threshold);
+        auto &node = excited["protocols"][protocol_key];
+        ensure_excited_protocol_placeholder_node(node);
+        execution["ready_protocol_placeholders"] =
+            execution["ready_protocol_placeholders"].get<size_t>() + 1;
+      }
+
+      if (plan.enabled) {
+        print("Excited-state bundle stage scaffold: prepared ",
+              execution["ready_protocol_placeholders"].get<size_t>(),
+              " protocol placeholders for future bundle execution.");
+      }
+    }
+
+    state_metadata_json =
+        broadcast_json_object(world, std::move(state_metadata_json), 0);
+    execution = broadcast_json_object(world, std::move(execution), 0);
+    return ExcitedExecutionResult{std::move(execution)};
+  }
 
   static DerivedExecutionResult execute_derived_state_requests(
       World &world, const CalculationParameters &calc_params, GroundContext &ctx,
@@ -2042,6 +2131,7 @@ private:
   static nlohmann::json build_state_stage_metadata(
       const PlannedStates &planned_states, const nlohmann::json &state_metadata,
       const StateSolveScheduleContext &schedule_ctx,
+      const ExcitedExecutionResult &excited_result,
       const DerivedExecutionResult &derived_result) {
     auto metadata = state_metadata;
     metadata["state_parallel_planner"] =
@@ -2076,12 +2166,20 @@ private:
         {"plan", planned_states.derived_state_plan.to_json()},
         {"dependency_gate", derived_result.dependency_gate.to_json()},
         {"execution", derived_result.execution}};
+    metadata["excited_state_planner"] = {
+        {"note",
+         "Stage scaffolding only: excited-state bundle metadata is planned "
+         "and persisted, but no excited-state solve path is executed yet."},
+        {"plan", planned_states.excited_state_bundle_plan.to_json()},
+        {"execution", excited_result.execution}};
     return metadata;
   }
 
   // Stage-2 orchestrator:
   // 2a) build runtime ownership policy, 2b) solve linear states,
-  // 2c) execute dependency-gated derived requests, 2d) publish stage metadata.
+  // 2c) update excited-stage scaffold metadata,
+  // 2d) execute dependency-gated derived requests,
+  // 2e) publish stage metadata.
   static SolvedStates
   solve_all_states(World &world, const CalculationParameters &calc_params,
                    GroundContext &ctx,
@@ -2111,7 +2209,12 @@ private:
     const FinalProtocolState final_state = prepare_and_validate_final_protocol_state(
         world, calc_params, ctx, planned_states, state_metadata_json);
 
-    // Stage 2c derived solve: dependency-gated execution + summary metadata.
+    // Stage 2c excited-state bundle scaffold: metadata placeholders only.
+    const ExcitedExecutionResult excited_result =
+        execute_excited_state_bundle_stage(world, planned_states,
+                                           state_metadata_json);
+
+    // Stage 2d derived solve: dependency-gated execution + summary metadata.
     const DerivedExecutionResult derived_result = execute_derived_state_requests(
         world, calc_params, ctx, planned_states, state_metadata_json,
         schedule_ctx.subgroup_parallel_requested, schedule_ctx.owner_group_schedule,
@@ -2119,7 +2222,8 @@ private:
 
     // Stage 2 metadata assembly for downstream property stage.
     auto metadata = build_state_stage_metadata(
-        planned_states, state_metadata_json, schedule_ctx, derived_result);
+        planned_states, state_metadata_json, schedule_ctx, excited_result,
+        derived_result);
 
     return SolvedStates{std::move(planned_states), std::move(metadata),
                         std::move(debug_log_json)};
