@@ -1741,10 +1741,14 @@ private:
         {"owner_group", plan.owner_group},
         {"protocol_count", plan.protocols.size()},
         {"ready_protocol_placeholders", 0},
+        {"restart_ready_protocols", 0},
+        {"pending_protocols", 0},
+        {"skipped_protocols", 0},
         {"completed_protocols", 0},
         {"failed_protocols", 0},
         {"total_wall_seconds", 0.0},
-        {"total_cpu_seconds", 0.0}};
+        {"total_cpu_seconds", 0.0},
+        {"protocol_events", nlohmann::json::array()}};
 
     if (world.rank() == 0) {
       if (!state_metadata_json.is_object()) {
@@ -1760,18 +1764,90 @@ private:
         excited["protocols"] = nlohmann::json::object();
       }
 
+      size_t ready_protocol_placeholders = 0;
+      size_t restart_ready_protocols = 0;
+      size_t pending_protocols = 0;
+      size_t skipped_protocols = 0;
+      size_t completed_protocols = 0;
+      size_t failed_protocols = 0;
+      double total_wall_seconds = 0.0;
+      double total_cpu_seconds = 0.0;
+      nlohmann::json protocol_events = nlohmann::json::array();
+
       for (const double threshold : plan.protocols) {
+        const double protocol_wall_start = madness::wall_time();
+        const double protocol_cpu_start = madness::cpu_time();
         const std::string protocol_key = ResponseRecord2::protocol_key(threshold);
         auto &node = excited["protocols"][protocol_key];
         ensure_excited_protocol_placeholder_node(node);
-        execution["ready_protocol_placeholders"] =
-            execution["ready_protocol_placeholders"].get<size_t>() + 1;
+        ++ready_protocol_placeholders;
+
+        const bool saved = node["saved"].get<bool>();
+        const bool converged = node["converged"].get<bool>();
+
+        std::string stage_status = "placeholder_pending_solver";
+        bool protocol_attempted = false;
+        bool protocol_failed = false;
+
+        if (!plan.enabled) {
+          stage_status = "disabled_skip";
+          ++skipped_protocols;
+        } else if (saved && converged) {
+          stage_status = "restart_ready_skip";
+          ++restart_ready_protocols;
+          ++skipped_protocols;
+        } else {
+          // Phase-3 scaffold behavior: keep placeholder state unresolved.
+          protocol_attempted = true;
+          ++pending_protocols;
+        }
+
+        const double protocol_wall_seconds =
+            madness::wall_time() - protocol_wall_start;
+        const double protocol_cpu_seconds =
+            madness::cpu_time() - protocol_cpu_start;
+        total_wall_seconds += protocol_wall_seconds;
+        total_cpu_seconds += protocol_cpu_seconds;
+
+        node["timings"]["wall_seconds"] = protocol_wall_seconds;
+        node["timings"]["cpu_seconds"] = protocol_cpu_seconds;
+        node["stage_status"] = stage_status;
+        node["owner_group"] = plan.owner_group;
+
+        if (protocol_failed) {
+          ++failed_protocols;
+        } else {
+          ++completed_protocols;
+        }
+        protocol_events.push_back(
+            {{"protocol_key", protocol_key},
+             {"threshold", threshold},
+             {"saved", saved},
+             {"converged", converged},
+             {"attempted", protocol_attempted},
+             {"failed", protocol_failed},
+             {"stage_status", stage_status},
+             {"wall_seconds", protocol_wall_seconds},
+             {"cpu_seconds", protocol_cpu_seconds}});
       }
 
-      if (plan.enabled) {
-        print("Excited-state bundle stage scaffold: prepared ",
-              execution["ready_protocol_placeholders"].get<size_t>(),
-              " protocol placeholders for future bundle execution.");
+      execution["attempted"] = plan.enabled && pending_protocols > 0;
+      execution["ready_protocol_placeholders"] = ready_protocol_placeholders;
+      execution["restart_ready_protocols"] = restart_ready_protocols;
+      execution["pending_protocols"] = pending_protocols;
+      execution["skipped_protocols"] = skipped_protocols;
+      execution["completed_protocols"] = completed_protocols;
+      execution["failed_protocols"] = failed_protocols;
+      execution["total_wall_seconds"] = total_wall_seconds;
+      execution["total_cpu_seconds"] = total_cpu_seconds;
+      execution["protocol_events"] = std::move(protocol_events);
+
+      if (plan.enabled || ready_protocol_placeholders > 0) {
+        print("Excited-state bundle stage scaffold: protocols=",
+              ready_protocol_placeholders,
+              " pending=", pending_protocols,
+              " restart_ready=", restart_ready_protocols,
+              " skipped=", skipped_protocols, ".");
       }
     }
 
@@ -2168,8 +2244,9 @@ private:
         {"execution", derived_result.execution}};
     metadata["excited_state_planner"] = {
         {"note",
-         "Stage scaffolding only: excited-state bundle metadata is planned "
-         "and persisted, but no excited-state solve path is executed yet."},
+         "Stage scaffolding only: protocol-aware excited-state metadata is "
+         "tracked with status/timing transitions, but no excited-state solve "
+         "path is executed yet."},
         {"plan", planned_states.excited_state_bundle_plan.to_json()},
         {"execution", excited_result.execution}};
     return metadata;
