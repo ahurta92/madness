@@ -438,6 +438,36 @@ private:
               dst_proto["restart_provenance"][freq_key] = provenance_value;
             }
           }
+          if (src_protocol.contains("iterations") &&
+              src_protocol["iterations"].is_number_unsigned()) {
+            const auto src_iterations =
+                src_protocol["iterations"].get<size_t>();
+            const auto dst_iterations =
+                (dst_protocol.contains("iterations") &&
+                 dst_protocol["iterations"].is_number_unsigned())
+                    ? dst_protocol["iterations"].get<size_t>()
+                    : static_cast<size_t>(0);
+            dst_protocol["iterations"] =
+                std::max(dst_iterations, src_iterations);
+          }
+          if (src_protocol.contains("residual_norms") &&
+              src_protocol["residual_norms"].is_array()) {
+            if (!dst_protocol.contains("residual_norms") ||
+                !dst_protocol["residual_norms"].is_array() ||
+                dst_protocol["residual_norms"].empty()) {
+              dst_protocol["residual_norms"] = src_protocol["residual_norms"];
+            }
+          }
+          if (src_protocol.contains("iteration_max_residuals") &&
+              src_protocol["iteration_max_residuals"].is_array()) {
+            if (!dst_protocol.contains("iteration_max_residuals") ||
+                !dst_protocol["iteration_max_residuals"].is_array() ||
+                dst_protocol["iteration_max_residuals"].size() <
+                    src_protocol["iteration_max_residuals"].size()) {
+              dst_protocol["iteration_max_residuals"] =
+                  src_protocol["iteration_max_residuals"];
+            }
+          }
         }
       }
     }
@@ -1729,24 +1759,37 @@ private:
         !protocol_node["energies"].is_array()) {
       protocol_node["energies"] = nlohmann::json::array();
     }
-  }
-
-  [[nodiscard]] static std::unique_ptr<ExcitedStateBundleSolver>
-  make_excited_state_bundle_solver_adapter() {
-    return std::make_unique<ExcitedStateBundleNoopSolver>();
+    if (!protocol_node.contains("iterations") ||
+        !protocol_node["iterations"].is_number_unsigned()) {
+      protocol_node["iterations"] = 0;
+    }
+    if (!protocol_node.contains("residual_norms") ||
+        !protocol_node["residual_norms"].is_array()) {
+      protocol_node["residual_norms"] = nlohmann::json::array();
+    }
+    if (!protocol_node.contains("iteration_max_residuals") ||
+        !protocol_node["iteration_max_residuals"].is_array()) {
+      protocol_node["iteration_max_residuals"] = nlohmann::json::array();
+    }
   }
 
   static ExcitedExecutionResult execute_excited_state_bundle_stage(
       World &world, const PlannedStates &planned_states,
+      const GroundContext &ground_ctx, const ResponseParameters &response_params,
       nlohmann::json &state_metadata_json) {
     const auto &plan = planned_states.excited_state_bundle_plan;
-    auto solver_adapter = make_excited_state_bundle_solver_adapter();
+    ExcitedBundleSolverConfig solver_config;
+    solver_config.archive_file = ground_ctx.archive_file;
+    solver_config.output_prefix = response_params.prefix();
+    solver_config.protocols = plan.protocols;
+    solver_config.print_level = response_params.print_level();
+    auto solver_adapter = make_excited_state_bundle_solver_adapter(solver_config);
     const std::string solver_adapter_name =
         solver_adapter ? solver_adapter->name() : "null_adapter";
 
     nlohmann::json execution = {
         {"attempted", false},
-        {"mode", plan.enabled ? "scaffold_only" : "disabled"},
+        {"mode", plan.enabled ? "legacy_adapter" : "disabled"},
         {"solver_adapter", solver_adapter_name},
         {"enabled", plan.enabled},
         {"owner_group", plan.owner_group},
@@ -1761,10 +1804,63 @@ private:
         {"total_cpu_seconds", 0.0},
         {"protocol_events", nlohmann::json::array()}};
 
-    if (world.rank() == 0) {
-      if (!state_metadata_json.is_object()) {
-        state_metadata_json = nlohmann::json::object();
+    auto protocol_result_to_json = [](const ExcitedBundleProtocolResult &result) {
+      return nlohmann::json{
+          {"attempted", result.attempted},
+          {"saved", result.saved},
+          {"converged", result.converged},
+          {"failed", result.failed},
+          {"skipped", result.skipped},
+          {"restart_reused", result.restart_reused},
+          {"stage_status", result.stage_status},
+          {"iterations", result.iterations},
+          {"energies", result.energies},
+          {"residual_norms", result.residual_norms},
+          {"iteration_max_residuals", result.iteration_max_residuals}};
+    };
+    auto protocol_result_from_json = [](const nlohmann::json &node) {
+      ExcitedBundleProtocolResult result;
+      if (!node.is_object()) {
+        return result;
       }
+      result.attempted = node.value("attempted", false);
+      result.saved = node.value("saved", false);
+      result.converged = node.value("converged", false);
+      result.failed = node.value("failed", false);
+      result.skipped = node.value("skipped", false);
+      result.restart_reused = node.value("restart_reused", false);
+      result.stage_status = node.value("stage_status",
+                                       std::string("placeholder_pending_solver"));
+      result.iterations = node.value("iterations", static_cast<size_t>(0));
+      if (node.contains("energies") && node["energies"].is_array()) {
+        result.energies = node["energies"].get<std::vector<double>>();
+      }
+      if (node.contains("residual_norms") && node["residual_norms"].is_array()) {
+        result.residual_norms = node["residual_norms"].get<std::vector<double>>();
+      }
+      if (node.contains("iteration_max_residuals") &&
+          node["iteration_max_residuals"].is_array()) {
+        result.iteration_max_residuals =
+            node["iteration_max_residuals"].get<std::vector<double>>();
+      }
+      return result;
+    };
+
+    size_t ready_protocol_placeholders = 0;
+    size_t restart_ready_protocols = 0;
+    size_t pending_protocols = 0;
+    size_t skipped_protocols = 0;
+    size_t completed_protocols = 0;
+    size_t failed_protocols = 0;
+    size_t attempted_protocols = 0;
+    double total_wall_seconds = 0.0;
+    double total_cpu_seconds = 0.0;
+    nlohmann::json protocol_events = nlohmann::json::array();
+
+    if (!state_metadata_json.is_object()) {
+      state_metadata_json = nlohmann::json::object();
+    }
+    if (world.rank() == 0) {
       if (!state_metadata_json.contains("excited_states") ||
           !state_metadata_json["excited_states"].is_object()) {
         state_metadata_json["excited_states"] = nlohmann::json::object();
@@ -1774,125 +1870,177 @@ private:
       if (!excited.contains("protocols") || !excited["protocols"].is_object()) {
         excited["protocols"] = nlohmann::json::object();
       }
+    }
 
-      size_t ready_protocol_placeholders = 0;
-      size_t restart_ready_protocols = 0;
-      size_t pending_protocols = 0;
-      size_t skipped_protocols = 0;
-      size_t completed_protocols = 0;
-      size_t failed_protocols = 0;
-      double total_wall_seconds = 0.0;
-      double total_cpu_seconds = 0.0;
-      nlohmann::json protocol_events = nlohmann::json::array();
+    for (size_t protocol_index = 0; protocol_index < plan.protocols.size();
+         ++protocol_index) {
+      const double threshold = plan.protocols[protocol_index];
+      const double protocol_wall_start = madness::wall_time();
+      const double protocol_cpu_start = madness::cpu_time();
 
-      for (size_t protocol_index = 0; protocol_index < plan.protocols.size();
-           ++protocol_index) {
-        const double threshold = plan.protocols[protocol_index];
-        const double protocol_wall_start = madness::wall_time();
-        const double protocol_cpu_start = madness::cpu_time();
+      nlohmann::json dispatch = nlohmann::json::object();
+      if (world.rank() == 0) {
         const std::string protocol_key = ResponseRecord2::protocol_key(threshold);
+        auto &excited = state_metadata_json["excited_states"];
         auto &node = excited["protocols"][protocol_key];
         ensure_excited_protocol_placeholder_node(node);
         ++ready_protocol_placeholders;
-
-        bool saved = node["saved"].get<bool>();
-        bool converged = node["converged"].get<bool>();
-
-        std::string stage_status = "placeholder_pending_solver";
-        bool protocol_attempted = false;
-        bool protocol_failed = false;
-        bool protocol_skipped = false;
-        bool protocol_restart_reused = false;
-        std::vector<double> protocol_energies;
-
+        dispatch["protocol_key"] = protocol_key;
+        dispatch["saved"] = node["saved"].get<bool>();
+        dispatch["converged"] = node["converged"].get<bool>();
+        dispatch["energies"] = node["energies"];
+        dispatch["iterations"] = node["iterations"];
+        dispatch["residual_norms"] = node["residual_norms"];
+        dispatch["iteration_max_residuals"] = node["iteration_max_residuals"];
         if (!plan.enabled) {
-          stage_status = "disabled_skip";
-          protocol_skipped = true;
-          protocol_restart_reused = false;
-        } else if (saved && converged) {
-          stage_status = "restart_ready_skip";
-          protocol_skipped = true;
-          protocol_restart_reused = true;
+          dispatch["solver_needed"] = false;
+          dispatch["stage_status"] = "disabled_skip";
+        } else if (dispatch["saved"].get<bool>() &&
+                   dispatch["converged"].get<bool>()) {
+          dispatch["solver_needed"] = false;
+          dispatch["stage_status"] = "restart_ready_skip";
         } else {
-          ExcitedBundleProtocolInput protocol_input;
-          protocol_input.threshold = threshold;
-          protocol_input.protocol_index = protocol_index;
-          protocol_input.restart_saved = saved;
-          protocol_input.restart_converged = converged;
-          protocol_input.owner_group = plan.owner_group;
-          protocol_input.tda = plan.tda;
-          protocol_input.num_states = plan.num_states;
-          protocol_input.guess_max_iter = plan.guess_max_iter;
-          protocol_input.maxiter = plan.maxiter;
-          protocol_input.maxsub = plan.maxsub;
-          ExcitedBundleProtocolResult protocol_result;
-          if (solver_adapter) {
-            protocol_result = solver_adapter->solve_protocol(world, protocol_input);
-          } else {
-            protocol_result.stage_status = "solver_adapter_missing";
-            protocol_result.failed = true;
-          }
-          protocol_attempted = protocol_result.attempted;
-          protocol_failed = protocol_result.failed;
-          protocol_skipped = protocol_result.skipped;
-          protocol_restart_reused = protocol_result.restart_reused;
-          stage_status = protocol_result.stage_status;
-          saved = protocol_result.saved;
-          converged = protocol_result.converged;
-          protocol_energies = std::move(protocol_result.energies);
-          if (stage_status.empty()) {
-            stage_status = "placeholder_pending_solver";
-          }
+          dispatch["solver_needed"] = true;
+          dispatch["stage_status"] = "placeholder_pending_solver";
         }
+      }
+      dispatch = broadcast_json_object(world, std::move(dispatch), 0);
 
-        const double protocol_wall_seconds =
-            madness::wall_time() - protocol_wall_start;
-        const double protocol_cpu_seconds =
-            madness::cpu_time() - protocol_cpu_start;
-        total_wall_seconds += protocol_wall_seconds;
-        total_cpu_seconds += protocol_cpu_seconds;
+      ExcitedBundleProtocolResult protocol_result;
+      const bool solver_needed = dispatch.value("solver_needed", false);
+      const bool node_saved = dispatch.value("saved", false);
+      const bool node_converged = dispatch.value("converged", false);
+      if (!solver_needed) {
+        protocol_result.attempted = false;
+        protocol_result.saved = node_saved;
+        protocol_result.converged = node_converged;
+        protocol_result.failed = false;
+        protocol_result.skipped = true;
+        protocol_result.restart_reused = node_saved && node_converged;
+        protocol_result.stage_status = dispatch.value(
+            "stage_status", std::string("placeholder_pending_solver"));
+        protocol_result.iterations =
+            dispatch.value("iterations", static_cast<size_t>(0));
+        if (dispatch.contains("energies") && dispatch["energies"].is_array()) {
+          protocol_result.energies =
+              dispatch["energies"].get<std::vector<double>>();
+        }
+        if (dispatch.contains("residual_norms") &&
+            dispatch["residual_norms"].is_array()) {
+          protocol_result.residual_norms =
+              dispatch["residual_norms"].get<std::vector<double>>();
+        }
+        if (dispatch.contains("iteration_max_residuals") &&
+            dispatch["iteration_max_residuals"].is_array()) {
+          protocol_result.iteration_max_residuals =
+              dispatch["iteration_max_residuals"].get<std::vector<double>>();
+        }
+      } else {
+        ExcitedBundleProtocolInput protocol_input;
+        protocol_input.threshold = threshold;
+        protocol_input.protocol_index = protocol_index;
+        protocol_input.restart_saved = node_saved;
+        protocol_input.restart_converged = node_converged;
+        protocol_input.owner_group = plan.owner_group;
+        protocol_input.tda = plan.tda;
+        protocol_input.num_states = plan.num_states;
+        protocol_input.guess_max_iter = plan.guess_max_iter;
+        protocol_input.maxiter = plan.maxiter;
+        protocol_input.maxsub = plan.maxsub;
+        if (solver_adapter) {
+          protocol_result = solver_adapter->solve_protocol(world, protocol_input);
+        } else {
+          protocol_result.attempted = true;
+          protocol_result.saved = false;
+          protocol_result.converged = false;
+          protocol_result.failed = true;
+          protocol_result.skipped = false;
+          protocol_result.restart_reused = false;
+          protocol_result.stage_status = "solver_adapter_missing";
+        }
+        if (protocol_result.stage_status.empty()) {
+          protocol_result.stage_status = "placeholder_pending_solver";
+        }
+      }
 
-        node["saved"] = saved;
-        node["converged"] = converged;
+      nlohmann::json protocol_result_json = nlohmann::json::object();
+      if (world.rank() == 0) {
+        protocol_result_json = protocol_result_to_json(protocol_result);
+      }
+      protocol_result_json =
+          broadcast_json_object(world, std::move(protocol_result_json), 0);
+      protocol_result = protocol_result_from_json(protocol_result_json);
+
+      const double protocol_wall_seconds =
+          madness::wall_time() - protocol_wall_start;
+      const double protocol_cpu_seconds =
+          madness::cpu_time() - protocol_cpu_start;
+
+      if (world.rank() == 0) {
+        const std::string protocol_key =
+            dispatch.value("protocol_key", ResponseRecord2::protocol_key(threshold));
+        auto &node = state_metadata_json["excited_states"]["protocols"][protocol_key];
+        node["saved"] = protocol_result.saved;
+        node["converged"] = protocol_result.converged;
         node["timings"]["wall_seconds"] = protocol_wall_seconds;
         node["timings"]["cpu_seconds"] = protocol_cpu_seconds;
-        node["stage_status"] = stage_status;
+        node["stage_status"] = protocol_result.stage_status;
         node["owner_group"] = plan.owner_group;
-        if (!protocol_energies.empty()) {
-          node["energies"] = protocol_energies;
+        node["iterations"] = protocol_result.iterations;
+        if (!protocol_result.energies.empty()) {
+          node["energies"] = protocol_result.energies;
+        }
+        if (!protocol_result.residual_norms.empty()) {
+          node["residual_norms"] = protocol_result.residual_norms;
+        }
+        if (!protocol_result.iteration_max_residuals.empty()) {
+          node["iteration_max_residuals"] =
+              protocol_result.iteration_max_residuals;
         }
 
-        if (protocol_restart_reused) {
+        total_wall_seconds += protocol_wall_seconds;
+        total_cpu_seconds += protocol_cpu_seconds;
+        if (protocol_result.attempted) {
+          ++attempted_protocols;
+        }
+        if (protocol_result.restart_reused) {
           ++restart_ready_protocols;
         }
-        if (protocol_skipped) {
+        if (protocol_result.skipped) {
           ++skipped_protocols;
         }
-        if (!protocol_skipped && !protocol_failed && !converged) {
+        if (!protocol_result.skipped && !protocol_result.failed &&
+            !protocol_result.converged) {
           ++pending_protocols;
         }
-
-        if (protocol_failed) {
+        if (protocol_result.failed) {
           ++failed_protocols;
         } else {
           ++completed_protocols;
         }
+
         protocol_events.push_back(
             {{"protocol_key", protocol_key},
              {"threshold", threshold},
-             {"saved", saved},
-             {"converged", converged},
-             {"attempted", protocol_attempted},
-              {"failed", protocol_failed},
-             {"skipped", protocol_skipped},
-             {"restart_reused", protocol_restart_reused},
-             {"stage_status", stage_status},
-             {"energies", protocol_energies},
+             {"saved", protocol_result.saved},
+             {"converged", protocol_result.converged},
+             {"attempted", protocol_result.attempted},
+             {"failed", protocol_result.failed},
+             {"skipped", protocol_result.skipped},
+             {"restart_reused", protocol_result.restart_reused},
+             {"stage_status", protocol_result.stage_status},
+             {"iterations", protocol_result.iterations},
+             {"energies", protocol_result.energies},
+             {"residual_norms", protocol_result.residual_norms},
+             {"iteration_max_residuals",
+              protocol_result.iteration_max_residuals},
              {"wall_seconds", protocol_wall_seconds},
              {"cpu_seconds", protocol_cpu_seconds}});
       }
+    }
 
-      execution["attempted"] = plan.enabled && pending_protocols > 0;
+    if (world.rank() == 0) {
+      execution["attempted"] = attempted_protocols > 0;
       execution["ready_protocol_placeholders"] = ready_protocol_placeholders;
       execution["restart_ready_protocols"] = restart_ready_protocols;
       execution["pending_protocols"] = pending_protocols;
@@ -1904,7 +2052,7 @@ private:
       execution["protocol_events"] = std::move(protocol_events);
 
       if (plan.enabled || ready_protocol_placeholders > 0) {
-        print("Excited-state bundle stage scaffold: protocols=",
+        print("Excited-state bundle stage: protocols=",
               ready_protocol_placeholders,
               " pending=", pending_protocols,
               " restart_ready=", restart_ready_protocols,
@@ -2323,8 +2471,6 @@ private:
                    GroundContext &ctx,
                    const ResponseParameters &response_params,
                    PlannedStates planned_states) {
-    (void)response_params;
-
     // Stage 2a setup: build runtime ownership schedule and restart-aware policy.
     const StateSolveScheduleContext schedule_ctx =
         build_state_solve_schedule_context(world, calc_params, planned_states);
@@ -2349,8 +2495,8 @@ private:
 
     // Stage 2c excited-state bundle scaffold: metadata placeholders only.
     const ExcitedExecutionResult excited_result =
-        execute_excited_state_bundle_stage(world, planned_states,
-                                           state_metadata_json);
+        execute_excited_state_bundle_stage(world, planned_states, ctx,
+                                           response_params, state_metadata_json);
 
     // Stage 2d derived solve: dependency-gated execution + summary metadata.
     const DerivedExecutionResult derived_result = execute_derived_state_requests(

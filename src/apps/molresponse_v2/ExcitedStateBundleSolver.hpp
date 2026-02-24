@@ -2,8 +2,16 @@
 
 #include <madness/world/world.h>
 
+#include <memory>
 #include <string>
 #include <vector>
+
+struct ExcitedBundleSolverConfig {
+  std::string archive_file;
+  std::string output_prefix = "excited_bundle";
+  std::vector<double> protocols;
+  int print_level = 0;
+};
 
 struct ExcitedBundleProtocolInput {
   double threshold = 0.0;
@@ -26,7 +34,10 @@ struct ExcitedBundleProtocolResult {
   bool skipped = false;
   bool restart_reused = false;
   std::string stage_status = "placeholder_pending_solver";
+  size_t iterations = 0;
   std::vector<double> energies;
+  std::vector<double> residual_norms;
+  std::vector<double> iteration_max_residuals;
 };
 
 class ExcitedStateBundleSolver {
@@ -56,6 +67,10 @@ public:
     result.skipped = false;
     result.restart_reused = false;
     result.stage_status = "placeholder_pending_solver";
+    result.iterations = 0;
     return result;
   }
 };
+
+[[nodiscard]] std::unique_ptr<ExcitedStateBundleSolver>
+make_excited_state_bundle_solver_adapter(const ExcitedBundleSolverConfig &config);
