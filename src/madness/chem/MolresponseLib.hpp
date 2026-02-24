@@ -54,6 +54,7 @@
 #include <optional>
 #include <memory>
 #include <utility>
+#include <vector>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/Results.h>
@@ -104,11 +105,47 @@ private:
     std::string fock_json_file;
   };
 
+  struct ExcitedStateBundlePlan {
+    // Enables the excited-state bundle protocol stage in Stage 2.
+    bool enabled = false;
+    // Target number of excited states in one coupled bundle solve.
+    size_t num_states = 1;
+    // Optional TDA mode for the future excited-state solver stage.
+    bool tda = false;
+    // Guess stage iteration budget.
+    size_t guess_max_iter = 5;
+    // Main excited-state iteration budget.
+    size_t maxiter = 20;
+    // Subspace size for iterative diagonalization.
+    size_t maxsub = 8;
+    // Reserved owner lane for the future excited-state bundle solve.
+    size_t owner_group = 0;
+    // Protocol thresholds that will index excited-bundle restart metadata.
+    std::vector<double> protocols;
+
+    [[nodiscard]] nlohmann::json to_json() const {
+      nlohmann::json protocol_keys = nlohmann::json::array();
+      for (const auto threshold : protocols) {
+        protocol_keys.push_back(ResponseRecord2::protocol_key(threshold));
+      }
+      return {{"enabled", enabled},
+              {"num_states", num_states},
+              {"tda", tda},
+              {"guess_max_iter", guess_max_iter},
+              {"maxiter", maxiter},
+              {"maxsub", maxsub},
+              {"owner_group", owner_group},
+              {"protocols", std::move(protocol_keys)}};
+    }
+  };
+
   struct PlannedStates {
     // Linear states generated directly from requested perturbations.
     GeneratedStateData generated_states;
     // Derived-state requests (currently VBC-driven scaffolding/execution).
     DerivedStatePlan derived_state_plan;
+    // Excited-state bundle execution plan (protocol-indexed).
+    ExcitedStateBundlePlan excited_state_bundle_plan;
     // Ownership and subgroup execution plan for Stage 2.
     StateParallelPlan state_parallel_plan;
   };
@@ -142,6 +179,12 @@ private:
     void
     initialize_states(const std::vector<LinearResponseDescriptor> &states) {
       response_record_.initialize_states(states);
+    }
+
+    void initialize_excited_bundle(const ExcitedStateBundlePlan &plan) {
+      response_record_.initialize_excited_bundle(
+          plan.enabled, plan.num_states, plan.tda, plan.guess_max_iter,
+          plan.maxiter, plan.maxsub, plan.owner_group, plan.protocols);
     }
 
     void print_summary() const { response_record_.print_summary(); }
@@ -353,89 +396,168 @@ private:
     if (!merged.contains("states") || !merged["states"].is_object()) {
       merged["states"] = nlohmann::json::object();
     }
-    if (!shard.is_object() || !shard.contains("states") ||
-        !shard["states"].is_object()) {
+    if (!shard.is_object()) {
       return;
     }
 
-    for (const auto &[state_id, shard_state] : shard["states"].items()) {
-      auto &dst_state = merged["states"][state_id];
-      if (!dst_state.is_object()) {
-        dst_state = nlohmann::json::object();
-      }
-      if (!dst_state.contains("protocols") ||
-          !dst_state["protocols"].is_object()) {
-        dst_state["protocols"] = nlohmann::json::object();
-      }
-
-      if (shard_state.contains("final_saved") &&
-          shard_state["final_saved"].is_boolean()) {
-        const bool lhs = dst_state.contains("final_saved") &&
-                         dst_state["final_saved"].is_boolean() &&
-                         dst_state["final_saved"].get<bool>();
-        const bool rhs = shard_state["final_saved"].get<bool>();
-        dst_state["final_saved"] = (lhs || rhs);
-      }
-
-      if (!shard_state.contains("protocols") ||
-          !shard_state["protocols"].is_object()) {
-        continue;
-      }
-
-      for (const auto &[protocol_key, shard_proto] :
-           shard_state["protocols"].items()) {
-        auto &dst_proto = dst_state["protocols"][protocol_key];
-        if (!dst_proto.is_object()) {
-          dst_proto = nlohmann::json::object();
+    if (shard.contains("states") && shard["states"].is_object()) {
+      for (const auto &[state_id, shard_state] : shard["states"].items()) {
+        auto &dst_state = merged["states"][state_id];
+        if (!dst_state.is_object()) {
+          dst_state = nlohmann::json::object();
         }
-        if (!dst_proto.contains("saved") || !dst_proto["saved"].is_object()) {
-          dst_proto["saved"] = nlohmann::json::object();
-        }
-        if (!dst_proto.contains("converged") ||
-            !dst_proto["converged"].is_object()) {
-          dst_proto["converged"] = nlohmann::json::object();
-        }
-        if (!dst_proto.contains("timings") ||
-            !dst_proto["timings"].is_object()) {
-          dst_proto["timings"] = nlohmann::json::object();
-        }
-        if (!dst_proto.contains("restart_provenance") ||
-            !dst_proto["restart_provenance"].is_object()) {
-          dst_proto["restart_provenance"] = nlohmann::json::object();
+        if (!dst_state.contains("protocols") ||
+            !dst_state["protocols"].is_object()) {
+          dst_state["protocols"] = nlohmann::json::object();
         }
 
-        auto merge_flag_map = [&](const char *name) {
-          if (!shard_proto.contains(name) || !shard_proto[name].is_object()) {
-            return;
+        if (shard_state.contains("final_saved") &&
+            shard_state["final_saved"].is_boolean()) {
+          const bool lhs = dst_state.contains("final_saved") &&
+                           dst_state["final_saved"].is_boolean() &&
+                           dst_state["final_saved"].get<bool>();
+          const bool rhs = shard_state["final_saved"].get<bool>();
+          dst_state["final_saved"] = (lhs || rhs);
+        }
+
+        if (!shard_state.contains("protocols") ||
+            !shard_state["protocols"].is_object()) {
+          continue;
+        }
+
+        for (const auto &[protocol_key, shard_proto] :
+             shard_state["protocols"].items()) {
+          auto &dst_proto = dst_state["protocols"][protocol_key];
+          if (!dst_proto.is_object()) {
+            dst_proto = nlohmann::json::object();
           }
-          for (const auto &[freq_key, shard_value] :
-               shard_proto[name].items()) {
-            const bool rhs =
-                shard_value.is_boolean() && shard_value.get<bool>();
-            const bool lhs = dst_proto[name].contains(freq_key) &&
-                             dst_proto[name][freq_key].is_boolean() &&
-                             dst_proto[name][freq_key].get<bool>();
-            dst_proto[name][freq_key] = (lhs || rhs);
+          if (!dst_proto.contains("saved") || !dst_proto["saved"].is_object()) {
+            dst_proto["saved"] = nlohmann::json::object();
           }
-        };
+          if (!dst_proto.contains("converged") ||
+              !dst_proto["converged"].is_object()) {
+            dst_proto["converged"] = nlohmann::json::object();
+          }
+          if (!dst_proto.contains("timings") ||
+              !dst_proto["timings"].is_object()) {
+            dst_proto["timings"] = nlohmann::json::object();
+          }
+          if (!dst_proto.contains("restart_provenance") ||
+              !dst_proto["restart_provenance"].is_object()) {
+            dst_proto["restart_provenance"] = nlohmann::json::object();
+          }
 
-        merge_flag_map("saved");
-        merge_flag_map("converged");
-        if (shard_proto.contains("timings") &&
-            shard_proto["timings"].is_object()) {
-          for (const auto &[freq_key, timing_value] :
-               shard_proto["timings"].items()) {
-            if (!dst_proto["timings"].contains(freq_key)) {
-              dst_proto["timings"][freq_key] = timing_value;
+          auto merge_flag_map = [&](const char *name) {
+            if (!shard_proto.contains(name) || !shard_proto[name].is_object()) {
+              return;
+            }
+            for (const auto &[freq_key, shard_value] :
+                 shard_proto[name].items()) {
+              const bool rhs =
+                  shard_value.is_boolean() && shard_value.get<bool>();
+              const bool lhs = dst_proto[name].contains(freq_key) &&
+                               dst_proto[name][freq_key].is_boolean() &&
+                               dst_proto[name][freq_key].get<bool>();
+              dst_proto[name][freq_key] = (lhs || rhs);
+            }
+          };
+
+          merge_flag_map("saved");
+          merge_flag_map("converged");
+          if (shard_proto.contains("timings") &&
+              shard_proto["timings"].is_object()) {
+            for (const auto &[freq_key, timing_value] :
+                 shard_proto["timings"].items()) {
+              if (!dst_proto["timings"].contains(freq_key)) {
+                dst_proto["timings"][freq_key] = timing_value;
+              }
+            }
+          }
+          if (shard_proto.contains("restart_provenance") &&
+              shard_proto["restart_provenance"].is_object()) {
+            for (const auto &[freq_key, provenance_value] :
+                 shard_proto["restart_provenance"].items()) {
+              if (!dst_proto["restart_provenance"].contains(freq_key)) {
+                dst_proto["restart_provenance"][freq_key] = provenance_value;
+              }
             }
           }
         }
-        if (shard_proto.contains("restart_provenance") &&
-            shard_proto["restart_provenance"].is_object()) {
-          for (const auto &[freq_key, provenance_value] :
-               shard_proto["restart_provenance"].items()) {
-            if (!dst_proto["restart_provenance"].contains(freq_key)) {
-              dst_proto["restart_provenance"][freq_key] = provenance_value;
+      }
+    }
+
+    if (shard.contains("excited_states") && shard["excited_states"].is_object()) {
+      if (!merged.contains("excited_states") ||
+          !merged["excited_states"].is_object()) {
+        merged["excited_states"] = nlohmann::json::object();
+      }
+      auto &dst_excited = merged["excited_states"];
+      const auto &src_excited = shard["excited_states"];
+
+      if (src_excited.contains("plan") && src_excited["plan"].is_object()) {
+        if (!dst_excited.contains("plan") || !dst_excited["plan"].is_object()) {
+          dst_excited["plan"] = src_excited["plan"];
+        } else {
+          for (const auto &[key, value] : src_excited["plan"].items()) {
+            dst_excited["plan"][key] = value;
+          }
+        }
+      }
+
+      if (src_excited.contains("protocols") &&
+          src_excited["protocols"].is_object()) {
+        if (!dst_excited.contains("protocols") ||
+            !dst_excited["protocols"].is_object()) {
+          dst_excited["protocols"] = nlohmann::json::object();
+        }
+        auto &dst_protocols = dst_excited["protocols"];
+        for (const auto &[protocol_key, src_protocol] :
+             src_excited["protocols"].items()) {
+          auto &dst_protocol = dst_protocols[protocol_key];
+          if (!dst_protocol.is_object()) {
+            dst_protocol = nlohmann::json::object();
+          }
+          const bool src_saved =
+              src_protocol.contains("saved") && src_protocol["saved"].is_boolean() &&
+              src_protocol["saved"].get<bool>();
+          const bool src_converged = src_protocol.contains("converged") &&
+                                     src_protocol["converged"].is_boolean() &&
+                                     src_protocol["converged"].get<bool>();
+          const bool dst_saved =
+              dst_protocol.contains("saved") &&
+              dst_protocol["saved"].is_boolean() &&
+              dst_protocol["saved"].get<bool>();
+          const bool dst_converged =
+              dst_protocol.contains("converged") &&
+              dst_protocol["converged"].is_boolean() &&
+              dst_protocol["converged"].get<bool>();
+          dst_protocol["saved"] = (dst_saved || src_saved);
+          dst_protocol["converged"] = (dst_converged || src_converged);
+
+          if (src_protocol.contains("timings") &&
+              src_protocol["timings"].is_object()) {
+            if (!dst_protocol.contains("timings") ||
+                !dst_protocol["timings"].is_object()) {
+              dst_protocol["timings"] = src_protocol["timings"];
+            } else {
+              for (const auto &[k, v] : src_protocol["timings"].items()) {
+                const bool take_value =
+                    !dst_protocol["timings"].contains(k) ||
+                    (dst_protocol["timings"][k].is_number() &&
+                     dst_protocol["timings"][k].get<double>() == 0.0);
+                if (take_value) {
+                  dst_protocol["timings"][k] = v;
+                }
+              }
+            }
+          }
+
+          if (src_protocol.contains("energies") &&
+              src_protocol["energies"].is_array()) {
+            if (!dst_protocol.contains("energies") ||
+                !dst_protocol["energies"].is_array() ||
+                dst_protocol["energies"].empty()) {
+              dst_protocol["energies"] = src_protocol["energies"];
             }
           }
           if (src_protocol.contains("iterations") &&
@@ -613,6 +735,27 @@ private:
                          std::move(fock_json_file)};
   }
 
+  static ExcitedStateBundlePlan
+  build_excited_state_bundle_plan(const CalculationParameters &calc_params,
+                                  const ResponseParameters &response_params,
+                                  const StateParallelPlan &state_parallel_plan) {
+    ExcitedStateBundlePlan plan;
+    plan.enabled = response_params.excited_enable();
+    plan.num_states = response_params.excited_num_states();
+    plan.tda = response_params.excited_tda();
+    plan.guess_max_iter = response_params.excited_guess_max_iter();
+    plan.maxiter = response_params.excited_maxiter();
+    plan.maxsub = response_params.excited_maxsub();
+    const size_t max_owner_group =
+        state_parallel_plan.mapping_groups > 0
+            ? (state_parallel_plan.mapping_groups - 1)
+            : 0;
+    plan.owner_group =
+        std::min(response_params.excited_owner_group(), max_owner_group);
+    plan.protocols = calc_params.protocol();
+    return plan;
+  }
+
   static PlannedStates
   plan_required_states(World &world, const CalculationParameters &calc_params,
                        const GroundContext &ctx,
@@ -631,9 +774,18 @@ private:
             calc_params.protocol());
     StateParallelPlan state_parallel_plan = StateParallelPlanner::build(
         response_params, world.size(), generated_states.states);
+    ExcitedStateBundlePlan excited_state_bundle_plan =
+        build_excited_state_bundle_plan(calc_params, response_params,
+                                        state_parallel_plan);
     if (world.rank() == 0 && !derived_state_plan.requests.empty()) {
       print("🧩 Planned ", derived_state_plan.requests.size(),
             " VBC-derived quadratic-state requests.");
+    }
+    if (world.rank() == 0 && excited_state_bundle_plan.enabled) {
+      print("🧠 Planned excited-state bundle execution: states=",
+            excited_state_bundle_plan.num_states,
+            " owner_group=", excited_state_bundle_plan.owner_group,
+            " tda=", excited_state_bundle_plan.tda);
     }
     if (world.rank() == 0 && response_params.state_parallel() != "off") {
       print(
@@ -651,6 +803,7 @@ private:
     world.gop.fence();
     return PlannedStates{std::move(generated_states),
                          std::move(derived_state_plan),
+                         std::move(excited_state_bundle_plan),
                          std::move(state_parallel_plan)};
   }
 
@@ -1311,6 +1464,7 @@ private:
   static void execute_serial_state_solve(
       World &world, const CalculationParameters &calc_params, GroundContext &ctx,
       const StateSolveScheduleContext &schedule_ctx,
+      const ExcitedStateBundlePlan &excited_state_bundle_plan,
       nlohmann::json &state_metadata_json, nlohmann::json &debug_log_json) {
     // Serial execution path:
     // 1) initialize metadata/log persistence,
@@ -1319,6 +1473,7 @@ private:
     JsonStateSolvePersistence persistence(world, "response_metadata.json",
                                           "response_log.json");
     persistence.initialize_states(schedule_ctx.linear_states);
+    persistence.initialize_excited_bundle(excited_state_bundle_plan);
 
     if (world.rank() == 0) {
       persistence.print_summary();
@@ -1452,6 +1607,7 @@ private:
   static bool execute_subgroup_state_solve(
       World &world, const CalculationParameters &calc_params, GroundContext &ctx,
       const StateSolveScheduleContext &schedule_ctx,
+      const ExcitedStateBundlePlan &excited_state_bundle_plan,
       nlohmann::json &state_metadata_json, nlohmann::json &debug_log_json) {
     // Subgroup execution path:
     // 1) create macrotask subworlds,
@@ -1502,6 +1658,7 @@ private:
             subworld, metadata_shard_file, debug_shard_file,
             baseline_state_metadata);
         local_persistence.initialize_states(local_channels);
+        local_persistence.initialize_excited_bundle(excited_state_bundle_plan);
         if (subworld.rank() == 0) {
           print("State-parallel subgroup ", subgroup_id, " owns ",
                 local_channel_indices.size(), " protocol-0 channels and ",
@@ -2453,9 +2610,9 @@ private:
         {"execution", derived_result.execution}};
     metadata["excited_state_planner"] = {
         {"note",
-         "Stage scaffolding only: protocol-aware excited-state metadata is "
-         "tracked with status/timing transitions, but no excited-state solve "
-         "path is executed yet."},
+         "Stage 2c executes the protocol-aware excited-state bundle adapter. "
+         "Per-protocol status, timings, restart provenance, and solver "
+         "diagnostics are recorded in metadata."},
         {"plan", planned_states.excited_state_bundle_plan.to_json()},
         {"execution", excited_result.execution}};
     return metadata;
@@ -2463,7 +2620,7 @@ private:
 
   // Stage-2 orchestrator:
   // 2a) build runtime ownership policy, 2b) solve linear states,
-  // 2c) update excited-stage scaffold metadata,
+  // 2c) execute excited-state bundle protocol stage,
   // 2d) execute dependency-gated derived requests,
   // 2e) publish stage metadata.
   static SolvedStates
@@ -2482,18 +2639,20 @@ private:
     bool ran_subgroup_path = false;
     if (schedule_ctx.subgroup_parallel_requested) {
       ran_subgroup_path = execute_subgroup_state_solve(
-          world, calc_params, ctx, schedule_ctx, state_metadata_json,
+          world, calc_params, ctx, schedule_ctx,
+          planned_states.excited_state_bundle_plan, state_metadata_json,
           debug_log_json);
     }
     if (!ran_subgroup_path) {
       execute_serial_state_solve(world, calc_params, ctx, schedule_ctx,
+                                 planned_states.excited_state_bundle_plan,
                                  state_metadata_json, debug_log_json);
     }
 
     const FinalProtocolState final_state = prepare_and_validate_final_protocol_state(
         world, calc_params, ctx, planned_states, state_metadata_json);
 
-    // Stage 2c excited-state bundle scaffold: metadata placeholders only.
+    // Stage 2c excited-state bundle: protocol-aware adapter execution.
     const ExcitedExecutionResult excited_result =
         execute_excited_state_bundle_stage(world, planned_states, ctx,
                                            response_params, state_metadata_json);

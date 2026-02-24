@@ -135,11 +135,14 @@ private:
                    const ExcitedBundleProtocolInput &input) {
       ExcitedBundleProtocolResult result;
       const std::string protocol_file = protocol_restart_file(input.threshold);
-      const bool protocol_file_exists = file_exists_world(world, protocol_file);
       const auto restart_snapshot = read_restart_snapshot(world, protocol_file);
 
       // Matches old response flow: if this protocol is already converged, skip.
       if (input.restart_saved && input.restart_converged) {
+        if (restart_snapshot.has_data && !restart_snapshot.energies.empty()) {
+          load_restart_guess(restart_snapshot);
+          ensure_trial_space_matches_guess(world, input);
+        }
         result.attempted = false;
         result.saved = true;
         result.converged = true;
@@ -156,23 +159,33 @@ private:
 
       prepare_protocol(world, input.threshold);
 
-      std::string initialize_status;
-      if (!first_protocol_initialized_) {
-        initialize_status =
-            initialize(world, input, protocol_file_exists, restart_snapshot);
-        first_protocol_initialized_ = true;
-      }
+      const auto initialize_result =
+          initialize_protocol_guess(world, input, restart_snapshot);
 
-      result = iterate(world, input, protocol_file_exists);
-      if (!initialize_status.empty()) {
-        result.stage_status = initialize_status + "__" + result.stage_status;
+      result = iterate(world, input, initialize_result.restart_reused);
+      if (!initialize_result.stage_status.empty()) {
+        result.stage_status =
+            initialize_result.stage_status + "__" + result.stage_status;
       }
       return result;
     }
 
   private:
+    struct ProtocolInitResult {
+      std::string stage_status;
+      bool restart_reused = false;
+    };
+
+    struct RestartSeedChoice {
+      RestartSnapshot snapshot;
+      bool found = false;
+      bool from_current_protocol = false;
+      bool from_lower_protocol = false;
+      double source_threshold = 0.0;
+    };
+
     ExcitedBundleSolverConfig config_;
-    bool first_protocol_initialized_ = false;
+    bool has_active_guess_ = false;
     ExcitedTrialSpace trial_space_;
     std::vector<double> omega_;
     std::vector<double> residual_norms_;
@@ -456,27 +469,19 @@ private:
       }
     }
 
-    [[nodiscard]] std::string
-    initialize(madness::World &world, const ExcitedBundleProtocolInput &input,
-               bool protocol_file_exists,
-               const RestartSnapshot &restart_snapshot) {
-      ensure_ground_data(world);
-      // Old flow mirror:
-      // - first protocol either restarts from file or builds/iterates trial
-      //   guesses, then stores selected roots for the main iterate phase.
-      if ((input.restart_saved || protocol_file_exists) &&
-          restart_snapshot.has_data && !restart_snapshot.energies.empty()) {
-        omega_ = restart_snapshot.energies;
-        residual_norms_ = restart_snapshot.residual_norms;
-        last_iteration_count_ = restart_snapshot.iterations;
-        iteration_max_residuals_ = restart_snapshot.iteration_max_residuals;
-        if (world.rank() == 0) {
-          madness::print("Excited bundle init: loaded restart energies (",
-                         omega_.size(), " states)");
-        }
-        return "first_protocol_restart_init";
+    void load_restart_guess(const RestartSnapshot &restart_snapshot) {
+      omega_ = restart_snapshot.energies;
+      residual_norms_ = restart_snapshot.residual_norms;
+      if (residual_norms_.size() != omega_.size()) {
+        residual_norms_.assign(omega_.size(), 1.0e-2);
       }
+      last_iteration_count_ = restart_snapshot.iterations;
+      iteration_max_residuals_ = restart_snapshot.iteration_max_residuals;
+      has_active_guess_ = !omega_.empty();
+    }
 
+    void build_fresh_guess(madness::World &world,
+                           const ExcitedBundleProtocolInput &input) {
       if (input.tda) {
         trial_space_ = create_trial_functions2(world, input);
       } else if (input.num_states <= 2) {
@@ -495,27 +500,122 @@ private:
       residual_norms_ = std::vector<double>(omega_.size(), 1.0e-2);
       last_iteration_count_ = std::max<size_t>(input.guess_max_iter, 1);
       iteration_max_residuals_.clear();
+      has_active_guess_ = !omega_.empty();
+    }
+
+    void ensure_trial_space_matches_guess(
+        madness::World &world, const ExcitedBundleProtocolInput &input) {
+      if (trial_space_.x_states.empty()) {
+        trial_space_ = create_trial_functions(world, input);
+        iterate_trial(world, input, trial_space_);
+      }
+
+      if (trial_space_.x_states.size() > input.num_states) {
+        trial_space_.x_states.resize(input.num_states);
+      }
+      if (!omega_.empty()) {
+        if (trial_space_.x_states.size() > omega_.size()) {
+          trial_space_.x_states.resize(omega_.size());
+        } else if (trial_space_.x_states.size() < omega_.size()) {
+          omega_.resize(trial_space_.x_states.size());
+        }
+        trial_space_.omega = omega_;
+      } else {
+        omega_ = trial_space_.omega;
+      }
+      if (residual_norms_.size() != omega_.size()) {
+        residual_norms_.assign(omega_.size(), 1.0e-2);
+      }
+      has_active_guess_ = !omega_.empty();
+    }
+
+    [[nodiscard]] RestartSeedChoice
+    select_restart_seed(madness::World &world,
+                        const ExcitedBundleProtocolInput &input,
+                        const RestartSnapshot &current_protocol_snapshot) const {
+      RestartSeedChoice selected;
+      if (current_protocol_snapshot.has_data &&
+          !current_protocol_snapshot.energies.empty()) {
+        selected.snapshot = current_protocol_snapshot;
+        selected.found = true;
+        selected.from_current_protocol = true;
+        selected.source_threshold = input.threshold;
+        return selected;
+      }
+
+      double best_threshold = -1.0;
+      for (const auto threshold : config_.protocols) {
+        if (threshold >= input.threshold - 1.0e-14) {
+          continue;
+        }
+        const auto snapshot =
+            read_restart_snapshot(world, protocol_restart_file(threshold));
+        if (!snapshot.has_data || snapshot.energies.empty()) {
+          continue;
+        }
+        if (!selected.found || threshold > best_threshold) {
+          selected.snapshot = snapshot;
+          selected.found = true;
+          selected.from_lower_protocol = true;
+          selected.source_threshold = threshold;
+          best_threshold = threshold;
+        }
+      }
+      return selected;
+    }
+
+    [[nodiscard]] ProtocolInitResult
+    initialize_protocol_guess(madness::World &world,
+                              const ExcitedBundleProtocolInput &input,
+                              const RestartSnapshot &current_protocol_snapshot) {
+      ensure_ground_data(world);
+      const auto restart_choice =
+          select_restart_seed(world, input, current_protocol_snapshot);
+      if (restart_choice.found) {
+        load_restart_guess(restart_choice.snapshot);
+        ensure_trial_space_matches_guess(world, input);
+        if (world.rank() == 0) {
+          if (restart_choice.from_current_protocol) {
+            madness::print("Excited bundle init: using protocol restart guess (",
+                           omega_.size(), " states)");
+          } else if (restart_choice.from_lower_protocol) {
+            madness::print(
+                "Excited bundle init: using lower-protocol restart guess (",
+                "source_thresh=", restart_choice.source_threshold,
+                ", states=", omega_.size(), ")");
+          }
+        }
+        return {restart_choice.from_current_protocol
+                    ? "protocol_restart_guess"
+                    : "lower_protocol_restart_guess",
+                true};
+      }
+
+      if (has_active_guess_ && !omega_.empty()) {
+        ensure_trial_space_matches_guess(world, input);
+        if (world.rank() == 0) {
+          madness::print("Excited bundle init: using in-memory carryover guess (",
+                         omega_.size(), " states)");
+        }
+        return {"carryover_guess", true};
+      }
+
+      build_fresh_guess(world, input);
       if (world.rank() == 0) {
         madness::print("Excited bundle init: fresh trial/guess path (",
                        omega_.size(), " states)");
       }
-      return "first_protocol_fresh_init";
+      return {"protocol_fresh_guess", false};
     }
 
     [[nodiscard]] ExcitedBundleProtocolResult
     iterate(madness::World &world, const ExcitedBundleProtocolInput &input,
-            bool protocol_file_exists) {
+            bool restart_seed_reused) {
       ensure_ground_data(world);
+      ensure_trial_space_matches_guess(world, input);
       if (omega_.empty()) {
-        trial_space_ = create_trial_functions(world, input);
-        iterate_trial(world, input, trial_space_);
-        if (trial_space_.x_states.size() > input.num_states) {
-          trial_space_.x_states.resize(input.num_states);
-          trial_space_.omega.resize(input.num_states);
-        }
-        omega_ = trial_space_.omega;
-        residual_norms_ = std::vector<double>(omega_.size(), 1.0e-2);
-        iteration_max_residuals_.clear();
+        build_fresh_guess(world, input);
+        ensure_trial_space_matches_guess(world, input);
       }
 
       const size_t max_iterations = std::max<size_t>(input.maxiter, 1);
@@ -580,7 +680,7 @@ private:
       result.converged = converged;
       result.failed = !converged;
       result.skipped = false;
-      result.restart_reused = protocol_file_exists || input.restart_saved;
+      result.restart_reused = restart_seed_reused;
       result.stage_status =
           converged ? "iterate_converged" : "iterate_reached_iter_budget";
       if (result.restart_reused) {
