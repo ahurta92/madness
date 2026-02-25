@@ -43,6 +43,24 @@ struct ResponseParameters : public QCCalculationParametersBase {
         "requested_properties", {"polarizability"},
         "properties to calculate (polarizability,hessian, hyperpolarizability, "
         "Raman.)");
+    initialize<std::string>(
+        "state_parallel", "off",
+        "state-level subgroup scheduling mode (off, auto, on)",
+        {"off", "auto", "on"});
+    initialize<size_t>(
+        "state_parallel_groups", 1,
+        "number of processor groups for state-level subgroup scheduling");
+    initialize<size_t>(
+        "state_parallel_min_states", 4,
+        "minimum number of generated states before auto state-parallel mode "
+        "activates");
+    initialize<size_t>(
+        "state_parallel_property_group", 0,
+        "subgroup id used for property assembly in state-parallel mode");
+    initialize<size_t>(
+        "state_parallel_point_start_protocol", 1,
+        "first protocol index where state-parallel mode may fan out by "
+        "state-frequency point ownership");
     //** if properites are requested, then one should specify directions,
     // frequencies, and atom_indices(for nuclear response) */
     initialize<bool>("property", false, "Compute properties");
@@ -107,6 +125,21 @@ public:
     return get<std::vector<std::string>>("requested_properties");
   }
   [[nodiscard]] bool dipole() const { return get<bool>("dipole"); }
+  [[nodiscard]] std::string state_parallel() const {
+    return get<std::string>("state_parallel");
+  }
+  [[nodiscard]] size_t state_parallel_groups() const {
+    return get<size_t>("state_parallel_groups");
+  }
+  [[nodiscard]] size_t state_parallel_min_states() const {
+    return get<size_t>("state_parallel_min_states");
+  }
+  [[nodiscard]] size_t state_parallel_property_group() const {
+    return get<size_t>("state_parallel_property_group");
+  }
+  [[nodiscard]] size_t state_parallel_point_start_protocol() const {
+    return get<size_t>("state_parallel_point_start_protocol");
+  }
   [[nodiscard]] std::vector<double> dipole_frequencies() const {
     return get<std::vector<double>>("dipole.frequencies");
   }

@@ -15,9 +15,22 @@
 #include "Perturbation.hpp"
 #include "molecular_functors.h"
 #include "vmra.h"
+#include <cmath>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+inline double canonicalize_response_frequency(double raw_frequency) {
+  // Response filenames are rendered at 3 decimal places, so normalize
+  // frequencies to that same grid to avoid duplicate schedule entries that
+  // differ only by floating-point noise.
+  constexpr double scale = 1000.0;
+  double rounded = std::round(raw_frequency * scale) / scale;
+  if (std::abs(rounded) < (0.5 / scale)) {
+    rounded = 0.0;
+  }
+  return rounded;
+}
 
 struct AbstractResponseDescriptor {
   [[nodiscard]] virtual bool is_spin_restricted() const = 0;
@@ -80,6 +93,13 @@ struct LinearResponsePoint {
 
   [[nodiscard]] std::string perturbationDescription() const;
 };
+
+// Terminology aliases used by state-parallel scheduling code:
+// - PerturbationChannelDescriptor: one perturbation channel with a
+//   frequency series across protocol levels.
+// - ChannelPoint: one (channel, frequency, protocol) solve target.
+using PerturbationChannelDescriptor = LinearResponseDescriptor;
+using ChannelPoint = LinearResponsePoint;
 
 struct SecondOrderResponseDescriptor : public AbstractResponseDescriptor {
   std::pair<Perturbation, Perturbation> perturbations_;

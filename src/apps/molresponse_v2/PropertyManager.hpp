@@ -11,10 +11,13 @@
 #include "madness/constants.h"
 
 #include <chrono>
+#include <cerrno>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <cstring>
 #include <madness/chem/vibanal.h>
 #include <madness/external/nlohmann_json/json.hpp>
 #include <madness/tensor/tensor.h>
@@ -23,6 +26,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 using json = nlohmann::json;
 
@@ -137,6 +141,36 @@ inline std::string iso_timestamp() {
   std::ostringstream ss;
   ss << std::put_time(std::gmtime(&itt), "%Y%m%dT%H%M%SZ");
   return ss.str();
+}
+
+inline bool try_claim_property_component_task(
+    const std::string &claim_file, const std::string &payload = "") {
+  std::error_code ec;
+  const auto parent = fs::path(claim_file).parent_path();
+  if (!parent.empty()) {
+    fs::create_directories(parent, ec);
+    if (ec) {
+      throw std::runtime_error("Failed to create claim directory '" +
+                               parent.string() + "': " + ec.message());
+    }
+  }
+
+  const int fd = ::open(claim_file.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+  if (fd < 0) {
+    if (errno == EEXIST) {
+      return false;
+    }
+    throw std::runtime_error("Failed to claim property component task '" +
+                             claim_file + "': " + std::strerror(errno));
+  }
+
+  if (!payload.empty()) {
+    ssize_t written = ::write(fd, payload.c_str(),
+                              static_cast<size_t>(payload.size()));
+    (void)written;
+  }
+  ::close(fd);
+  return true;
 }
 
 inline madness::Tensor<double> compute_response_inner_product_tensor(
@@ -417,9 +451,9 @@ void compute_alpha(
     const std::map<std::string, LinearResponseDescriptor> &state_map,
     const GroundStateData &gs, const std::vector<double> &frequencies,
     const std::string &directions, PropertyManager &pm) {
-  const long num_directions = static_cast<long>(directions.size());
-  const long num_orbitals = gs.getNumOrbitals();
-  const long num_frequencies = static_cast<long>(frequencies.size());
+  const size_t num_directions = directions.size();
+  const auto num_orbitals = gs.getNumOrbitals();
+  const size_t num_frequencies = frequencies.size();
   // const bool is_restricted = gs.isSpinRestricted();
 
   // if (world.rank() == 0) {
@@ -466,7 +500,7 @@ void compute_alpha(
     std::vector<vector_real_function_3d> response_vecs(num_directions);
     std::vector<vector_real_function_3d> perturb_vecs(num_directions);
 
-    for (long j = 0; j < num_directions; ++j) {
+    for (size_t j = 0; j < num_directions; ++j) {
       const auto &active_state = state_map.at(direction_keys[j]);
       LinearResponsePoint pt{active_state, active_state.thresholds.size() - 1,
                              ffi};
@@ -599,7 +633,7 @@ void compute_alpha(
     Tensor<double> purified = copy(H);
     double maxasymmetric = 0.0;
 
-    const size_t natom = mol.natom();
+    const long natom = static_cast<long>(mol.natom());
 
     for (long iatom = 0; iatom < natom; ++iatom) {
       for (long iaxis = 0; iaxis < 3; ++iaxis) {
@@ -729,7 +763,9 @@ void compute_beta(
     const std::vector<Perturbation> &perturbation_A,
     const std::vector<std::pair<Perturbation, Perturbation>> &BC_pairs,
     const std::pair<std::vector<double>, std::vector<double>> &frequencies,
-    PropertyManager &pm, const PropertyType &prop_type) {
+    PropertyManager &pm, const PropertyType &prop_type,
+    const std::string &task_claim_prefix = "",
+    std::optional<size_t> subgroup_id = std::nullopt) {
   const bool is_spin_restricted = gs.isSpinRestricted();
   const int num_orbitals = static_cast<int>(gs.getNumOrbitals());
   // const double thresh = FunctionDefaults<3>::get_thresh();
@@ -737,11 +773,36 @@ void compute_beta(
   // 1) Build a SimpleVBCComputer once
   auto vbc_computer = SimpleVBCComputer(world, gs);
 
+  size_t task_index = 0;
+
   // 2) Loop over all freq
   for (auto &freq_b : frequencies.first) {
     for (auto &freq_c : frequencies.second) {
       // Get all BC pairs possible out of Perturbation
       for (auto [B, C] : BC_pairs) {
+        const size_t this_task = task_index++;
+
+        bool task_claimed = true;
+        if (!task_claim_prefix.empty()) {
+          if (world.rank() == 0) {
+            std::ostringstream claim_name;
+            claim_name << task_claim_prefix << ".task" << this_task << ".lock";
+            std::ostringstream payload;
+            payload << "group="
+                    << (subgroup_id.has_value() ? std::to_string(*subgroup_id)
+                                                : std::string("serial"))
+                    << " freq_b=" << freq_b << " freq_c=" << freq_c
+                    << " B=" << describe_perturbation(B)
+                    << " C=" << describe_perturbation(C) << "\n";
+            task_claimed = try_claim_property_component_task(claim_name.str(),
+                                                             payload.str());
+          }
+          world.gop.broadcast_serializable(task_claimed, 0);
+          if (!task_claimed) {
+            continue;
+          }
+        }
+
         VBCResponseState vbc_state(B, C, freq_b, freq_c,
                                    FunctionDefaults<3>::get_thresh(),
                                    is_spin_restricted);
@@ -901,7 +962,8 @@ void compute_hyperpolarizability(
     World &world, const GroundStateData &gs,
     const std::vector<double> &frequencies, // ωB and ωC
     const std::string &directions,          // which Cartesian dirs
-    PropertyManager &pm) {
+    PropertyManager &pm, const std::string &task_claim_prefix = "",
+    std::optional<size_t> subgroup_id = std::nullopt) {
   // 1) Build A-list (dipole along each dir)
   std::vector<Perturbation> A_pert;
   A_pert.reserve(directions.size());
@@ -920,7 +982,7 @@ void compute_hyperpolarizability(
   compute_beta<DipolePerturbation, DipolePerturbation>(
       world, gs, A_pert, BC_pairs,
       freq_pair, // ωB and ωC = same list of freqs
-      pm, PropertyType::Beta);
+      pm, PropertyType::Beta, task_claim_prefix, subgroup_id);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -928,22 +990,22 @@ void compute_hyperpolarizability(
 //  frequencies: the optical frequencies for both Dipole and Raman.
 //  dip_dirs: which dipole directions to include.
 // ─────────────────────────────────────────────────────────────────────────────
-std::vector<Tensor<double>>
-compute_Raman(World &world, const GroundStateData &gs,
-              const std::vector<double> &frequencies, // ωB and ωC
-              const std::string &dip_dirs,            // e.g. {'x','y','z'}
-              const std::string &nuc_dirs,            // e.g. {'x','y','z'}
-              PropertyManager &pm) {
+void compute_Raman_components(
+    World &world, const GroundStateData &gs,
+    const std::vector<double> &frequencies, const std::string &dip_dirs,
+    const std::string &nuc_dirs, PropertyManager &pm,
+    const std::string &task_claim_prefix = "",
+    std::optional<size_t> subgroup_id = std::nullopt) {
   // 1) A-list is still the dipole directions
   std::vector<Perturbation> A_pert;
   A_pert.reserve(dip_dirs.size());
   for (char d : dip_dirs)
     A_pert.emplace_back(DipolePerturbation{d});
 
-  // 3) Build BC pairs = (Dipole, NuclearDisp)
+  // 2) Build BC pairs = (Dipole, NuclearDisp)
   std::vector<std::pair<Perturbation, Perturbation>> BC_pairs;
-  auto natoms = gs.molecule.natom();
-  vector<int> nuc_indices(natoms);
+  const auto natoms = gs.molecule.natom();
+  std::vector<int> nuc_indices(natoms);
   std::iota(nuc_indices.begin(), nuc_indices.end(), 0);
 
   BC_pairs.reserve(dip_dirs.size() * nuc_indices.size() * nuc_dirs.size());
@@ -955,16 +1017,30 @@ compute_Raman(World &world, const GroundStateData &gs,
       }
     }
   }
+
   std::pair<std::vector<double>, std::vector<double>> BC_frequencies;
   BC_frequencies.first = frequencies;
-  // zeros size of second vector
   BC_frequencies.second = std::vector<double>(frequencies.size(), 0.0);
 
-  // 4) Dispatch
   compute_beta<DipolePerturbation, NuclearDisplacementPerturbation>(
-      world, gs, A_pert, BC_pairs,
-      BC_frequencies, // ωB and ωC = same list of freqs
-      pm, PropertyType::Raman);
+      world, gs, A_pert, BC_pairs, BC_frequencies, pm, PropertyType::Raman,
+      task_claim_prefix, subgroup_id);
+}
+
+std::vector<Tensor<double>>
+compute_Raman(World &world, const GroundStateData &gs,
+              const std::vector<double> &frequencies, // ωB and ωC
+              const std::string &dip_dirs,            // e.g. {'x','y','z'}
+              const std::string &nuc_dirs,            // e.g. {'x','y','z'}
+              PropertyManager &pm) {
+  // Stage 1: ensure all Raman frequency-dependent components are present.
+  compute_Raman_components(world, gs, frequencies, dip_dirs, nuc_dirs, pm);
+
+  // Stage 2: assemble component table into Raman tensors for downstream
+  // post-processing.
+  auto natoms = gs.molecule.natom();
+  vector<int> nuc_indices(natoms);
+  std::iota(nuc_indices.begin(), nuc_indices.end(), 0);
 
   std::vector<components> all_comps;
 

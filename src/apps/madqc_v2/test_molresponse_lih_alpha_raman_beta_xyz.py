@@ -3,11 +3,12 @@
 import argparse
 import json
 import os
-import sys
+import shlex
 import subprocess
+import sys
 
 sys.path.append("@CMAKE_SOURCE_DIR@/bin")
-from test_utilities import cleanup, skip_on_small_machines
+from test_utilities import cleanup
 
 
 def response_rows_to_map(rows):
@@ -24,7 +25,6 @@ def response_rows_to_map(rows):
 
 
 def get_scf_energy(task):
-    # Accept both legacy and nested task schemas.
     if "properties" in task and "energy" in task["properties"]:
         return float(task["properties"]["energy"])
     if "scf_total_energy" in task:
@@ -33,9 +33,27 @@ def get_scf_energy(task):
         return float(task["scf"]["scf_total_energy"])
     raise KeyError("Could not find SCF energy in task JSON")
 
+
+def run_cmd(cmd, env=None):
+    print("executing\n ", " ".join(cmd))
+    p = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        env=env,
+    )
+    print("finished run")
+    print(p.stdout)
+    if p.stderr:
+        print(p.stderr)
+    print("exitcode", p.returncode)
+    return p
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="H2O response regression test (alpha/beta, z direction)"
+        description="LiH response regression test (alpha/beta/raman, xyz directions)"
     )
     parser.add_argument(
         "--reference_directory",
@@ -45,21 +63,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # This response test is expensive on small machines.
-    try:
-        if skip_on_small_machines():
-            print("Skipping this verylong test on small machines")
-            sys.exit(77)
-    except Exception:
-        print("Unable to evaluate machine size from MAD_NUM_THREADS, skipping test")
-        sys.exit(77)
-
     print("Testing @BINARY@/@TESTCASE@")
     print("reference files found in directory:", args.reference_directory)
 
     prefix = "mad_@BINARY@_@TESTCASE@"
     outputfile = prefix + ".calc_info.json"
-    inputfile = os.path.join(args.reference_directory, "test_molresponse_h2o_alpha_beta_z.in")
+    inputfile = os.path.join(
+        args.reference_directory, "test_molresponse_lih_alpha_raman_beta_xyz.in"
+    )
     referencefile = os.path.join(args.reference_directory, prefix + ".calc_info.ref.json")
 
     if not os.path.exists(inputfile):
@@ -71,25 +82,30 @@ if __name__ == "__main__":
         sys.exit(77)
 
     cleanup(prefix)
+    for stale in (outputfile,):
+        try:
+            os.remove(stale)
+        except FileNotFoundError:
+            pass
 
-    cmd = f"./@BINARY@ --wf=response --prefix={prefix} {inputfile}"
-    print("executing\n", cmd)
-    p = subprocess.run(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-    )
+    env = os.environ.copy()
+    launcher = env.get("MADQC_LAUNCHER", "").strip()
 
-    print("finished run")
-    print(p.stdout)
-    if p.stderr:
-        print(p.stderr)
-    exitcode = p.returncode
-    print("exitcode", exitcode)
-    if exitcode != 0:
-        sys.exit(exitcode)
+    rsp_cmd = [
+        "./@BINARY@",
+        "--wf=response",
+        f"--prefix={prefix}",
+        inputfile,
+    ]
+    if launcher:
+        rsp_cmd = shlex.split(launcher) + rsp_cmd
+    rsp_run = run_cmd(rsp_cmd, env=env)
+    if rsp_run.returncode != 0:
+        sys.exit(rsp_run.returncode)
+
+    if not os.path.exists(outputfile):
+        print("Response output file not found:", outputfile)
+        sys.exit(1)
 
     with open(outputfile, "r", encoding="utf-8") as f:
         got = json.load(f)
@@ -98,7 +114,6 @@ if __name__ == "__main__":
 
     success = True
 
-    # Basic structure checks
     if len(got["tasks"]) != len(ref["tasks"]):
         print("Mismatch in number of tasks:", len(got["tasks"]), len(ref["tasks"]))
         success = False
@@ -107,7 +122,6 @@ if __name__ == "__main__":
         print("Expected at least two tasks (SCF + response) in output/reference.")
         sys.exit(1)
 
-    # Ground-state checks
     got_scf = got["tasks"][0]
     ref_scf = ref["tasks"][0]
     got_model = got_scf.get("model", "scf")
@@ -118,14 +132,9 @@ if __name__ == "__main__":
     got_energy = get_scf_energy(got_scf)
     ref_energy = get_scf_energy(ref_scf)
     if abs(got_energy - ref_energy) > 1e-4:
-        print(
-            "SCF energy mismatch:",
-            got_energy,
-            ref_energy,
-        )
+        print("SCF energy mismatch:", got_energy, ref_energy)
         success = False
 
-    # Response checks
     got_rsp = got["tasks"][1]
     ref_rsp = ref["tasks"][1]
     if got_rsp["type"] != ref_rsp["type"]:
@@ -155,5 +164,4 @@ if __name__ == "__main__":
                 success = False
 
     print("final success:", success)
-
     sys.exit(0 if success else 1)
