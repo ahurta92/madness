@@ -61,6 +61,22 @@ struct ResponseParameters : public QCCalculationParametersBase {
         "state_parallel_point_start_protocol", 1,
         "first protocol index where state-parallel mode may fan out by "
         "state-frequency point ownership");
+    initialize<bool>(
+        "excited.enable", false,
+        "enable excited-state bundle planning metadata scaffolding");
+    initialize<size_t>("excited.num_states", 1,
+                       "number of excited states to target when enabled");
+    initialize<bool>("excited.tda", false,
+                     "use Tamm-Dancoff approximation in excited-state stage");
+    initialize<size_t>("excited.guess_max_iter", 5,
+                       "maximum iterations for excited-state guess stage");
+    initialize<size_t>("excited.maxiter", 20,
+                       "maximum iterations for excited-state solve stage");
+    initialize<size_t>("excited.maxsub", 8,
+                       "subspace size for excited-state iterative solves");
+    initialize<size_t>(
+        "excited.owner_group", 0,
+        "subgroup lane reserved for excited-state bundle execution");
     //** if properites are requested, then one should specify directions,
     // frequencies, and atom_indices(for nuclear response) */
     initialize<bool>("property", false, "Compute properties");
@@ -139,6 +155,25 @@ public:
   }
   [[nodiscard]] size_t state_parallel_point_start_protocol() const {
     return get<size_t>("state_parallel_point_start_protocol");
+  }
+  [[nodiscard]] bool excited_enable() const {
+    return get<bool>("excited.enable");
+  }
+  [[nodiscard]] size_t excited_num_states() const {
+    return get<size_t>("excited.num_states");
+  }
+  [[nodiscard]] bool excited_tda() const { return get<bool>("excited.tda"); }
+  [[nodiscard]] size_t excited_guess_max_iter() const {
+    return get<size_t>("excited.guess_max_iter");
+  }
+  [[nodiscard]] size_t excited_maxiter() const {
+    return get<size_t>("excited.maxiter");
+  }
+  [[nodiscard]] size_t excited_maxsub() const {
+    return get<size_t>("excited.maxsub");
+  }
+  [[nodiscard]] size_t excited_owner_group() const {
+    return get<size_t>("excited.owner_group");
   }
   [[nodiscard]] std::vector<double> dipole_frequencies() const {
     return get<std::vector<double>>("dipole.frequencies");

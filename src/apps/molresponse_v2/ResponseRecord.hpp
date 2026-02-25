@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -77,6 +78,61 @@ public:
       }
     }
     write(); // sync to disk + broadcast
+  }
+
+  void initialize_excited_bundle(bool enabled, size_t num_states, bool tda,
+                                 size_t guess_max_iter, size_t maxiter,
+                                 size_t maxsub, size_t owner_group,
+                                 const std::vector<double> &protocols) {
+    ensure_excited_root(data_);
+    auto &plan = data_["excited_states"]["plan"];
+    if (!plan.is_object()) {
+      plan = json::object();
+    }
+    plan["enabled"] = enabled;
+    plan["num_states"] = num_states;
+    plan["tda"] = tda;
+    plan["guess_max_iter"] = guess_max_iter;
+    plan["maxiter"] = maxiter;
+    plan["maxsub"] = maxsub;
+    plan["owner_group"] = owner_group;
+    plan["protocols"] = json::array();
+
+    for (double protocol : protocols) {
+      const std::string pkey = protocol_key(protocol);
+      plan["protocols"].push_back(pkey);
+      ensure_excited_protocol(data_, pkey);
+    }
+    write();
+  }
+
+  void record_excited_protocol_status(double protocol, bool saved,
+                                      bool converged) {
+    const std::string pkey = protocol_key(protocol);
+    ensure_excited_protocol(data_, pkey);
+    auto &node = data_["excited_states"]["protocols"][pkey];
+    node["saved"] = saved;
+    node["converged"] = converged;
+    write();
+  }
+
+  void record_excited_protocol_timing(double protocol, double wall_seconds,
+                                      double cpu_seconds) {
+    const std::string pkey = protocol_key(protocol);
+    ensure_excited_protocol(data_, pkey);
+    auto &node = data_["excited_states"]["protocols"][pkey];
+    node["timings"] = {{"wall_seconds", wall_seconds},
+                       {"cpu_seconds", cpu_seconds}};
+    write();
+  }
+
+  void record_excited_protocol_energies(double protocol,
+                                        const std::vector<double> &energies) {
+    const std::string pkey = protocol_key(protocol);
+    ensure_excited_protocol(data_, pkey);
+    auto &node = data_["excited_states"]["protocols"][pkey];
+    node["energies"] = energies;
+    write();
   }
 
   // --- Pretty table ---
@@ -422,6 +478,41 @@ private:
       root = json::object();
     if (!root.contains("states"))
       root["states"] = json::object();
+    ensure_excited_root(root);
+  }
+
+  static void ensure_excited_root(json &root) {
+    if (!root.contains("excited_states") || !root["excited_states"].is_object()) {
+      root["excited_states"] = json::object();
+    }
+    auto &excited = root["excited_states"];
+    if (!excited.contains("plan") || !excited["plan"].is_object()) {
+      excited["plan"] = json::object();
+    }
+    if (!excited.contains("protocols") || !excited["protocols"].is_object()) {
+      excited["protocols"] = json::object();
+    }
+  }
+
+  static void ensure_excited_protocol(json &root, const std::string &pkey) {
+    ensure_excited_root(root);
+    auto &protocols = root["excited_states"]["protocols"];
+    if (!protocols.contains(pkey) || !protocols[pkey].is_object()) {
+      protocols[pkey] = json::object();
+    }
+    auto &node = protocols[pkey];
+    if (!node.contains("saved") || !node["saved"].is_boolean()) {
+      node["saved"] = false;
+    }
+    if (!node.contains("converged") || !node["converged"].is_boolean()) {
+      node["converged"] = false;
+    }
+    if (!node.contains("timings") || !node["timings"].is_object()) {
+      node["timings"] = {{"wall_seconds", 0.0}, {"cpu_seconds", 0.0}};
+    }
+    if (!node.contains("energies") || !node["energies"].is_array()) {
+      node["energies"] = json::array();
+    }
   }
   static void ensure_state(json &root, const std::string &sid) {
     ensure_root(root);
