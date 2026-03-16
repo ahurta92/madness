@@ -36,10 +36,9 @@ void save_response_vector(World &world, const Desc &desc,
 
 template <typename Desc>
 inline bool load_response_vector(World &world, const int &num_orbitals,
-                                 const Desc &desc,
-                                 ResponseVector &load_response,
-                                 size_t thresh_index = 0,
-                                 size_t freq_index = 0) {
+                                 const Desc &desc, const size_t &thresh_index,
+                                 const size_t &freq_index,
+                                 ResponseVector &load_response) {
   auto filename = desc.response_filename(thresh_index, freq_index);
   if (!fs::exists(filename + ".00000")) {
     if (world.rank() == 0) {
@@ -47,26 +46,27 @@ inline bool load_response_vector(World &world, const int &num_orbitals,
     }
     return false;
   }
-  if (world.rank() == 0) {
+  bool debug = false;
+  if (world.rank() == 0 and debug) {
     std::cout << "Loading response vector from: " << filename << std::endl;
   }
 
-  load_response = desc.make_vector(num_orbitals, freq_index);
+  load_response = make_response_vector(num_orbitals, desc.is_static(freq_index),
+                                       !desc.is_spin_restricted());
 
   archive::ParallelInputArchive ar(world, filename.c_str());
   auto current_k = FunctionDefaults<3>::get_k();
-  int loaded_k;
+  int loaded_k{};
 
   ar & loaded_k;
   FunctionDefaults<3>::set_k(loaded_k);
 
   std::visit(
       [&](auto &v) {
-        int i = 0;
         for (auto &f : v.flat) {
-          if (world.rank() == 0) {
-            print("Loading response vector ", i++);
-          }
+          // if (world.rank() == 0) {
+          //   print("Loading response vector ", i++);
+          // }
           ar & f;
         }
         v.sync();
@@ -95,4 +95,34 @@ inline bool load_response_vector(World &world, const int &num_orbitals,
       load_response);
 
   return true;
+}
+
+// Convenience overloads for a single LinearResponsePoint
+inline bool load_response_vector(World &world, const int &num_orbitals,
+                                 const LinearResponsePoint &pt,
+                                 ResponseVector &load_response) {
+  struct PointAdapter {
+    const LinearResponsePoint &pt;
+    std::string response_filename(size_t, size_t) const {
+      return pt.response_filename();
+    }
+    bool is_static(size_t) const { return pt.is_static(); }
+    bool is_spin_restricted() const { return pt.is_spin_restricted(); }
+  } adaptor{pt};
+
+  return load_response_vector(world, num_orbitals, adaptor,
+                              /*thresh_index=*/0, /*freq_index=*/0,
+                              load_response);
+}
+
+inline void save_response_vector(World &world, const LinearResponsePoint &pt,
+                                 const ResponseVector &response) {
+  struct PointAdapter {
+    const LinearResponsePoint &pt;
+    std::string response_filename() const {
+      return pt.response_filename();
+    }
+  } adaptor{pt};
+
+  save_response_vector(world, adaptor, response);
 }

@@ -18,105 +18,163 @@ struct response_vector_allocator {
 using response_solver = XNonlinearSolver<vector_real_function_3d, double,
                                          response_vector_allocator>;
 
-template <typename ResponseType>
-class ResponseSolverPolicy; // forward declaration
+// template <typename ResponseType>
+// class ResponseSolverPolicy; // forward declaration
 
-// Primary template left undefined; we’ll specialize it:
-template <typename ResponseType> class ResponseSolverPolicy {
-  // nothing here
-};
+// // Primary template left undefined; we’ll specialize it:
+// template <typename ResponseType> class ResponseSolverPolicy {
+//   // nothing here
+// };
 
-template <> class ResponseSolverPolicy<StaticRestrictedResponse> {
-public:
-  static constexpr double alpha_factor = -4.0;
 
-  static real_function_3d compute_density(World &world,
-                                          const StaticRestrictedResponse &rvec,
-                                          const vector_real_function_3d &phi0) {
-    auto &x = rvec.x_alpha;
-    auto xphi = mul(world, x, phi0, true);
-    return 2.0 * sum(world, xphi, true);
-  }
+// alpha factor as a constexpr function (nice for inlining/constants)
+constexpr double alpha_factor(const StaticRestrictedResponse&)     { return -4.0; }
+constexpr double alpha_factor(const DynamicRestrictedResponse&)    { return -2.0; }
+constexpr double alpha_factor(const StaticUnrestrictedResponse&)   { return -2.0; }
+constexpr double alpha_factor(const DynamicUnrestrictedResponse&)  { return -2.0; }
 
-  static vector_real_function_3d CoupledResponseEquations(
-      World &world, const GroundStateData &gs,
-      const StaticRestrictedResponse &vecs, const vector_real_function_3d &vp,
-      const std::vector<poperatorT> &bsh_x, const ResponseManager &rm,
-      ResponseDebugLogger &logger);
+// compute_density
+real_function_3d compute_density(World&, const StaticRestrictedResponse&,
+                                 const vector_real_function_3d&);
 
-  // Helper functions
-  static std::vector<poperatorT>
-  make_bsh_operators(World &world, const ResponseManager &rm, double freq,
-                     const Tensor<double> &orbital_energies, int n,
-                     ResponseDebugLogger &logger);
-};
-template <> class ResponseSolverPolicy<DynamicRestrictedResponse> {
-public:
-  static constexpr double alpha_factor = -2.0;
-  static std::vector<poperatorT>
-  make_bsh_operators(World &world, const ResponseManager &rm, double freq,
-                     const Tensor<double> &orbital_energies, int n,
-                     ResponseDebugLogger &logger);
-  static real_function_3d compute_density(World &world,
-                                          const DynamicRestrictedResponse &rvec,
-                                          const vector_real_function_3d &phi0) {
-    auto phi_phi = phi0;
-    phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
-    auto &x = rvec.flat;
+real_function_3d compute_density(World&, const DynamicRestrictedResponse&,
+                                 const vector_real_function_3d&);
 
-    auto xphi = mul(world, x, phi_phi, true);
-    return 2.0 * sum(world, xphi, true);
-  }
+real_function_3d compute_density(World&, const StaticUnrestrictedResponse&,
+                                 const vector_real_function_3d&);
 
-  static vector_real_function_3d CoupledResponseEquations(
-      World &world, const GroundStateData &gs,
-      const DynamicRestrictedResponse &vecs, const vector_real_function_3d &vp,
-      const std::vector<poperatorT> &bsh_x, const ResponseManager &rm,
-      ResponseDebugLogger &logger);
-};
+real_function_3d compute_density(World&, const DynamicUnrestrictedResponse&,
+                                 const vector_real_function_3d&);
 
-template <> class ResponseSolverPolicy<StaticUnrestrictedResponse> {
-public:
-  static constexpr double alpha_factor = -2.0;
-  static std::vector<poperatorT>
-  make_bsh_operators(World &world, const ResponseManager &rm, double freq,
-                     const Tensor<double> &orbital_energies, int n,
-                     ResponseDebugLogger &logger);
-  static real_function_3d
-  compute_density(World &world, const StaticUnrestrictedResponse &rvec,
-                  const vector_real_function_3d &phi0) {
-    auto phi_phi = phi0;
-    phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
-    auto &x = rvec.flat;
+// make_bsh_operators
+std::vector<poperatorT> make_bsh_operators(World&, const ResponseManager&, double freq,
+                                           const Tensor<double>& orbital_energies, int n,
+                                           ResponseDebugLogger&, const StaticRestrictedResponse&);
 
-    auto xphi = mul(world, x, phi_phi, true);
-    return 2.0 * sum(world, xphi, true);
-  }
-  static vector_real_function_3d CoupledResponseEquations(
-      World &world, const GroundStateData &gs, const ResponseVector &vecs,
-      const vector_real_function_3d &vp, const std::vector<poperatorT> &bsh_x,
-      const ResponseManager &rm, ResponseDebugLogger &logger);
-};
+std::vector<poperatorT> make_bsh_operators(World&, const ResponseManager&, double freq,
+                                           const Tensor<double>& orbital_energies, int n,
+                                           ResponseDebugLogger&, const DynamicRestrictedResponse&);
 
-template <> class ResponseSolverPolicy<DynamicUnrestrictedResponse> {
-public:
-  static constexpr double alpha_factor = -2.0;
-  static std::vector<poperatorT>
-  make_bsh_operators(World &world, const ResponseManager &rm, double freq,
-                     const Tensor<double> &orbital_energies, int n,
-                     ResponseDebugLogger &logger);
-  static real_function_3d
-  compute_density(World &world, const DynamicUnrestrictedResponse &rvec,
-                  const vector_real_function_3d &phi0) {
-    auto phi_phi = phi0;
-    phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
-    auto &x = rvec.flat;
+std::vector<poperatorT> make_bsh_operators(World&, const ResponseManager&, double freq,
+                                           const Tensor<double>& orbital_energies, int n,
+                                           ResponseDebugLogger&, const StaticUnrestrictedResponse&);
 
-    auto xphi = mul(world, x, phi_phi, true);
-    return 2.0 * sum(world, xphi, true);
-  }
-  static vector_real_function_3d CoupledResponseEquations(
-      World &world, const GroundStateData &gs, const ResponseVector &vecs,
-      const vector_real_function_3d &vp, const std::vector<poperatorT> &bsh_x,
-      const ResponseManager &rm, ResponseDebugLogger &logger);
-};
+std::vector<poperatorT> make_bsh_operators(World&, const ResponseManager&, double freq,
+                                           const Tensor<double>& orbital_energies, int n,
+                                           ResponseDebugLogger&, const DynamicUnrestrictedResponse&);
+
+// CoupledResponseEquations (one per variant)
+vector_real_function_3d CoupledResponseEquations(World&, const GroundStateData&,
+  const StaticRestrictedResponse&, const vector_real_function_3d& vp,
+  const std::vector<poperatorT>& bsh_x, const ResponseManager&, ResponseDebugLogger&);
+
+vector_real_function_3d CoupledResponseEquations(World&, const GroundStateData&,
+  const DynamicRestrictedResponse&, const vector_real_function_3d& vp,
+  const std::vector<poperatorT>& bsh_x, const ResponseManager&, ResponseDebugLogger&);
+
+vector_real_function_3d CoupledResponseEquations(World&, const GroundStateData&,
+  const StaticUnrestrictedResponse&, const vector_real_function_3d& vp,
+  const std::vector<poperatorT>& bsh_x, const ResponseManager&, ResponseDebugLogger&);
+
+vector_real_function_3d CoupledResponseEquations(World&, const GroundStateData&,
+  const DynamicUnrestrictedResponse&, const vector_real_function_3d& vp,
+  const std::vector<poperatorT>& bsh_x, const ResponseManager&, ResponseDebugLogger&);
+
+
+// template <> class ResponseSolverPolicy<StaticRestrictedResponse> {
+// public:
+//   static constexpr double alpha_factor = -4.0;
+
+//   static real_function_3d compute_density(World &world,
+//                                           const StaticRestrictedResponse &rvec,
+//                                           const vector_real_function_3d &phi0) {
+//     auto &x = rvec.x_alpha;
+//     auto xphi = mul(world, x, phi0, true);
+//     return 2.0 * sum(world, xphi, true);
+//   }
+
+//   static vector_real_function_3d CoupledResponseEquations(
+//       World &world, const GroundStateData &gs,
+//       const StaticRestrictedResponse &vecs, const vector_real_function_3d &vp,
+//       const std::vector<poperatorT> &bsh_x, const ResponseManager &rm,
+//       ResponseDebugLogger &logger);
+
+//   // Helper functions
+//   static std::vector<poperatorT>
+//   make_bsh_operators(World &world, const ResponseManager &rm, double freq,
+//                      const Tensor<double> &orbital_energies, int n,
+//                      ResponseDebugLogger &logger);
+// };
+
+
+
+// template <> class ResponseSolverPolicy<DynamicRestrictedResponse> {
+// public:
+//   static constexpr double alpha_factor = -2.0;
+//   static std::vector<poperatorT>
+//   make_bsh_operators(World &world, const ResponseManager &rm, double freq,
+//                      const Tensor<double> &orbital_energies, int n,
+//                      ResponseDebugLogger &logger);
+//   static real_function_3d compute_density(World &world,
+//                                           const DynamicRestrictedResponse &rvec,
+//                                           const vector_real_function_3d &phi0) {
+//     auto phi_phi = phi0;
+//     phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
+//     auto &x = rvec.flat;
+
+//     auto xphi = mul(world, x, phi_phi, true);
+//     return 2.0 * sum(world, xphi, true);
+//   }
+
+//   static vector_real_function_3d CoupledResponseEquations(
+//       World &world, const GroundStateData &gs,
+//       const DynamicRestrictedResponse &vecs, const vector_real_function_3d &vp,
+//       const std::vector<poperatorT> &bsh_x, const ResponseManager &rm,
+//       ResponseDebugLogger &logger);
+// };
+
+// template <> class ResponseSolverPolicy<StaticUnrestrictedResponse> {
+// public:
+//   static constexpr double alpha_factor = -2.0;
+//   static std::vector<poperatorT>
+//   make_bsh_operators(World &world, const ResponseManager &rm, double freq,
+//                      const Tensor<double> &orbital_energies, int n,
+//                      ResponseDebugLogger &logger);
+//   static real_function_3d
+//   compute_density(World &world, const StaticUnrestrictedResponse &rvec,
+//                   const vector_real_function_3d &phi0) {
+//     auto phi_phi = phi0;
+//     phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
+//     auto &x = rvec.flat;
+
+//     auto xphi = mul(world, x, phi_phi, true);
+//     return 2.0 * sum(world, xphi, true);
+//   }
+//   static vector_real_function_3d CoupledResponseEquations(
+//       World &world, const GroundStateData &gs, const ResponseVector &vecs,
+//       const vector_real_function_3d &vp, const std::vector<poperatorT> &bsh_x,
+//       const ResponseManager &rm, ResponseDebugLogger &logger);
+// };
+
+// template <> class ResponseSolverPolicy<DynamicUnrestrictedResponse> {
+// public:
+//   static constexpr double alpha_factor = -2.0;
+//   static std::vector<poperatorT>
+//   make_bsh_operators(World &world, const ResponseManager &rm, double freq,
+//                      const Tensor<double> &orbital_energies, int n,
+//                      ResponseDebugLogger &logger);
+//   static real_function_3d
+//   compute_density(World &world, const DynamicUnrestrictedResponse &rvec,
+//                   const vector_real_function_3d &phi0) {
+//     auto phi_phi = phi0;
+//     phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
+//     auto &x = rvec.flat;
+
+//     auto xphi = mul(world, x, phi_phi, true);
+//     return 2.0 * sum(world, xphi, true);
+//   }
+//   static vector_real_function_3d CoupledResponseEquations(
+//       World &world, const GroundStateData &gs, const ResponseVector &vecs,
+//       const vector_real_function_3d &vp, const std::vector<poperatorT> &bsh_x,
+//       const ResponseManager &rm, ResponseDebugLogger &logger);
+// };

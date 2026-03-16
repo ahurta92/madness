@@ -10,6 +10,10 @@ set(MOLRESPONSE_SOURCES2
     ResponseManager.cpp
     GroundStateData.cpp
     ResponseSolver.cpp
+    ResponseState.cpp
+    ResponseInitializer.cpp
+    FrequencyLoop.cpp
+    ExcitedStateBundleSolver.cpp
 )
 
 set(MOLRESPONSE_HEADERS2
@@ -18,7 +22,9 @@ set(MOLRESPONSE_HEADERS2
     ResponseManager.hpp
     ResponseState.hpp
     ResponseIO.hpp
-    ResponseMetaData.hpp
+        ResponseRecord.hpp
+    DerivedStatePlanner.hpp
+    StateParallelPlanner.hpp
     FrequencyLoop.hpp
     PropertyManager.hpp
     ResponseSolver.hpp
@@ -33,6 +39,16 @@ set(MOLRESPONSE_HEADERS2
 # Create the MADresponse2 library
 add_mad_library(response2 MOLRESPONSE_SOURCES2 MOLRESPONSE_HEADERS2 "chem" "madness/chem/molresponse2/")
 set(targetname MADresponse2)
+option(MADNESS_ENABLE_LEGACY_EXCITED_BUNDLE_ADAPTER
+       "Enable legacy molresponse-based excited-bundle adapter"
+       OFF)
+if (MADNESS_ENABLE_LEGACY_EXCITED_BUNDLE_ADAPTER)
+    if (NOT TARGET MADresponse)
+        message(FATAL_ERROR "MADNESS_ENABLE_LEGACY_EXCITED_BUNDLE_ADAPTER requires MADresponse target")
+    endif()
+    target_link_libraries(MADresponse2 PUBLIC MADresponse)
+    target_compile_definitions(MADresponse2 PUBLIC MADNESS_ENABLE_LEGACY_EXCITED_BUNDLE_ADAPTER=1)
+endif()
 #add_dependencies(applications-madness test_preliminaries)
 add_dependencies(applications-madness test_parameter_manager)
 add_dependencies(applications-madness molresponse2)
@@ -42,4 +58,3 @@ add_mad_executable(molresponse2 "molresponse2.cpp" "MADresponse2;MADchem")
 
 # Add install targets for executables
 install(TARGETS molresponse2 test_parameter_manager DESTINATION "${MADNESS_INSTALL_BINDIR}")
-
