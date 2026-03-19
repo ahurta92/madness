@@ -102,6 +102,85 @@ struct ExcitedProtocolResult {
     double      max_rotation                = 0.0;
 };
 
+inline void to_json(nlohmann::json &j, const ExcitedProtocolResult &r) {
+    j = nlohmann::json{
+        {"attempted",                        r.attempted},
+        {"saved",                            r.saved},
+        {"converged",                        r.converged},
+        {"failed",                           r.failed},
+        {"skipped",                          r.skipped},
+        {"restart_reused",                   r.restart_reused},
+        {"stage_status",                     r.stage_status},
+        {"response_variant",                 r.response_variant},
+        {"restart_support_mode",             r.restart_support_mode},
+        {"restart_source",                   r.restart_source},
+        {"snapshot_kind",                    r.snapshot_kind},
+        {"bundle_state_present",             r.bundle_state_present},
+        {"restart_capable",                  r.restart_capable},
+        {"restart_source_threshold",         r.restart_source_threshold},
+        {"iterations",                       r.iterations},
+        {"energies",                         r.energies},
+        {"state_names",                      r.state_names},
+        {"roots",                            r.roots},
+        {"slot_permutation",                 r.slot_permutation},
+        {"residual_norms",                   r.residual_norms},
+        {"density_change_norms",             r.density_change_norms},
+        {"relative_residual_norms",          r.relative_residual_norms},
+        {"iteration_max_residuals",          r.iteration_max_residuals},
+        {"iteration_max_density_changes",    r.iteration_max_density_changes},
+        {"iteration_max_relative_residuals", r.iteration_max_relative_residuals},
+        {"convergence_mode",                 r.convergence_mode},
+        {"accelerator_mode",                 r.accelerator_mode},
+        {"accelerator_subspace",             r.accelerator_subspace},
+        {"density_convergence_target",       r.density_convergence_target},
+        {"relative_convergence_target",      r.relative_convergence_target},
+        {"max_rotation",                     r.max_rotation}};
+}
+
+inline void from_json(const nlohmann::json &j, ExcitedProtocolResult &r) {
+    r.attempted              = j.value("attempted",              false);
+    r.saved                  = j.value("saved",                  false);
+    r.converged              = j.value("converged",              false);
+    r.failed                 = j.value("failed",                 false);
+    r.skipped                = j.value("skipped",                false);
+    r.restart_reused         = j.value("restart_reused",         false);
+    r.stage_status           = j.value("stage_status",           std::string("pending"));
+    r.response_variant       = j.value("response_variant",       std::string("unknown"));
+    r.restart_support_mode   = j.value("restart_support_mode",   std::string("guess_only"));
+    r.restart_source         = j.value("restart_source",         std::string("none"));
+    r.snapshot_kind          = j.value("snapshot_kind",          std::string("none"));
+    r.bundle_state_present   = j.value("bundle_state_present",   false);
+    r.restart_capable        = j.value("restart_capable",        false);
+    r.restart_source_threshold = j.value("restart_source_threshold", 0.0);
+    r.iterations             = j.value("iterations",             static_cast<size_t>(0));
+    if (j.contains("energies") && j["energies"].is_array())
+        r.energies = j["energies"].get<std::vector<double>>();
+    if (j.contains("state_names") && j["state_names"].is_array())
+        r.state_names = j["state_names"].get<std::vector<std::string>>();
+    if (j.contains("roots") && j["roots"].is_array())
+        r.roots = j["roots"].get<std::vector<ExcitedRootDescriptor>>();
+    if (j.contains("slot_permutation") && j["slot_permutation"].is_array())
+        r.slot_permutation = j["slot_permutation"].get<std::vector<size_t>>();
+    if (j.contains("residual_norms") && j["residual_norms"].is_array())
+        r.residual_norms = j["residual_norms"].get<std::vector<double>>();
+    if (j.contains("density_change_norms") && j["density_change_norms"].is_array())
+        r.density_change_norms = j["density_change_norms"].get<std::vector<double>>();
+    if (j.contains("relative_residual_norms") && j["relative_residual_norms"].is_array())
+        r.relative_residual_norms = j["relative_residual_norms"].get<std::vector<double>>();
+    if (j.contains("iteration_max_residuals") && j["iteration_max_residuals"].is_array())
+        r.iteration_max_residuals = j["iteration_max_residuals"].get<std::vector<double>>();
+    if (j.contains("iteration_max_density_changes") && j["iteration_max_density_changes"].is_array())
+        r.iteration_max_density_changes = j["iteration_max_density_changes"].get<std::vector<double>>();
+    if (j.contains("iteration_max_relative_residuals") && j["iteration_max_relative_residuals"].is_array())
+        r.iteration_max_relative_residuals = j["iteration_max_relative_residuals"].get<std::vector<double>>();
+    r.convergence_mode           = j.value("convergence_mode",           std::string("max_residual"));
+    r.accelerator_mode           = j.value("accelerator_mode",           std::string("none"));
+    r.accelerator_subspace       = j.value("accelerator_subspace",       static_cast<size_t>(0));
+    r.density_convergence_target = j.value("density_convergence_target", 0.0);
+    r.relative_convergence_target= j.value("relative_convergence_target",0.0);
+    r.max_rotation               = j.value("max_rotation",               0.0);
+}
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 

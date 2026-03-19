@@ -93,7 +93,53 @@ Developer Overview
 /// - Plan linear, derived, and excited-state work.
 /// - Execute state solve stages (serial or subgroup modes).
 /// - Assemble requested properties and return structured JSON payloads.
+///
+/// Logical sections (in order of appearance):
+///   1. Context types          — Results, GroundContext, ExcitedStateBundlePlan,
+///                               PlannedStates, SolvedStates, PropertyStageOutput
+///   2. State persistence      — JsonStateSolvePersistence
+///   3. JSON file I/O          — write_json_file, read_json_file_or_object,
+///                               broadcast_json*, with_subworld,
+///                               merge_state_metadata_json, merge_debug_log_json,
+///                               point_ready_in_metadata,
+///                               point_marked_for_frequency_removal_in_metadata
+///   4. Manifest/claim helpers — sanitize_manifest_token,
+///                               derived_request_{manifest_scope,done_file,
+///                               claim_file,done_record_exists,
+///                               write_done_record}
+///   5. Log capture            — FilteredLineStreambuf, ScopedRankLogRedirect,
+///                               group_{shard,console,derived_timing}_file
+///   6. Schedule context types — ProtocolExecutionPolicy,
+///                               RuntimePointOwnershipPolicy,
+///                               StateSolveScheduleContext,
+///                               PendingPointWorkItem, PendingProtocolManifest
+///                               and associated helper functions
+///   7. Schedule context builder — build_state_solve_schedule_context
+///                                 and its sub-steps
+///   8. Linear state solve     — prepare_protocol_context, log_pending_manifest,
+///                               execute_manifest_work, cached_or_built_manifest,
+///                               execute_serial_state_solve,
+///                               execute_subgroup_state_solve
+///   9. Excited-state bundle   — ExcitedExecutionResult,
+///                               ensure_excited_protocol_placeholder_node,
+///                               build_excited_root_manifest,
+///                               execute_excited_state_bundle_stage
+///  10. Derived state          — DerivedRequestTiming, run_derived_request,
+///                               DerivedExecutionResult,
+///                               execute_derived_state_requests
+///  11. Property stage         — PropertyContext, PropertyType,
+///                               parse_property_name, compute_polarizability,
+///                               compute_hyperpolarizability, print_raman_table,
+///                               compute_raman, compute_requested_properties,
+///                               compute_requested_properties_with_property_group
+///  12. Top-level orchestration — solve_all_states, run_response
 struct molresponse_lib {
+  // ============================================================================
+  // SECTION 1: Context types
+  //   Public result struct + private planning and solve-stage context bundles.
+  //   These are value types passed by move across the Stage 1 → 2 → 3 pipeline.
+  // ============================================================================
+
   /// Structured output returned to workflow drivers (`madqc --wf=response`).
   struct Results {
     nlohmann::json metadata;
@@ -179,6 +225,14 @@ private:
     VibrationalResults vibrational_analysis;
     RamanResults raman_spectra;
   };
+
+  // ============================================================================
+  // SECTION 2: State persistence
+  //   JsonStateSolvePersistence implements StateSolvePersistence by delegating
+  //   to ResponseRecord2 (metadata) and ResponseDebugLogger (debug log).  It is
+  //   instantiated once per execution path (serial or per-subgroup) and drives
+  //   the FrequencyLoop convergence queries.
+  // ============================================================================
 
   /// JSON-backed implementation of `StateSolvePersistence`.
   ///
@@ -308,6 +362,13 @@ private:
     ProgressPollFn progress_poll_fn_;
   };
 
+  // ============================================================================
+  // SECTION 3: Subgroup shard filename generators
+  //   Produce per-group file paths for metadata shards, console logs, and
+  //   derived-request timing shards.  Used by both the linear-solve and
+  //   derived-state subgroup execution paths.
+  // ============================================================================
+
   static std::string group_shard_file(const std::string &filename, size_t gid) {
     std::filesystem::path in(filename);
     const auto parent = in.parent_path();
@@ -329,6 +390,14 @@ private:
   static std::string group_derived_timing_file(size_t gid) {
     return group_shard_file("derived_request_timings.json", gid);
   }
+
+  // ============================================================================
+  // SECTION 4: Derived-state manifest and claim-file helpers
+  //   File-based coordination primitives for derived-request idempotency.
+  //   sanitize_manifest_token / derived_request_manifest_scope produce stable
+  //   path tokens.  The done/claim file pair implements a lightweight
+  //   distributed task-claim protocol used in both subgroup and serial paths.
+  // ============================================================================
 
   static std::string sanitize_manifest_token(const std::string &raw) {
     std::string token;
@@ -411,6 +480,14 @@ private:
         {"cpu_seconds", cpu_seconds}};
     write_json_file(done_file, done_payload);
   }
+
+  // ============================================================================
+  // SECTION 5: Console log capture (stream-redirect utilities)
+  //   FilteredLineStreambuf suppresses noisy MADNESS hung-queue warnings when
+  //   redirecting subgroup stdout/stderr to per-group shard log files.
+  //   ScopedRankLogRedirect is an RAII guard that activates the redirect for
+  //   the lifetime of a subgroup execution block.
+  // ============================================================================
 
   class FilteredLineStreambuf final : public std::streambuf {
   public:
@@ -508,6 +585,19 @@ private:
     std::unique_ptr<FilteredLineStreambuf> filtered_cerr_;
   };
 
+  // ============================================================================
+  // SECTION 6: JSON file I/O and broadcast utilities
+  //   write_json_file / read_json_file_or_object — safe disk read/write with
+  //   in-flight-parse guard (returns empty object on malformed content).
+  //   broadcast_json_object / broadcast_json — serialize → gop broadcast →
+  //   deserialize pattern for distributing metadata across all MPI ranks.
+  //   with_subworld — RAII subworld create/pmap-swap/restore template.
+  //   merge_state_metadata_json / merge_debug_log_json — or-merge shard JSONs
+  //   into the canonical metadata file at global barrier points.
+  //   point_ready_in_metadata / point_marked_for_frequency_removal_in_metadata
+  //   — stateless key-path lookups into the metadata JSON used by stages 2-3.
+  // ============================================================================
+
   static void write_json_file(const std::string &filename,
                               const nlohmann::json &json_data) {
     std::ofstream out(filename);
@@ -553,6 +643,36 @@ private:
     }
     return nlohmann::json::parse(payload_dump, nullptr,
                                  /*allow_exceptions=*/true);
+  }
+
+  /// In-place broadcast of a JSON object from `root` to all ranks.
+  /// On rank `root` the object is serialized and sent; on other ranks
+  /// the object is replaced with the deserialized result.
+  static void broadcast_json(World &world, nlohmann::json &obj, int root = 0) {
+    std::string dump;
+    if (world.rank() == root) dump = obj.dump();
+    world.gop.broadcast_serializable(dump, root);
+    if (world.rank() != root)
+      obj = dump.empty() ? nlohmann::json::object() : nlohmann::json::parse(dump);
+  }
+
+  /// RAII-style helper: create `ngroups` MacroTaskQ subworlds, set the default
+  /// pmap to the subworld for the duration of `fn`, then restore the original
+  /// pmap even if `fn` throws.
+  template <typename Fn>
+  static void with_subworld(World &world, size_t ngroups, Fn &&fn) {
+    auto subworld_ptr = MacroTaskQ::create_worlds(world, ngroups);
+    if (!subworld_ptr) throw std::runtime_error("subworld creation returned null");
+    World &subworld = *subworld_ptr;
+    auto old_pmap = FunctionDefaults<3>::get_pmap();
+    FunctionDefaults<3>::set_default_pmap(subworld);
+    try {
+      fn(subworld);
+      FunctionDefaults<3>::set_pmap(old_pmap);
+    } catch (...) {
+      FunctionDefaults<3>::set_pmap(old_pmap);
+      throw;
+    }
   }
 
   static void merge_state_metadata_json(nlohmann::json &merged,
@@ -1007,6 +1127,16 @@ private:
            (*solver_it)["remove_from_frequency_set"].get<bool>();
   }
 
+  // ============================================================================
+  // SECTION 7: Stage 1 — Planning (ground context + state generation)
+  //   make_ground_context  — reads SCF checkpoint, builds GroundStateData and
+  //                          ResponseManager for the run directory.
+  //   build_excited_state_bundle_plan — translates response knobs into
+  //                          ExcitedStateBundlePlan.
+  //   plan_required_states — combines StateGenerator, DerivedStatePlanner, and
+  //                          StateParallelPlanner outputs into PlannedStates.
+  // ============================================================================
+
   /// Build stage-1 ground/runtime context from SCF checkpoint artifacts.
   ///
   /// Loads molecule data, resolves archive/fock paths, and constructs the
@@ -1139,6 +1269,34 @@ private:
                          std::move(state_parallel_plan)};
   }
 
+  // ============================================================================
+  // SECTION 8: Stage 2a — Schedule context types and builders
+  //   ProtocolExecutionPolicy — per-protocol active-groups / mode descriptor.
+  //   RuntimePointOwnershipPolicy — restart-aware runtime policy aggregated
+  //                                 from planner output + existing metadata.
+  //   StateSolveScheduleContext — full scheduling context passed to the serial
+  //                               and subgroup solve paths.
+  //   PendingPointWorkItem / PendingProtocolManifest — work lists for one
+  //                               protocol step in one owner lane.
+  //   build_owner_by_channel_index — maps channel_index → owner lane.
+  //   build_protocol_execution_policy — reads existing metadata and computes
+  //                               per-protocol active groups and mode.
+  //   compute_runtime_point_ownership_policy — wraps restart + point-parallel
+  //                               start computation into RuntimePointOwnershipPolicy.
+  //   build_local_channel_workset — filters global channel list to subgroup.
+  //   use_channel_series_ownership_for_protocol_runtime — inline policy gate.
+  //   active_owner_groups_for_protocol_runtime — inline policy lookup.
+  //   point_needs_solving / point_needs_solving_from_metadata — convergence
+  //                               predicates (persistence-backed and metadata-backed).
+  //   any_state_point_needs_solving — short-circuit scan across state indices.
+  //   run_protocol_threshold_loop — generic protocol iteration driver.
+  //   run_frequency_loop_with_flush — thin wrapper around computeFrequencyLoop.
+  //   build_pending_work_manifest / build_pending_manifest_from_metadata —
+  //                               construct per-protocol, per-lane work lists.
+  //   print_state_solve_execution_mode — logs selected execution strategy.
+  //   build_state_solve_schedule_context — top-level schedule context factory.
+  // ============================================================================
+
   struct ProtocolExecutionPolicy {
     bool use_channel_series_mode = true;
     size_t active_groups = 1;
@@ -1266,7 +1424,7 @@ private:
         payload.push_back(policy.to_json());
       }
     }
-    payload = broadcast_json_object(world, std::move(payload), 0);
+    broadcast_json(world, payload);
     if (!payload.is_array()) {
       return protocol_policies;
     }
@@ -2014,6 +2172,23 @@ private:
         std::move(runtime_policy.protocol_policies));
   }
 
+  // ============================================================================
+  // SECTION 9: Stage 2b — Linear state solve (serial and subgroup paths)
+  //   prepare_protocol_context — sets wavelet order + Coulomb/Fock operators
+  //                              for a protocol threshold on a given world.
+  //   log_pending_manifest — prints pending-work summary (with subgroup label).
+  //   execute_manifest_work — dispatches channel-series or channel-point work
+  //                           via caller-supplied solve lambdas.
+  //   cached_or_built_manifest — lazy manifest cache to avoid redundant builds.
+  //   execute_serial_state_solve — universe-communicator protocol loop;
+  //                                initialises JsonStateSolvePersistence once
+  //                                and iterates over pending manifests.
+  //   execute_subgroup_state_solve — MacroTaskQ subworld protocol loop;
+  //                                  each subgroup owns a metadata shard and
+  //                                  merges at barriers; includes tail derived
+  //                                  polling for subgroup-derived hand-off.
+  // ============================================================================
+
   /// Execute stage-2 linear solves on the universe communicator.
   ///
   /// Used as the deterministic baseline path and as fallback when subgroup mode
@@ -2258,8 +2433,7 @@ private:
     if (world.rank() == 0) {
       baseline_state_metadata = read_json_file_or_object("response_metadata.json");
     }
-    baseline_state_metadata =
-        broadcast_json_object(world, std::move(baseline_state_metadata), 0);
+    broadcast_json(world, baseline_state_metadata);
     std::string tail_derived_claim_prefix;
     if (world.rank() == 0 && !derived_state_plan.requests.empty()) {
       tail_derived_claim_prefix =
@@ -2555,6 +2729,7 @@ private:
           constexpr size_t k_tail_max_idle_polls = 720;
           constexpr std::chrono::seconds k_tail_poll_sleep{5};
 
+          // TODO(step4): extract execute_subgroup_tail_derived_poll
           while (true) {
             size_t final_pending_linear_points = 0;
             std::vector<size_t> ready_request_indices;
@@ -2750,6 +2925,18 @@ private:
     }
   }
 
+  // ============================================================================
+  // SECTION 10: Stage 2d — Derived state execution
+  //   DerivedRequestTiming — wall/cpu result for one VBC request.
+  //   run_derived_request — single-request runner shared by subgroup and
+  //                         serial fallback paths; delegates to
+  //                         SimpleVBCComputer::compute_and_save.
+  //   DerivedExecutionResult — dependency gate + execution summary bundle.
+  //   execute_derived_state_requests — evaluates dependency gate, partitions
+  //                         ready requests across owner lanes, and runs them in
+  //                         subgroup subworlds (with serial fallback).
+  // ============================================================================
+
   struct DerivedRequestTiming {
     bool success = false;
     double wall_seconds = 0.0;
@@ -2793,6 +2980,20 @@ private:
     nlohmann::json execution;
   };
 
+  // ============================================================================
+  // SECTION 11: Stage 2c — Excited-state bundle execution
+  //   ExcitedExecutionResult — execution summary JSON produced by stage 2c.
+  //   FinalProtocolState — final threshold + convergence status forwarded to
+  //                        stage 3.
+  //   ensure_excited_protocol_placeholder_node — fills missing keys in the
+  //                        metadata excited-protocol node with defaults.
+  //   build_excited_root_manifest — serialises ExcitedRootDescriptor list.
+  //   execute_excited_state_bundle_stage — protocol loop that dispatches
+  //                        ExcitedResponse::solve_protocol for pending
+  //                        protocols, records results via ResponseRecord2,
+  //                        and merges metadata.
+  // ============================================================================
+
   struct ExcitedExecutionResult {
     // Execution summary JSON written into response metadata.
     nlohmann::json execution;
@@ -2804,152 +3005,18 @@ private:
     bool all_linear_points_converged = true;
   };
 
-  static void ensure_excited_protocol_placeholder_node(
-      nlohmann::json &protocol_node) {
-    if (!protocol_node.is_object()) {
-      protocol_node = nlohmann::json::object();
-    }
-    if (!protocol_node.contains("saved") || !protocol_node["saved"].is_boolean()) {
-      protocol_node["saved"] = false;
-    }
-    if (!protocol_node.contains("converged") ||
-        !protocol_node["converged"].is_boolean()) {
-      protocol_node["converged"] = false;
-    }
-    if (!protocol_node.contains("timings") ||
-        !protocol_node["timings"].is_object()) {
-      protocol_node["timings"] =
-          nlohmann::json{{"wall_seconds", 0.0}, {"cpu_seconds", 0.0}};
-    } else {
-      if (!protocol_node["timings"].contains("wall_seconds") ||
-          !protocol_node["timings"]["wall_seconds"].is_number()) {
-        protocol_node["timings"]["wall_seconds"] = 0.0;
-      }
-      if (!protocol_node["timings"].contains("cpu_seconds") ||
-          !protocol_node["timings"]["cpu_seconds"].is_number()) {
-        protocol_node["timings"]["cpu_seconds"] = 0.0;
-      }
-    }
-    if (!protocol_node.contains("energies") ||
-        !protocol_node["energies"].is_array()) {
-      protocol_node["energies"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("state_names") ||
-        !protocol_node["state_names"].is_array()) {
-      protocol_node["state_names"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("roots") ||
-        !protocol_node["roots"].is_array()) {
-      protocol_node["roots"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("slot_permutation") ||
-        !protocol_node["slot_permutation"].is_array()) {
-      protocol_node["slot_permutation"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("iterations") ||
-        !protocol_node["iterations"].is_number_unsigned()) {
-      protocol_node["iterations"] = 0;
-    }
-    if (!protocol_node.contains("stage_status") ||
-        !protocol_node["stage_status"].is_string()) {
-      protocol_node["stage_status"] = "placeholder_pending_solver";
-    }
-    if (!protocol_node.contains("response_variant") ||
-        !protocol_node["response_variant"].is_string()) {
-      protocol_node["response_variant"] = "unknown";
-    }
-    if (!protocol_node.contains("restart_support_mode") ||
-        !protocol_node["restart_support_mode"].is_string()) {
-      protocol_node["restart_support_mode"] = "guess_only";
-    }
-    if (!protocol_node.contains("restart_source") ||
-        !protocol_node["restart_source"].is_string()) {
-      protocol_node["restart_source"] = "none";
-    }
-    if (!protocol_node.contains("snapshot_kind") ||
-        !protocol_node["snapshot_kind"].is_string()) {
-      protocol_node["snapshot_kind"] = "none";
-    }
-    if (!protocol_node.contains("bundle_state_present") ||
-        !protocol_node["bundle_state_present"].is_boolean()) {
-      protocol_node["bundle_state_present"] = false;
-    }
-    if (!protocol_node.contains("restart_capable") ||
-        !protocol_node["restart_capable"].is_boolean()) {
-      protocol_node["restart_capable"] = false;
-    }
-    if (!protocol_node.contains("restart_source_threshold") ||
-        !protocol_node["restart_source_threshold"].is_number()) {
-      protocol_node["restart_source_threshold"] = 0.0;
-    }
-    if (!protocol_node.contains("owner_group") ||
-        !protocol_node["owner_group"].is_number_unsigned()) {
-      protocol_node["owner_group"] = 0;
-    }
-    if (!protocol_node.contains("attempted") ||
-        !protocol_node["attempted"].is_boolean()) {
-      protocol_node["attempted"] = false;
-    }
-    if (!protocol_node.contains("failed") ||
-        !protocol_node["failed"].is_boolean()) {
-      protocol_node["failed"] = false;
-    }
-    if (!protocol_node.contains("skipped") ||
-        !protocol_node["skipped"].is_boolean()) {
-      protocol_node["skipped"] = false;
-    }
-    if (!protocol_node.contains("restart_reused") ||
-        !protocol_node["restart_reused"].is_boolean()) {
-      protocol_node["restart_reused"] = false;
-    }
-    if (!protocol_node.contains("residual_norms") ||
-        !protocol_node["residual_norms"].is_array()) {
-      protocol_node["residual_norms"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("density_change_norms") ||
-        !protocol_node["density_change_norms"].is_array()) {
-      protocol_node["density_change_norms"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("relative_residual_norms") ||
-        !protocol_node["relative_residual_norms"].is_array()) {
-      protocol_node["relative_residual_norms"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("iteration_max_residuals") ||
-        !protocol_node["iteration_max_residuals"].is_array()) {
-      protocol_node["iteration_max_residuals"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("iteration_max_density_changes") ||
-        !protocol_node["iteration_max_density_changes"].is_array()) {
-      protocol_node["iteration_max_density_changes"] = nlohmann::json::array();
-    }
-    if (!protocol_node.contains("iteration_max_relative_residuals") ||
-        !protocol_node["iteration_max_relative_residuals"].is_array()) {
-      protocol_node["iteration_max_relative_residuals"] =
-          nlohmann::json::array();
-    }
-    if (!protocol_node.contains("convergence_mode") ||
-        !protocol_node["convergence_mode"].is_string()) {
-      protocol_node["convergence_mode"] = "max_residual";
-    }
-    if (!protocol_node.contains("accelerator_mode") ||
-        !protocol_node["accelerator_mode"].is_string()) {
-      protocol_node["accelerator_mode"] = "none";
-    }
-    if (!protocol_node.contains("accelerator_subspace") ||
-        !protocol_node["accelerator_subspace"].is_number_unsigned()) {
-      protocol_node["accelerator_subspace"] = 0;
-    }
-    if (!protocol_node.contains("density_convergence_target") ||
-        !protocol_node["density_convergence_target"].is_number()) {
-      protocol_node["density_convergence_target"] = 0.0;
-    }
-    if (!protocol_node.contains("relative_convergence_target") ||
-        !protocol_node["relative_convergence_target"].is_number()) {
-      protocol_node["relative_convergence_target"] = 0.0;
-    }
-    if (!protocol_node.contains("max_rotation") ||
-        !protocol_node["max_rotation"].is_number()) {
-      protocol_node["max_rotation"] = 0.0;
+  static void ensure_excited_protocol_placeholder_node(nlohmann::json &node) {
+    static const nlohmann::json kDefaultExcitedProtocolNode = []() {
+      ExcitedProtocolResult defaults;
+      nlohmann::json j;
+      to_json(j, defaults);
+      j["stage_status"] = "placeholder_pending_solver";
+      j["timings"] = {{"wall_seconds", 0.0}, {"cpu_seconds", 0.0}};
+      return j;
+    }();
+    if (!node.is_object()) node = nlohmann::json::object();
+    for (auto &[key, val] : kDefaultExcitedProtocolNode.items()) {
+      if (!node.contains(key)) node[key] = val;
     }
   }
 
@@ -3221,7 +3288,7 @@ private:
           dispatch["stage_status"] = "placeholder_pending_solver";
         }
       }
-      dispatch = broadcast_json_object(world, std::move(dispatch), 0);
+      broadcast_json(world, dispatch);
 
       ExcitedProtocolResult protocol_result;
       const bool solver_needed = dispatch.value("solver_needed", false);
@@ -3336,8 +3403,7 @@ private:
       if (world.rank() == 0) {
         protocol_result_json = protocol_result_to_json(protocol_result);
       }
-      protocol_result_json =
-          broadcast_json_object(world, std::move(protocol_result_json), 0);
+      broadcast_json(world, protocol_result_json);
       protocol_result = protocol_result_from_json(protocol_result_json);
       protocol_result =
           ResponseRecord2::normalize_excited_protocol_result(
@@ -3456,9 +3522,8 @@ private:
       write_json_file("response_metadata.json", state_metadata_json);
     }
 
-    state_metadata_json =
-        broadcast_json_object(world, std::move(state_metadata_json), 0);
-    execution = broadcast_json_object(world, std::move(execution), 0);
+    broadcast_json(world, state_metadata_json);
+    broadcast_json(world, execution);
     return ExcitedExecutionResult{std::move(execution)};
   }
 
@@ -3937,6 +4002,22 @@ private:
                         std::move(debug_log_json)};
   }
 
+  // ============================================================================
+  // SECTION 12: Stage 3 — Property assembly
+  //   PropertyContext — aggregates world, parameters, ground context, solved
+  //                     states, and PropertyManager for property dispatch.
+  //   PropertyType — internal dispatch enum (Alpha, Beta, Raman).
+  //   parse_property_name — maps user string → PropertyType.
+  //   compute_polarizability — stage-3 alpha assembly with frequency filter.
+  //   compute_hyperpolarizability — stage-3 beta assembly.
+  //   print_raman_table — formatted per-mode Raman output on rank 0.
+  //   compute_raman — Hessian + Raman tensor assembly.
+  //   compute_requested_properties — serial stage-3 dispatch loop.
+  //   compute_requested_properties_with_property_group — subgroup-aware path
+  //                     with component precompute, property-group execution,
+  //                     and broadcast-to-world.
+  // ============================================================================
+
   struct PropertyContext {
     // Universe world used for property assembly.
     World &world;
@@ -4074,6 +4155,81 @@ private:
     ctx.properties.save();
   }
 
+  /// Print per-frequency Raman mode table to stdout on rank 0.
+  static void print_raman_table(World &world, const RamanResults &raman,
+                                int print_level) {
+    if (world.rank() != 0) return;
+
+    // 1 a.u. of photon energy → wavelength (nm)
+    auto wavelength_nm_from_au = [](double omega_au) {
+      const double AU_TO_NM_FACTOR = 45.5633525316;
+      return (omega_au > 0.0) ? (AU_TO_NM_FACTOR / omega_au) : 0.0;
+    };
+    struct ColumnSpec {
+      int width;
+      int precision;
+    };
+    static const ColumnSpec COL_FREQ{10, 2};
+    static const ColumnSpec COL_FLOAT{11, 6};
+
+    auto print_header = [&](std::ostream &os, double omega_au) {
+      const double lambda_nm = wavelength_nm_from_au(omega_au);
+      os << "     Raman related properties for freq.  " << std::fixed
+         << std::setprecision(6) << std::setw(9) << omega_au
+         << " au  = " << std::setw(9) << std::setprecision(2) << lambda_nm
+         << " nm\n";
+      os << "     "
+            "----------------------------------------------------------"
+            "----"
+            "-\n\n";
+      os << " Mode    Freq.     Alpha**2   Beta(a)**2   Pol.Int.   "
+            "Depol.Int.  Dep. Ratio \n\n";
+    };
+
+    auto print_row = [&](std::ostream &os,
+                         const RamanResults::RamanModeRow &r) {
+      double pol  = r.pol_int   ? *r.pol_int   : (45.0 * r.alpha2 + 4.0 * r.beta2);
+      double depi = r.depol_int ? *r.depol_int : (3.0 * r.beta2);
+      double rho;
+      if (r.dep_ratio) {
+        rho = *r.dep_ratio;
+      } else {
+        rho = (pol != 0.0) ? (depi / pol) : 0.0;
+      }
+      os << std::setw(5) << r.mode
+         << " "
+         << std::fixed << std::setw(COL_FREQ.width)
+         << std::setprecision(COL_FREQ.precision) << r.freq_cm1
+         << "  "
+         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
+         << r.alpha2
+         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
+         << r.beta2
+         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
+         << pol
+         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
+         << depi
+         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
+         << rho << "\n";
+    };
+
+    auto print_block =
+        [&](std::ostream &os, double omega_au,
+            const std::vector<RamanResults::RamanModeRow> &rows) {
+          print_header(os, omega_au);
+          for (auto r_it = rows.rbegin(); r_it != rows.rend(); ++r_it)
+            print_row(os, *r_it);
+          os << "\n";
+        };
+
+    for (double omega_au : raman.polarization_frequencies) {
+      auto it = raman.raman_spectra.find(omega_au);
+      if (it != raman.raman_spectra.end()) {
+        print_block(std::cout, omega_au, it->second);
+      }
+    }
+  }
+
   /// Stage-3 Raman wrapper (Hessian + Raman tensor/intensity assembly).
   inline static void compute_raman(PropertyContext &ctx,
                                    VibrationalResults &vib,
@@ -4169,81 +4325,6 @@ private:
               pol_freq, " (a.u.): \n", alpha_qi);
       }
     }
-    // 1 a.u. of photon energy  wavelength (nm)
-    auto wavelength_nm_from_au = [](double omega_au) {
-      // lambda(nm) = 1239.841973 eV*nm / (27.211386 eV * omega_au)
-      //             45.56335 / omega_au
-      const double AU_TO_NM_FACTOR = 45.5633525316;
-      return (omega_au > 0.0) ? (AU_TO_NM_FACTOR / omega_au) : 0.0;
-    };
-    struct ColumnSpec {
-      int width;
-      int precision;
-    };
-
-    static const ColumnSpec COL_FREQ{10, 2};  // "Freq." like Dalton (xx.xx)
-    static const ColumnSpec COL_FLOAT{11, 6}; // six decimals for the rest
-                                              //
-    auto print_header = [&](std::ostream &os, double omega_au) {
-      const double lambda_nm = wavelength_nm_from_au(omega_au);
-      os << "     Raman related properties for freq.  " << std::fixed
-         << std::setprecision(6) << std::setw(9) << omega_au
-         << " au  = " << std::setw(9) << std::setprecision(2) << lambda_nm
-         << " nm\n";
-      os << "     "
-            "----------------------------------------------------------"
-            "----"
-            "-\n\n";
-      os << " Mode    Freq.     Alpha**2   Beta(a)**2   Pol.Int.   "
-            "Depol.Int.  Dep. Ratio \n\n";
-    };
-
-    auto print_row = [&](std::ostream &os,
-                         const RamanResults::RamanModeRow &r) {
-      // Compute missing fields if not provided
-      double pol = r.pol_int ? *r.pol_int : (45.0 * r.alpha2 + 4.0 * r.beta2);
-      double depi = r.depol_int ? *r.depol_int : (3.0 * r.beta2);
-      double rho;
-      if (r.dep_ratio) {
-        rho = *r.dep_ratio;
-      } else {
-        rho = (pol != 0.0) ? (depi / pol) : 0.0; // guard div-by-zero
-      }
-
-      // Mode index
-      os << std::setw(5) << r.mode
-         << " "
-         // Freq.
-         << std::fixed << std::setw(COL_FREQ.width)
-         << std::setprecision(COL_FREQ.precision) << r.freq_cm1
-         << "  "
-         // Alpha**2
-         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
-         << r.alpha2
-         // Beta(a)**2
-         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
-         << r.beta2
-         // Pol.Int.
-         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
-         << pol
-         // Depol.Int.
-         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
-         << depi
-         // Dep. Ratio
-         << std::setw(COL_FLOAT.width) << std::setprecision(COL_FLOAT.precision)
-         << rho << "\n";
-    };
-
-    auto print_block =
-        [&](std::ostream &os, double omega_au,
-            const std::vector<RamanResults::RamanModeRow> &rows) {
-          print_header(os, omega_au);
-          // print in reverse order to match Dalton output
-          // for (auto const& x : range | std::views::reverse)
-          for (auto r_it = rows.rbegin(); r_it != rows.rend(); ++r_it)
-            print_row(os, *r_it);
-          os << "\n";
-        };
     using RamanModeRow = RamanResults::RamanModeRow;
 
     for (size_t freq_idx = 0; freq_idx < raman.polarization_frequencies.size();
@@ -4271,13 +4352,8 @@ private:
       raman.raman_spectra[raman.polarization_frequencies[freq_idx]] =
           raman_rows;
       ctx.world.gop.fence();
-      if (ctx.world.rank() == 0) {
-        print_block(std::cout, raman.polarization_frequencies[freq_idx],
-                    raman_rows);
-      }
-
-      ctx.world.gop.fence();
     }
+    print_raman_table(ctx.world, raman, ctx.response_params.print_level());
   }
 
   /// Serial stage-3 property dispatch over requested property list.
@@ -4654,6 +4730,20 @@ private:
     world.gop.fence();
     return stage_output;
   }
+
+  // ============================================================================
+  // SECTION 13: Top-level orchestration
+  //   solve_all_states — Stage 2 master function: builds schedule context,
+  //                      runs linear solve (subgroup or serial), calls excited-
+  //                      bundle stage, calls derived-state stage, and assembles
+  //                      the SolvedStates bundle consumed by stage 3.
+  //   prepare_and_validate_final_protocol_state — rebuilds final-threshold
+  //                      context and reports unconverged-point count.
+  //   build_state_stage_metadata — assembles the combined stage-2 metadata
+  //                      JSON from planner/runtime/excited/derived outputs.
+  //   run_response (public) — entry point called by WorkflowBuilders; drives
+  //                      stages 1 → 2 → 3, finalises stats, returns Results.
+  // ============================================================================
 
 public:
   /**
