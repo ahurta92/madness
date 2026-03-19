@@ -79,7 +79,7 @@ if __name__ == "__main__":
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True,
+        encoding='utf-8', errors='replace',
     )
 
     print("finished run")

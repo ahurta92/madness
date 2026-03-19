@@ -32,7 +32,7 @@ if __name__ == "__main__":
     print("executing \n ",cmd)
 #    p=subprocess.run(cmd,shell=True,capture_output=True, text=True)
 
-    p=subprocess.run(cmd,shell=True,stdout=subprocess.PIPE, stderr=subprocess.PIPE , universal_newlines=True)
+    p=subprocess.run(cmd,shell=True,stdout=subprocess.PIPE, stderr=subprocess.PIPE , encoding='utf-8', errors='replace')
     print("finished with run")
     print(p.stdout)
     exitcode=p.returncode

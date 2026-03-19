@@ -40,7 +40,7 @@ def run_cmd(cmd, env=None):
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True,
+        encoding='utf-8', errors='replace',
         env=env,
     )
     print("finished run")
