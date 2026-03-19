@@ -1,0 +1,267 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black,
+  pdftitle={Molecular Response Notes},
+}
+
+\numberwithin{equation}{section}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+
+% Code style for snippets, file names, and identifiers.
+\lstdefinestyle{respcode}{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{green!40!black},
+  stringstyle=\color{red!50!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  showstringspaces=false,
+  frame=single,
+  columns=fullflexible,
+  tabsize=2
+}
+
+% Text helpers for code-facing notes.
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\class}[1]{\texttt{#1}}
+\newcommand{\func}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\param}[1]{\texttt{#1}}
+
+% General math helpers.
+\newcommand{\dd}{\mathop{}\!\mathrm{d}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\trans}{^{\mathsf{T}}}
+\newcommand{\herm}{^{\dagger}}
+\newcommand{\inv}{^{-1}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\mat}[1]{\bm{#1}}
+\newcommand{\op}[1]{\hat{#1}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\Repart}{\operatorname{Re}}
+\newcommand{\Impart}{\operatorname{Im}}
+
+% Quantum chemistry notation.
+\newcommand{\bra}[1]{\langle #1 \rvert}
+\newcommand{\ket}[1]{\lvert #1 \rangle}
+\newcommand{\braket}[2]{\langle #1 \mid #2 \rangle}
+\newcommand{\expect}[1]{\langle #1 \rangle}
+\newcommand{\ao}[1]{\chi_{#1}}
+\newcommand{\mo}[1]{\phi_{#1}}
+\newcommand{\state}[1]{\ket{\Psi_{#1}}}
+\newcommand{\gs}{\Psi_0}
+\newcommand{\occset}{\mathcal{O}}
+\newcommand{\virtset}{\mathcal{V}}
+\newcommand{\basisset}{\mathcal{B}}
+\newcommand{\nocc}{N_{\mathrm{occ}}}
+\newcommand{\nvirt}{N_{\mathrm{virt}}}
+\newcommand{\nmo}{N_{\mathrm{MO}}}
+
+% Common matrices and vectors in response theory.
+\newcommand{\ident}{\mat{I}}
+\newcommand{\coef}{\mat{C}}
+\newcommand{\density}{\mat{D}}
+\newcommand{\fock}{\mat{F}}
+\newcommand{\overlap}{\mat{S}}
+\newcommand{\coreH}{\mat{H}}
+\newcommand{\coulomb}{\mat{J}}
+\newcommand{\exchange}{\mat{K}}
+\newcommand{\Aresp}{\mat{A}}
+\newcommand{\Bresp}{\mat{B}}
+\newcommand{\Mresp}{\mat{M}}
+\newcommand{\metric}{\mat{\Sigma}}
+\newcommand{\trial}{\mat{V}}
+\newcommand{\subspace}{\mat{W}}
+\newcommand{\Xresp}{\vect{X}}
+\newcommand{\Yresp}{\vect{Y}}
+\newcommand{\rhs}{\vect{b}}
+\newcommand{\residual}{\vect{r}}
+
+% Response-specific shorthand.
+\newcommand{\freq}{\omega}
+\newcommand{\freqshift}{\eta}
+\newcommand{\exenergy}[1]{\Omega_{#1}}
+\newcommand{\pert}[1]{\op{V}^{#1}}
+\newcommand{\prop}[1]{\alpha_{#1}}
+\newcommand{\response}[2]{#1\!\left(#2\right)}
+\newcommand{\lrmat}{\Aresp - (\freq + \ii \freqshift)\metric}
+
+\title{Molecular Response Notes}
+\author{Your Name}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+\section{Purpose}
+
+These notes are a working document for the molecular response implementation.
+Keep theory, algorithm choices, code structure, and validation cases in one place.
+The preamble is intentionally macro-heavy so notation changes can be made once and
+applied everywhere.
+
+\section{Notation Cheat Sheet}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Notation & Meaning \\
+\midrule
+$\ao{\mu}, \ao{\nu}$ & atomic-orbital basis functions \\
+$\mo{p}, \mo{q}$ & molecular orbitals \\
+$\coef$ & AO-to-MO coefficient matrix \\
+$\density$ & density matrix \\
+$\fock$ & effective one-body / Fock-like matrix \\
+$\Aresp, \Bresp$ & response blocks \\
+$\Xresp, \Yresp$ & excitation or response amplitudes \\
+$\freq$ & perturbation frequency \\
+\code{\class{ResponseVector}} & code identifier recorded with a text macro \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Core Equations}
+
+\subsection{Orbital Expansion}
+
+\begin{equation}
+  \mo{p}(\vect{r}) = \sum_{\mu \in \basisset} C_{\mu p}\,\ao{\mu}(\vect{r}).
+\end{equation}
+
+\subsection{Frequency-Domain Linear Response}
+
+\begin{equation}
+  \left[\Aresp - (\freq + \ii \freqshift)\metric\right]
+  \response{\Xresp}{\freq}
+  =
+  \response{\rhs}{\freq}.
+  \label{eq:linear-response}
+\end{equation}
+
+Document here exactly what \(\Aresp\), \(\metric\), and \(\rhs\) mean in your
+implementation. If the code uses a reduced space, this is also the right place
+to define the projected problem.
+
+\subsection{Excited-State Eigenproblem}
+
+\begin{equation}
+  \begin{pmatrix}
+    \Aresp & \Bresp \\
+    \Bresp^{*} & \Aresp^{*}
+  \end{pmatrix}
+  \begin{pmatrix}
+    \Xresp_{n} \\
+    \Yresp_{n}
+  \end{pmatrix}
+  =
+  \exenergy{n}
+  \begin{pmatrix}
+    \ident & 0 \\
+    0 & -\ident
+  \end{pmatrix}
+  \begin{pmatrix}
+    \Xresp_{n} \\
+    \Yresp_{n}
+  \end{pmatrix}.
+  \label{eq:excited-state}
+\end{equation}
+
+\subsection{Transition Property Placeholder}
+
+\begin{equation}
+  \vect{\mu}_{n}
+  =
+  \bra{\gs}\op{\vect{\mu}}\state{n}.
+  \label{eq:transition-dipole}
+\end{equation}
+
+Replace Eq.~\eqref{eq:transition-dipole} with the property expression that is
+most useful for your current work: polarizability, oscillator strengths, Raman
+intensities, or response residues.
+
+\section{Implementation Map}
+
+\subsection{Key Objects}
+
+\begin{itemize}
+  \item \class{ResponseVector}: note storage layout, ownership, and normalization.
+  \item \class{ExcitedStateBundleSolver}: note subspace growth, restart, and locking.
+  \item \func{apply\_response\_operator(...)}: describe the mathematical operator
+        applied by the code.
+  \item \file{src/apps/molresponse\_v2/...}: keep exact file paths once they settle.
+\end{itemize}
+
+\subsection{Code Entry Template}
+
+\begin{lstlisting}[style=respcode,language=C++,caption={Starter block for recording an implementation detail}]
+// File: src/apps/molresponse_v2/ExcitedStateBundleSolver.cpp
+// Routine: solve_bundle(...)
+// Role: build the projected problem and update bundle residuals
+// Inputs: trial subspace, operator application, convergence thresholds
+// Outputs: Ritz pairs, residual norms, restart metadata
+\end{lstlisting}
+
+\section{Algorithm Notes}
+
+\subsection{Data Flow}
+
+\begin{enumerate}
+  \item Build or update the trial space \(\trial\).
+  \item Apply the operator to form projected quantities.
+  \item Solve the reduced problem.
+  \item Form \(\residual\) and decide expand / lock / restart.
+\end{enumerate}
+
+\subsection{Numerical Questions}
+
+\begin{itemize}
+  \item What is the effective preconditioner for the current operator?
+  \item Which quantities must be orthogonalized across frequencies or states?
+  \item Where does symmetry reduce the cost or storage footprint?
+  \item What is the failure mode when the projected metric becomes ill-conditioned?
+\end{itemize}
+
+\section{Validation Plan}
+
+\begin{itemize}
+  \item Small molecules with reference excitation energies.
+  \item Frequency-domain checks against finite differences.
+  \item Restart and checkpoint consistency.
+  \item Invariance tests under subspace reordering or block partition changes.
+\end{itemize}
+
+\section{Open Items}
+
+\begin{itemize}
+  \item \textbf{TODO:} record the exact response equations used in the current code path.
+  \item \textbf{TODO:} document how the solver labels frequencies, states, and bundles.
+  \item \textbf{TODO:} add the file/function map once interfaces stop moving.
+\end{itemize}
+
+\appendix
+
+\section{Scratch Derivations}
+
+Use this appendix for algebra that is not ready for the main narrative.
+Once a derivation stabilizes, move the cleaned version into the main sections.
+
+\end{document}
