@@ -1,7 +1,56 @@
 # Agent Instructions for MADNESS
 
-
 This document provides instructions for agents working with the MADNESS codebase from the github repo `git@github.com:m-a-d-n-e-s-s/madness.git`
+
+## Environment Setup (Required Before Any Build)
+
+This system uses Intel oneAPI (MKL, TBB).  **Always source the environment first:**
+
+```bash
+source setenv.sh
+```
+
+`setenv.sh` is at the repository root.  It calls `~/load_xeonmax.sh` to initialize oneAPI.
+No build will succeed without this step.
+
+## Build Directory Convention
+
+Build directories live **outside** the source tree, under:
+```
+/gpfs/projects/rjh/adrian/development/madness-worktrees/builds/<branch>/<config>/
+```
+
+The active build for this worktree is symlinked at `./build`:
+```
+build -> /gpfs/projects/rjh/adrian/development/madness-worktrees/builds/molresponse-feature-next/96core
+```
+
+This means you can always run `ninja -C build <target>` from the repository root.
+
+**Preferred build target:** `madqc` — compiles all applications in one step.
+
+```bash
+source setenv.sh
+ninja -C build madqc
+```
+
+**Available configs:**
+
+| Directory | Purpose |
+|-----------|---------|
+| `96core`  | High-core-count production build (symlinked as `./build`) |
+| `debug`   | Debug build with `-O0 -g`, already configured with `build.ninja` |
+
+To configure a fresh build (e.g. for `96core` after a clean checkout):
+```bash
+source setenv.sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_NEVER_SPIN=ON \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_TESTING=ON
+ninja -C build madqc
+```
 
 ## Dependencies
 
