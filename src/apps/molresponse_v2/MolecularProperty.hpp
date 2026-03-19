@@ -37,12 +37,12 @@ std::string property_type_to_string(MolecularPropertyType type) {
 
 // Function to print requested properties
 void print_requested_properties(const std::vector<MolecularProperty> &properties) {
-  std::cout << "\n📋 Requested Molecular Properties:\n";
+  std::cout << "\n Requested Molecular Properties:\n";
   for (const auto &prop : properties) {
     std::cout << "- " << property_type_to_string(prop.type) << ":\n";
     for (double freq : prop.frequencies) {
       for (char dir : prop.directions) {
-        std::cout << "  • Direction: " << dir << ", Frequency: "
+        std::cout << "   Direction: " << dir << ", Frequency: "
                   << std::scientific << std::setprecision(3) << freq << "\n";
       }
     }
