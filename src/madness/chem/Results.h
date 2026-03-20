@@ -5,8 +5,8 @@
 #ifndef RESULTS_H
 #define RESULTS_H
 
-#include "madness/constants.h"
-#include "madness_exception.h"
+#include <madness/constants.h>
+#include <madness/world/madness_exception.h>
 #include <madness/chem/molecule.h>
 #include <madness/external/nlohmann_json/json.hpp>
 #include <madness/tensor/tensor_json.hpp>
@@ -207,7 +207,7 @@ public:
   static constexpr double au2invm =
       constants::au2invcm; // conversion factor from Hartree to cm^-1
   VibrationalResults() = default;
-  VibrationalResults(const nlohmann::json &j) {}
+  VibrationalResults(const nlohmann::json &/*j*/) {}
 
   [[nodiscard]] bool has_data() const {
     return hessian || frequencies || intensities || reducedmass || normalmodes || normalmodes_atomic;

@@ -34,7 +34,7 @@
 #pragma once
 
 #include "ResponseParameters.hpp"
-#include "madness_exception.h"
+#include <madness/world/madness_exception.h>
 #include <apps/molresponse_v2/DerivedStatePlanner.hpp>
 #include <apps/molresponse_v2/ExcitedResponse.hpp>
 #include <apps/molresponse_v2/FrequencyLoop.hpp>
@@ -1730,7 +1730,7 @@ private:
   template <typename PointNeedsFn>
   static bool any_state_point_needs_solving(const std::vector<size_t> &state_indices,
                                             const StateSolveScheduleContext &schedule_ctx,
-                                            size_t thresh_index,
+                                            size_t /*thresh_index*/,
                                             PointNeedsFn &&point_needs_solving_fn) {
     for (const auto state_index : state_indices) {
       const auto &state = schedule_ctx.linear_states[state_index];
@@ -4157,7 +4157,7 @@ private:
 
   /// Print per-frequency Raman mode table to stdout on rank 0.
   static void print_raman_table(World &world, const RamanResults &raman,
-                                int print_level) {
+                                int /*print_level*/) {
     if (world.rank() != 0) return;
 
     // 1 a.u. of photon energy → wavelength (nm)
