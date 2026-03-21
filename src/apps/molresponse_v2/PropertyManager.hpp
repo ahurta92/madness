@@ -502,15 +502,6 @@ void compute_alpha(
     //   continue;
     // }
 
-    // alpha_factor is determined by the ResponseVector type (not by frequency).
-    // Using response_alpha_factor() ensures consistency with the type system.
-    // See ResponseVector.hpp and ResponseSolver.hpp for the physical derivation.
-    double alpha_factor = response_alpha_factor(load_vector[0]);
-    // if (world.rank() == 0) {
-    //   print("  Computing  at  =", omega, "for directions:", directions,
-    //         " alpha factor = ", alpha_factor);
-    // }
-
     std::vector<vector_real_function_3d> response_vecs(num_directions);
     std::vector<vector_real_function_3d> perturb_vecs(num_directions);
     bool have_all_direction_states = true;
@@ -543,14 +534,20 @@ void compute_alpha(
       perturb_vecs[j] = perturbations[j];
 
       if (omega != 0.0) {
-        // Duplicate for dynamic response
-        perturb_vecs[j].insert(perturb_vecs[j].end(), perturb_vecs[j].begin(),
-                               perturb_vecs[j].end());
+        // Duplicate [v] → [v|v] to match DynamicRestrictedResponse flat layout.
+        // Copy first to avoid UB from self-referencing insert iterators.
+        auto copy = perturb_vecs[j];
+        perturb_vecs[j].insert(perturb_vecs[j].end(), copy.begin(), copy.end());
       }
     }
     if (!have_all_direction_states) {
       continue;
     }
+
+    // alpha_factor is determined by the ResponseVector type (not by frequency).
+    // Must be computed AFTER loading so load_vector holds the correct variant.
+    // See ResponseVector.hpp and ResponseSolver.hpp for the physical derivation.
+    double alpha_factor = response_alpha_factor(load_vector[0]);
 
     // Compute  using the utility
     madness::Tensor<double> alpha = compute_response_inner_product_tensor(

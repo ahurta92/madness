@@ -27,19 +27,45 @@
 using namespace madness;
 
 // ============================================================================
+// K(bra, ket) — Exchange operator factory
+//
+// Returns a ready-to-apply Exchange<double,3> with bra/ket set and the
+// algorithm defaulting to multiworld_efficient_row.
+//
+// Usage:  K(world, phi0, x)(phi0)   reads as   K[φ₀,x](φ₀)
+// ============================================================================
+[[nodiscard]] inline Exchange<double, 3>
+K(madness::World& world,
+  const vector_real_function_3d& bra,
+  const vector_real_function_3d& ket,
+  Exchange<double, 3>::ExchangeAlgorithm alg =
+      Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row) {
+    constexpr double lo = 1.e-10;
+    Exchange<double, 3> ex(world, lo);
+    ex.set_bra_and_ket(bra, ket);
+    ex.set_algorithm(alg);
+    return ex;
+}
+
+// ============================================================================
 // compute_ground_exchange<R>
 //
-// Applies K[φ₀,φ₀] to all active response channels simultaneously.
+// Applies K[φ₀,φ₀] to each response channel independently.
 //
 // No Q-projection (mirrors the commented-out Q(g) in
 // ResponseComputeGroundExchange).
 //
-// Returns:
-//   TDA/Static (x-only):    N functions  — K[φ₀,φ₀](x_p) for p in [0..N-1]
-//   TDDFT (x+y channels):  2N functions  — K[φ₀,φ₀](flat_p) for p in [0..2N-1]
+// The Exchange operator's bra/ket (φ₀, N functions) must match the size of
+// the vector it acts on, so each channel (x_alpha, y_alpha) is processed
+// separately — not as a single flat application.
+//
+// Returns R with:
+//   TDA/Static (x-only):  result.x_alpha = K[φ₀,φ₀](x_alpha)
+//   TDDFT (x+y):          result.x_alpha = K[φ₀,φ₀](x_alpha)
+//                          result.y_alpha = K[φ₀,φ₀](y_alpha)
 // ============================================================================
 template <typename R>
-[[nodiscard]] vector_real_function_3d
+[[nodiscard]] R
 compute_ground_exchange(madness::World& world,
                         const R& response,
                         const vector_real_function_3d& phi0) {
@@ -48,19 +74,16 @@ compute_ground_exchange(madness::World& world,
             "compute_ground_exchange: unrestricted not yet implemented", 1);
     }
 
-    if (phi0.empty()) return {};
+    R result(response.num_orbitals());
+    if (phi0.empty()) return result;
 
-    constexpr double lo = 1.e-10;
-    Exchange<double, 3> k0(world, lo);
-    k0.set_bra_and_ket(phi0, phi0);
-    k0.set_algorithm(
-        Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-
-    if constexpr (!response_has_y_channel_v<R>) {
-        return k0(response.x_alpha);  // N functions
-    } else {
-        return k0(response.flat);     // 2N functions
+    auto k0 = K(world, phi0, phi0);
+    result.x_alpha = k0(response.x_alpha);
+    if constexpr (response_has_y_channel_v<R>) {
+        result.y_alpha = k0(response.y_alpha);
     }
+    result.flatten();
+    return result;
 }
 
 // ============================================================================
@@ -68,15 +91,15 @@ compute_ground_exchange(madness::World& world,
 //
 // Computes the full response XC coupling vector, Q-projected.
 //
-// Per orbital p:
-//   gx[p] = 2·J[ρ_channel]·φ₀_p  −  K_a(φ₀_p)  −  K_b(φ₀_p)
+// Per orbital p, three branches by response type:
 //
-// Channel definitions and set_bra_and_ket arguments:
+//   TDA (excited-state, y≡0) — legacy compute_gamma_tda:
+//     ρ = Σ x_i·φ₀_i   (no spin factor; 2× on J)
+//     gx[p] = 2·J[ρ]·φ₀_p − c_xc·K[φ₀,x](φ₀_p)
 //
-//   TDA/Static (x-only):
-//     ρ_channel = 2·Σ x_i·φ₀_i
-//     K_a = K[φ₀,x](φ₀_p)   set_bra_and_ket(φ₀,  x)
-//     K_b = K[x,φ₀](φ₀_p)   set_bra_and_ket(x,   φ₀)
+//   Static (freq-dependent, y≡x) — legacy compute_gamma_static:
+//     ρ = 2·Σ x_i·φ₀_i  (factor-of-2 from y≡x)
+//     gx[p] = 2·J[ρ]·φ₀_p − c_xc·(K[φ₀,x](φ₀_p) + K[x,φ₀](φ₀_p))
 //
 //   TDDFT x-channel:
 //     ρ_channel = Σ(x_i+y_i)·φ₀_i  (shared with y-channel — computed once)
@@ -92,7 +115,8 @@ compute_ground_exchange(madness::World& world,
 // independent Coulomb evaluations that the per-orbital macrotask performed.
 //
 // Returns:
-//   TDA/Static:    N functions  (Q-projected)
+//   TDA:           N functions  (Q-projected)
+//   Static:        N functions  (Q-projected)
 //   TDDFT:        2N functions  in flat [gx|gy] layout (Q-projected)
 // ============================================================================
 template <typename R>
@@ -100,7 +124,8 @@ template <typename R>
 compute_gamma_response(madness::World& world,
                        const R& response,
                        const vector_real_function_3d& phi0,
-                       const madness::QProjector<double, 3>& Q) {
+                       const madness::QProjector<double, 3>& Q,
+                       double c_xc = 1.0) {
     if constexpr (response_is_unrestricted_v<R>) {
         MADNESS_EXCEPTION(
             "compute_gamma_response: unrestricted not yet implemented", 1);
@@ -108,68 +133,52 @@ compute_gamma_response(madness::World& world,
 
     if (phi0.empty()) return {};
 
-    constexpr double lo = 1.e-10;
-    const double thresh = FunctionDefaults<3>::get_thresh();
+    constexpr double lo    = 1.e-10;
+    const double     thresh = FunctionDefaults<3>::get_thresh();
+    const auto&      x     = response.x_alpha;
 
     if constexpr (!response_has_y_channel_v<R>) {
-        // ---- TDA / Static (x-only) ----
+        auto xphi = mul(world, x, phi0, true);
 
-        // ρ = 2·Σ x_i·φ₀_i
-        auto xphi  = mul(world, response.x_alpha, phi0, true);
-        auto rho   = 2.0 * sum(world, xphi, true);
-        auto J_rho = apply(CoulombOperator(world, lo, thresh), rho);
-        auto Jphix = J_rho * phi0;  // N functions
+        if constexpr (std::is_same_v<R, TDARestrictedResponse>) {
+            // ---- TDA (excited-state, y≡0) ----
+            // ρ = Σ x_i·φ_i, single K
+            auto rho   = sum(world, xphi, true);
+            auto J_rho = apply(CoulombOperator(world, lo, thresh), rho);
 
-        // K_a = K[φ₀,x](φ₀_p)  →  set_bra_and_ket(φ₀, x)
-        Exchange<double, 3> ka_op(world, lo);
-        ka_op.set_bra_and_ket(phi0, response.x_alpha);
-        ka_op.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
+            auto gx = 2.0 * (J_rho * phi0) - c_xc * K(world, phi0, x)(phi0);
+            return Q(gx);
 
-        // K_b = K[x,φ₀](φ₀_p)  →  set_bra_and_ket(x, φ₀)
-        Exchange<double, 3> kb_op(world, lo);
-        kb_op.set_bra_and_ket(response.x_alpha, phi0);
-        kb_op.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
+        } else {
+            // ---- Static (freq-dependent, y≡x) ----
+            // ρ = 2·Σ x_i·φ_i, both K terms
+            auto rho   = 2.0 * sum(world, xphi, true);
+            auto J_rho = apply(CoulombOperator(world, lo, thresh), rho);
 
-        auto gx = 2.0 * Jphix - ka_op(phi0) - kb_op(phi0);
-        return Q(gx);
+            //  K[φ₀,x](φ₀) + K[x,φ₀](φ₀)
+            auto gx = 2.0 * (J_rho * phi0)
+                     - c_xc * (K(world, phi0, x)(phi0) + K(world, x, phi0)(phi0));
+            return Q(gx);
+        }
 
     } else {
         // ---- TDDFT (x and y channels) ----
+        const auto& y = response.y_alpha;
 
         // ρ¹ = Σ(x_i+y_i)·φ₀_i — computed once, shared across both channels
-        auto xphi  = mul(world, response.x_alpha, phi0, true);
-        auto yphi  = mul(world, response.y_alpha, phi0, true);
+        auto xphi  = mul(world, x, phi0, true);
+        auto yphi  = mul(world, y, phi0, true);
         auto rho1  = sum(world, xphi, true) + sum(world, yphi, true);
         auto J_rho = apply(CoulombOperator(world, lo, thresh), rho1);
-        auto Jphix = J_rho * phi0;  // N functions (shared)
+        auto Jphi  = J_rho * phi0;  // N functions (shared)
 
-        // x-channel:
-        //   K_a = K[φ₀,x](φ₀_p)  →  set_bra_and_ket(φ₀, x)
-        //   K_b = K[y,φ₀](φ₀_p)  →  set_bra_and_ket(y,  φ₀)
-        Exchange<double, 3> kax(world, lo);
-        kax.set_bra_and_ket(phi0, response.x_alpha);
-        kax.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-        Exchange<double, 3> kbx(world, lo);
-        kbx.set_bra_and_ket(response.y_alpha, phi0);
-        kbx.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-        auto gx = 2.0 * Jphix - kax(phi0) - kbx(phi0);
+        // x-channel:  K[φ₀,x](φ₀) + K[y,φ₀](φ₀)
+        auto gx = 2.0 * Jphi
+                 - c_xc * (K(world, phi0, x)(phi0) + K(world, y, phi0)(phi0));
 
-        // y-channel:
-        //   K_a = K[φ₀,y](φ₀_p)  →  set_bra_and_ket(φ₀, y)
-        //   K_b = K[x,φ₀](φ₀_p)  →  set_bra_and_ket(x,  φ₀)
-        Exchange<double, 3> kay(world, lo);
-        kay.set_bra_and_ket(phi0, response.y_alpha);
-        kay.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-        Exchange<double, 3> kby(world, lo);
-        kby.set_bra_and_ket(response.x_alpha, phi0);
-        kby.set_algorithm(
-            Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-        auto gy = 2.0 * Jphix - kay(phi0) - kby(phi0);
+        // y-channel:  K[φ₀,y](φ₀) + K[x,φ₀](φ₀)
+        auto gy = 2.0 * Jphi
+                 - c_xc * (K(world, phi0, y)(phi0) + K(world, x, phi0)(phi0));
 
         // Assemble flat [gx | gy], Q-project
         gx.insert(gx.end(), gy.begin(), gy.end());

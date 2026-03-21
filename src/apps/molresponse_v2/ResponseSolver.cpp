@@ -155,16 +155,16 @@ vector_real_function_3d CoupledResponseEquations(World& world, const GroundState
                                                  const ResponseManager& response_manager, ResponseDebugLogger& logger) {
 
     auto c_xc = g_s.xcf_.hf_exchange_coefficient();
-    vector_real_function_3d k_0;
+    StaticRestrictedResponse k_0(vecs.num_orbitals());
     vector_real_function_3d g_x;
 
     DEBUG_TIMED_BLOCK(world, &logger, "g0_task",
                       { k_0 = compute_ground_exchange(world, vecs, g_s.orbitals); });
     DEBUG_TIMED_BLOCK(world, &logger, "gx_task",
-                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat); });
+                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat, c_xc); });
 
     auto v_local = g_s.V_local * vecs.x_alpha;
-    auto v0x = v_local - c_xc * k_0;
+    auto v0x = v_local - c_xc * k_0.x_alpha;
     auto epsilonx = transform(world, vecs.x_alpha, g_s.Hamiltonian_no_diag, true);
 
     auto thetax = -2.0 * (v0x - epsilonx + g_x + v_p);
@@ -188,16 +188,16 @@ vector_real_function_3d CoupledResponseEquations(World& world, const GroundState
                                                  const ResponseManager& response_manager, ResponseDebugLogger& logger) {
 
     auto c_xc = g_s.xcf_.hf_exchange_coefficient();
-    vector_real_function_3d k_0;
+    TDARestrictedResponse k_0(vecs.num_orbitals());
     vector_real_function_3d g_x;
 
     DEBUG_TIMED_BLOCK(world, &logger, "g0_task",
                       { k_0 = compute_ground_exchange(world, vecs, g_s.orbitals); });
     DEBUG_TIMED_BLOCK(world, &logger, "gx_task",
-                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat); });
+                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat, c_xc); });
 
     auto v_local = g_s.V_local * vecs.x_alpha;
-    auto v0x = v_local - c_xc * k_0;
+    auto v0x = v_local - c_xc * k_0.x_alpha;
     auto epsilonx = transform(world, vecs.x_alpha, g_s.Hamiltonian_no_diag, true);
 
     auto thetax = -2.0 * (v0x - epsilonx + g_x + v_p);
@@ -229,17 +229,16 @@ vector_real_function_3d CoupledResponseEquations(World& world, const GroundState
     const auto& yvec = vecs.y_alpha;
     const auto& all_x = vecs.flat;
 
-    vector_real_function_3d k_0;
+    auto c_xc = g_s.xcf_.hf_exchange_coefficient();
+    DynamicRestrictedResponse k_0(vecs.num_orbitals());
     vector_real_function_3d g_x;
 
     DEBUG_TIMED_BLOCK(world, &logger, "g0_task",
                       { k_0 = compute_ground_exchange(world, vecs, g_s.orbitals); });
     DEBUG_TIMED_BLOCK(world, &logger, "gx_task",
-                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat); });
-
-    auto c_xc = g_s.xcf_.hf_exchange_coefficient();
+                      { g_x = compute_gamma_response(world, vecs, g_s.orbitals, g_s.Qhat, c_xc); });
     auto v_local = g_s.V_local * all_x;
-    auto v0x = v_local - c_xc * k_0;
+    auto v0x = v_local - c_xc * k_0.flat;
     auto epsilonx = transform(world, xvec, g_s.Hamiltonian_no_diag, true);
     auto epsilony = transform(world, yvec, g_s.Hamiltonian_no_diag, true);
     epsilonx.insert(epsilonx.end(), epsilony.begin(), epsilony.end());

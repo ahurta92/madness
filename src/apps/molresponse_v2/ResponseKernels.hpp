@@ -374,10 +374,9 @@ compute_response_potentials(madness::World &world,
     }
 
     auto k0 = compute_ground_exchange(world, state, gs.orbitals);
-    auto gx = compute_gamma_response(world, state, gs.orbitals, gs.Qhat);
-
     const double c_xc  = gs.xcf_.hf_exchange_coefficient();
-    auto v0_flat       = gs.V_local * flat - c_xc * k0;
+    auto gx = compute_gamma_response(world, state, gs.orbitals, gs.Qhat, c_xc);
+    auto v0_flat       = gs.V_local * flat - c_xc * k0.flat;
     auto epsilon_flat  = apply_hamiltonian_no_diag(world, state, gs);
     auto lambda_flat   = v0_flat - epsilon_flat + gx;
 
