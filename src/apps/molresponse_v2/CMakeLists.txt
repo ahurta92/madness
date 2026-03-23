@@ -64,6 +64,7 @@ add_dependencies(applications-madness test_tda_h2)
 add_mad_executable(test_parameter_manager "test_parameter_manager.cpp" "MADresponse2;MADchem")
 add_mad_executable(molresponse2 "molresponse2.cpp" "MADresponse2;MADchem")
 add_mad_executable(test_tda_h2 "test_tda_h2.cpp" "MADresponse2;MADchem")
+add_mad_executable(test_response_vector_alias "test_response_vector_alias.cpp" "MADresponse2;MADchem")
 
 # Add install targets for executables
 install(TARGETS molresponse2 test_parameter_manager test_tda_h2

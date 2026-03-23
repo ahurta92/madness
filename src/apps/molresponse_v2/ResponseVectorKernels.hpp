@@ -66,9 +66,9 @@ compute_ground_exchange(madness::World& world,
     if (phi0.empty()) return result;
 
     auto k0 = K(world, phi0, phi0);
-    result.x_alpha = k0(response.x_alpha);
+    response_x(result) = k0(response_x(response));
     if constexpr (response_has_y_channel_v<R>) {
-        result.y_alpha = k0(response.y_alpha);
+        response_y(result) = k0(response_y(response));
     }
     result.flatten();
     return result;
@@ -101,7 +101,7 @@ compute_gamma_response(madness::World& world,
     if (phi0.empty()) return {};
 
     const double thresh = FunctionDefaults<3>::get_thresh();
-    const auto&      x     = response.x_alpha;
+    const auto&      x     = response_x(response);
 
     if constexpr (!response_has_y_channel_v<R>) {
         auto xphi = mul(world, x, phi0, true);
@@ -122,7 +122,7 @@ compute_gamma_response(madness::World& world,
         }
     } else {
         // TDDFT: ρ = Σ(xᵢ+yᵢ)φᵢ, shared J, per-channel asymmetric K
-        const auto& y = response.y_alpha;
+        const auto& y = response_y(response);
         auto xphi  = mul(world, x, phi0, true);
         auto yphi  = mul(world, y, phi0, true);
         auto rho1  = sum(world, xphi, true) + sum(world, yphi, true);

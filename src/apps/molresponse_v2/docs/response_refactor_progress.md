@@ -114,10 +114,42 @@ Observed result:
 - phase-timing output and `tda_excited_debug_log.json` were produced
 - the x-only alias-backed storage change did not change the observed one-iteration serial behavior
 
+## Follow-up After Checkpoint
+
+A second cleanup pass completed the remaining x-only restricted accessor migration in:
+
+- `src/apps/molresponse_v2/ResponseVectorKernels.hpp`
+- `src/apps/molresponse_v2/ops/StaticRestrictedOps.hpp`
+- `src/apps/molresponse_v2/ops/TDARestrictedOps.hpp`
+- `src/apps/molresponse_v2/ResponseInitializer.cpp`
+- `src/apps/molresponse_v2/ExcitedResponse.hpp`
+
+A focused regression test was also added:
+
+- `src/apps/molresponse_v2/test_response_vector_alias.cpp`
+
+This test checks that for `StaticRestrictedResponse` and `TDARestrictedResponse`:
+
+- `x_alpha` and `flat` alias the same underlying storage
+- `response_x(...)` and `response_all(...)` return the same vector
+- copy and move operations preserve the alias-backed storage contract
+
+Verification for this follow-up pass:
+
+```bash
+source setenv.sh
+ninja -C /gpfs/projects/rjh/adrian/development/madness-worktrees/builds/molresponse-feature-next/debug madqc test_tda_h2 test_response_vector_alias
+
+source /gpfs/projects/rjh/adrian/development/madness-worktrees/molresponse-feature-next/setenv.sh
+/gpfs/projects/rjh/adrian/development/madness-worktrees/builds/molresponse-feature-next/debug/src/apps/molresponse_v2/test_response_vector_alias
+/gpfs/projects/rjh/adrian/development/madness-worktrees/builds/molresponse-feature-next/debug/src/apps/molresponse_v2/test_tda_h2 \
+  --num-states 2 --max-iter 1 --print-level 3 .
+```
+
 ## Remaining follow-up
 
 The most obvious next cleanup steps are:
 
-1. finish migrating the remaining restricted x-only helpers and ops to `response_x(...)` / `response_all(...)` rather than direct field access
-2. add focused regression coverage for x-only alias semantics in addition to the end-to-end H2 smoke test
-3. decide how far to push the accessor cleanup into the legacy `ExcitedStateBundleSolver.cpp` path versus keeping that file in compatibility mode
+1. decide whether to migrate more of the legacy `ExcitedStateBundleSolver.cpp` compatibility path onto the accessor layer or leave it intentionally mixed
+2. add broader coverage for x-only restricted behavior beyond alias-storage semantics and the H2 smoke path
+3. evaluate whether unrestricted response types should eventually adopt the same channel-centric access style more completely

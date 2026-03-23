@@ -12,16 +12,19 @@ ResponseVector initialize_guess_vector(World &world, const GroundStateData &gs,
 
   if (is_static && !is_unrestricted) {
     StaticRestrictedResponse response(num_orbitals);
+    auto &x = response_x(response);
     for (size_t i = 0; i < num_orbitals; ++i)
-      response.x_alpha[i] = Vp[i];
+      x[i] = Vp[i];
     response.flatten();
     return response;
 
   } else if (!is_static && !is_unrestricted) {
     DynamicRestrictedResponse response(num_orbitals);
+    auto &x = response_x(response);
+    auto &y = response_y(response);
     for (size_t i = 0; i < num_orbitals; ++i) {
-      response.x_alpha[i] = Vp[i];
-      response.y_alpha[i] = Vp[i];
+      x[i] = Vp[i];
+      y[i] = Vp[i];
     }
     response.flatten();
     return response;

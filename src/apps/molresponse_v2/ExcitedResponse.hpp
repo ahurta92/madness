@@ -93,14 +93,15 @@ pack_guess_states(madness::World                                          &world
     states.reserve(x_states.size());
     for (const auto &xs : x_states) {
         R rv;
-        rv.x_alpha = copy(world, xs, true);
-        if (rv.x_alpha.size() < n_orbitals)
-            rv.x_alpha.resize(n_orbitals,
+        auto &x = response_x(rv);
+        x = copy(world, xs, true);
+        if (x.size() < n_orbitals)
+            x.resize(n_orbitals,
                 zero_functions_compressed<double, 3>(world, 1)[0]);
-        rv.x_alpha.resize(n_orbitals);
+        x.resize(n_orbitals);
 
         if constexpr (response_has_y_channel_v<R>)
-            rv.y_alpha = zero_functions_compressed<double, 3>(
+            response_y(rv) = zero_functions_compressed<double, 3>(
                 world, static_cast<int>(n_orbitals));
 
         rv.flatten();

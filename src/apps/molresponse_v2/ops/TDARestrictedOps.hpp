@@ -57,7 +57,7 @@ constexpr double alpha_factor(const TDARestrictedResponse&) { return -4.0; }
 inline real_function_3d
 compute_density(World& world, const TDARestrictedResponse& rvec,
                 const vector_real_function_3d& phi0) {
-    auto xphi = mul(world, rvec.x_alpha, phi0, true);
+    auto xphi = mul(world, response_x(rvec), phi0, true);
     return ResponseSolverConstants::k_restricted_spin_factor * sum(world, xphi, true);
 }
 
@@ -95,7 +95,7 @@ CoupledResponseEquations(World& world, const GroundStateData& g_s,
                           const ResponseManager& /*response_manager*/,
                           ResponseDebugLogger& logger) {
     const auto   c_xc  = g_s.xcf_.hf_exchange_coefficient();
-    const auto&  x     = vecs.x_alpha;
+    const auto&  x     = response_x(vecs);
     const auto&  phi0  = g_s.orbitals;
 
     // --- Ground exchange: K₀[x] = K[φ₀,φ₀](x) ---
