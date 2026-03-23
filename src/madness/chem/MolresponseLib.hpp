@@ -53,6 +53,7 @@
 #include <iostream>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <numeric>
 #include <optional>
 #include <memory>
@@ -3944,6 +3945,112 @@ private:
     return metadata;
   }
 
+  /// Derive wavelet order k from protocol threshold, matching
+  /// ResponseManager::setProtocol.
+  static int k_from_thresh(double thresh) {
+    if (thresh >= 0.9e-2) return 4;
+    if (thresh >= 0.9e-4) return 6;
+    if (thresh >= 0.9e-6) return 8;
+    if (thresh >= 0.9e-8) return 10;
+    return 12;
+  }
+
+  /// Pre-flight memory estimate for ground-state orbital storage, emitted
+  /// before Stage 2 subworld allocation.
+  ///
+  /// Prints a PREFLIGHT_MEMORY line on rank 0 reporting the per-task and
+  /// per-node estimated memory for the ground-state orbitals at the current
+  /// and final protocol k.  Emits a PREFLIGHT_MEMORY_WARNING when the
+  /// estimate exceeds 80 % of /proc/meminfo MemAvailable.
+  ///
+  /// All ranks must call this function — tree_size() is a collective op.
+  static void preflight_memory_estimate(World &world,
+                                        const GroundContext &ctx,
+                                        const CalculationParameters &calc_params,
+                                        size_t n_subgroups) {
+    const long n_occupied = ctx.ground.getNumOrbitals();
+    const int current_k   = ctx.ground.getK();
+    const auto &orbitals  = ctx.ground.getOrbitals();
+
+    // Sum tree-node counts across all orbitals (collective over all ranks).
+    std::size_t total_tree_nodes = 0;
+    for (const auto &orb : orbitals)
+      total_tree_nodes += orb.tree_size();
+
+    // Determine final-protocol k from the threshold schedule.
+    const auto &protocol      = calc_params.protocol();
+    const double final_thresh = protocol.empty()
+                                    ? FunctionDefaults<3>::get_thresh()
+                                    : protocol.back();
+    const int final_k = k_from_thresh(final_thresh);
+
+    if (world.rank() != 0) return;
+
+    // Memory estimate: every tree node stores k^3 doubles.
+    // tree_size() counts both leaf and internal nodes, giving an
+    // ~2x overestimate for uncompressed functions — intentionally
+    // conservative so the warning fires before OOM rather than after.
+    const double gib = 1024.0 * 1024.0 * 1024.0;
+    const auto est_orb_gb = [&](int k) -> double {
+      return static_cast<double>(total_tree_nodes)
+             * static_cast<double>(k) * k * k * 8.0 / gib;
+    };
+    const double est_current_gb = est_orb_gb(current_k);
+    const double est_final_gb   = est_orb_gb(final_k);
+
+    // Node-available memory from /proc/meminfo (MemAvailable kB → GiB).
+    double avail_gb = 0.0;
+    {
+      std::ifstream meminfo_stream("/proc/meminfo");
+      std::string line;
+      while (std::getline(meminfo_stream, line)) {
+        if (line.find("MemAvailable:") == 0) {
+          std::istringstream iss(line);
+          std::string key;
+          uint64_t kb = 0;
+          iss >> key >> kb;
+          avail_gb = static_cast<double>(kb) / (1024.0 * 1024.0);
+          break;
+        }
+      }
+    }
+
+    // Tasks per node: prefer SLURM env var, fall back to total MPI size.
+    int tasks_per_node = static_cast<int>(world.size());
+    if (const char *env = std::getenv("SLURM_NTASKS_PER_NODE")) {
+      try { tasks_per_node = std::stoi(std::string(env)); } catch (...) {}
+    }
+
+    const double est_node_gb_final = est_final_gb * tasks_per_node;
+
+    std::ostringstream msg;
+    msg << std::fixed << std::setprecision(2);
+    msg << "PREFLIGHT_MEMORY"
+        << "  n_occupied=" << n_occupied
+        << "  current_k=" << current_k
+        << "  final_k=" << final_k
+        << "  total_tree_nodes=" << total_tree_nodes
+        << "  est_orb_gb_current=" << est_current_gb
+        << "  est_orb_gb_final=" << est_final_gb
+        << "  tasks_per_node=" << tasks_per_node
+        << "  est_node_gb_final=" << est_node_gb_final
+        << "  avail_gb=" << avail_gb
+        << "  n_subgroups=" << n_subgroups;
+    print(msg.str());
+
+    if (avail_gb > 0.0 && est_node_gb_final > 0.8 * avail_gb) {
+      std::ostringstream warn;
+      warn << std::fixed << std::setprecision(2);
+      warn << "PREFLIGHT_MEMORY_WARNING: estimated ground orbital memory at"
+           << " final protocol (" << est_node_gb_final << " GB/node,"
+           << " " << tasks_per_node << " tasks x " << est_final_gb << " GB/task)"
+           << " exceeds 80% of available memory (" << avail_gb << " GB)."
+           << " Consider reducing --ntasks-per-node or setting"
+           << " response.state_parallel = off.";
+      print(warn.str());
+    }
+  }
+
   /// Stage-2 orchestrator.
   ///
   /// Sequence:
@@ -3964,6 +4071,11 @@ private:
 
     nlohmann::json state_metadata_json = nlohmann::json::object();
     nlohmann::json debug_log_json = nlohmann::json::object();
+
+    // Pre-flight memory estimate: emits PREFLIGHT_MEMORY before any subworld
+    // allocation so OOM risk is visible in the log before a silent SIGKILL.
+    preflight_memory_estimate(world, ctx, calc_params,
+                              schedule_ctx.runtime_execution_groups);
 
     // Stage 2b linear solve: subgroup path first, serial fallback second.
     bool ran_subgroup_path = false;

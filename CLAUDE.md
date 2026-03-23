@@ -2,6 +2,8 @@
 
 MADNESS (Multiresolution Adaptive Numerical Environment for Scientific Simulation) is a high-performance C++ framework for solving integral and differential equations in many dimensions using adaptive multiresolution analysis. It includes a full quantum chemistry stack (DFT, HF, post-HF, response properties) and a distributed task-based runtime (MADWorld).
 
+For excited-state reintegration contracts, hot files, and the focused validation matrix, use `$madness-excited-state-dev`. For environment/setup and cross-project run workflow, use `$gecko-madness-workspace`.
+
 ---
 
 ## Repository Layout
@@ -343,3 +345,84 @@ Static analysis: `.clang-tidy` with `bugprone-*`, `readability-*`, and other che
 9. **Test in parallel.** Many bugs only appear under MPI. Use `mpiexec -np 2` for response tests. Use the Python smoke tests in `src/apps/madqc_v2/` to validate excited-state metadata and restart behaviour.
 10. **Serialization requirements.** Any type stored in `WorldContainer` or sent via MPI tasks must implement MADNESS archive serialization.
 11. **Never spin.** Use `ENABLE_NEVER_SPIN=ON` in debug builds to avoid spin-wait hangs during debugging.
+
+---
+
+## Scaling Goal and Known Memory Bottleneck
+
+**Project goal:** extend the response solver to larger molecular systems (>20 occupied
+orbitals). The three primary constraints are memory per MPI task, wall time, and
+strong-scaling efficiency.
+
+### Empirical data (mul_sparse benchmark, March 2026)
+
+In `state_parallel "on"` (subworld) mode every MPI task holds a **complete replica of
+all occupied ground-state orbitals** at the current protocol accuracy. Per-task memory:
+
+```
+memory ≈ n_occupied × n_leaves(k) × k³ × 8 bytes  +  response_overhead
+```
+
+At the final protocol (`k=10`, `thresh=1e-7`), `n_leaves` is ~4.6× the k=6 count.
+Measured MaxRSS per MPI task (6 nodes × 8 tasks/node, Xeon Max ≈576 GB/node):
+
+| Molecule    | Occupied orbs | MaxRSS/task | Per-node (×8) | Result  |
+|-------------|--------------|-------------|----------------|---------|
+| H2O         | 5            | ~14 GB      | ~112 GB        | ✓       |
+| C2H4        | 8            | ~32 GB      | ~256 GB        | ✓       |
+| CH3OH       | 9            | ~43 GB      | ~344 GB        | ✓       |
+| C6H6        | 21           | ~67 GB      | ~536 GB        | ✗ OOM   |
+| naphthalene | 34           | >67 GB      | >576 GB        | ✗ OOM   |
+
+C6H6 and naphthalene fail with exit 137 (SIGKILL/OOM) immediately after `PROTOCOL_POLICY`
+lines, before the first response iteration. The current workaround is to halve
+`--ntasks-per-node` (and double `--cpus-per-task`) to reduce the per-node multiplier.
+
+The ground-state orbital replication across subworlds is the primary blocker.
+
+### Priority improvements
+
+**Memory (high priority):**
+- **Pre-flight memory estimate** — before Stage 2 subworld allocation in `MolresponseLib.hpp`,
+  compute and print `n_occupied × n_leaves × k³ × 8 bytes` per task and compare against
+  available memory. `worldmem.h` already has RSS query infrastructure; `/proc/meminfo`
+  gives node-level available memory. A clean abort with a useful message is far better
+  than a silent SIGKILL.
+- **Per-task RSS at protocol boundaries** — use `worldmem.h` to emit a
+  `MEMORY_HWM  rank=N  protocol=N  rss_GB=X` line inside `FrequencyLoop` at each
+  protocol transition. This replaces the current post-mortem sacct workflow.
+- **Lazy/on-demand orbital loading** — investigate whether `GroundStateData` can load
+  orbitals on demand and evict when not needed, rather than keeping a full replica
+  resident throughout the run. `ResponseIO.hpp` archive infrastructure could be reused.
+- **Shared node-local orbital replica** — rather than one full copy per MPI task,
+  a single copy per node (via MPI shared-memory windows) would reduce the memory
+  multiplier from `ntasks_per_node` to 1 for the ground-state contribution.
+
+**Logging (medium priority):**
+- **Machine-readable protocol lines** in `FrequencyLoop`:
+  `PROTOCOL_START index=N thresh=X k=N` and `PROTOCOL_DONE index=N iters=N converged=true`
+- **Input path echo** in `madqc.cpp`: `INPUT_FILE  given=X  resolved=/absolute/path`
+  (madqc currently lowercases its input argument; callers must pass basename not
+  absolute path as a workaround — echoing the resolved path surfaces this immediately)
+- **SIGTERM handler** — a signal handler that flushes a
+  `MADQC_EXIT reason=signal last_action=X protocol=N` line before the process dies
+  is far more useful than a silent kill entry in the SLURM log
+
+**Scaling (longer term):**
+- **Delay full subworld expansion** — `protocol0_owner_groups` already reduces active
+  groups at protocol 0; investigate extending this so the expensive k=10 protocol
+  allocates subworlds only as needed rather than all upfront
+- **Per-task timing breakdowns** in `ResponseRecord` (orbital projection, BSH apply,
+  orthogonalization) to enable molecule-by-molecule bottleneck identification
+
+### Reference data and operator guide
+
+```
+Benchmark study:  /gpfs/scratch/ahurtado/mul_sparse_study/
+Run log:          RUNLOG.md               (empirical memory table, job history)
+Diagnosis guide:  agents/madqc_error_handling.md  (OOM + error triage steps for agents)
+```
+
+When suggesting memory or scaling changes, verify they do not regress H2O/CH3OH/C2H4
+and aim to bring C6H6 and naphthalene within budget at 8 tasks/node
+(target: <72 GB/task so that 8 × 72 = 576 GB fits within the Xeon Max node capacity).

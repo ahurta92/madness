@@ -4,6 +4,7 @@
 #include "ResponseState.hpp"
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant> // C++ 17
 
 using namespace madness;
@@ -128,11 +129,15 @@ using namespace madness;
 // Sync/flatten invariant
 // ============================================================================
 //
-// Each struct maintains TWO synchronized views of the same data:
+// Multi-channel response structs maintain TWO synchronized views of the same data:
 //   - Typed channel members: x_alpha, y_alpha, x_beta, y_beta
 //   - Concatenated flat vector: flat
 //
-// Contract:
+// The x-only restricted structs (StaticRestrictedResponse and
+// TDARestrictedResponse) are special: x_alpha and flat are aliases of the same
+// underlying storage, so sync()/flatten() are intentional no-ops.
+//
+// Contract for multi-channel structs:
 //   After modifying flat directly (KAIN update, BSH apply, archive load):
 //       call sync() to propagate flat → typed channels.
 //   After modifying typed channels directly (guess init, pack_guess_states):
@@ -141,6 +146,46 @@ using namespace madness;
 //       one will silently overwrite the other's work.
 //
 // ============================================================================
+
+namespace response_vector_detail {
+
+// Shared alias-backed storage for x-only restricted response types.
+// x_alpha and flat stay available as public references so existing call sites
+// keep compiling, but both names point at the same vector.
+struct RestrictedSingleChannelStorage {
+protected:
+    vector_real_function_3d storage_;
+
+public:
+    vector_real_function_3d &x_alpha;
+    vector_real_function_3d &flat;
+
+    RestrictedSingleChannelStorage()
+        : storage_(), x_alpha(storage_), flat(storage_) {}
+
+    explicit RestrictedSingleChannelStorage(const size_t &n_orb)
+        : storage_(n_orb), x_alpha(storage_), flat(storage_) {}
+
+    RestrictedSingleChannelStorage(const RestrictedSingleChannelStorage &other)
+        : storage_(other.storage_), x_alpha(storage_), flat(storage_) {}
+
+    RestrictedSingleChannelStorage(RestrictedSingleChannelStorage &&other) noexcept
+        : storage_(std::move(other.storage_)), x_alpha(storage_), flat(storage_) {}
+
+    RestrictedSingleChannelStorage &operator=(
+        const RestrictedSingleChannelStorage &other) {
+        if (this != &other) storage_ = other.storage_;
+        return *this;
+    }
+
+    RestrictedSingleChannelStorage &operator=(
+        RestrictedSingleChannelStorage &&other) noexcept {
+        if (this != &other) storage_ = std::move(other.storage_);
+        return *this;
+    }
+};
+
+} // namespace response_vector_detail
 
 struct StaticRestrictedResponse;
 struct TDARestrictedResponse;
@@ -162,18 +207,17 @@ std::variant<StaticRestrictedResponse, DynamicRestrictedResponse,
 /// Flat layout: [ x_alpha[0..N-1] ]   (N slots)
 /// alpha_factor = -4.0
 ///   (factor 2 from two spin channels × factor 2 from restricted normalization)
-struct StaticRestrictedResponse {
-    vector_real_function_3d x_alpha;
-    vector_real_function_3d flat;
+struct StaticRestrictedResponse : public response_vector_detail::RestrictedSingleChannelStorage {
+    using response_vector_detail::RestrictedSingleChannelStorage::RestrictedSingleChannelStorage;
 
     StaticRestrictedResponse() = default;
-
-    explicit StaticRestrictedResponse(const size_t &n_orb) : x_alpha(n_orb) {
-        flatten();
-    }
+    StaticRestrictedResponse(const StaticRestrictedResponse &) = default;
+    StaticRestrictedResponse(StaticRestrictedResponse &&) noexcept = default;
+    StaticRestrictedResponse &operator=(const StaticRestrictedResponse &) = default;
+    StaticRestrictedResponse &operator=(StaticRestrictedResponse &&) noexcept = default;
 
     /// Number of ground-state occupied orbitals N.
-    [[nodiscard]] size_t num_orbitals() const noexcept { return x_alpha.size(); }
+    [[nodiscard]] size_t num_orbitals() const noexcept { return flat.size(); }
     /// Number of logical channels stored in flat (1 for TDA restricted).
     [[nodiscard]] static constexpr size_t num_channels() noexcept { return 1; }
     /// Total flat slots: num_orbitals() * num_channels().
@@ -184,15 +228,18 @@ struct StaticRestrictedResponse {
     /// Derivation: ρ¹ = 2 Σ x_i φ_i* (spin factor 2); α = -2*2*⟨x|v⟩ = -4⟨x|v⟩.
     [[nodiscard]] static constexpr double alpha_factor() noexcept { return -4.0; }
 
-    /// Propagate flat → typed channels.  Call after any direct modification of flat.
-    void sync() {
-        MADNESS_ASSERT(flat.size() == num_flat_slots());
-        for (size_t i = 0; i < x_alpha.size(); ++i)
-            x_alpha[i] = flat[channel_offset(0) + i];
-    }
+    /// Preferred all-channel solver view. Alias of the legacy flat storage.
+    [[nodiscard]] vector_real_function_3d &all() noexcept { return flat; }
+    [[nodiscard]] const vector_real_function_3d &all() const noexcept { return flat; }
+    /// Preferred x-channel view for x-only restricted models.
+    [[nodiscard]] vector_real_function_3d &x() noexcept { return x_alpha; }
+    [[nodiscard]] const vector_real_function_3d &x() const noexcept { return x_alpha; }
 
-    /// Propagate typed channels → flat.  Call after modifying x_alpha directly.
-    void flatten() { flat = x_alpha; }
+    /// x_alpha and flat already alias the same storage for x-only restricted states.
+    void sync() noexcept {}
+
+    /// x_alpha and flat already alias the same storage for x-only restricted states.
+    void flatten() noexcept {}
 };
 
 /// Closed-shell Tamm-Dancoff Approximation (TDA) excited-state response.
@@ -209,18 +256,17 @@ struct StaticRestrictedResponse {
 ///
 /// Flat layout: [ x_alpha[0..N-1] ]   (N slots)
 /// alpha_factor = -4.0
-struct TDARestrictedResponse {
-    vector_real_function_3d x_alpha;
-    vector_real_function_3d flat;
+struct TDARestrictedResponse : public response_vector_detail::RestrictedSingleChannelStorage {
+    using response_vector_detail::RestrictedSingleChannelStorage::RestrictedSingleChannelStorage;
 
     TDARestrictedResponse() = default;
-
-    explicit TDARestrictedResponse(const size_t &n_orb) : x_alpha(n_orb) {
-        flatten();
-    }
+    TDARestrictedResponse(const TDARestrictedResponse &) = default;
+    TDARestrictedResponse(TDARestrictedResponse &&) noexcept = default;
+    TDARestrictedResponse &operator=(const TDARestrictedResponse &) = default;
+    TDARestrictedResponse &operator=(TDARestrictedResponse &&) noexcept = default;
 
     /// Number of ground-state occupied orbitals N.
-    [[nodiscard]] size_t num_orbitals() const noexcept { return x_alpha.size(); }
+    [[nodiscard]] size_t num_orbitals() const noexcept { return flat.size(); }
     /// Number of logical channels stored in flat (1 for TDA restricted).
     [[nodiscard]] static constexpr size_t num_channels() noexcept { return 1; }
     /// Total flat slots: num_orbitals() * num_channels().
@@ -231,15 +277,18 @@ struct TDARestrictedResponse {
     /// Derivation: ρ¹ = 2 Σ x_i φ_i* (spin factor 2); α = -2*2*⟨x|v⟩ = -4⟨x|v⟩.
     [[nodiscard]] static constexpr double alpha_factor() noexcept { return -4.0; }
 
-    /// Propagate flat → typed channels.  Call after any direct modification of flat.
-    void sync() {
-        MADNESS_ASSERT(flat.size() == num_flat_slots());
-        for (size_t i = 0; i < x_alpha.size(); ++i)
-            x_alpha[i] = flat[channel_offset(0) + i];
-    }
+    /// Preferred all-channel solver view. Alias of the legacy flat storage.
+    [[nodiscard]] vector_real_function_3d &all() noexcept { return flat; }
+    [[nodiscard]] const vector_real_function_3d &all() const noexcept { return flat; }
+    /// Preferred x-channel view for x-only restricted models.
+    [[nodiscard]] vector_real_function_3d &x() noexcept { return x_alpha; }
+    [[nodiscard]] const vector_real_function_3d &x() const noexcept { return x_alpha; }
 
-    /// Propagate typed channels → flat.  Call after modifying x_alpha directly.
-    void flatten() { flat = x_alpha; }
+    /// x_alpha and flat already alias the same storage for x-only restricted states.
+    void sync() noexcept {}
+
+    /// x_alpha and flat already alias the same storage for x-only restricted states.
+    void flatten() noexcept {}
 };
 
 /// Closed-shell full TDDFT/TDHF response state (frequency-dependent).
@@ -276,6 +325,15 @@ struct DynamicRestrictedResponse {
     [[nodiscard]] size_t channel_offset(size_t k) const noexcept { return k * num_orbitals(); }
     /// Prefactor for polarizability assembly: α_{AB} = alpha_factor() * ⟨x_A|V_B⟩.
     [[nodiscard]] static constexpr double alpha_factor() noexcept { return -2.0; }
+
+    /// Preferred all-channel solver view. Alias of the legacy flat storage.
+    [[nodiscard]] vector_real_function_3d &all() noexcept { return flat; }
+    [[nodiscard]] const vector_real_function_3d &all() const noexcept { return flat; }
+    /// Preferred x/y channel views for restricted full-response models.
+    [[nodiscard]] vector_real_function_3d &x() noexcept { return x_alpha; }
+    [[nodiscard]] const vector_real_function_3d &x() const noexcept { return x_alpha; }
+    [[nodiscard]] vector_real_function_3d &y() noexcept { return y_alpha; }
+    [[nodiscard]] const vector_real_function_3d &y() const noexcept { return y_alpha; }
 
     /// Propagate flat → typed channels.  Call after any direct modification of flat.
     void sync() {
@@ -326,6 +384,10 @@ struct StaticUnrestrictedResponse {
     [[nodiscard]] size_t channel_offset(size_t k) const noexcept { return k * num_orbitals(); }
     /// Prefactor for polarizability assembly: α_{AB} = alpha_factor() * ⟨x_A|V_B⟩.
     [[nodiscard]] static constexpr double alpha_factor() noexcept { return -2.0; }
+
+    /// Preferred all-channel solver view. Alias of the legacy flat storage.
+    [[nodiscard]] vector_real_function_3d &all() noexcept { return flat; }
+    [[nodiscard]] const vector_real_function_3d &all() const noexcept { return flat; }
 
     /// Propagate flat → typed channels.  Call after any direct modification of flat.
     void sync() {
@@ -383,6 +445,10 @@ struct DynamicUnrestrictedResponse {
     [[nodiscard]] size_t channel_offset(size_t k) const noexcept { return k * num_orbitals(); }
     /// Prefactor for polarizability assembly: α_{AB} = alpha_factor() * ⟨x_A|V_B⟩.
     [[nodiscard]] static constexpr double alpha_factor() noexcept { return -2.0; }
+
+    /// Preferred all-channel solver view. Alias of the legacy flat storage.
+    [[nodiscard]] vector_real_function_3d &all() noexcept { return flat; }
+    [[nodiscard]] const vector_real_function_3d &all() const noexcept { return flat; }
 
     /// Propagate typed channels → flat.  Call after modifying any typed channel directly.
     void flatten() {
@@ -507,6 +573,59 @@ inline bool response_is_unrestricted(const ResponseVector &vec) {
         vec);
 }
 
+template <typename ResponseType>
+inline vector_real_function_3d &response_all(ResponseType &response) {
+    return response.all();
+}
+
+template <typename ResponseType>
+inline const vector_real_function_3d &response_all(const ResponseType &response) {
+    return response.all();
+}
+
+inline vector_real_function_3d &response_all(ResponseVector &vec) {
+    return std::visit(
+        [](auto &v) -> vector_real_function_3d & { return response_all(v); }, vec);
+}
+
+inline const vector_real_function_3d &response_all(const ResponseVector &vec) {
+    return std::visit(
+        [](const auto &v) -> const vector_real_function_3d & { return response_all(v); },
+        vec);
+}
+
+template <typename ResponseType>
+inline vector_real_function_3d &response_x(ResponseType &response) {
+    static_assert(!response_is_unrestricted_v<ResponseType>,
+                  "response_x: unrestricted not yet implemented");
+    return response.x();
+}
+
+template <typename ResponseType>
+inline const vector_real_function_3d &response_x(const ResponseType &response) {
+    static_assert(!response_is_unrestricted_v<ResponseType>,
+                  "response_x: unrestricted not yet implemented");
+    return response.x();
+}
+
+template <typename ResponseType>
+inline vector_real_function_3d &response_y(ResponseType &response) {
+    static_assert(!response_is_unrestricted_v<ResponseType>,
+                  "response_y: unrestricted not yet implemented");
+    static_assert(response_has_y_channel_v<ResponseType>,
+                  "response_y: response type has no y channel");
+    return response.y();
+}
+
+template <typename ResponseType>
+inline const vector_real_function_3d &response_y(const ResponseType &response) {
+    static_assert(!response_is_unrestricted_v<ResponseType>,
+                  "response_y: unrestricted not yet implemented");
+    static_assert(response_has_y_channel_v<ResponseType>,
+                  "response_y: response type has no y channel");
+    return response.y();
+}
+
 inline void flatten_response(ResponseVector &vec) {
     std::visit([](auto &v) { v.flatten(); }, vec);
 }
@@ -515,16 +634,14 @@ inline void sync_response(ResponseVector &vec) {
     std::visit([](auto &v) { v.sync(); }, vec);
 }
 
+/// Legacy alias for the concatenated all-channel solver view.
 inline vector_real_function_3d &get_flat(ResponseVector &vec) {
-    return std::visit(
-        [](auto &v) -> vector_real_function_3d & { return v.flat; }, vec);
+    return response_all(vec);
 }
 
-/// Get the flat vector from a (const) ResponseVector.
+/// Get the concatenated all-channel solver view from a (const) ResponseVector.
 inline const vector_real_function_3d &get_flat(const ResponseVector &vec) {
-    return std::visit(
-        [](const auto &v) -> const vector_real_function_3d & { return v.flat; },
-        vec);
+    return response_all(vec);
 }
 
 /// Runtime dispatch of alpha_factor() for a ResponseVector variant.
@@ -544,7 +661,7 @@ inline size_t response_num_channels(const ResponseVector &vec) {
     return std::visit([](const auto &v) { return v.num_channels(); }, vec);
 }
 
-/// Atomically replace flat and sync typed channels.
+/// Atomically replace the all-channel solver view and sync typed channels.
 ///
 /// Use this instead of the two-liner:
 ///   r.flat = expr;
@@ -561,12 +678,23 @@ inline size_t response_num_channels(const ResponseVector &vec) {
 ///   ensure_initialized_flat(world, r.flat);
 ///   r.sync();
 template <typename ResponseType>
-inline void assign_flat_and_sync(ResponseType &r, vector_real_function_3d f) {
-    r.flat = std::move(f);
+inline void assign_all_and_sync(ResponseType &r, vector_real_function_3d all) {
+    response_all(r) = std::move(all);
     r.sync();
 }
 
-/// Variant-dispatched assign_flat_and_sync for a ResponseVector.
+/// Variant-dispatched assign_all_and_sync for a ResponseVector.
+inline void assign_all_and_sync(ResponseVector &r, vector_real_function_3d all) {
+    std::visit([&](auto &v) { assign_all_and_sync(v, std::move(all)); }, r);
+}
+
+/// Legacy flat-named wrapper kept during the accessor migration.
+template <typename ResponseType>
+inline void assign_flat_and_sync(ResponseType &r, vector_real_function_3d f) {
+    assign_all_and_sync(r, std::move(f));
+}
+
+/// Legacy flat-named wrapper kept during the accessor migration.
 inline void assign_flat_and_sync(ResponseVector &r, vector_real_function_3d f) {
-    std::visit([&](auto &v) { assign_flat_and_sync(v, std::move(f)); }, r);
+    assign_all_and_sync(r, std::move(f));
 }

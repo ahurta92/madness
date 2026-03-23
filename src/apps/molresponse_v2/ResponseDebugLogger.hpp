@@ -34,15 +34,22 @@ public:
   // Call at the start of each (state, protocol, frequency) block
   // before iteration begins.
   void start_state(const LinearResponsePoint &pt) {
+    start_named_state(pt.perturbationDescription(), pt.threshold(),
+                      pt.frequency());
+  }
+
+  // Start a logging context using an explicit state label and numeric protocol /
+  // frequency tags. This is useful for excited-state bundle workflows that do not
+  // naturally map to a LinearResponsePoint.
+  void start_named_state(const std::string &state_key, double protocol,
+                         double frequency) {
     if (!enabled_)
       return;
-    state_key_ = pt.perturbationDescription();
-    proto_key_ = protocol_key_(pt.threshold());
-    freq_key_ = freq_key(pt.frequency());
+    state_key_ = state_key;
+    proto_key_ = protocol_key_(protocol);
+    freq_key_ = freq_key(frequency);
 
-    // Ensure nested shape exists, no copies involved
-    auto &node = node_ref_(); // creates and returns the path
-    // If first time, ensure arrays exist
+    auto &node = node_ref_();
     if (!node.contains("iteration_values"))
       node["iteration_values"] = json::array();
     if (!node.contains("iteration_timings"))

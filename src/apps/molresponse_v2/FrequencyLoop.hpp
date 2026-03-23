@@ -61,7 +61,7 @@ iterate(World &world, const ResponseManager &response_manager,
   // using Policy = ResponseSolverPolicy<ResponseType>;
 
   auto &rvec = response;
-  auto &all_x = rvec.flat;
+  auto &all_x = response_all(rvec);
   const double point_solve_wall_start = madness::wall_time();
   const double point_stall_timeout_s = response_point_stall_timeout_seconds();
 
@@ -142,7 +142,7 @@ iterate(World &world, const ResponseManager &response_manager,
     drho_old = copy(drho);
     // Inner product of response state
     DEBUG_LOG_VALUE(world, &logger, "<x|x>",
-                    ResponseSolverUtils::inner(world, rvec.flat, rvec.flat));
+                    ResponseSolverUtils::inner(world, response_all(rvec), response_all(rvec)));
     // 1. Coupled-response equations
     vector_real_function_3d x_new;
     DEBUG_TIMED_BLOCK(world, &logger, "compute_rsh", {
@@ -167,13 +167,13 @@ iterate(World &world, const ResponseManager &response_manager,
       });
     }
     // 5. Update response vector
-    assign_flat_and_sync(rvec, copy(world, kain_x));
+    assign_all_and_sync(rvec, copy(world, kain_x));
     // 6. Compute updated response density
     drho = compute_density(world, rvec, phi0);
     double drho_change = (drho - drho_old).norm2();
     DEBUG_LOG_VALUE(world, &logger, "drho_change", drho_change);
     auto alpha =
-        alpha_factor(rvec) * ResponseSolverUtils::inner(world, rvec.flat, vp);
+        alpha_factor(rvec) * ResponseSolverUtils::inner(world, response_all(rvec), vp);
     DEBUG_LOG_VALUE(world, &logger, "alpha", alpha);
     consecutive_negative_alpha = (alpha < 0.0) ? (consecutive_negative_alpha + 1)
                                                : 0;

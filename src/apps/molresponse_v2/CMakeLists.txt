@@ -33,6 +33,9 @@ set(MOLRESPONSE_HEADERS2
     ResponseSolverUtils.hpp
     ResponseKernels.hpp
     ResponseVectorKernels.hpp
+    excited_ops/RestrictedBundleCommon.hpp
+    excited_ops/RestrictedFullBundleOps.hpp
+    excited_ops/RestrictedTDABundleOps.hpp
     ResponseInitializer.hpp
     ResponseDebugLogger.hpp
     ResponseDebugLoggerMacros.hpp

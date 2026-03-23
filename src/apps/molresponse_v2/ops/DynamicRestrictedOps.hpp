@@ -55,7 +55,7 @@ compute_density(World& world, const DynamicRestrictedResponse& rvec,
                 const vector_real_function_3d& phi0) {
     auto phi_phi = phi0;
     phi_phi.insert(phi_phi.end(), phi0.begin(), phi0.end());
-    auto xphi = mul(world, rvec.flat, phi_phi, true);
+    auto xphi = mul(world, response_all(rvec), phi_phi, true);
     return ResponseSolverConstants::k_restricted_spin_factor * sum(world, xphi, true);
 }
 
@@ -103,9 +103,9 @@ CoupledResponseEquations(World& world, const GroundStateData& g_s,
                           const ResponseManager& /*response_manager*/,
                           ResponseDebugLogger& logger) {
     const auto  c_xc  = g_s.xcf_.hf_exchange_coefficient();
-    const auto& xvec  = vecs.x_alpha;
-    const auto& yvec  = vecs.y_alpha;
-    const auto& all_x = vecs.flat;
+    const auto& xvec  = response_x(vecs);
+    const auto& yvec  = response_y(vecs);
+    const auto& all_x = response_all(vecs);
     const auto& phi0  = g_s.orbitals;
 
     // --- Ground exchange: K[φ₀,φ₀] applied per channel ---

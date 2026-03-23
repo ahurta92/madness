@@ -63,7 +63,7 @@ template <typename ResponseType>
                                           const ResponseType &rhs) {
     static_assert(!response_is_unrestricted_v<ResponseType>,
                   "response_plain_inner: unrestricted not yet implemented");
-    return inner(world, lhs.flat, rhs.flat).sum();
+    return inner(world, response_all(lhs), response_all(rhs)).sum();
 }
 
 // Symplectic metric inner product for the TDDFT generalized eigenvalue problem.
@@ -88,9 +88,9 @@ template <typename ResponseType>
                                            const ResponseType &rhs) {
     static_assert(!response_is_unrestricted_v<ResponseType>,
                   "response_metric_inner: unrestricted not yet implemented");
-    double metric = inner(world, lhs.x_alpha, rhs.x_alpha).sum();
+    double metric = inner(world, response_x(lhs), response_x(rhs)).sum();
     if constexpr (response_has_y_channel_v<ResponseType>)
-        metric -= inner(world, lhs.y_alpha, rhs.y_alpha).sum();
+        metric -= inner(world, response_y(lhs), response_y(rhs)).sum();
     return metric;
 }
 
@@ -110,14 +110,30 @@ state_norm(madness::World &world, const vector_real_function_3d &flat) {
     return std::sqrt(std::max(0.0, inner(world, flat, flat).sum()));
 }
 
-// Replace any uninitialised entries in flat with zero functions.
+// Replace any uninitialised entries in the concatenated all-channel vector
+// with zero functions.
+inline void ensure_initialized_all(madness::World &world,
+                                   vector_real_function_3d &all) {
+    if (all.empty()) return;
+    auto zeros = zero_functions_compressed<double, 3>(
+        world, static_cast<int>(all.size()));
+    for (size_t i = 0; i < all.size(); ++i)
+        if (!all[i].is_initialized()) all[i] = zeros[i];
+}
+
 inline void ensure_initialized_flat(madness::World &world,
                                     vector_real_function_3d &flat) {
-    if (flat.empty()) return;
-    auto zeros = zero_functions_compressed<double, 3>(
-        world, static_cast<int>(flat.size()));
-    for (size_t i = 0; i < flat.size(); ++i)
-        if (!flat[i].is_initialized()) flat[i] = zeros[i];
+    ensure_initialized_all(world, flat);
+}
+
+template <typename ResponseType>
+[[nodiscard]] ResponseType clone_with_all(madness::World &world,
+                                          const ResponseType &prototype,
+                                          vector_real_function_3d all) {
+    auto response = prototype;
+    ensure_initialized_all(world, all);
+    assign_all_and_sync(response, std::move(all));
+    return response;
 }
 
 // Scale all active channels by 1/sqrt(metric_norm2).
@@ -129,7 +145,7 @@ void normalize_response_metric(madness::World &world, ResponseType &state) {
                   "normalize_response_metric: unrestricted not yet implemented");
     const double metric = response_metric_norm2(world, state);
     if (!std::isfinite(metric) || metric <= 1.0e-14) return;
-    scale(world, state.flat, 1.0 / std::sqrt(metric), false);
+    scale(world, response_all(state), 1.0 / std::sqrt(metric), false);
     state.sync();
     world.gop.fence();
 }
@@ -143,8 +159,7 @@ void project_response_channels(madness::World &world, ResponseType &state,
                                 const GroundStateData &gs) {
     static_assert(!response_is_unrestricted_v<ResponseType>,
                   "project_response_channels: unrestricted not yet implemented");
-    state.flat = gs.Qhat(state.flat);
-    state.sync();
+    assign_all_and_sync(state, gs.Qhat(response_all(state)));
 }
 
 // Compute the one-particle response density from the first-order density matrix.
@@ -166,12 +181,13 @@ compute_response_density(madness::World &world, const ResponseType &state,
                          const GroundStateData &gs) {
     static_assert(!response_is_unrestricted_v<ResponseType>,
                   "compute_response_density: unrestricted not yet implemented");
-    const size_t n = std::min(state.x_alpha.size(), gs.orbitals.size());
+    const auto &x = response_x(state);
+    const size_t n = std::min(x.size(), gs.orbitals.size());
     madness::real_function_3d rho{madness::real_factory_3d(world)};
     for (size_t i = 0; i < n; ++i) {
-        rho += state.x_alpha[i] * gs.orbitals[i];
+        rho += x[i] * gs.orbitals[i];
         if constexpr (response_has_y_channel_v<ResponseType>)
-            rho += state.y_alpha[i] * gs.orbitals[i];
+            rho += response_y(state)[i] * gs.orbitals[i];
     }
     rho.truncate();
     return rho;
@@ -275,9 +291,10 @@ make_excited_bsh_operators(madness::World &world, const ResponseType &state,
     }
 
     // Guard against size mismatch (e.g. partially-initialised state)
-    if (ops.size() != state.flat.size()) {
-        orbital_shifts_out.resize(state.flat.size(), 0.0);
-        if (ops.size() > state.flat.size()) ops.resize(state.flat.size());
+    const auto all_size = response_all(state).size();
+    if (ops.size() != all_size) {
+        orbital_shifts_out.resize(all_size, 0.0);
+        if (ops.size() > all_size) ops.resize(all_size);
     }
     return ops;
 }
@@ -306,11 +323,11 @@ apply_hamiltonian_no_diag(madness::World &world,
         MADNESS_EXCEPTION("apply_hamiltonian_no_diag: unrestricted not yet implemented", 1);
     } else if constexpr (!response_has_y_channel_v<ResponseType>) {
         // x-only channel (StaticRestricted, TDARestricted, any future 1-channel restricted type).
-        return transform(world, response.x_alpha, gs.Hamiltonian_no_diag, true);
+        return transform(world, response_x(response), gs.Hamiltonian_no_diag, true);
     } else {
         // x and y channels (DynamicRestricted): transform each with the same Norb x Norb H.
-        auto eps   = transform(world, response.x_alpha, gs.Hamiltonian_no_diag, true);
-        auto eps_y = transform(world, response.y_alpha, gs.Hamiltonian_no_diag, true);
+        auto eps   = transform(world, response_x(response), gs.Hamiltonian_no_diag, true);
+        auto eps_y = transform(world, response_y(response), gs.Hamiltonian_no_diag, true);
         eps.insert(eps.end(), eps_y.begin(), eps_y.end());
         return eps;
     }
@@ -366,33 +383,22 @@ template <typename ResponseType>
 compute_response_potentials(madness::World &world,
                             const ResponseType &state,
                             const GroundStateData &gs) {
-    const auto &flat = state.flat;
-    const size_t n   = flat.size();
-
-    if (n == 0) {
+    const auto &all = response_all(state);
+    if (all.empty()) {
         return {state, state, state};
     }
 
     auto k0 = compute_ground_exchange(world, state, gs.orbitals);
-    const double c_xc  = gs.xcf_.hf_exchange_coefficient();
+    const double c_xc = gs.xcf_.hf_exchange_coefficient();
     auto gx = compute_gamma_response(world, state, gs.orbitals, gs.Qhat, c_xc);
-    auto v0_flat       = gs.V_local * flat - c_xc * k0.flat;
-    auto epsilon_flat  = apply_hamiltonian_no_diag(world, state, gs);
-    auto lambda_flat   = v0_flat - epsilon_flat + gx;
-
-    // Reconstruct typed response from a flat vector.
-    // flat -> channels via sync(), which splits by channel size.
-    auto from_flat = [&](vector_real_function_3d f) -> ResponseType {
-        auto r  = state;
-        r.flat  = std::move(f);
-        r.sync();
-        return r;
-    };
+    auto v0_all      = gs.V_local * all - c_xc * response_all(k0);
+    auto epsilon_all = apply_hamiltonian_no_diag(world, state, gs);
+    auto lambda_all  = v0_all - epsilon_all + gx;
 
     ResponseStatePotentials<ResponseType> result;
-    result.v0     = from_flat(std::move(v0_flat));
-    result.gamma  = from_flat(std::move(gx));
-    result.lambda = from_flat(std::move(lambda_flat));
+    result.v0     = clone_with_all(world, state, std::move(v0_all));
+    result.gamma  = clone_with_all(world, state, std::move(gx));
+    result.lambda = clone_with_all(world, state, std::move(lambda_all));
     return result;
 }
 
@@ -518,17 +524,15 @@ rotate_bundle(madness::World &world,
                   "rotate_bundle: unrestricted not yet implemented");
     const size_t M       = states.size();
     if (M == 0) return states;
-    const size_t n_slots = states[0].flat.size();
+    const size_t n_slots = response_all(states[0]).size();
 
     std::vector<ResponseType> rotated = states;
     for (size_t i = 0; i < M; ++i) {
-        auto result_flat = zero_functions_compressed<double, 3>(world, n_slots);
+        auto result_all = zero_functions_compressed<double, 3>(world, n_slots);
         for (size_t j = 0; j < M; ++j)
-            gaxpy(world, 1.0, result_flat, U(long(j), long(i)), states[j].flat);
-        rotated[i].flat = std::move(result_flat);
+            gaxpy(world, 1.0, result_all, U(long(j), long(i)), response_all(states[j]));
+        assign_all_and_sync(rotated[i], std::move(result_all));
     }
-    for (auto &s : rotated)
-        s.sync();
     world.gop.fence();
     return rotated;
 }

@@ -35,6 +35,7 @@
 #include "ExcitedResponse.hpp"
 #include "GroundStateData.hpp"
 #include "ResponseBundle.hpp"
+#include "ResponseDebugLogger.hpp"
 #include "ResponseVector.hpp"
 
 #include <madness/chem/molecule.h>
@@ -45,6 +46,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -134,6 +136,13 @@ int main(int argc, char **argv) {
     // Parse arguments before startup() so --help works without MPI.
     // argv is still intact after initialize().
     TestArgs args = parse_args(argc, argv);
+    const bool enable_debug_log = args.print_level >= 3;
+    const std::string debug_log_file =
+        args.gs_dir.empty() ? "tda_excited_debug_log.json"
+                            : args.gs_dir + "/tda_excited_debug_log.json";
+    std::unique_ptr<ResponseDebugLogger> debug_logger;
+    if (enable_debug_log)
+        debug_logger = std::make_unique<ResponseDebugLogger>(debug_log_file, true);
 
     try {
         startup(world, argc, argv, /*print_banner=*/true);
@@ -154,7 +163,10 @@ int main(int argc, char **argv) {
             std::printf("  max_iter         = %zu\n", args.max_iter);
             std::printf("  dconv            = %.2e\n", args.dconv);
             std::printf("  thresh           = %.2e\n", args.thresh);
-            std::printf("  k                = %d\n\n", args.k);
+            std::printf("  k                = %d\n", args.k);
+            if (enable_debug_log)
+                std::printf("  debug_log        = %s\n", debug_log_file.c_str());
+            std::printf("\n");
         }
 
         // ── Load ground state ──────────────────────────────────────────────
@@ -229,11 +241,21 @@ int main(int argc, char **argv) {
         params.print_level  = args.print_level;
         params.tda          = true;
         params.max_rotation = 0.25;
+        params.debug_logger = debug_logger.get();
+
+        if (debug_logger) {
+            TimedValueLogger::set_console_enabled(true);
+            debug_logger->start_named_state("excited_tda_bundle", args.thresh, 0.0);
+        }
 
         if (world.rank() == 0)
             std::printf("Running TDA iterate_excited (bundle-level KAIN)...\n\n");
 
         auto diag = iterate_excited(world, bundle, omega, gs, params);
+        if (debug_logger && world.rank() == 0) {
+            debug_logger->finalize_state();
+            debug_logger->write_to_disk();
+        }
 
         // ── Report results ─────────────────────────────────────────────────
         if (world.rank() == 0) {
@@ -270,12 +292,20 @@ int main(int argc, char **argv) {
                 std::printf("PASS: all energies positive and monotone.\n");
         }
     } catch (const MadnessException &e) {
+        if (debug_logger && world.rank() == 0) {
+            debug_logger->finalize_state();
+            debug_logger->write_to_disk();
+        }
         if (world.rank() == 0)
             std::printf("MADNESS exception: %s  (%s:%d)\n",
                         e.msg, e.filename, e.line);
         finalize();
         return 1;
     } catch (const std::exception &e) {
+        if (debug_logger && world.rank() == 0) {
+            debug_logger->finalize_state();
+            debug_logger->write_to_disk();
+        }
         if (world.rank() == 0)
             std::printf("Exception: %s\n", e.what());
         finalize();

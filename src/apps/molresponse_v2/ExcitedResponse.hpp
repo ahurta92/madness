@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+class ResponseDebugLogger;
+
 // ============================================================================
 // Parameters for the iterate_excited kernel
 // ============================================================================
@@ -42,6 +44,7 @@ struct ExcitedSolverParams {
     double max_rotation = 0.25;   // step-restriction threshold (0 = disabled)
     int    print_level  = 0;
     bool   tda          = false;
+    ResponseDebugLogger *debug_logger = nullptr;
 };
 
 // Per-iteration diagnostics returned by iterate_excited.

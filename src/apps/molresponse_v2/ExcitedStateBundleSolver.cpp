@@ -1777,24 +1777,24 @@ private:
       return result;
     }
 
-    template <typename ResponseType>
+    template <typename ResponseType, typename Accessor>
     void rotate_bundle_component(
         madness::World &world, const std::vector<ResponseType> &source_states,
         std::vector<ResponseType> &rotated_states, const Tensor<double> &U,
-        vector_real_function_3d ResponseType::*component_ptr) const {
+        Accessor accessor) const {
       const size_t n_states = source_states.size();
       if (n_states == 0) {
         return;
       }
-      const size_t n_orbitals = (source_states[0].*component_ptr).size();
+      const size_t n_orbitals = accessor(source_states[0]).size();
       for (size_t orb = 0; orb < n_orbitals; ++orb) {
         vector_real_function_3d by_state(n_states);
         for (size_t s = 0; s < n_states; ++s) {
-          by_state[s] = (source_states[s].*component_ptr)[orb];
+          by_state[s] = accessor(source_states[s])[orb];
         }
         const auto rotated_orbital = transform(world, by_state, U, false);
         for (size_t s = 0; s < n_states; ++s) {
-          (rotated_states[s].*component_ptr)[orb] = rotated_orbital[s];
+          accessor(rotated_states[s])[orb] = rotated_orbital[s];
         }
       }
     }
@@ -1808,18 +1808,21 @@ private:
       for (auto &state : rotated) {
         align_response_to_ground(world, state);
       }
-      rotate_bundle_component(world, states, rotated, U, &ResponseType::x_alpha);
+      rotate_bundle_component(world, states, rotated, U,
+                              [](auto &state) -> auto & { return state.x_alpha; });
       if constexpr (std::is_same_v<ResponseType, DynamicRestrictedResponse> ||
                     std::is_same_v<ResponseType, DynamicUnrestrictedResponse>) {
         rotate_bundle_component(world, states, rotated, U,
-                                &ResponseType::y_alpha);
+                                [](auto &state) -> auto & { return state.y_alpha; });
       }
       if constexpr (std::is_same_v<ResponseType, StaticUnrestrictedResponse> ||
                     std::is_same_v<ResponseType, DynamicUnrestrictedResponse>) {
-        rotate_bundle_component(world, states, rotated, U, &ResponseType::x_beta);
+        rotate_bundle_component(world, states, rotated, U,
+                                [](auto &state) -> auto & { return state.x_beta; });
       }
       if constexpr (std::is_same_v<ResponseType, DynamicUnrestrictedResponse>) {
-        rotate_bundle_component(world, states, rotated, U, &ResponseType::y_beta);
+        rotate_bundle_component(world, states, rotated, U,
+                                [](auto &state) -> auto & { return state.y_beta; });
       }
       for (auto &state : rotated) {
         state.flatten();

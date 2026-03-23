@@ -48,7 +48,7 @@ public:
 
     /// Number of flat slots per state (N * num_channels).
     size_t flat_size() const noexcept {
-        return states_.empty() ? 0 : states_[0].flat.size();
+        return states_.empty() ? 0 : response_all(states_[0]).size();
     }
 
     // Raw vector access — for passing to existing kernel functions.
@@ -72,8 +72,10 @@ public:
         madness::vector_real_function_3d result;
         const size_t fsz = flat_size();
         result.reserve(states_.size() * fsz);
-        for (const auto& s : states_)
-            result.insert(result.end(), s.flat.begin(), s.flat.end());
+        for (const auto& s : states_) {
+            const auto &all = response_all(s);
+            result.insert(result.end(), all.begin(), all.end());
+        }
         return result;
     }
 
@@ -83,7 +85,7 @@ public:
         const size_t n = flat_size();
         MADNESS_ASSERT(f.size() == states_.size() * n);
         for (size_t i = 0; i < states_.size(); ++i)
-            assign_flat_and_sync(states_[i],
+            assign_all_and_sync(states_[i],
                 madness::vector_real_function_3d(f.begin() + i * n,
                                                  f.begin() + (i + 1) * n));
     }
@@ -96,8 +98,10 @@ public:
     ResponseBundle& operator+=(const ResponseBundle& b) {
         MADNESS_ASSERT(states_.size() == b.states_.size());
         for (size_t i = 0; i < states_.size(); ++i) {
-            madness::World& w = states_[i].flat[0].world();
-            madness::gaxpy(w, 1.0, states_[i].flat, 1.0, b.states_[i].flat);
+            auto &lhs_all = response_all(states_[i]);
+            const auto &rhs_all = response_all(b.states_[i]);
+            madness::World& w = lhs_all[0].world();
+            madness::gaxpy(w, 1.0, lhs_all, 1.0, rhs_all);
             states_[i].sync();
         }
         return *this;
@@ -110,8 +114,10 @@ public:
     friend ResponseBundle operator-(ResponseBundle a, const ResponseBundle& b) {
         MADNESS_ASSERT(a.states_.size() == b.states_.size());
         for (size_t i = 0; i < a.states_.size(); ++i) {
-            madness::World& w = a.states_[i].flat[0].world();
-            madness::gaxpy(w, 1.0, a.states_[i].flat, -1.0, b.states_[i].flat);
+            auto &lhs_all = response_all(a.states_[i]);
+            const auto &rhs_all = response_all(b.states_[i]);
+            madness::World& w = lhs_all[0].world();
+            madness::gaxpy(w, 1.0, lhs_all, -1.0, rhs_all);
             a.states_[i].sync();
         }
         return a;
@@ -119,8 +125,9 @@ public:
 
     friend ResponseBundle operator*(ResponseBundle a, double s) {
         for (auto& st : a.states_) {
-            madness::World& w = st.flat[0].world();
-            madness::scale(w, st.flat, s);
+            auto &all = response_all(st);
+            madness::World& w = all[0].world();
+            madness::scale(w, all, s);
             st.sync();
         }
         return a;
@@ -146,10 +153,10 @@ template <typename R>
 double inner(const ResponseBundle<R>& a, const ResponseBundle<R>& b) {
     MADNESS_ASSERT(a.size() == b.size());
     if (a.size() == 0) return 0.0;
-    madness::World& world = a[0].flat[0].world();
+    madness::World& world = response_all(a[0])[0].world();
     double result = 0.0;
     for (size_t i = 0; i < a.size(); ++i)
-        result += madness::inner(world, a[i].flat, b[i].flat).sum();
+        result += madness::inner(world, response_all(a[i]), response_all(b[i])).sum();
     return result;
 }
 
@@ -177,9 +184,10 @@ struct ResponseBundleAllocator {
             // then calls flatten() so flat.size() == flat_sz.
             // We overwrite flat with real zero functions and sync back.
             R s(N);
-            s.flat = madness::zero_functions_compressed<double, 3>(
-                world, static_cast<int>(flat_sz));
-            s.sync();
+            assign_all_and_sync(
+                s,
+                madness::zero_functions_compressed<double, 3>(
+                    world, static_cast<int>(flat_sz)));
             states.push_back(std::move(s));
         }
         return ResponseBundle<R>(std::move(states));
