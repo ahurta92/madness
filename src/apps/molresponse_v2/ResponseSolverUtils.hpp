@@ -72,7 +72,19 @@ inline std::vector<poperatorT> make_bsh_operators_response(
     operator_p = poperatorT(BSHOperatorPtr3D(world, mu, lo, tol));
   });
   return ops;
-  // End timer
+}
+
+// Returns the level-shift needed to keep BSH operators bounded when ε_p + ω ≥ 0.
+// Without a shift the BSH exponent μ = √(−2·(ε_p+ω)) would be imaginary or zero,
+// causing the operator to diverge.  The shift pushes the effective energy safely
+// below zero.  shift_factor = 0.05 a.u. is an empirical guard margin.
+//
+// n     — number of occupied orbitals (shift is determined by the LUMO-adjacent orbital)
+// freq  — response frequency ω (a.u.); use +ω for x-channel, −ω for y-channel
+inline double compute_bsh_x_shift(const Tensor<double>& eps, int n, double freq) {
+    constexpr double shift_factor = 0.05;
+    const double     lumo_approx  = eps[static_cast<long>(n) - 1] + freq;
+    return (lumo_approx >= 0.0) ? -shift_factor - lumo_approx : 0.0;
 }
 
 inline double inner(World &world, const vector_real_function_3d &x, const vector_real_function_3d &y) {
