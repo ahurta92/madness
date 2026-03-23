@@ -234,6 +234,19 @@ iterate_excited(World                     &world,
             gammas.push_back(std::move(pots.gamma));
         }
 
+        // Diagnostic inner products (print_level >= 2).
+        if (params.print_level >= 2 && world.rank() == 0) {
+            for (size_t i = 0; i < M; ++i) {
+                auto xgx  = inner(world, states[i].flat, gammas[i].flat);
+                auto xv0x = inner(world, states[i].flat, v0s[i].flat);
+                auto xlx  = inner(world, states[i].flat, lambdas[i].flat);
+                madness::print("  DIAG state=", i,
+                               " <x|gamma>=", xgx.sum(),
+                               " <x|v0>=", xv0x.sum(),
+                               " <x|lambda>=", xlx.sum());
+            }
+        }
+
         // 2. Subspace rotation matrices.
         //    A_ij includes kinetic T so eigenvalues are physical excitation
         //    energies.  BSH theta does NOT include T (implicit in BSH kernel).
@@ -249,6 +262,11 @@ iterate_excited(World                     &world,
         Tensor<double> S, A;
         build_rotation_matrices(world, states, lambdas_rot, S, A);
 
+        if (params.print_level >= 2 && world.rank() == 0) {
+            madness::print("  S matrix:"); madness::print(S);
+            madness::print("  A matrix:"); madness::print(A);
+        }
+
         // 3. Diagonalise.
         auto diag = diagonalize_bundle(world, S, A, params.print_level);
         if (!diag.success) {
@@ -257,6 +275,13 @@ iterate_excited(World                     &world,
             break;
         }
         omega = diag.omega;
+
+        if (params.print_level >= 2 && world.rank() == 0) {
+            madness::print("  omega after diag:");
+            for (size_t i = 0; i < M; ++i)
+                madness::print("    state=", i, " omega=", omega[i],
+                               " eV=", omega[i] * 27.2114);
+        }
 
         // 4. Rotate response space and potentials.
         states = rotate_bundle(world, states, diag.U);
