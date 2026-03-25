@@ -44,7 +44,7 @@ void ResponseManager::setProtocol(World &world, double L, double thresh, int ove
   gradop = gradient_operator<double, 3>(world);
 
   if (world.rank() == 0) {
-    print("\nMRA Protocol Set: thresh =", thresh, ", k =", k, "\n");
+    print("PROTOCOL_SET threshold=", thresh, " k=", k);
   }
   world.gop.fence();
 }

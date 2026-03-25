@@ -1,65 +1,153 @@
 #pragma once
-#include <madness/world/world.h>
 
-#include "GroundStateData.hpp"
 #include "ResponseDebugLogger.hpp"
 #include "ResponseDebugLoggerMacros.hpp"
 #include "ResponseIO.hpp"
 #include "ResponseInitializer.hpp"
 #include "ResponseManager.hpp"
-#include "ResponseMetaData.hpp"
 #include "ResponseSolver.hpp"
 #include "ResponseSolverUtils.hpp"
 #include "ResponseState.hpp"
-#define NOT_IMPLEMENTED_THROW \
+
+#include <cstdlib>
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <string>
+
+#include <madness/world/world.h>
+#define NOT_IMPLEMENTED_THROW                                                  \
   throw std::runtime_error("This solver is not yet implemented.");
 
+/// Final point-level solver diagnostics persisted into response metadata.
+struct ResponseSolveDiagnostics {
+  bool converged = false;
+  size_t iterations_performed = 0;
+  double final_residual_norm = std::numeric_limits<double>::quiet_NaN();
+  double final_density_change = std::numeric_limits<double>::quiet_NaN();
+  double final_alpha = std::numeric_limits<double>::quiet_NaN();
+  size_t max_consecutive_negative_alpha = 0;
+  bool reached_iteration_limit = false;
+  bool remove_from_frequency_set = false;
+  double residual_remove_cutoff = std::numeric_limits<double>::quiet_NaN();
+  std::string failure_reason = "not_evaluated";
+};
+
+inline double response_point_stall_timeout_seconds() {
+  constexpr double k_default_point_stall_timeout_seconds =
+      std::numeric_limits<double>::infinity();
+  const char *env_value = std::getenv("MADQC_POINT_STALL_TIMEOUT_S");
+  if (env_value == nullptr) {
+    return k_default_point_stall_timeout_seconds;
+  }
+  char *end_ptr = nullptr;
+  const double parsed = std::strtod(env_value, &end_ptr);
+  if (end_ptr == env_value || parsed <= 0.0) {
+    return k_default_point_stall_timeout_seconds;
+  }
+  return parsed;
+}
+
+/// Nonlinear iteration driver for one response vector instance.
+///
+/// This routine performs the KAIN update loop and returns convergence metadata
+/// used by `StateSolvePersistence`.
 template <typename ResponseType>
-inline bool iterate(World &world, const ResponseManager &rm,
-                    const GroundStateData &gs,
-                    const LinearResponseDescriptor &state,
-                    ResponseType &response, ResponseDebugLogger &logger,
-                    size_t max_iter, double conv_thresh) {
-  using Policy = ResponseSolverPolicy<ResponseType>;
+ResponseSolveDiagnostics
+iterate(World &world, const ResponseManager &response_manager,
+        const GroundStateData &g_s, const LinearResponseDescriptor &state,
+        const LinearResponsePoint &pt, ResponseType &response,
+        ResponseDebugLogger &logger, size_t max_iter, double conv_thresh) {
+  // using Policy = ResponseSolverPolicy<ResponseType>;
 
   auto &rvec = response;
-  auto &all_x = rvec.flat;
+  auto &all_x = response_all(rvec);
+  const double point_solve_wall_start = madness::wall_time();
+  const double point_stall_timeout_s = response_point_stall_timeout_seconds();
 
-  // const auto thresh = FunctionDefaults<3>::get_thresh();
   const double dconv =
       std::max(FunctionDefaults<3>::get_thresh() * 10, conv_thresh);
   auto density_target =
-      dconv * static_cast<double>(std::max(size_t(5.0), gs.molecule.natom()));
+      dconv * static_cast<double>(std::max(size_t(5.0), g_s.molecule.natom()));
   const auto x_residual_target = density_target * 10.0;
 
-  auto vp = perturbation_vector(world, gs, state);
+  auto vp = perturbation_vector(world, g_s, pt);
 
-  auto &phi0 = gs.orbitals;
-  const auto &orbital_energies = gs.getEnergies();
+  auto &phi0 = g_s.orbitals;
+  const auto &orbital_energies = g_s.getEnergies();
 
   // First difference, Make bsh operators is different for each solver
-  auto bsh_ops = Policy::make_bsh_operators(
-      world, rm, state.current_frequency(), orbital_energies,
-      static_cast<int>(gs.orbitals.size()), logger);
+  auto bsh_ops =
+      make_bsh_operators(world, response_manager, pt.frequency(),
+                         orbital_energies,
+                         static_cast<int>(g_s.orbitals.size()), logger, rvec);
 
   response_solver solver(
       response_vector_allocator(world, static_cast<int>(all_x.size())),
       /*do_printing*/ false);
 
-  auto drho = Policy::compute_density(world, rvec, phi0);
+  auto drho = compute_density(world, rvec, phi0);
   functionT drho_old;
+  ResponseSolveDiagnostics diagnostics;
+  size_t consecutive_negative_alpha = 0;
+  std::optional<double> previous_residual_norm;
+  size_t large_residual_streak = 0;
+  size_t explosive_residual_streak = 0;
+
+  const double safety_residual_cutoff =
+      std::max(200.0 * x_residual_target, 50.0);
+  const double safety_density_cutoff = std::max(200.0 * density_target, 1.0);
+  constexpr size_t min_iter_before_safety_check = 4;
+  constexpr size_t large_residual_streak_limit = 3;
+  constexpr size_t explosive_residual_streak_limit = 2;
+  constexpr double explosive_residual_growth_factor = 3.0;
+  bool iteration_table_open = false;
+
+  const bool use_verbose_iteration_table = TimedValueLogger::console_enabled();
+
+  auto emit_iteration_table_start = [&]() {
+    if (world.rank() != 0 || iteration_table_open ||
+        !use_verbose_iteration_table) {
+      return;
+    }
+    madness::print("ITERATION_TABLE_START");
+    madness::print("  state = ", pt.perturbationDescription());
+    madness::print("  protocol = ", pt.threshold());
+    madness::print("  frequency = ", pt.frequency());
+    madness::print("  target_residual = ", x_residual_target);
+    madness::print("  target_drho = ", density_target);
+    iteration_table_open = true;
+  };
+  auto emit_iteration_table_end = [&](const std::string &reason) {
+    if (world.rank() != 0 || !iteration_table_open ||
+        !use_verbose_iteration_table) {
+      return;
+    }
+    ResponseSolverUtils::print_iteration_table_border();
+    madness::print("ITERATION_TABLE_END");
+    madness::print("ITERATION_END");
+    madness::print("  state = ", pt.perturbationDescription());
+    madness::print("  protocol = ", pt.threshold());
+    madness::print("  frequency = ", pt.frequency());
+    madness::print("  reason = ", reason);
+    madness::print("  iterations = ", diagnostics.iterations_performed);
+    madness::print("  converged = ", diagnostics.converged);
+    madness::print("------------------------------------------------------------");
+    iteration_table_open = false;
+  };
 
   for (size_t iter = 0; iter < max_iter; ++iter) {
+    TimedValueLogger::set_iteration_context(iter);
     logger.begin_iteration(iter);
     drho_old = copy(drho);
     // Inner product of response state
     DEBUG_LOG_VALUE(world, &logger, "<x|x>",
-                    ResponseSolverUtils::inner(world, rvec.flat, rvec.flat));
+                    ResponseSolverUtils::inner(world, response_all(rvec), response_all(rvec)));
     // 1. Coupled-response equations
     vector_real_function_3d x_new;
     DEBUG_TIMED_BLOCK(world, &logger, "compute_rsh", {
-      x_new = Policy::CoupledResponseEquations(world, gs, rvec, vp, bsh_ops, rm,
-                                               logger);
+      x_new = CoupledResponseEquations(world, g_s, rvec, vp, bsh_ops,
+                                       response_manager, logger);
     });
     // 2. Form residual r = x_new - x
     auto residuals = x_new - all_x;
@@ -71,249 +159,216 @@ inline bool iterate(World &world, const ResponseManager &rm,
     double res_norm = norm2(world, sub(world, all_x, x_new));
     DEBUG_LOG_VALUE(world, &logger, "res_norm", res_norm);
     // 4. Do step restriction
-    if (res_norm > rm.params().maxrotn()) {
+    if (res_norm > response_manager.params().maxrotn() && false) {
       DEBUG_TIMED_BLOCK(world, &logger, "step_restriction", {
-        ResponseSolverUtils::do_step_restriction(world, all_x, kain_x, res_norm,
-                                                 "a", rm.params().maxrotn());
+        ResponseSolverUtils::do_step_restriction(
+            world, all_x, kain_x, res_norm, "a",
+            response_manager.params().maxrotn());
       });
     }
     // 5. Update response vector
-    rvec.flat = copy(world, kain_x);
-    rvec.sync();
+    assign_all_and_sync(rvec, copy(world, kain_x));
     // 6. Compute updated response density
-    drho = Policy::compute_density(world, rvec, phi0);
+    drho = compute_density(world, rvec, phi0);
     double drho_change = (drho - drho_old).norm2();
     DEBUG_LOG_VALUE(world, &logger, "drho_change", drho_change);
     auto alpha =
-        Policy::alpha_factor * ResponseSolverUtils::inner(world, rvec.flat, vp);
+        alpha_factor(rvec) * ResponseSolverUtils::inner(world, response_all(rvec), vp);
     DEBUG_LOG_VALUE(world, &logger, "alpha", alpha);
+    consecutive_negative_alpha = (alpha < 0.0) ? (consecutive_negative_alpha + 1)
+                                               : 0;
+    diagnostics.max_consecutive_negative_alpha =
+        std::max(diagnostics.max_consecutive_negative_alpha,
+                 consecutive_negative_alpha);
     // 7. Convergence check
-    if (world.rank() == 0) {
-      ResponseSolverUtils::print_iteration_line(iter, res_norm, drho_change,
-                                                alpha, density_target,
-                                                x_residual_target);
-    }
-    if (drho_change < density_target && res_norm < x_residual_target) {
-      if (world.rank() == 0) print("✓ Converged in", iter, "iterations.");
-      logger.end_iteration();
-      rvec.sync();
-      logger.finalize_state();
-      return true;
-    }
     logger.end_iteration();
-  }
-  if (world.rank() == 0)
-    print("⚠️  Reached max iterations without convergence.");
-  logger.end_iteration();
+    
+    if (world.rank() == 0) {
+      if (use_verbose_iteration_table) {
+        if (iter == 0) {
+          emit_iteration_table_start();
+        }
+        ResponseSolverUtils::print_iteration_line(iter, res_norm, drho_change,
+                                                  alpha, density_target,
+                                                  x_residual_target);
+      } else {
+        madness::print("ITERATION_RESIDUAL state=", pt.perturbationDescription(),
+                       " protocol=", pt.threshold(), " frequency=",
+                       pt.frequency(), " iter=", iter, " residual=", res_norm,
+                       " drho=", drho_change, " alpha=", alpha);
+      }
+    }
+    diagnostics.iterations_performed = iter + 1;
+    diagnostics.final_residual_norm = res_norm;
+    diagnostics.final_density_change = drho_change;
+    diagnostics.final_alpha = alpha;
+    const double point_elapsed_s = madness::wall_time() - point_solve_wall_start;
+    const bool timeout_enabled =
+        std::isfinite(point_stall_timeout_s) && point_stall_timeout_s > 0.0;
+    if (timeout_enabled && point_elapsed_s > point_stall_timeout_s) {
+      diagnostics.reached_iteration_limit = false;
+      diagnostics.failure_reason = "point_stall_timeout";
+      emit_iteration_table_end("point_stall_timeout");
+      TimedValueLogger::clear_iteration_context();
+      if (world.rank() == 0) {
+        madness::print("WARN POINT_STALL_TIMEOUT state=",
+                       pt.perturbationDescription(), " protocol=",
+                       pt.threshold(), " frequency=", pt.frequency(),
+                       " elapsed_s=", point_elapsed_s,
+                       " timeout_s=", point_stall_timeout_s,
+                       " iterations=", diagnostics.iterations_performed);
+      }
+      return diagnostics;
+    }
 
-  if (world.rank() == 0) {
-    madness::print("📊 Iteration summary for", state.description());
-    logger.print_timing_table(state.description());
-    logger.print_values_table(state.description());
+    const bool has_non_finite_metric =
+        !std::isfinite(res_norm) || !std::isfinite(drho_change) ||
+        !std::isfinite(alpha);
+    if (has_non_finite_metric) {
+      diagnostics.reached_iteration_limit = false;
+      emit_iteration_table_end("non_finite_metric");
+      TimedValueLogger::clear_iteration_context();
+      if (world.rank() == 0) {
+        madness::print(
+            "WARN SAFETY_STOP reason=non_finite_metric state=",
+            pt.perturbationDescription(), " protocol=", pt.threshold(),
+            " frequency=", pt.frequency(),
+            " iterations=", diagnostics.iterations_performed);
+      }
+      return diagnostics;
+    }
+
+    const bool residual_is_large = res_norm > safety_residual_cutoff;
+    const bool density_change_is_large = drho_change > safety_density_cutoff;
+    if (iter + 1 >= min_iter_before_safety_check && residual_is_large &&
+        density_change_is_large) {
+      ++large_residual_streak;
+    } else {
+      large_residual_streak = 0;
+    }
+
+    const bool residual_is_explosive =
+        previous_residual_norm.has_value() && *previous_residual_norm > 0.0 &&
+        res_norm >
+            (*previous_residual_norm * explosive_residual_growth_factor) &&
+        residual_is_large;
+    if (iter + 1 >= min_iter_before_safety_check && residual_is_explosive) {
+      ++explosive_residual_streak;
+    } else {
+      explosive_residual_streak = 0;
+    }
+    previous_residual_norm = res_norm;
+
+    const bool trigger_safety_stop =
+        large_residual_streak >= large_residual_streak_limit ||
+        explosive_residual_streak >= explosive_residual_streak_limit;
+    if (trigger_safety_stop) {
+      diagnostics.reached_iteration_limit = false;
+      emit_iteration_table_end("divergent_residual_trend");
+      TimedValueLogger::clear_iteration_context();
+      if (world.rank() == 0) {
+        madness::print(
+            "WARN SAFETY_STOP reason=divergent_residual_trend state=",
+            pt.perturbationDescription(), " protocol=", pt.threshold(),
+            " frequency=", pt.frequency(),
+            " iterations=", diagnostics.iterations_performed,
+            " residual=", res_norm, " drho=", drho_change,
+            " residual_cutoff=", safety_residual_cutoff,
+            " drho_cutoff=", safety_density_cutoff);
+      }
+      return diagnostics;
+    }
+
+    if (drho_change < density_target && res_norm < x_residual_target) {
+      rvec.sync();
+      diagnostics.converged = true;
+      emit_iteration_table_end("converged");
+      TimedValueLogger::clear_iteration_context();
+      return diagnostics;
+    }
   }
-  logger.finalize_state();
-  return false;
+  diagnostics.reached_iteration_limit =
+      (diagnostics.iterations_performed >= max_iter) && !diagnostics.converged;
+  emit_iteration_table_end("max_iterations_reached");
+  TimedValueLogger::clear_iteration_context();
+  return diagnostics;
 };
 
-inline bool solve_response_vector(
-    World &world, const ResponseManager &rm, const GroundStateData &gs,
-    const LinearResponseDescriptor &state,
-    ResponseVector &response_variant,  // the std::variant<…>
-    ResponseDebugLogger &logger, size_t max_iter = 10,
-    double conv_thresh = 1e-4) {
-  return std::visit(
-      overloaded{[&](StaticRestrictedResponse &r) {
-                   return iterate(world, rm, gs, state, r, logger, max_iter,
-                                  conv_thresh);
-                 },
-                 [&](DynamicRestrictedResponse &r) {
-                   return iterate(world, rm, gs, state, r, logger, max_iter,
-                                  conv_thresh);
-                 },
-                 [&](StaticUnrestrictedResponse &r) {
-                   throw std::runtime_error(
-                       "Static unrestricted response not implemented yet");
-                   return false;
-                   /*return iterate(world, rm, gs, state, r, logger, max_iter,*/
-                   /*               conv_thresh);*/
-                 },
-                 [&](DynamicUnrestrictedResponse &r) {
-                   throw std::runtime_error(
-                       "Dynamic unrestricted response not implemented yet");
-                   return false;
-                   /*iterate(world, rm, gs, state, r, logger, max_iter,*/
-                   /*                          conv_thresh);*/
-                 }},
-      response_variant);
-}
+/// Variant-dispatch wrapper over `iterate(...)` for `ResponseVector`.
+ResponseSolveDiagnostics
+solve_response_vector(World &world, const ResponseManager &response_manager,
+                      const GroundStateData &g_s,
+                      const LinearResponseDescriptor &state,
+                      const LinearResponsePoint &pt,
+                      ResponseVector &response_variant,
+                      ResponseDebugLogger &logger, size_t max_iter,
+                      double conv_thresh);
 
-inline void promote_response_vector(World &world,
-                                    const ResponseVector &promote_from,
-                                    ResponseVector &promote_to) {
-  if (std::holds_alternative<StaticRestrictedResponse>(promote_from)) {
-    if (world.rank() == 0)
-      madness::print("🔁 Promoting static restricted → dynamic restricted");
-    const auto &prev_resp = std::get<StaticRestrictedResponse>(promote_from);
+/// Promote/copy static or restricted response vectors into a target variant shape.
+void promote_response_vector(World &world, const ResponseVector &x_in,
+                             ResponseVector &x_out);
 
-    DynamicRestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.flatten();
-    promote_to = current_resp;
-
-  } else if (std::holds_alternative<StaticUnrestrictedResponse>(promote_from)) {
-    if (world.rank() == 0)
-      madness::print("🔁 Promoting static unrestricted → dynamic unrestricted");
-    const auto &prev_resp = std::get<StaticUnrestrictedResponse>(promote_from);
-
-    DynamicUnrestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.x_beta = copy(world, prev_resp.x_beta);
-    current_resp.y_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_beta = copy(world, prev_resp.x_beta);
-    current_resp.flatten();
-    promote_to = current_resp;
-
-  } else if (std::holds_alternative<DynamicRestrictedResponse>(promote_from)) {
-    if (world.rank() == 0)
-      madness::print("📥 Copying dynamic restricted response");
-    const auto &prev_resp = std::get<DynamicRestrictedResponse>(promote_from);
-
-    DynamicRestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.y_alpha = copy(world, prev_resp.y_alpha);
-    current_resp.flatten();
-    promote_to = current_resp;
-
-  } else if (std::holds_alternative<DynamicUnrestrictedResponse>(
-                 promote_from)) {
-    if (world.rank() == 0)
-      madness::print("📥 Copying dynamic unrestricted response");
-    const auto &prev_resp = std::get<DynamicUnrestrictedResponse>(promote_from);
-
-    DynamicUnrestrictedResponse current_resp;
-    current_resp.x_alpha = copy(world, prev_resp.x_alpha);
-    current_resp.x_beta = copy(world, prev_resp.x_beta);
-    current_resp.y_alpha = copy(world, prev_resp.y_alpha);
-    current_resp.y_beta = copy(world, prev_resp.y_beta);
-    current_resp.flatten();
-    promote_to = current_resp;
-  } else {
-    throw std::runtime_error(
-        "Unknown response variant in promote_response_vector");
+/// Persistence abstraction used by frequency solve routines.
+///
+/// Implementations provide restart checks and recording backends (JSON metadata,
+/// debug logs, or future alternatives) without coupling solve code to storage.
+class StateSolvePersistence {
+public:
+  virtual ~StateSolvePersistence() = default;
+  /// True if a point archive exists.
+  [[nodiscard]] virtual bool is_saved(const LinearResponsePoint &pt) const = 0;
+  /// True if metadata marks the point as converged.
+  [[nodiscard]] virtual bool
+  is_converged(const LinearResponsePoint &pt) const = 0;
+  /// True if failure policy marked this point for frequency removal.
+  [[nodiscard]] virtual bool
+  is_removed_from_frequency_set(const LinearResponsePoint &pt) const = 0;
+  /// True when removed frequencies should be retried instead of skipped.
+  [[nodiscard]] virtual bool force_retry_removed_frequencies() const = 0;
+  /// Persist `saved`/`converged` status.
+  virtual void record_status(const LinearResponsePoint &pt, bool c) = 0;
+  /// Persist final residual, density change, and iteration count.
+  virtual void record_solver_diagnostics(const LinearResponsePoint &pt,
+                                         const ResponseSolveDiagnostics &d,
+                                         bool used_fallback_retry) = 0;
+  /// Persist wall/cpu timing for one solved point.
+  virtual void record_timing(const LinearResponsePoint &pt, double wall_seconds,
+                             double cpu_seconds) = 0;
+  /// Persist how the initial guess was seeded for this point.
+  virtual void record_restart_provenance(
+      const LinearResponsePoint &pt, const std::string &source_kind,
+      bool loaded_from_disk, bool promoted_from_static,
+      const std::optional<double> &source_protocol,
+      const std::optional<double> &source_frequency) = 0;
+  /// Access iteration logger bound to the persistence backend.
+  virtual ResponseDebugLogger &logger() = 0;
+  /// Flush buffered debug logs to backing storage.
+  virtual void flush_debug_log(World &world) = 0;
+  /// Optional progress/metadata polling hook (no-op by default).
+  virtual void maybe_poll_progress(World &world, bool force = false) {
+    (void)world;
+    (void)force;
   }
-}
+};
 
-inline void computeFrequencyLoop(World &world, const ResponseManager &rm,
-                                 LinearResponseDescriptor &state,
-                                 const GroundStateData &ground_state,
-                                 ResponseMetadata &metadata,
-                                 ResponseDebugLogger &logger) {
-  // const auto &frequencies = state.frequencies;
+/// Solve an entire frequency series for one descriptor/protocol index.
+///
+/// Used in channel-series ownership mode where a subgroup/lane owns complete
+/// channels and benefits from nearest-frequency continuation.
+void computeFrequencyLoop(World &world, const ResponseManager &response_manager,
+                          const LinearResponseDescriptor &state_desc,
+                          size_t thresh_index,
+                          const GroundStateData &ground_state,
+                          StateSolvePersistence &persistence,
+                          bool at_final_protocol);
 
-  auto state_id = state.perturbationDescription();
-  double protocol = state.current_threshold();
-  size_t thresh_index = state.current_thresh_index;
-
-  bool at_final_protocol = state.at_final_threshold();
-  bool is_unrestricted = !ground_state.isSpinRestricted();
-  auto num_orbitals = static_cast<int>(ground_state.getNumOrbitals());
-
-  ResponseVector previous_response =
-      make_response_vector(num_orbitals, state.is_static(), is_unrestricted);
-  bool have_previous_freq_response = false;
-  auto pertDesc = state.perturbationDescription();
-
-  // Frequency loop
-  for (size_t i = state.current_frequency_index; i < state.frequencies.size();
-       i++) {
-    state.set_frequency_index(i);
-    bool is_static = state.is_static();
-    double freq = state.current_frequency();
-    auto freq_index = state.current_frequency_index;
-    bool is_saved =
-        metadata.is_saved(pertDesc, protocol, freq);  // Check if already saved
-    bool should_solve =
-        !is_saved ||
-        (at_final_protocol && !metadata.is_converged(pertDesc, protocol, freq));
-    if (!should_solve) {
-      if (world.rank() == 0) {
-        print("⚠️  Skipping frequency", freq, "at protocol", protocol,
-              "for state:", pertDesc);
-      }
-      continue;
-    }
-    world.gop.fence();
-    ResponseVector guess =
-        make_response_vector(num_orbitals, is_static, is_unrestricted);
-
-    /*if (world.rank() == 0) {*/
-    /*  madness::print("🔄 Attempting to load response vector for",
-     * state.description());*/
-    /*}*/
-    // At this point, I know that I'm either not saved or not at the final
-    if (is_saved && load_response_vector(world, num_orbitals, state, guess,
-                                         thresh_index, freq_index)) {
-      if (world.rank() == 0) {
-        madness::print("📂 Loaded response vector from disk.");
-      }
-    } else if (thresh_index > 0 &&
-               load_response_vector(world, num_orbitals, state, guess,
-                                    thresh_index - 1, freq_index)) {
-      if (world.rank() == 0) {
-        madness::print("📂 Loaded response vector from previous protocol.");
-      }
-    } else if (!is_static) {
-      // Now i try to load the previous frequency response
-      // if it's in memory, I can use it
-      if (have_previous_freq_response) {
-        if (world.rank() == 0) {
-          madness::print("📂 Promoting previous in-memory response as guess.");
-        }
-      } else {
-        load_response_vector(world, num_orbitals, state, previous_response,
-                             thresh_index, freq_index - 1);
-      }
-
-      world.gop.fence();
-      promote_response_vector(world, previous_response, guess);
-    } else {
-      // Static case: just initialize
-      guess = initialize_guess_vector(world, ground_state, state);
-      if (world.rank() == 0) {
-        madness::print("📂 Initialized guess vector.");
-      }
-    }
-
-    // Run the solver with logging
-    logger.start_state(state);
-
-    auto max_iter = rm.params().maxiter();
-    auto conv_thresh = rm.params().dconv();
-
-    bool converged = solve_response_vector(
-        world, rm, ground_state, state, guess, logger, max_iter, conv_thresh);
-    logger.finalize_state();
-
-    world.gop.fence();
-
-    // Always save results (even if not fully converged)
-    save_response_vector(world, state, guess);
-    metadata.mark_saved(state_id, protocol, freq);
-    metadata.mark_converged(state_id, protocol, freq, converged);
-
-    if (world.rank() == 0) {
-      madness::print("💾 Saved response vector at protocol:", protocol,
-                     state.description());
-    }
-
-    previous_response = guess;
-    have_previous_freq_response = true;
-  }
-
-  // reset current frequency index
-  state.set_frequency_index(0);
-  // If all frequencies done at this protocol, update status
-  state.is_converged =
-      state.at_final_threshold() && metadata.final_converged(state_id);
-}
+/// Solve one independent `(state, protocol, frequency)` point.
+///
+/// Used in channel-point ownership mode to expose fine-grained parallelism.
+void computeFrequencyPoint(World &world,
+                           const ResponseManager &response_manager,
+                           const LinearResponseDescriptor &state_desc,
+                           size_t thresh_index, size_t freq_index,
+                           const GroundStateData &ground_state,
+                           StateSolvePersistence &persistence,
+                           bool at_final_protocol);

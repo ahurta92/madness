@@ -1,6 +1,11 @@
 build*
+vscode_build*
 cmake-build-debug*
 .history*
+*-workspace
+*/__pycache__/
+slurm-logs/
+molresponse_testdata/
 
 # Compiled Object files
 *.slo
@@ -68,3 +73,10 @@ compile_commands
 diff.txt
 newdiff.txt
 .vscode/settings.json
+
+# Local response workflow artifacts
+mad.in
+tmp_h2o_*.in
+tmp_h2o_validation/
+tmp_state_parallel_scaling/
+test_molresponse/

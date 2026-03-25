@@ -4,7 +4,7 @@
 
 #ifndef MADNESS_RESPONSEEXCEPTIONS_HPP
 #define MADNESS_RESPONSEEXCEPTIONS_HPP
-#include "madness_exception.h"
+#include <madness/world/madness_exception.h>
 /// Capturing the line/function/filename info is best done with the
 /// macros listed below.
 /// \param[in] m The error message.

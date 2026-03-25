@@ -14,7 +14,8 @@ inline json broadcast_json_file(World &world, const std::string &filepath) {
   if (world.rank() == 0) {
     std::ifstream ifs(filepath);
     if (!ifs.is_open()) {
-      std::cerr << "❌ Error opening file: " << filepath << std::endl;
+      std::cerr << "ERROR JSON_FILE_OPEN_FAILED file=" << filepath
+                << std::endl;
       throw std::runtime_error("Failed to open JSON file");
     }
     std::stringstream buffer;

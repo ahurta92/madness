@@ -6,6 +6,8 @@ add_subdirectory(plot)
 add_subdirectory(tdse)
 add_subdirectory(moldft)
 #add_subdirectory(molresponse)
+# Frozen compatibility baseline for excited-state parity/reference work.
+add_subdirectory(molresponse_legacy)
 add_subdirectory(molresponse_v2)
 add_subdirectory(madqc_v2)
 add_subdirectory(pno)
