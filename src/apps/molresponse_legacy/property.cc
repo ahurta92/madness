@@ -40,14 +40,17 @@ DipoleVector::DipoleVector(World &world) : PropertyBase() {
     std::vector<int> f(3, 0);
     f[i] = 1;
     operator_vector.at(i) = real_factory_3d(world).functor(real_functor_3d(new BS_MomentFunctor(f)));
-    // prsize_t k L truncation
-    print("norm of dipole function ", operator_vector[i].norm2());
+    // LEGACY_PATCH: norm2() is collective (all ranks compute); print only on rank 0
+    double n = operator_vector[i].norm2();
+    if (world.rank() == 0) print("norm of dipole function ", n);
   }
 
   truncate(world, operator_vector, true);
 
   for (size_t i = 0; i < 3; i++) {
-    print("norm of dipole function after truncate ", operator_vector[i].norm2());
+    // LEGACY_PATCH: norm2() collective; print rank 0 only
+    double n = operator_vector[i].norm2();
+    if (world.rank() == 0) print("norm of dipole function after truncate ", n);
   }
 };
 
@@ -57,7 +60,8 @@ NuclearVector::NuclearVector(World &world, Molecule &molecule) : PropertyBase() 
 
   vecfuncT dv(molecule.natom() * 3);  // default constructor for vector?
 
-  print("Creating Nuclear Derivative Operator");
+  // LEGACY_PATCH: gate print to rank 0
+  if (world.rank() == 0) print("Creating Nuclear Derivative Operator");
   for (size_t atom = 0; atom < molecule.natom(); ++atom) {
     for (size_t axis = 0; axis < 3; ++axis) {
       // question here....MolecularDerivativeFunctor takes derivative with
@@ -66,8 +70,9 @@ NuclearVector::NuclearVector(World &world, Molecule &molecule) : PropertyBase() 
       // here we save
       operator_vector.at(atom * 3 + axis) =
           FunctionT(FactoryT(world).functor(func).nofence().truncate_on_project().truncate_mode(0));
-      // prsize_t k L truncation
-      print("norm of derivative function ", operator_vector[atom * 3 + axis].norm2());
+      // LEGACY_PATCH: norm2() collective; print rank 0 only
+      double n = operator_vector[atom * 3 + axis].norm2();
+      if (world.rank() == 0) print("norm of derivative function ", n);
     }
   }
 
@@ -75,7 +80,9 @@ NuclearVector::NuclearVector(World &world, Molecule &molecule) : PropertyBase() 
 
   for (size_t atom = 0; atom < molecule.natom(); ++atom) {
     for (size_t axis = 0; axis < 3; ++axis) {
-      print("norm of derivative function after truncate ", operator_vector[atom * 3 + axis].norm2());
+      // LEGACY_PATCH: norm2() collective; print rank 0 only
+      double n = operator_vector[atom * 3 + axis].norm2();
+      if (world.rank() == 0) print("norm of derivative function after truncate ", n);
     }
   }
 }

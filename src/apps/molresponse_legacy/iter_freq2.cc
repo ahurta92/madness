@@ -74,14 +74,14 @@ void TDDFT::iterate_freq2(World& world) {
   omega_n = abs(omega_n);
   omega[0] = omega_n;
   // We compute with positive frequencies
-  print("Warning input frequency is assumed to be positive");
-  print("Computing at positive frequency omega = ", omega_n);
+  if (world.rank() == 0) print("Warning input frequency is assumed to be positive");  // LEGACY_PATCH: gate to rank 0
+  if (world.rank() == 0) print("Computing at positive frequency omega = ", omega_n);  // LEGACY_PATCH: gate to rank 0
   double x_shifts = 0.0;
   double y_shifts = 0.0;
   // if less negative orbital energy + frequency is positive or greater than 0
   if ((ground_energies[n - 1] + omega_n) >= 0.0) {
     // Calculate minimum shift needed such that \eps + \omega + shift < 0
-    print("*** we are shifting just so you know!!!");
+    if (world.rank() == 0) print("*** we are shifting just so you know!!!");  // LEGACY_PATCH: gate to rank 0
     x_shifts = -.05 - (omega_n + ground_energies[n - 1]);
   }
   std::vector<poperatorT> bsh_x_ops =
@@ -135,11 +135,11 @@ void TDDFT::iterate_freq2(World& world) {
       density_residuals = norm2s_T(world, (rho_omega - rho_omega_old));
       // Take the max between this an a minimum maxrotn step
       maxrotn = (bsh_residualsX + bsh_residualsY) / 4;
-      print("maxrotn", maxrotn);
+      if (world.rank() == 0) print("maxrotn", maxrotn);  // LEGACY_PATCH: gate to rank 0
       for (size_t i = 0; i < Chi.num_states(); i++) {
         if (maxrotn[i] < r_params.maxrotn()) {
           maxrotn[i] = r_params.maxrotn();
-          print("less than maxrotn....set to maxrotn");
+          if (world.rank() == 0) print("less than maxrotn....set to maxrotn");  // LEGACY_PATCH: gate to rank 0
         }
       }
       if (world.rank() == 0 and (r_params.print_level() > 1)) {

@@ -84,7 +84,8 @@ int main(int argc, char** argv) {
       print_meminfo(world.rank(), "startup");
       FunctionDefaults<3>::set_pmap(pmapT(new LevelPmap<Key<3>>(world)));
 
-      std::cout.precision(6);
+      // LEGACY_PATCH: gate format manipulator to rank 0
+      if (world.rank() == 0) std::cout.precision(6);
       // This makes a default input file name of 'input'
       const char* inpname = "input";
       // Process 0 reads input information and broadcasts
@@ -130,13 +131,13 @@ int main(int argc, char** argv) {
         calc.solve_response_states(world);
       } else if (calc.r_params.second_order()) {
       } else {
-        print("NOT GOOD");
+        if (world.rank() == 0) print("NOT GOOD");  // LEGACY_PATCH: rank 0 only
       }
 
       if (calc.r_params.dipole()) {  //
-        print("Computing Alpha");
+        if (world.rank() == 0) print("Computing Alpha");  // LEGACY_PATCH: rank 0 only
         Tensor<double> alpha = calc.polarizability();
-        print("Second Order Analysis");
+        if (world.rank() == 0) print("Second Order Analysis");  // LEGACY_PATCH: rank 0 only
         calc.PrintPolarizabilityAnalysis(world, alpha);
       }
     } catch (const SafeMPI::Exception& e) {

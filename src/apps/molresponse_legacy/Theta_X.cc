@@ -58,8 +58,9 @@ X_space TDDFT::Compute_Theta_X(World& world,
   }
 
   if (r_params.print_level() >= 20) {
-    print("<X|(E0-diag(E0)|X>");
-    print(inner(Chi, E0X));
+    // LEGACY_PATCH: inner() is collective; compute on all ranks, print on rank 0
+    auto xe0x = inner(Chi, E0X);
+    if (world.rank() == 0) { print("<X|(E0-diag(E0)|X>"); print(xe0x); }
   }
 
   X_space gamma;
@@ -76,8 +77,9 @@ X_space TDDFT::Compute_Theta_X(World& world,
   Theta_X.truncate();
 
   if (r_params.print_level() >= 20) {
-    print("<X|Theta|X>");
-    print(inner(Chi, Theta_X));
+    // LEGACY_PATCH: inner() is collective; compute on all ranks, print on rank 0
+    auto xthx = inner(Chi, Theta_X);
+    if (world.rank() == 0) { print("<X|Theta|X>"); print(xthx); }
   }
 
   return Theta_X;

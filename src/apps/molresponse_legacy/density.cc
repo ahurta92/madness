@@ -65,7 +65,9 @@ VectorFunction3DT density_vector::ComputeDensityVector(World &world, bool is_sta
 }
 void density_vector::PrintDensityInformation() {
   // print
-  //
+  // LEGACY_PATCH NOTE: this function has no World& parameter so rank gating is
+  // not possible without changing the API. It is never called in the current
+  // build; callers must guard externally if this is ever re-enabled.
   print("Response Density Information");
   print(property, " response at", omega(0, 0), "frequency using ", r_params.xc(), " exchange functional");
   print("Number of Response States : ", num_states);
@@ -113,11 +115,13 @@ Tensor<double> density_vector::ComputeSecondOrderPropertyTensor(World &world) {
   // do some printing before we compute so we know what we are working with
   //*******************************
   // G algorithim
-  print("version 1");
-  print(H);
-
-  print("version 2");
-  print(G);
+  // LEGACY_PATCH: gate debug prints to rank 0
+  if (world.rank() == 0) {
+    print("version 1");
+    print(H);
+    print("version 2");
+    print(G);
+  }
 
   // print(M);
 
@@ -215,14 +219,15 @@ void density_vector::LoadDensity(World &world,
     if (world.rank() == 0) print("creating nuclear property operator");
     this->property_operator = NuclearVector(world, molecule);
   }
-  print("property:", property);
+  // LEGACY_PATCH: gate archive-load debug prints to rank 0
+  if (world.rank() == 0) print("property:", property);
 
   ar &omega;
-  print("omega:", omega);
+  if (world.rank() == 0) print("omega:", omega);
   ar &num_states;
-  print("num_response_states:", num_states);
+  if (world.rank() == 0) print("num_response_states:", num_states);
   ar &num_orbitals;
-  print("num_ground_states:", num_orbitals);
+  if (world.rank() == 0) print("num_ground_states:", num_orbitals);
 
   this->Chi.X = response_space(world, num_states, num_orbitals);
   this->Chi.Y = response_space(world, num_states, num_orbitals);
@@ -230,10 +235,12 @@ void density_vector::LoadDensity(World &world,
   this->PQ.X = response_space(world, num_states, num_orbitals);
   this->PQ.Y = response_space(world, num_states, num_orbitals);
 
+  // LEGACY_PATCH: norm2() is collective (all ranks compute); print only on rank 0
   for (size_t i = 0; i < r_params.n_states(); i++) {
     for (size_t j = 0; j < g_params.n_orbitals(); j++) {
       ar &Chi.X[i][j];
-      print("norm of x ", Chi.X[i][j].norm2());
+      double nx = Chi.X[i][j].norm2();
+      if (world.rank() == 0) print("norm of x ", nx);
     }
   }
   world.gop.fence();
@@ -241,7 +248,8 @@ void density_vector::LoadDensity(World &world,
   for (size_t i = 0; i < r_params.n_states(); i++) {
     for (size_t j = 0; j < g_params.n_orbitals(); j++) {
       ar &Chi.Y[i][j];
-      print("norm of y ", Chi.Y[i][j].norm2());
+      double ny = Chi.Y[i][j].norm2();
+      if (world.rank() == 0) print("norm of y ", ny);
     }
   }
 
@@ -249,19 +257,23 @@ void density_vector::LoadDensity(World &world,
   this->rho_omega = zero_functions<double, 3>(world, num_states);
   for (size_t i = 0; i < num_states; i++) {
     ar &rho_omega[i];
-    print("norm of rho_omega ", rho_omega[i].norm2());
+    double nr = rho_omega[i].norm2();
+    if (world.rank() == 0) print("norm of rho_omega ", nr);
   }
 
   for (size_t i = 0; i < property_operator.num_operators; i++) {
-    print("norm of operator before ", property_operator.operator_vector[i].norm2());
+    double nb = property_operator.operator_vector[i].norm2();
+    if (world.rank() == 0) print("norm of operator before ", nb);
     ar &property_operator.operator_vector[i];
-    print("norm of operator after", property_operator.operator_vector[i].norm2());
+    double na = property_operator.operator_vector[i].norm2();
+    if (world.rank() == 0) print("norm of operator after", na);
   }
 
   for (size_t i = 0; i < r_params.n_states(); i++) {
     for (size_t j = 0; j < g_params.n_orbitals(); j++) {
       ar &PQ.X[i][j];
-      print("norm of P ", PQ.X[i][j].norm2());
+      double np = PQ.X[i][j].norm2();
+      if (world.rank() == 0) print("norm of P ", np);
     }
   }
   world.gop.fence();
@@ -269,7 +281,8 @@ void density_vector::LoadDensity(World &world,
   for (size_t i = 0; i < r_params.n_states(); i++) {
     for (size_t j = 0; j < g_params.n_orbitals(); j++) {
       ar &PQ.Y[i][j];
-      print("norm of y ", PQ.Y[i][j].norm2());
+      double npy = PQ.Y[i][j].norm2();
+      if (world.rank() == 0) print("norm of y ", npy);
     }
   }
 

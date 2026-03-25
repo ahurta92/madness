@@ -121,8 +121,11 @@ void TDDFT::iterate_excited(World& world, X_space& Chi) {
         print(ynorms);
       }
     }
-    print("Excited State Frequencies ");
-    print(omega);
+    // LEGACY_PATCH: gate excited-state frequency print on rank 0 and print_level
+    if (world.rank() == 0 && r_params.print_level() >= 1) {
+      print("Excited State Frequencies ");
+      print(omega);
+    }
 
     // rho_omega_old = make_density(world, old_Chi, r_params.calc_type());
     rho_omega_old = rho_omega;
@@ -142,7 +145,8 @@ void TDDFT::iterate_excited(World& world, X_space& Chi) {
       for (size_t i = 0; i < Chi.num_states(); i++) {
         if (maxrotn[i] < r_params.maxrotn()) {
           maxrotn[i] = r_params.maxrotn();
-          print("less than maxrotn....set to maxrotn");
+          // LEGACY_PATCH: gate diagnostic print on rank 0
+          if (world.rank() == 0) print("less than maxrotn....set to maxrotn");
         }
       }
       if (world.rank() == 0 and (r_params.print_level() > 2)) {
@@ -231,16 +235,18 @@ void TDDFT::iterate_excited(World& world, X_space& Chi) {
       molresponse::end_timer(world, " This iteration:");
   }
 
-  if (world.rank() == 0) print("\n");
-  if (world.rank() == 0) print("   Finished Excited State Calculation ");
-  if (world.rank() == 0) print("   ------------------------");
-  if (world.rank() == 0) print("\n");
+  // LEGACY_PATCH: add print_level >= 1 guard to completion banner
+  if (world.rank() == 0 && r_params.print_level() >= 1) print("\n");
+  if (world.rank() == 0 && r_params.print_level() >= 1) print("   Finished Excited State Calculation ");
+  if (world.rank() == 0 && r_params.print_level() >= 1) print("   ------------------------");
+  if (world.rank() == 0 && r_params.print_level() >= 1) print("\n");
 
   // Did we converge?
   if (iter == r_params.maxiter() && not converged) {
-    if (world.rank() == 0) print("   Failed to converge. Reason:");
-    if (world.rank() == 0) print("\n  ***  Ran out of iterations  ***\n");
-    if (world.rank() == 0) print("    Running analysis on current values.\n");
+    // LEGACY_PATCH: add print_level >= 1 guard to convergence failure messages
+    if (world.rank() == 0 && r_params.print_level() >= 1) print("   Failed to converge. Reason:");
+    if (world.rank() == 0 && r_params.print_level() >= 1) print("\n  ***  Ran out of iterations  ***\n");
+    if (world.rank() == 0 && r_params.print_level() >= 1) print("    Running analysis on current values.\n");
   }
 
   // Sorstatict
@@ -273,17 +279,20 @@ void TDDFT::iterate_excited(World& world, X_space& Chi) {
   }
 
   analysis(world, Chi);
-  print("--------------------------------------------------------");
+  // LEGACY_PATCH: gate separator and analyze_vectors output on rank 0 and print_level >= 1
+  if (world.rank() == 0 && r_params.print_level() >= 1) print("--------------------------------------------------------");
   for (size_t i = 0; i < m; i++) {
     std::string x_state = "x_" + std::to_string(i) + "_";
     analyze_vectors(world, Chi.X[i], x_state);
-    print("--------------------------------------------------------");
+    // LEGACY_PATCH: gate separator on rank 0 and print_level >= 1
+    if (world.rank() == 0 && r_params.print_level() >= 1) print("--------------------------------------------------------");
   }
   if (not r_params.tda()) {
     for (size_t i = 0; i < m; i++) {
       std::string y_state = "y_" + std::to_string(i) + "_";
       analyze_vectors(world, Chi.Y[i], y_state);
-      print("--------------------------------------------------------");
+      // LEGACY_PATCH: gate separator on rank 0 and print_level >= 1
+      if (world.rank() == 0 && r_params.print_level() >= 1) print("--------------------------------------------------------");
     }
   }
 }

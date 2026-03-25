@@ -741,8 +741,7 @@ void TDDFT::solve_excited_states(World& world) {
 
   // Print total time
   // Precision is set to 10 coming in, drop it to 2
-  std::cout.precision(2);
-  std::cout << std::fixed;
+  if (world.rank() == 0) { std::cout.precision(2); std::cout << std::fixed; }  // LEGACY_PATCH: gate format manipulators to rank 0
 
   // Get start time
   molresponse::end_timer(world, "total:");
@@ -805,8 +804,9 @@ void TDDFT::solve_response_states(World& world) {
           // set states
           PQ.X = PropertyRHS(world, p);
           PQ.Y = PQ.X.copy();
-          print("P: ", PQ.X.norm2());
-          print("Q: ", PQ.Y.norm2());
+          auto pq_norm_x = PQ.X.norm2();  // LEGACY_PATCH: extract collective call before rank-0 gate
+          auto pq_norm_y = PQ.Y.norm2();  // LEGACY_PATCH: extract collective call before rank-0 gate
+          if (world.rank() == 0) { print("P: ", pq_norm_x); print("Q: ", pq_norm_y); }  // LEGACY_PATCH: gate to rank 0
 
           // set RHS_Vector
         } else if (r_params.nuclear()) {
@@ -827,7 +827,7 @@ void TDDFT::solve_response_states(World& world) {
           PQ.Y = PQ.X.copy();
           // set states
           //
-          print("okay this is not a good idea if it comes up more than once");
+          if (world.rank() == 0) print("okay this is not a good idea if it comes up more than once");  // LEGACY_PATCH: gate to rank 0
           // set RHS_Vector
         } else if (r_params.nuclear()) {
           PQ.X = PropertyRHS(world, p);
@@ -844,20 +844,25 @@ void TDDFT::solve_response_states(World& world) {
     //
     // Here i should print some information about the calculation we are
     // about to do
-    print("Preiteration Information");
-    print("Number of Response States: ", r_params.n_states());
-    print("Number of Ground States: ", r_params.num_orbitals());
-    print("k = ", FunctionDefaults<3>::get_k());
-    print("protocol threshold = ", FunctionDefaults<3>::get_k());
+    // LEGACY_PATCH: extract collective norm2() calls before rank-0 gate
+    auto preiter_norm_x = PQ.X.norm2();
+    auto preiter_norm_y = PQ.Y.norm2();
+    if (world.rank() == 0) {  // LEGACY_PATCH: gate entire preiteration block to rank 0
+      print("Preiteration Information");
+      print("Number of Response States: ", r_params.n_states());
+      print("Number of Ground States: ", r_params.num_orbitals());
+      print("k = ", FunctionDefaults<3>::get_k());
+      print("protocol threshold = ", FunctionDefaults<3>::get_k());
 
-    print("Property rhs func k = ", PQ.X[0][0].k());
-    print("Property func k thresh= ", PQ.X[0][0].thresh());
+      print("Property rhs func k = ", PQ.X[0][0].k());
+      print("Property func k thresh= ", PQ.X[0][0].thresh());
 
-    print("Property rhs func Q k = ", PQ.Y[0][0].k());
-    print("Property func Q k thresh = ", PQ.Y[0][0].thresh());
+      print("Property rhs func Q k = ", PQ.Y[0][0].k());
+      print("Property func Q k thresh = ", PQ.Y[0][0].thresh());
 
-    print("Property rhs func P norms", PQ.X.norm2());
-    print("Property rhs func Q norms", PQ.Y.norm2());
+      print("Property rhs func P norms", preiter_norm_x);
+      print("Property rhs func Q norms", preiter_norm_y);
+    }  // LEGACY_PATCH end rank-0 gate
 
     if (proto > 0) {
       r_params.set_derived_value<bool>("first_run", false);
@@ -910,8 +915,7 @@ void TDDFT::solve_response_states(World& world) {
 
   // Print total time
   // Precision is set to 10 coming in, drop it to 2
-  std::cout.precision(2);
-  std::cout << std::fixed;
+  if (world.rank() == 0) { std::cout.precision(2); std::cout << std::fixed; }  // LEGACY_PATCH: gate format manipulators to rank 0
 
   // Get start time
   molresponse::end_timer(world, "total:");

@@ -152,7 +152,7 @@ GroundParameters TDDFT::GetGroundParameters() { return g_params; }
 PropertyBase TDDFT::GetPropertyObject() { return p; }
 // Get Frequencies Omega
 Tensor<double> TDDFT::GetFrequencyOmega() {
-  print("Frequencies : ", omega);
+  // LEGACY_PATCH: removed ungated print (no World& available in getter; print had no rank guard)
   return omega;
 }
 // Save the current response calculation
@@ -609,22 +609,31 @@ X_space TDDFT::create_trial_functions2(World& world,
   // create 3 x n orbital functions
   std::vector<vector<real_function_3d>> functions;
 
-  print("Debug Norms", xyz[0].norm2());
-  print("Debug Norms", xyz[1].norm2());
-  print("Debug Norms", xyz[2].norm2());
+  // LEGACY_PATCH: norm2() is collective — extract before rank-0 print
+  double n0 = xyz[0].norm2(), n1 = xyz[1].norm2(), n2 = xyz[2].norm2();
+  if (world.rank() == 0) {  // LEGACY_PATCH: rank gate debug prints
+    print("Debug Norms", n0);
+    print("Debug Norms", n1);
+    print("Debug Norms", n2);
+  }
 
   for (size_t d = 0; d < directions; d++) {
     vector<real_function_3d> temp;
     for (size_t i = 0; i < n; i++) {
       // create x functions then y.. then z ..
       temp.push_back(orbitals[i] * xyz[d]);
-      print("Debug Norms of temp ", i, "=", temp[i].norm2());
-      print("Debug Norms of orbitals ", i, "=", orbitals[i].norm2());
+      // LEGACY_PATCH: norm2() collective — extract before rank-0 print
+      double tn = temp[i].norm2();
+      double on = orbitals[i].norm2();
+      if (world.rank() == 0) {  // LEGACY_PATCH: rank gate debug prints
+        print("Debug Norms of temp ", i, "=", tn);
+        print("Debug Norms of orbitals ", i, "=", on);
+      }
     }
     // all the x then the y then the z
     functions.push_back(temp);
   }
-  print("number of orbitals: ", orbitals.size());
+  if (world.rank() == 0) print("number of orbitals: ", orbitals.size());  // LEGACY_PATCH: rank gate
 
   // Container to return
   size_t count = 0;
@@ -732,7 +741,7 @@ response_space TDDFT::PropertyRHS(World& world, PropertyBase& p) const {
   // This is just orbitals times dipole operator
   std::vector<real_function_3d> orbitals = ground_orbitals;
 
-  print("num operators ", p.num_operators);
+  if (world.rank() == 0) print("num operators ", p.num_operators);  // LEGACY_PATCH: rank gate
   for (size_t i = 0; i < p.num_operators; i++) {
     // question here....MolecularDerivativeFunctor takes derivative with
     // respect to axis atom and axis
@@ -749,12 +758,16 @@ response_space TDDFT::PropertyRHS(World& world, PropertyBase& p) const {
     rhs[i] = Qhat(rhs[i]);
     // truncate(world, rhs[i], true);
     for (size_t j = 0; j < orbitals.size(); j++) {
-      print("RHS norm for after orbital ",
-            j,
-            "Response state  ",
-            i,
-            ": ",
-            rhs[i][j].norm2());
+      // LEGACY_PATCH: norm2() is collective — extract before rank-0 print
+      double n = rhs[i][j].norm2();
+      if (world.rank() == 0) {  // LEGACY_PATCH: rank gate RHS norm prints
+        print("RHS norm for after orbital ",
+              j,
+              "Response state  ",
+              i,
+              ": ",
+              n);
+      }
     }
 
     world.gop.fence();
@@ -946,18 +959,10 @@ void TDDFT::xy_from_XVector(response_space& x,
   MADNESS_ASSERT(y[0].size() == size_orbitals(Xvectors[0]));
 
   for (size_t b = 0; b < x.size(); b++) {
-    std::cout << "moving state " << b << std::endl;
-    for (auto xs : x[b]) {
-      std::cout << "norm xs before move" << xs.norm2() << std::endl;
-    }
-    for (auto xs : Xvectors[b].X[0]) {
-      std::cout << "norm Xvector before move" << xs.norm2() << std::endl;
-    }
+    // LEGACY_PATCH: removed ungated std::cout debug prints (no World& available; norm2() is
+    // collective and cannot be safely called inside a rank-gated block from this context)
     x[b] = Xvectors[b].X[0];
     y[b] = Xvectors[b].Y[0];
-    for (auto xs : x[b]) {
-      std::cout << "norm xs after move" << xs.norm2() << std::endl;
-    }
   }
 }
 // compute rms and maxabsval of vector of doubles
@@ -989,7 +994,7 @@ double TDDFT::do_step_restriction(World& world,
   std::vector<double> anorm = norm2s(world, sub(world, x, x_new));
   size_t nres = 0;
   for (unsigned int i = 0; i < x.size(); ++i) {
-    print("anorm ", i, " : ", anorm[i]);
+    if (world.rank() == 0) print("anorm ", i, " : ", anorm[i]);  // LEGACY_PATCH: rank gate
     if (anorm[i] > r_params.maxrotn()) {
       double s = r_params.maxrotn() / anorm[i];
       ++nres;
@@ -1018,10 +1023,10 @@ double TDDFT::do_step_restriction(World& world,
                                   std::string spin,
                                   double maxrotn) const {
   Tensor<double> anorm = norm2s_T(world, sub(world, x, x_new));
-  print("ANORM", anorm);
-  print("maxrotn: ", maxrotn);
+  if (world.rank() == 0) print("ANORM", anorm);          // LEGACY_PATCH: rank gate
+  if (world.rank() == 0) print("maxrotn: ", maxrotn);    // LEGACY_PATCH: rank gate
   for (unsigned int i = 0; i < x_new.size(); ++i) {
-    print("anorm ", i, " : ", anorm[i]);
+    if (world.rank() == 0) print("anorm ", i, " : ", anorm[i]);  // LEGACY_PATCH: rank gate
     if (anorm[i] > maxrotn) {
       double s = maxrotn / anorm[i];
       /*
@@ -1279,7 +1284,7 @@ TDDFT::create_bsh_operators(World& world,
     // Run over occupied components
     for (size_t p = 0; p < n; p++) {
       double mu = sqrt(-2.0 * (ground(p) + omega(k) + shift(k, p)));
-      print("res state ", k, " orb ", p, " bsh exponent mu :", mu);
+      if (world.rank() == 0) print("res state ", k, " orb ", p, " bsh exponent mu :", mu);  // LEGACY_PATCH: rank gate
       temp[p] = std::shared_ptr<SeparatedConvolution<double, 3>>(
           BSHOperatorPtr3D(world, mu, lo, thresh));
     }
@@ -1429,7 +1434,7 @@ void TDDFT::update_x_space_response(World& world,
 
   X_space theta_X = Compute_Theta_X(world, Chi, xc, r_params.calc_type());
   // compute residual X_space
-  print("BSH update iter = ", iteration);
+  if (world.rank() == 0) print("BSH update iter = ", iteration);  // LEGACY_PATCH: rank gate
 
   X_space temp = bsh_update_response(
       world, theta_X, bsh_x_ops, bsh_y_ops, projector, x_shifts);
@@ -1531,11 +1536,15 @@ X_space TDDFT::compute_residual(World& world,
   molresponse::end_timer(world, "BSH residual");
 
   if (r_params.print_level() >= 1) {
-    print("res.X norms in iteration after compute_residual function: ");
-    print(res.X.norm2());
-
-    print("res.Y norms in iteration after compute_residual function: ");
-    print(res.Y.norm2());
+    // LEGACY_PATCH: norm2() is collective — extract before rank-0 print
+    auto nx = res.X.norm2();
+    auto ny = res.Y.norm2();
+    if (world.rank() == 0) {  // LEGACY_PATCH: rank gate
+      print("res.X norms in iteration after compute_residual function: ");
+      print(nx);
+      print("res.Y norms in iteration after compute_residual function: ");
+      print(ny);
+    }
   }
   // the max error in residual
   bsh_residualsX = errX;
@@ -1652,7 +1661,7 @@ void TDDFT::update_x_space_excited(World& world,
 
   Tensor<double> x_shifts(m);
   Tensor<double> y_shifts(m);
-  print("Entering Compute Lambda");
+  if (world.rank() == 0) print("Entering Compute Lambda");  // LEGACY_PATCH: rank gate
 
   if (compute_y) {
     gram_schmidt(world, Chi.X, Chi.Y);
@@ -1665,8 +1674,7 @@ void TDDFT::update_x_space_excited(World& world,
   X_space Lambda_X = Compute_Lambda_X(world, Chi, xc, r_params.calc_type());
   // This diagonalizes XAX and computes new omegas
   // updates Chi
-  print("omega before transform");
-  print(omega);
+  if (world.rank() == 0) { print("omega before transform"); print(omega); }  // LEGACY_PATCH: rank gate
   old_energy = omega;
   compute_new_omegas_transform(world,
                                old_Chi,
@@ -1685,18 +1693,20 @@ void TDDFT::update_x_space_excited(World& world,
   // roatate Chi and old Chi saves this value
   //  old_Chi = Chi.copy();
 
-  print("omega before transform");
-  print(old_energy);
-  print("omega after transform");
-  print(omega);
+  if (world.rank() == 0) {  // LEGACY_PATCH: rank gate omega debug prints
+    print("omega before transform");
+    print(old_energy);
+    print("omega after transform");
+    print(omega);
+  }
   // Analysis gets messed up if BSH is last thing applied
   // so exit early if last iteration
   if (iter == r_params.maxiter() - 1) {
-    print("Reached max iter");
+    if (world.rank() == 0) print("Reached max iter");  // LEGACY_PATCH: rank gate
   } else {
     X_space theta_X = Compute_Theta_X(world, Chi, xc, r_params.calc_type());
     //  Calculates shifts needed for potential / energies
-    print("BSH update iter = ", iter);
+    if (world.rank() == 0) print("BSH update iter = ", iter);  // LEGACY_PATCH: rank gate
     X_space temp = bsh_update_excited(world, omega, theta_X, projector);
 
     res = compute_residual(
@@ -1809,10 +1819,10 @@ X_space TDDFT::bsh_update_excited(World& world,
   bool compute_y = !r_params.tda();
   Tensor<double> x_shifts(m);
   Tensor<double> y_shifts(m);
-  print("omega before shifts");
+  if (world.rank() == 0) print("omega before shifts");  // LEGACY_PATCH: rank gate
   Tensor<double> omega_plus = omega;
   Tensor<double> omega_minus = -omega;
-  print(omega);
+  if (world.rank() == 0) print(omega);  // LEGACY_PATCH: rank gate
   x_shifts = create_shift(
       world, ground_energies, omega_plus, r_params.print_level(), "x");
   // Compute Theta X
@@ -1916,7 +1926,7 @@ void TDDFT::x_space_step_restriction(World& world,
                                      Tensor<double>& maxrotn) {
   size_t m = old_Chi.num_states();
   molresponse::start_timer(world);
-  print(maxrotn);
+  if (world.rank() == 0) print(maxrotn);  // LEGACY_PATCH: rank gate
 
   for (size_t b = 0; b < m; b++) {
     if (true) {
@@ -2107,9 +2117,11 @@ double TDDFT::calculate_max_residual(World& world, response_space& f) {
 void TDDFT::select_active_subspace(World& world) {
   // Default output
   if (r_params.print_level() >= 0) {
-    // Set print output to something reasonable
-    std::cout.precision(2);
-    std::cout << std::fixed;
+    // LEGACY_PATCH: gate format manipulators and prints to rank 0
+    if (world.rank() == 0) {
+      std::cout.precision(2);
+      std::cout << std::fixed;
+    }
 
     if (world.rank() == 0)
       print(
@@ -2154,7 +2166,7 @@ void TDDFT::select_active_subspace(World& world) {
   // Also set the active size
   act_num_orbitals = act_orbitals.size();
 
-  print("Found", act_num_orbitals, "active orbitals.");
+  if (world.rank() == 0) print("Found", act_num_orbitals, "active orbitals.");  // LEGACY_PATCH: rank gate
 }
 
 // Selects from a list of functions and energies the k functions with the
@@ -2728,10 +2740,10 @@ void TDDFT::unaugment_full(World& world,
 
   // Pop off the "m" vectors off the back end of appropriate vectors
   // (only after first iteration)
-  print("Entering Loop to pop_back Chi and LambdaX");
+  if (world.rank() == 0) print("Entering Loop to pop_back Chi and LambdaX");  // LEGACY_PATCH: rank gate
   if (iter > 0) {
     for (size_t i = 0; i < num_states; i++) {
-      print("pop back Chi and LambdaX");
+      if (world.rank() == 0) print("pop back Chi and LambdaX");  // LEGACY_PATCH: rank gate
       Chi.pop_back();
       Lambda_X.pop_back();
     }
@@ -2869,7 +2881,7 @@ Tensor<double> TDDFT::GetFullResponseTransformation(
 
   // Transform into this smaller space if necessary
   if (num_zero > 0) {
-    print("num_zero = ", num_zero);
+    if (world.rank() == 0) print("num_zero = ", num_zero);  // LEGACY_PATCH: rank gate
     // Cut out the singular values that are small
     // (singular values come out in descending order)
 
@@ -3131,7 +3143,7 @@ void TDDFT::deflateTDA(World& world,
   // look at this and make sure it uses my new functions molresponse )
   // by default r_params.larger_subspace() = 0 therefore never uses this
   if (iteration < r_params.larger_subspace() and iteration > 0) {
-    print("Using augmented subspace");
+    if (world.rank() == 0) print("Using augmented subspace");  // LEGACY_PATCH: rank gate
     augment(world,
             Chi,
             old_Chi,
@@ -3152,7 +3164,7 @@ void TDDFT::deflateTDA(World& world,
 
   // If larger subspace, need to "un-augment" everything
   if (iteration < r_params.larger_subspace()) {
-    print("Unaugmenting subspace");
+    if (world.rank() == 0) print("Unaugmenting subspace");  // LEGACY_PATCH: rank gate
     unaugment(world,
               Chi,
               old_Chi,
@@ -3183,7 +3195,7 @@ void TDDFT::deflateFull(World& world,
   Tensor<double> A;
 
   if (iteration < r_params.larger_subspace() and iteration > 0) {
-    print("Entering Augment Full");
+    if (world.rank() == 0) print("Entering Augment Full");  // LEGACY_PATCH: rank gate
     augment_full(world,
                  Chi,
                  old_Chi,
@@ -3224,7 +3236,7 @@ void TDDFT::deflateFull(World& world,
                                     r_params.print_level());
 
   if (iteration < r_params.larger_subspace() and iteration > 0) {
-    print("Entering Unaugment Full");
+    if (world.rank() == 0) print("Entering Unaugment Full");  // LEGACY_PATCH: rank gate
     unaugment_full(world,
                    Chi,
                    old_Chi,

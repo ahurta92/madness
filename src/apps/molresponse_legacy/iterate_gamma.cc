@@ -160,24 +160,26 @@ X_space TDDFT::compute_gamma_full(World& world,
 
   if (r_params.print_level() >= 10) {
     molresponse::start_timer(world);
-    print("inner <X|JX|X>");
-    print(inner(Chi_copy, JX));
-    print("inner <X|JY|X>");
-    print(inner(Chi_copy, JY));
-    print("inner <X|J|X>");
-    print(inner(Chi_copy, J));
-    print("inner <X|KX|X>");
-    print(inner(Chi_copy, KX));
-    print("inner <X|KY|X>");
-    print(inner(Chi_copy, KY));
-    print("inner <X|K|X>");
-    X_space K = KX + KY;
-    print(inner(Chi_copy, K));
-    print("inner <X|W|X>");
-    print(inner(Chi_copy, W));
-    print("inner <X|Gamma|X>");
-    print(inner(Chi_copy, gamma));
-
+    // LEGACY_PATCH: inner() is collective — compute on all ranks, print on rank 0 only
+    auto v_jx    = inner(Chi_copy, JX);
+    auto v_jy    = inner(Chi_copy, JY);
+    auto v_j     = inner(Chi_copy, J);
+    auto v_kx    = inner(Chi_copy, KX);
+    auto v_ky    = inner(Chi_copy, KY);
+    X_space K_tmp = KX + KY;
+    auto v_k     = inner(Chi_copy, K_tmp);
+    auto v_w     = inner(Chi_copy, W);
+    auto v_gamma = inner(Chi_copy, gamma);
+    if (world.rank() == 0) {
+      print("inner <X|JX|X>");    print(v_jx);
+      print("inner <X|JY|X>");    print(v_jy);
+      print("inner <X|J|X>");     print(v_j);
+      print("inner <X|KX|X>");    print(v_kx);
+      print("inner <X|KY|X>");    print(v_ky);
+      print("inner <X|K|X>");     print(v_k);
+      print("inner <X|W|X>");     print(v_w);
+      print("inner <X|Gamma|X>"); print(v_gamma);
+    }
     molresponse::end_timer(world, "Print Expectation Creating Gamma:");
   }
   // put it all together
@@ -366,8 +368,11 @@ X_space TDDFT::compute_gamma_tda(World& world,
 
   if (r_params.print_level() >= 2) {
     molresponse::start_timer(world);
-    print("-------------------------Gamma Functions ------------------");
-    print("2-Electron Potential for Iteration of x");
+    // LEGACY_PATCH: gate print on rank 0; PrintResponseVectorNorms handles collective internally
+    if (world.rank() == 0) {
+      print("-------------------------Gamma Functions ------------------");
+      print("2-Electron Potential for Iteration of x");
+    }
     PrintResponseVectorNorms(world, J * 2, "J");
     PrintResponseVectorNorms(world, k1_x, "k1_x");
     molresponse::end_timer(world, "Print Response Vector Norms:");
@@ -386,13 +391,18 @@ X_space TDDFT::compute_gamma_tda(World& world,
   molresponse::end_timer(world, "Project Gamma:");
 
   if (r_params.print_level() >= 2) {
-    print("------------------------ Gamma Functions Norms  ------------------");
-    print("Gamma X norms");
-    print(gamma.X.norm2());
+    // LEGACY_PATCH: norm2() is collective — compute on all ranks, print on rank 0 only
+    auto gx_norms = gamma.X.norm2();
+    if (world.rank() == 0) {
+      print("------------------------ Gamma Functions Norms  ------------------");
+      print("Gamma X norms");
+      print(gx_norms);
+    }
   }
 
   if (r_params.print_level() >= 2) {
-    print("<X ,Gamma(X,Y) Phi>");
+    // LEGACY_PATCH: gate label print on rank 0; PrintRFExpectation handles collective internally
+    if (world.rank() == 0) print("<X ,Gamma(X,Y) Phi>");
     PrintRFExpectation(world, Chi_copy.X, gamma.X, "x", "Gamma)");
   }
 
@@ -544,24 +554,36 @@ X_space TDDFT::compute_F0X(World& world,
     T0X.Y = T(world, chi_copy.Y);
   }
   if (r_params.print_level() >= 20) {
-    print("_________________compute F0X _______________________");
-    print("inner <X|T0|X>");
-    print(inner(chi_copy, T0X));
+    // LEGACY_PATCH: inner() is collective — compute on all ranks, print on rank 0 only
+    auto v_t0x = inner(chi_copy, T0X);
+    if (world.rank() == 0) {
+      print("_________________compute F0X _______________________");
+      print("inner <X|T0|X>");
+      print(v_t0x);
+    }
   }
 
   X_space V0X = compute_V0X(world, chi_copy, xc, compute_Y);
   if (r_params.print_level() >= 20) {
-    print("_________________compute F0X _______________________");
-    print("inner <X|V0|X>");
-    print(inner(chi_copy, V0X));
+    // LEGACY_PATCH: inner() is collective — compute on all ranks, print on rank 0 only
+    auto v_v0x = inner(chi_copy, V0X);
+    if (world.rank() == 0) {
+      print("_________________compute F0X _______________________");
+      print("inner <X|V0|X>");
+      print(v_v0x);
+    }
   }
 
   F0X = T0X + V0X;
 
   if (r_params.print_level() >= 20) {
-    print("_________________compute F0X _______________________");
-    print("inner <X|F0|X>");
-    print(inner(chi_copy, F0X));
+    // LEGACY_PATCH: inner() is collective — compute on all ranks, print on rank 0 only
+    auto v_f0x = inner(chi_copy, F0X);
+    if (world.rank() == 0) {
+      print("_________________compute F0X _______________________");
+      print("inner <X|F0|X>");
+      print(v_f0x);
+    }
   }
 
   molresponse::end_timer(world, "F0X:");
