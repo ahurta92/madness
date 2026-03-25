@@ -1,5 +1,13 @@
 # molresponse_legacy
 
+
+## Review
+
+- Starting in @calc_runner.cc
+- Start timer, and plot the ground-state vtk if plot_initial is requested through r_params.
+
+
+
 ## Status
 
 `src/apps/molresponse_legacy/` is a frozen compatibility baseline imported from
