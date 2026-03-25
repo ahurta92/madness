@@ -16,7 +16,7 @@
 //
 //   Excited-state response (M-state bundle, variational omega):
 //     for each i: potentials[i] = compute_response_potentials(world, states[i], gs)
-//     build_rotation_matrices(states, lambdas, S, A)
+//     excited_ops::build_rotation_matrices(states, lambdas, S, A)   // in BundleKernels.hpp
 //     diag = diagonalize_bundle(world, S, A)       // -> U, omega
 //     states   = rotate_bundle(world, states, diag.U)
 //     lambdas  = rotate_bundle(world, lambdas, diag.U)
@@ -55,7 +55,7 @@ using namespace madness;
 //
 // flat already collects all channels in contiguous order, so this reduces to
 // a single vmra inner() call.  Used to build the A matrix in the excited-state
-// subspace rotation (see build_rotation_matrices).
+// subspace rotation (see excited_ops::build_rotation_matrices in BundleKernels.hpp).
 // Unrestricted support is not yet implemented.
 template <typename ResponseType>
 [[nodiscard]] double response_plain_inner(madness::World &world,
@@ -80,7 +80,7 @@ template <typename ResponseType>
 //
 // For TDA (StaticRestricted) B = 0 and there is no y block, so the metric
 // reduces to a plain overlap: ⟨x|x'⟩.
-// Used in build_rotation_matrices to form the overlap matrix S.
+// Used in excited_ops::build_rotation_matrices (BundleKernels.hpp) to form S.
 // Unrestricted support is not yet implemented.
 template <typename ResponseType>
 [[nodiscard]] double response_metric_inner(madness::World &world,
@@ -405,49 +405,6 @@ compute_response_potentials(madness::World &world,
 // ============================================================================
 // Excited-state subspace rotation
 // ============================================================================
-
-// Build overlap (S) and energy (A) matrices for the M-state excited-state bundle.
-//
-// These are the S and A matrices of the generalized eigenvalue problem
-// solved in each excited-state iteration:
-//
-//   A c = ω S c
-//
-// where c are the subspace mixing coefficients and ω are the excitation energies.
-//
-//   S_ij = ⟨Φ_i|Φ_j⟩_metric
-//        = ⟨x_i|x_j⟩ − ⟨y_i|y_j⟩   (symplectic metric; see response_metric_inner)
-//
-//   A_ij = ½ (⟨Φ_i|λ_j⟩_plain + ⟨Φ_j|λ_i⟩_plain)   (symmetrised)
-//
-// where λ_j = v0_j − ε_j + γ_j is the effective Hamiltonian action on state j
-// (see compute_response_potentials).
-//
-// Both S and A are symmetrised before being passed to diagonalize_bundle.
-// S and A are inputs to diagonalize_bundle.
-template <typename ResponseType>
-void build_rotation_matrices(madness::World &world,
-                             const std::vector<ResponseType> &states,
-                             const std::vector<ResponseType> &lambdas,
-                             madness::Tensor<double> &S,
-                             madness::Tensor<double> &A) {
-    const size_t n = states.size();
-    S = madness::Tensor<double>(n, n);
-    A = madness::Tensor<double>(n, n);
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i; j < n; ++j) {
-            const double sij = response_metric_inner(world, states[i], states[j]);
-            S(i, j) = sij;
-            S(j, i) = sij;
-            const double aij = response_plain_inner(world, states[i], lambdas[j]);
-            const double aji = response_plain_inner(world, states[j], lambdas[i]);
-            A(i, j) = aij;
-            A(j, i) = aji;
-        }
-    }
-    S = 0.5 * (S + transpose(S));
-    A = 0.5 * (A + transpose(A));
-}
 
 // SVD conditioning of S when it is near-singular (near-linear dependence
 // between states). Floors small singular values to avoid sygvp failure.

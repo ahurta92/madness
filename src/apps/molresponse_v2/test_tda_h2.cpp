@@ -291,6 +291,12 @@ int main(int argc, char **argv) {
             if (sane && diag.converged)
                 std::printf("PASS: all energies positive and monotone.\n");
         }
+
+        // Write excited_states.calc_info.json next to the ground-state archive.
+        write_excited_state_calc_info(
+            world,
+            args.gs_dir + "/excited_states.calc_info.json",
+            args.gs_dir, gs, params, omega, diag);
     } catch (const MadnessException &e) {
         if (debug_logger && world.rank() == 0) {
             debug_logger->finalize_state();

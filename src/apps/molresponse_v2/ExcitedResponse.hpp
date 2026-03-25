@@ -147,6 +147,23 @@ iterate_excited(madness::World            &world,
 }
 
 // ============================================================================
+// JSON output
+// ============================================================================
+
+/// Write excited_states.calc_info.json to output_json_path (rank 0 only).
+/// gs_dir is the directory containing moldft.calc_info.json (used to read
+/// the ground-state total energy).  All other information is taken from gs,
+/// params, omega, and diag.  The schema follows EXCITED_STATE_JSON_SCHEMA.md.
+void write_excited_state_calc_info(
+    madness::World               &world,
+    const std::string            &output_json_path,
+    const std::string            &gs_dir,
+    const GroundStateData        &gs,
+    const ExcitedSolverParams    &params,
+    const std::vector<double>    &omega,
+    const ExcitedIterDiagnostics &diag);
+
+// ============================================================================
 // Config for the ExcitedResponse driver
 // ============================================================================
 

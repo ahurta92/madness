@@ -3,8 +3,8 @@
 // Two-layer design (mirrors the header):
 //
 //   Layer 1  iterate_excited<R>  (top of this file)
-//     Pure numerics.  Takes (world, states, omega, gs, params), runs the
-//     diagonalise-rotate-BSH-KAIN loop, returns ExcitedIterDiagnostics.
+//     Pure numerics.  Takes (world, bundle, omega, gs, params), runs the
+//     potentials → rotate → BSH → KAIN loop, returns ExcitedIterDiagnostics.
 //     No files, no restart, no MPI topology decisions.
 //
 //   Layer 2  ExcitedResponse::Impl
@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <random>
@@ -182,7 +184,22 @@ build_fresh_guess_x_states(World              &world,
 }
 
 // ============================================================================
-// iterate_excited<R>(ResponseBundle) — shared dispatcher
+// iterate_excited<R> — generic excited-state KAIN iteration loop
+//
+// Algorithm (mirrors the frequency-dependent iterate<R> in FrequencyLoop.hpp):
+//
+//   for each iteration:
+//     1. Compute per-root potentials: V₀, γ, λ
+//     2. Subspace rotation: build S + A, diagonalise → ω, U; rotate states + pots
+//     3. Snapshot previous bundle for KAIN and residual computation
+//     4. Per-root BSH step: θ = V₀ − ε·x + γ  →  x_new = G(μ)·θ
+//     5. Bundle KAIN acceleration
+//     6. Step restriction + Q-project + normalize
+//     7. Convergence check on max BSH residual
+//
+// Per-type dispatch is handled implicitly via if constexpr in ResponseKernels.hpp:
+//   TDARestrictedResponse     — x-only; ρ¹ = Σ xᵢφᵢ
+//   DynamicRestrictedResponse — x+y;    ρ¹ = Σ(xᵢ+yᵢ)φᵢ
 // ============================================================================
 
 template <typename R>
@@ -195,9 +212,132 @@ iterate_excited(World                     &world,
 {
     static_assert(!response_is_unrestricted_v<R>,
                   "iterate_excited: unrestricted not yet implemented");
-    return excited_ops::iterate_trial(world, bundle, omega, gs, params);
+    using namespace excited_ops;
+
+    auto &states = bundle.states();
+    const size_t M = states.size();
+    const size_t N = bundle.num_orbitals();
+    if (M == 0) return {};
+    if (omega.size() < M) omega.resize(M, 0.0);
+
+    auto *logger = params.debug_logger;
+    bundle_solver<R> solver(ResponseBundleAllocator<R>{world, M, N}, false);
+    solver.set_maxsub(static_cast<int>(params.maxsub));
+
+    ExcitedIterDiagnostics result;
+    std::vector<double> last_residuals(M, 0.0);
+    std::vector<double> last_density_changes(M, 0.0);
+
+    for (size_t iter = 0; iter < params.maxiter; ++iter) {
+        if (logger) logger->begin_iteration(iter);
+        TimedValueLogger::set_iteration_context(iter);
+
+        // ── 0. Gram-Schmidt orthonormalize ─────────────────────────────────
+        // Mirrors gram_schmidt(Chi.X, Chi.Y) + normalize(Chi) called at the
+        // start of every update_x_space_excited in the reference implementation.
+        // Keeps states orthonormal under the metric (⟨x|x⟩ − ⟨y|y⟩) so that S
+        // remains well-conditioned for the subsequent subspace diagonalization.
+        DEBUG_TIMED_BLOCK(world, logger, "gram_schmidt", {
+            metric_gram_schmidt(world, states, gs);
+        });
+
+        // ── 1. Compute per-root potentials: V₀, γ, λ ──────────────────────
+        BundlePotentials<R> potentials;
+        DEBUG_TIMED_BLOCK(world, logger, "compute_potentials", {
+            potentials = compute_excited_potentials(world, states, gs);
+        });
+        print_potential_diagnostics(world, states, potentials, params.print_level);
+
+        // ── 2. Subspace rotation: S + A → ω, U; rotate states + pots ──────
+        bool rotate_ok;
+        DEBUG_TIMED_BLOCK(world, logger, "rotate", {
+            rotate_ok = diagonalize_and_rotate_bundle(
+                world, states, potentials, omega, params.print_level, logger);
+        });
+        if (!rotate_ok) {
+            if (logger) logger->end_iteration();
+            TimedValueLogger::clear_iteration_context();
+            break;
+        }
+
+        // ── 3. Snapshot previous bundle; save densities before BSH step ───
+        auto prev_bundle      = snapshot_bundle(world, states);
+        auto densities_before = compute_response_densities(world, states, gs);
+
+        // ── 4. Per-root BSH step: θ_p = V₀_p − ε·x_i + γ_p  →  G(μ)·θ ──
+        std::vector<double> residuals(M);
+        std::vector<R>      updated_states;
+        updated_states.reserve(M);
+        for (size_t i = 0; i < M; ++i) {
+            R updated;
+            DEBUG_TIMED_BLOCK(world, logger, "bsh_step", {
+                updated = ExcitedStateStep(
+                    world, states[i], potentials.v0[i], potentials.gamma[i],
+                    omega[i], gs);
+            });
+            residuals[i] = state_norm(world,
+                               sub(world, response_all(updated),
+                                         response_all(prev_bundle[i])));
+            DEBUG_LOG_VALUE(world, logger,
+                            "state_" + std::to_string(i) + ".residual",
+                            residuals[i]);
+            updated_states.push_back(std::move(updated));
+        }
+        world.gop.fence();
+
+        // ── 5. Bundle KAIN (seed with direct step for first 2 iterations) ──
+        ResponseBundle<R> updated_bundle(std::move(updated_states));
+        auto residual_bundle = updated_bundle - prev_bundle;
+        auto kain_bundle = (iter >= 2)
+            ? solver.update(prev_bundle, residual_bundle)
+            : std::move(updated_bundle);
+
+        // ── 6. Step restriction + Q-project + normalize ────────────────────
+        std::vector<double> density_changes;
+        DEBUG_TIMED_BLOCK(world, logger, "step_project_normalize", {
+            density_changes = apply_step_project_normalize(
+                world, states, kain_bundle, prev_bundle,
+                densities_before, gs, params.max_rotation);
+        });
+
+        // ── 7. Convergence check ───────────────────────────────────────────
+        const double max_res  = *std::max_element(residuals.begin(),      residuals.end());
+        const double max_drho = *std::max_element(density_changes.begin(), density_changes.end());
+        result.iteration_max_residuals.push_back(max_res);
+        result.iteration_max_density_changes.push_back(max_drho);
+        last_residuals      = residuals;
+        last_density_changes = density_changes;
+        result.iterations_used = iter + 1;
+
+        DEBUG_LOG_VALUE(world, logger, "iteration.max_residual",      max_res);
+        DEBUG_LOG_VALUE(world, logger, "iteration.max_density_change", max_drho);
+
+        if (params.print_level > 0 && world.rank() == 0) {
+            madness::print("iterate_excited"
+                           " iter=",     iter,
+                           " max_res=",  max_res,
+                           " max_drho=", max_drho);
+            for (size_t i = 0; i < M; ++i)
+                madness::print("  root=",  i,
+                               " omega=", omega[i],
+                               " eV=",    omega[i] * 27.2114,
+                               " res=",   residuals[i]);
+        }
+
+        if (logger) logger->end_iteration();
+        TimedValueLogger::clear_iteration_context();
+
+        if (max_res <= params.dconv) { result.converged = true; break; }
+    }
+
+    // Populate final per-root vectors for the caller (actual per-root values,
+    // not the max broadcasted to all roots).
+    result.residual_norms      = last_residuals;
+    result.density_change_norms = last_density_changes;
+    return result;
 }
 
+// Explicit instantiations — one per supported response type.
 template ExcitedIterDiagnostics
 iterate_excited<TDARestrictedResponse>(
     World &, ResponseBundle<TDARestrictedResponse> &,
@@ -207,6 +347,108 @@ template ExcitedIterDiagnostics
 iterate_excited<DynamicRestrictedResponse>(
     World &, ResponseBundle<DynamicRestrictedResponse> &,
     std::vector<double> &, const GroundStateData &, const ExcitedSolverParams &);
+
+// ============================================================================
+// write_excited_state_calc_info
+// ============================================================================
+
+namespace {
+double read_gs_energy_from_calc_info(const std::string &gs_dir) {
+    const std::string path = gs_dir + "/moldft.calc_info.json";
+    std::ifstream f(path);
+    if (!f.is_open()) return 0.0;
+    try {
+        nlohmann::json j;
+        f >> j;
+        if (j.contains("properties") && j["properties"].contains("energy"))
+            return j["properties"]["energy"].get<double>();
+        if (j.contains("scf") && j["scf"].contains("properties") &&
+            j["scf"]["properties"].contains("energy"))
+            return j["scf"]["properties"]["energy"].get<double>();
+    } catch (...) {}
+    return 0.0;
+}
+} // namespace
+
+void write_excited_state_calc_info(
+    World                        &world,
+    const std::string            &output_json_path,
+    const std::string            &gs_dir,
+    const GroundStateData        &gs,
+    const ExcitedSolverParams    &params,
+    const std::vector<double>    &omega,
+    const ExcitedIterDiagnostics &diag)
+{
+    if (world.rank() != 0) return;
+
+    constexpr double au2ev    = 27.2114;
+    constexpr double not_conv = 1.0e100; // JSON has no infinity
+    const int    k      = FunctionDefaults<3>::get_k();
+    const double thresh = FunctionDefaults<3>::get_thresh();
+    const bool   is_hf  = (gs.xcf_.hf_exchange_coefficient() >= 1.0 - 1.0e-8);
+    const std::string approx = params.tda ? "tda" : "full";
+
+    nlohmann::json j;
+    j["schema_version"] = "1.0";
+
+    // metadata
+    j["metadata"]["code"]     = "molresponse_v2";
+    j["metadata"]["mpi_size"] = world.size();
+
+    // ground state
+    const double gs_energy = read_gs_energy_from_calc_info(gs_dir);
+    j["ground_state"]["model"]           = is_hf ? "hf" : "dft";
+    j["ground_state"]["xc"]              = is_hf ? "hf" : "dft";
+    j["ground_state"]["total_energy_au"] = gs_energy;
+    j["ground_state"]["num_orbitals"]    = gs.getNumOrbitals();
+    j["ground_state"]["wavelet_order_k"] = k;
+    j["ground_state"]["thresh"]          = thresh;
+    j["ground_state"]["basis"]           = nullptr;
+    nlohmann::json evals = nlohmann::json::array();
+    const auto &ev = gs.getEnergies();
+    for (long i = 0; i < ev.dim(0); ++i)
+        evals.push_back(ev(i));
+    j["ground_state"]["eigenvalues_au"]  = evals;
+
+    // calculation parameters
+    j["calculation"]["type"]                 = "excited_state";
+    j["calculation"]["approximation"]        = approx;
+    j["calculation"]["num_states_requested"] = static_cast<int>(omega.size());
+    j["calculation"]["dconv"]                = params.dconv;
+    j["calculation"]["thresh"]               = thresh;
+    j["calculation"]["maxiter"]              = static_cast<int>(params.maxiter);
+    j["calculation"]["kain_subspace"]        = static_cast<int>(params.maxsub);
+
+    // convergence
+    j["convergence"]["converged"]            = diag.converged;
+    j["convergence"]["converged_for_dconv"]  = diag.converged ? params.dconv : not_conv;
+    j["convergence"]["converged_for_thresh"] = diag.converged ? thresh       : not_conv;
+    j["convergence"]["num_iterations"]       = static_cast<int>(diag.iterations_used);
+
+    // excitations — one object per root, sorted by omega ascending
+    nlohmann::json excitations = nlohmann::json::array();
+    for (size_t i = 0; i < omega.size(); ++i) {
+        const double err = (i < diag.residual_norms.size())
+                           ? diag.residual_norms[i] : 0.0;
+        nlohmann::json ex;
+        ex["root"]                          = static_cast<int>(i + 1);
+        ex["spin"]                          = "singlet";
+        ex["irrep"]                         = nullptr;
+        ex["omega_au"]                      = omega[i];
+        ex["omega_ev"]                      = omega[i] * au2ev;
+        ex["current_error"]                 = err;
+        ex["oscillator_strength_length"]    = nullptr;
+        ex["oscillator_strength_velocity"]  = nullptr;
+        ex["converged"]                     = (err <= params.dconv);
+        excitations.push_back(ex);
+    }
+    j["excitations"] = excitations;
+
+    std::ofstream out(output_json_path);
+    out << std::setw(4) << j << "\n";
+    if (world.rank() == 0)
+        madness::print("Wrote excited-state results to:", output_json_path);
+}
 
 // ============================================================================
 // ExcitedResponse::Impl — protocol driver
@@ -280,7 +522,7 @@ public:
                            " dconv=",       input.dconv);
             madness::print("  Excitation energies:");
             for (size_t i = 0; i < omega.size(); ++i)
-                madness::print("    state", i,
+                madness::print("    root", i,
                                "  omega =", omega[i], " au",
                                "  =", omega[i] * 27.2114, " eV");
         }
@@ -291,6 +533,16 @@ public:
         result.residual_norms   = diag.residual_norms;
         result.stage_status     = diag.converged ? "converged" : "not_converged";
         result.response_variant = input.tda ? "TDARestricted" : "DynamicRestricted";
+
+        // Write excited_states.calc_info.json alongside the ground-state archive.
+        const auto sep = config_.archive_file.rfind('/');
+        const std::string gs_dir =
+            (sep != std::string::npos) ? config_.archive_file.substr(0, sep) : ".";
+        write_excited_state_calc_info(
+            world,
+            gs_dir + "/excited_states.calc_info.json",
+            gs_dir, *gs_, params, omega, diag);
+
         return result;
     }
 

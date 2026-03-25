@@ -326,104 +326,142 @@ For excited states we solve for a **bundle of M states simultaneously** without
 an external perturbation.  The excitation energies ω and transition vectors
 (x_1, …, x_M) are the eigenvectors of the Casida generalized eigenvalue problem.
 
-Each iteration of `iterate_excited_bundle()` in `ExcitedStateBundleSolver.cpp`
-performs the following steps:
+The entry point is `iterate_excited<R>(world, bundle, omega, gs, params)` in
+`ExcitedResponse.cpp`.  It accepts any restricted closed-shell response type R:
+- `TDARestrictedResponse` — x-only, TDA density ρ¹ = Σ xᵢφᵢ
+- `DynamicRestrictedResponse` — x+y, full TDDFT density ρ¹ = Σ(xᵢ+yᵢ)φᵢ
 
-### Step 1 — Compute response potentials
+Each iteration performs seven steps:
 
-For each bundle state i, compute:
-
-```cpp
-auto pots = compute_response_potentials(world, states[i], gs);
-// pots.v0     = V^0 x_i          (local reference potential)
-// pots.gamma  = g'[γ^C_i] φ      (XC response kernel)
-// pots.lambda = v0 - epsilon + gamma  (full effective Hamiltonian action)
-```
-
-### Step 2 — Build rotation matrices S and A
-
-```
-S_ij = ⟨Φ_i|Φ_j⟩_metric  =  ⟨x_i|x_j⟩ − ⟨y_i|y_j⟩
-A_ij = ½ (⟨Φ_i|λ_j + T·x_j⟩  +  ⟨Φ_j|λ_i + T·x_i⟩)
-```
-
-Note: kinetic energy `T` is included in the A matrix (needed to make eigenvalues
-physical excitation energies), but **T is NOT included in the BSH source term**
-(T is handled implicitly by the BSH Green's function).
+### Step 0 — Gram-Schmidt orthonormalization (`metric_gram_schmidt` in `BundleKernels.hpp`)
 
 ```cpp
-// Add kinetic contribution to lambda for A-matrix building.
-auto lambda_T = lambda;
-assign_flat_and_sync(lambda_T, add(world, lambda.flat, T_flat));
-build_rotation_matrices(world, states, lambdas_T, S, A);
+metric_gram_schmidt(world, states, gs);
 ```
 
-### Step 3 — Generalized eigenvalue problem
+Called at the **start** of every iteration before computing potentials.  Mirrors
+`gram_schmidt(Chi.X, Chi.Y) + normalize(Chi)` from the reference implementation.
+Uses the symplectic metric ⟨x|x'⟩ − ⟨y|y'⟩ so S stays well-conditioned.
 
-```cpp
-// Solve A c = ω S c.
-auto diag = diagonalize_bundle(world, S, A, print_level);
-// diag.omega    = excitation energies (ascending)
-// diag.U        = rotation matrix
-// diag.slot_order = permutation used for energy sorting
+### Step 1 — Compute per-root potentials (`compute_excited_potentials` in `BundleKernels.hpp`)
+
+For each bundle state i:
+```
+pots.v0[i]     = V^0 x_i  =  (V_local − c_xc·K₀) x_i
+pots.gamma[i]  = Q̂·[response XC kernel]           (type-dispatched via ResponseKernels.hpp)
+pots.lambda[i] = v0 − ε·x + gamma                  (no kinetic — T is implicit in BSH)
 ```
 
-Post-processing in `diagonalize_bundle`:
+### Step 2 — Subspace rotation: S, A → ω, U (`diagonalize_and_rotate_bundle` in `BundleKernels.hpp`)
+
+```
+S_ij = metric_inner(states_i, states_j)           TDA: ⟨x|x'⟩;  Full: ⟨x|x'⟩−⟨y|y'⟩
+A_ij = ½(⟨Φ_i | λ_j + T·x_j ⟩  +  ⟨Φ_j | λ_i + T·x_i ⟩)
+```
+
+**Important:** `T` (kinetic energy via `apply_kinetic_flat`) is applied to the
+**state** `x_i`, not to `lambda_i`, and is only added for building A.  It must
+NOT appear in the BSH source term (T is handled implicitly by the BSH Green's
+function, which would double-count it).
+
+`diagonalize_bundle` (`ResponseKernels.hpp`) solves `A c = ω S c` and applies:
 1. Column swap to keep large coefficients near diagonal (root tracking)
 2. Phase fixing so diagonal elements are positive
 3. SVD rotation within near-degenerate clusters
-4. Sort by ascending eigenvalue
+4. Sort columns by ascending eigenvalue
 
-### Step 4 — Subspace rotation
+After diagonalisation, states, lambda, v0, and gamma are all rotated by U, and
+each state is renormalized under the metric.
+
+### Step 3 — Snapshot bundle
 
 ```cpp
-states  = rotate_bundle(world, states,  diag.U);
-lambdas = rotate_bundle(world, lambdas, diag.U);
+auto prev_bundle = snapshot_bundle(world, states);      // deep copy for KAIN
+auto densities_before = compute_response_densities(...); // ρ¹ before BSH step
 ```
 
-`rotate_bundle` operates on the flat vector:
-```
-rotated[i].flat = Σ_j U(j,i) * states[j].flat
-```
-then calls `sync()` to rebuild typed channels.
-
-### Step 5 — BSH update per state
+### Step 4 — Per-root BSH step (`ExcitedStateStep` in `BundleKernels.hpp`)
 
 For each bundle state i:
-
 ```
-theta_i = -2 * (lambda_i[p] + shift[p] * x_i[p])
-x_new_i = Ĝ(ω_i) * theta_i      (no vp — excited state, no external perturbation)
+θ_p = v0_p − ε_{ip}·x_i + γ_p               (= lambda_p; recomputed from rotated pots)
+x_p^new = Ĝ(μ_p) · [−2·(θ_p + shift_p·x_p)]
+
+μ_p = √(−2·(ε_p + ω_i + shift_p))
+shift_p applied when ε_p + ω_i ≥ 0 to keep denominator negative (BSH stability)
 ```
 
-BSH exponent: `k_p = sqrt(-2*(ε_p + ω_i + shift_p))`
+TDA: N BSH operators at +ω.  Full: 2N operators (N at +ω, N at −ω).
 
-Numerical stabilization: if `ε_p + ω_i > 0`, a shift is applied to keep the
-denominator negative (well-conditioned BSH operator).
+### Step 5 — Bundle KAIN acceleration
 
 ```cpp
-std::vector<double> orbital_shifts;
-auto bsh_ops = make_excited_bsh_operators(world, states[i], omega[i], gs, orbital_shifts);
-auto theta   = ...;   // -2*(lambda[p] + shift[p]*x[p])
-auto updated_flat = apply(world, bsh_ops, theta);
-
-// Atomically replace flat and sync typed channels.
-assign_flat_and_sync(updated, updated_flat);
-project_response_channels(world, updated);   // Qhat
-normalize_response_metric(world, updated);   // ||Φ||_metric = 1
+// Direct BSH step for the first two iterations; KAIN from iter ≥ 2.
+auto kain_bundle = (iter >= 2)
+    ? solver.update(prev_bundle, updated_bundle - prev_bundle)
+    : std::move(updated_bundle);
 ```
 
-### Step 6 — Convergence check
+The `bundle_solver<R>` is a `XNonlinearSolver` over `ResponseBundle<R>`, so KAIN
+captures inter-state coupling from the subspace rotation step.
+
+### Step 6 — Step restriction + Q-project + normalize (`apply_step_project_normalize` in `BundleKernels.hpp`)
+
+For each root i:
+1. If `||candidate[i] − prev[i]|| > max_rotation`, mix back toward prev
+2. `project_response_channels(world, states[i], gs)` — Q̂ onto virtual subspace
+3. `normalize_response_metric(world, states[i])` — metric norm = 1
+
+### Step 7 — Convergence check
 
 ```cpp
-const double max_res  = max over i of ||x_new_i - x_old_i||
-const double max_drho = max over i of ||ρ¹_new_i - ρ¹_old_i||_2
-converged = (max_res < residual_thresh && max_drho < density_thresh)
+const double max_res  = max over i of ||updated[i] − prev[i]||
+const double max_drho = max over i of ||ρ¹_new − ρ¹_old||_2
+converged = (max_res < params.dconv)
 ```
+
+`ExcitedIterDiagnostics` carries both the per-root final residuals
+(`residual_norms`) and the per-iteration max histories
+(`iteration_max_residuals`, `iteration_max_density_changes`).
 
 ---
 
-## 5. Extending to Open-Shell (Unrestricted)
+## 5. JSON Output — `excited_states.calc_info.json`
+
+After convergence, `write_excited_state_calc_info()` (declared in
+`ExcitedResponse.hpp`, implemented in `ExcitedResponse.cpp`) writes a JSON file
+that follows the schema in `results/h2_tda_test/EXCITED_STATE_JSON_SCHEMA.md`:
+
+```json
+{
+  "schema_version": "1.0",
+  "metadata":    { "code": "molresponse_v2", "mpi_size": 4 },
+  "ground_state":{ "model": "hf", "total_energy_au": -1.1336, "eigenvalues_au": [...],
+                   "num_orbitals": 1, "wavelet_order_k": 8, "thresh": 1e-4, "basis": null },
+  "calculation": { "type": "excited_state", "approximation": "tda",
+                   "num_states_requested": 4, "dconv": 1e-4, ... },
+  "convergence": { "converged": true, "converged_for_dconv": 1e-4,
+                   "converged_for_thresh": 1e-4, "num_iterations": 12 },
+  "excitations": [
+    { "root": 1, "spin": "singlet", "irrep": null,
+      "omega_au": 0.46789, "omega_ev": 12.73, "current_error": 8.3e-5,
+      "oscillator_strength_length": null, "oscillator_strength_velocity": null,
+      "converged": true },
+    ...
+  ]
+}
+```
+
+`irrep` and `oscillator_strength_*` are `null` because MRA runs without symmetry
+constraints and the current TDA implementation does not compute transition
+dipoles.  Comparing against Dalton reference data should use only `omega_au`.
+
+Both `test_tda_h2` and `ExcitedResponse::solve_protocol` write this file to the
+ground-state directory (where `moldft.restartdata` lives).
+
+---
+
+## 6. Extending to Open-Shell (Unrestricted)
 
 Unrestricted support (`StaticUnrestrictedResponse`, `DynamicUnrestrictedResponse`)
 requires independent alpha and beta spin channels.  The data layout already
@@ -458,7 +496,7 @@ reintegration plan (see `EXCITED_STATE_REINTEGRATION_PLAN.md`).
 
 ---
 
-## 6. Key File Index
+## 7. Key File Index
 
 | File | Role |
 |------|------|
