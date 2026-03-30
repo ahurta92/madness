@@ -5,6 +5,7 @@
 #include <madness/chem/atomutil.h>
 
 #include "GroundState.hpp"
+#include "ResponseFunctions.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -124,6 +125,52 @@ int main(int argc, char** argv) {
                       " ", atom.x, " ", atom.y, " ", atom.z);
             }
             print("--- End Summary ---\n");
+        }
+
+        // --- Test ResponseState types ---
+        if (world.rank() == 0) {
+            print("\n--- ResponseState Tests ---");
+        }
+
+        long na = ground.num_alpha();
+        long nb = ground.is_spin_restricted() ? 0 : ground.num_beta();
+
+        // Static restricted (x only, no y, no beta)
+        auto static_state = molresponse_v3::RealResponseState::allocate(
+            world, na, nb, false);
+        if (world.rank() == 0) {
+            static_state.print_info("static (x-only)");
+        }
+
+        // Full restricted (x + y)
+        auto full_state = molresponse_v3::RealResponseState::allocate(
+            world, na, nb, true);
+        if (world.rank() == 0) {
+            full_state.print_info("full (x+y)");
+        }
+
+        // Test flat round-trip
+        auto flat = full_state.flat();
+        if (world.rank() == 0) {
+            print("  flat size:", flat.size(),
+                  "(expected:", full_state.total_size(), ")");
+        }
+        full_state.from_flat(flat);
+        if (world.rank() == 0) {
+            print("  flat round-trip: OK");
+        }
+
+        // Test in-place vmra on flat (shared_ptr semantics)
+        auto f = full_state.flat();
+        madness::scale(world, f, 2.0);
+        double norm_xa = madness::norm2(world, full_state.x_alpha);
+        if (world.rank() == 0) {
+            print("  scale(flat, 2.0) -> ||x_alpha|| =", norm_xa,
+                  "(should be 0 for zero funcs)");
+        }
+
+        if (world.rank() == 0) {
+            print("--- ResponseState Tests PASSED ---\n");
         }
 
         world.gop.fence();
