@@ -25,14 +25,13 @@ GroundState::GroundState(World& world, std::shared_ptr<SCF> scf)
 GroundState GroundState::from_archive(World& world,
                                        const std::string& archive_path,
                                        const Molecule& molecule) {
-    // Step 1: Read archive header to get L, xc, etc.
+    // Step 1: Read archive header to get L, xc, nmo_alpha, spin_restricted
     auto header = read_archive_header(world, archive_path);
 
     // Step 2: Build CalculationParameters with values from the archive.
     // SCF::load_mos checks L == param.L(), so we must set L correctly.
     // SCF constructor calls set_derived_values(molecule) which computes
-    // nalpha/nbeta from nuclear charge + nopen, so we must set nopen
-    // for open-shell systems.
+    // nalpha/nbeta from nuclear charge + nopen.
     CalculationParameters params;
     params.set_user_defined_value("l", header.L);
     params.set_user_defined_value("xc", header.xc);
@@ -46,8 +45,6 @@ GroundState GroundState::from_archive(World& world,
     params.set_user_defined_value("prefix", prefix);
 
     // For open-shell: infer nopen from nmo_alpha and total electrons.
-    // Archive stores nmo_alpha directly; nopen = 2*nmo_alpha - nelec.
-    // set_derived_values uses nopen to compute nalpha/nbeta.
     if (!header.spin_restricted) {
         int nelec = static_cast<int>(molecule.total_nuclear_charge());
         int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
@@ -55,7 +52,7 @@ GroundState GroundState::from_archive(World& world,
         params.set_user_defined_value("nopen", nopen);
     }
 
-    // Step 3: Construct SCF
+    // Step 3: Construct SCF (calls set_derived_values internally)
     auto scf = std::make_shared<SCF>(world, params, molecule);
 
     // Step 4: Load orbitals via SCF's own archive reader
@@ -119,7 +116,7 @@ void GroundState::prepare(World& world, double vtol,
         }
         truncate(world, scf_->amo, thresh);
 
-        if (!scf_->is_spin_restricted()) {
+        if (!is_spin_restricted()) {
             reconstruct(world, scf_->bmo);
             for (auto& orbital : scf_->bmo) {
                 orbital = project(orbital, current_k, thresh, true);
@@ -128,44 +125,71 @@ void GroundState::prepare(World& world, double vtol,
         }
     } else {
         truncate(world, scf_->amo, thresh);
-        if (!scf_->is_spin_restricted()) {
+        if (!is_spin_restricted()) {
             truncate(world, scf_->bmo, thresh);
         }
     }
 
-    // Build QProjector from current orbitals
+    // Build QProjector from current alpha orbitals
     q_projector_ = QProjector<double, 3>(scf_->get_amo());
 
-    // Compute density
-    auto density = scf_->make_density(world, scf_->aocc, scf_->amo);
+    // Build V_local for the response solver (multiplicative potential)
+    build_v_local(world, vtol, coulop);
 
-    // Nuclear potential (uses SCF's potentialmanager)
-    scf_->make_nuclear_potential(world);
-    world.gop.fence();
+    // Build Fock matrices using SCF's own methods
+    build_fock_matrices(world, vtol, fock_json_file);
 
-    auto V_nuc = scf_->potentialmanager->vnuclear();
-    V_nuc.truncate(vtol);
+    prepared_ = true;
 
-    // Coulomb potential
-    auto V_coul = 2.0 * apply(*coulop, density, true);
-    V_coul.truncate(vtol);
+    if (world.rank() == 0) {
+        print_info();
+    }
+}
 
-    // Assemble local potential
-    v_local_ = V_nuc + V_coul;
-
-    // XC potential (for DFT with non-pure HF exchange)
-    if (scf_->xc.is_dft() && scf_->xc.hf_exchange_coefficient() != 1.0) {
-        XCOperator<double, 3> xc_op(world, scf_->param.xc(),
-                                     scf_->is_spin_restricted(),
-                                     density, density);
-        v_local_ += xc_op.make_xc_potential();
+void GroundState::build_v_local(World& world, double vtol,
+                                 const poperatorT& coulop) {
+    // Density: alpha + beta (for restricted, brho = arho so total = 2*arho)
+    auto arho = scf_->make_density(world, scf_->aocc, scf_->amo);
+    functionT rho;
+    if (is_spin_restricted()) {
+        rho = 2.0 * arho;
+    } else {
+        auto brho = scf_->make_density(world, scf_->bocc, scf_->bmo);
+        rho = arho + brho;
     }
 
-    V_nuc.clear();
-    V_coul.clear();
-    density.clear();
+    // Nuclear potential
+    scf_->make_nuclear_potential(world);
+    world.gop.fence();
+    auto vnuc = scf_->potentialmanager->vnuclear();
+    vnuc.truncate(vtol);
 
-    // Hamiltonian / Fock matrix
+    // Coulomb potential from total density
+    auto vcoul = apply(*coulop, rho);
+    vcoul.truncate(vtol);
+    rho.clear();
+
+    // Assemble V_local = V_nuc + V_coul
+    v_local_ = vnuc + vcoul;
+    vnuc.clear();
+    vcoul.clear();
+
+    // Add XC potential if DFT (not pure HF)
+    if (scf_->xc.is_dft() && scf_->xc.hf_exchange_coefficient() != 1.0) {
+        XCOperator<double, 3> xc_op(world, scf_->param.xc(),
+                                     is_spin_restricted(),
+                                     arho, arho);
+        v_local_ += xc_op.make_xc_potential();
+    }
+    arho.clear();
+}
+
+void GroundState::build_fock_matrices(World& world, double vtol,
+                                       const std::string& fock_json_file) {
+    auto thresh = FunctionDefaults<3>::get_thresh();
+    auto current_k = FunctionDefaults<3>::get_k();
+
+    // Try loading Fock matrices from JSON file first
     bool loaded_from_file = false;
     if (!fock_json_file.empty() && std::filesystem::exists(fock_json_file)) {
         auto fock_json = broadcast_json_file(world, fock_json_file);
@@ -174,59 +198,81 @@ void GroundState::prepare(World& world, double vtol,
         auto protocol_key = std::string("thresh: ") + std::to_string(thresh)
                           + std::string(" k: ") + std::to_string(current_k);
         if (fock_json.contains(protocol_key)) {
-            hamiltonian_ = tensor_from_json<double>(fock_json[protocol_key]["focka"]);
+            focka_ = tensor_from_json<double>(fock_json[protocol_key]["focka"]);
+            if (!is_spin_restricted() && fock_json[protocol_key].contains("fockb")) {
+                fockb_ = tensor_from_json<double>(fock_json[protocol_key]["fockb"]);
+            } else {
+                fockb_ = copy(focka_);
+            }
             loaded_from_file = true;
         }
     }
 
     if (!loaded_from_file) {
-        const auto& phi = scf_->get_amo();
-        auto phi_copy = copy(world, phi, true);
-        reconstruct(world, phi_copy);
+        // Build Fock matrices using SCF's own pipeline:
+        //   1. apply_potential: builds V_eff*phi (V_local + V_xc + K)
+        //   2. make_fock_matrix: T + <phi|V_eff|phi>, symmetrized
 
-        // Kinetic energy
-        real_derivative_3d Dx(world, 0), Dy(world, 1), Dz(world, 2);
-        auto fx = apply(world, Dx, phi_copy);
-        auto fy = apply(world, Dy, phi_copy);
-        auto fz = apply(world, Dz, phi_copy);
-        compress(world, fx, true);
-        compress(world, fy, true);
-        compress(world, fz, true);
-        world.gop.fence();
-        tensorT T = 0.5 * (matrix_inner(world, fx, fx)
-                          + matrix_inner(world, fy, fy)
-                          + matrix_inner(world, fz, fz));
-        fx.clear(); fy.clear(); fz.clear();
-
-        // Potential energy
-        auto V_local_phi = mul_sparse(world, v_local_, phi, vtol);
-        vecfuncT V_hf_phi = zero_functions<double, 3>(world, phi.size());
-        if (scf_->xc.hf_exchange_coefficient() > 0.0) {
-            const double lo = 1.e-10;
-            Exchange<double, 3> K(world, lo);
-            auto phi_k = copy(world, phi, true);
-            K.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
-            K.set_bra_and_ket(phi_k, phi_k);
-            V_hf_phi = -scf_->xc.hf_exchange_coefficient() * K(phi_k);
+        // SCF::apply_potential needs vlocal = V_nuc + V_coul (without V_xc;
+        // apply_potential adds V_xc and K internally).
+        // Rebuild the bare vlocal for SCF's interface.
+        auto arho = scf_->make_density(world, scf_->aocc, scf_->amo);
+        functionT rho;
+        if (is_spin_restricted()) {
+            rho = 2.0 * arho;
+        } else {
+            auto brho = scf_->make_density(world, scf_->bocc, scf_->bmo);
+            rho = arho + brho;
         }
+        arho.clear();
 
-        auto V_phi = gaxpy_oop(1.0, V_local_phi, 1.0, V_hf_phi);
-        truncate(world, V_phi);
-        auto phi_V_phi = matrix_inner(world, phi, V_phi);
+        scf_->make_nuclear_potential(world);
+        world.gop.fence();
+        auto vnuc = scf_->potentialmanager->vnuclear();
+        vnuc.truncate(vtol);
 
-        hamiltonian_ = T + phi_V_phi;
+        // SCF needs the coulop set for exchange computation
+        scf_->coulop = poperatorT(CoulombOperatorPtr(
+            world, scf_->param.lo(), 0.001 * thresh));
+
+        auto vcoul = apply(*scf_->coulop, rho);
+        vcoul.truncate(vtol);
+        rho.clear();
+
+        functionT vlocal_bare = vnuc + vcoul;
+        vnuc.clear();
+        vcoul.clear();
+
+        // Alpha Fock matrix
+        double exca = 0.0, enla = 0.0, ekina = 0.0;
+        auto Vpsia = scf_->apply_potential(
+            world, scf_->aocc, scf_->amo, vlocal_bare, exca, enla, 0);
+        focka_ = scf_->make_fock_matrix(
+            world, scf_->amo, Vpsia, scf_->aocc, ekina);
+        Vpsia.clear();
+
+        // Beta Fock matrix
+        if (!is_spin_restricted() && num_beta() > 0) {
+            double excb = 0.0, enlb = 0.0, ekinb = 0.0;
+            auto Vpsib = scf_->apply_potential(
+                world, scf_->bocc, scf_->bmo, vlocal_bare, excb, enlb, 1);
+            fockb_ = scf_->make_fock_matrix(
+                world, scf_->bmo, Vpsib, scf_->bocc, ekinb);
+            Vpsib.clear();
+        } else {
+            fockb_ = copy(focka_);
+        }
     }
 
-    // Build off-diagonal Hamiltonian
-    hamiltonian_no_diag_ = copy(hamiltonian_);
-    for (long i = 0; i < num_orbitals(); i++) {
-        hamiltonian_no_diag_(i, i) = 0.0;
+    // Build off-diagonal versions (zero the diagonal)
+    focka_no_diag_ = copy(focka_);
+    for (long i = 0; i < num_alpha(); i++) {
+        focka_no_diag_(i, i) = 0.0;
     }
 
-    prepared_ = true;
-
-    if (world.rank() == 0) {
-        print_info();
+    fockb_no_diag_ = copy(fockb_);
+    for (long i = 0; i < static_cast<long>(fockb_.dim(0)); i++) {
+        fockb_no_diag_(i, i) = 0.0;
     }
 }
 
@@ -239,14 +285,24 @@ const real_function_3d& GroundState::V_local() const {
     return v_local_;
 }
 
-const tensorT& GroundState::hamiltonian() const {
+const tensorT& GroundState::focka() const {
     MADNESS_CHECK(prepared_);
-    return hamiltonian_;
+    return focka_;
 }
 
-const tensorT& GroundState::hamiltonian_no_diag() const {
+const tensorT& GroundState::fockb() const {
     MADNESS_CHECK(prepared_);
-    return hamiltonian_no_diag_;
+    return fockb_;
+}
+
+const tensorT& GroundState::focka_no_diag() const {
+    MADNESS_CHECK(prepared_);
+    return focka_no_diag_;
+}
+
+const tensorT& GroundState::fockb_no_diag() const {
+    MADNESS_CHECK(prepared_);
+    return fockb_no_diag_;
 }
 
 const QProjector<double, 3>& GroundState::Q() const {
@@ -261,16 +317,22 @@ const QProjector<double, 3>& GroundState::Q() const {
 void GroundState::print_info() const {
     print("GROUND_STATE_INFO (v3)");
     print("  xc =", scf_->param.xc());
-    print("  spin_restricted =", scf_->is_spin_restricted());
+    print("  spin_restricted =", is_spin_restricted());
     print("  num_alpha =", num_alpha());
-    if (!scf_->is_spin_restricted()) {
+    if (!is_spin_restricted()) {
         print("  num_beta =", num_beta());
     }
     print("  box_l =", L());
     print("  k =", k());
     print("  orbital_energies_alpha =", scf_->aeps);
-    if (!scf_->is_spin_restricted() && scf_->beps.size() > 0) {
+    if (!is_spin_restricted() && scf_->beps.size() > 0) {
         print("  orbital_energies_beta =", scf_->beps);
+    }
+    if (prepared_) {
+        print("  focka shape =", focka_.dim(0), "x", focka_.dim(1));
+        if (!is_spin_restricted()) {
+            print("  fockb shape =", fockb_.dim(0), "x", fockb_.dim(1));
+        }
     }
     print("  prepared =", prepared_);
     print("------------------------------------------------------------");

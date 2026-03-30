@@ -14,11 +14,13 @@ using namespace madness;
 /// Thin wrapper around SCF for response property calculations.
 ///
 /// Delegates all ground-state data access to a shared SCF object.
-/// Extends with response-specific cached operators (V_local, Hamiltonian,
+/// Extends with response-specific cached operators (V_local, Fock matrices,
 /// QProjector) that are rebuilt per protocol step via prepare().
 ///
 /// Supports both closed-shell (restricted) and open-shell (unrestricted)
-/// through SCF's native alpha/beta orbital storage.
+/// through SCF's native alpha/beta orbital storage. Fock matrices are
+/// computed using SCF::apply_potential() and SCF::make_fock_matrix()
+/// directly — no reimplementation of the Fock construction pipeline.
 class GroundState {
 public:
     /// Construct from an existing SCF calculation (shared ownership).
@@ -69,20 +71,29 @@ public:
 
     /// Prepare ground-state operators for the current protocol.
     /// Must be called after FunctionDefaults<3> are set for the current
-    /// protocol step. Reprojects orbitals if k changed, then computes
-    /// V_local, Hamiltonian, and QProjector.
+    /// protocol step. Reprojects orbitals if k changed, then builds
+    /// V_local and Fock matrices using SCF::apply_potential() and
+    /// SCF::make_fock_matrix().
     void prepare(World& world, double vtol,
                  const poperatorT& coulop,
                  const std::string& fock_json_file = "");
 
-    /// Local potential: V_nuc + 2*V_coul + V_xc
+    /// Local potential: V_nuc + V_coul + V_xc (for response multiplicative term)
     const real_function_3d& V_local() const;
 
-    /// Full Fock/Hamiltonian matrix
-    const tensorT& hamiltonian() const;
+    /// Alpha Fock matrix (also the only Fock matrix for restricted)
+    const tensorT& focka() const;
+    /// Beta Fock matrix (only meaningful for unrestricted)
+    const tensorT& fockb() const;
 
-    /// Fock matrix with diagonal zeroed (off-diagonal coupling)
-    const tensorT& hamiltonian_no_diag() const;
+    /// Alpha Fock with diagonal zeroed (off-diagonal coupling)
+    const tensorT& focka_no_diag() const;
+    /// Beta Fock with diagonal zeroed
+    const tensorT& fockb_no_diag() const;
+
+    /// Convenience: alpha Fock (matches v2 interface name)
+    const tensorT& hamiltonian() const { return focka(); }
+    const tensorT& hamiltonian_no_diag() const { return focka_no_diag(); }
 
     /// Projector onto virtual space: Q = 1 - |phi><phi|
     const QProjector<double, 3>& Q() const;
@@ -102,8 +113,10 @@ private:
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;
-    tensorT hamiltonian_;
-    tensorT hamiltonian_no_diag_;
+    tensorT focka_;
+    tensorT fockb_;
+    tensorT focka_no_diag_;
+    tensorT fockb_no_diag_;
     QProjector<double, 3> q_projector_;
     bool prepared_ = false;
 
@@ -123,6 +136,15 @@ private:
 
     static ArchiveHeader read_archive_header(World& world,
                                               const std::string& archive_path);
+
+    /// Build V_local (V_nuc + V_coul + V_xc) for the response solver.
+    /// This is the multiplicative local potential used in the response
+    /// equations, separate from the Fock matrix construction.
+    void build_v_local(World& world, double vtol, const poperatorT& coulop);
+
+    /// Build Fock matrices using SCF::apply_potential + SCF::make_fock_matrix.
+    void build_fock_matrices(World& world, double vtol,
+                              const std::string& fock_json_file);
 };
 
 } // namespace molresponse_v3
