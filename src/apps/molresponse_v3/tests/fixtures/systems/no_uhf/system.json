@@ -1,0 +1,22 @@
+{
+    "name": "no_uhf",
+    "description": "Nitric oxide, Hartree-Fock, open-shell (doublet)",
+    "molecule": "NO",
+    "method": "hf",
+    "spin": "unrestricted",
+    "n_atoms": 2,
+    "n_electrons": 15,
+    "n_occupied": 8,
+    "n_alpha": 8,
+    "n_beta": 7,
+    "nopen": 1,
+    "geometry_source": "08_test_fixtures.md, NO bond length 2.175 bohr",
+    "seawulf_checkpoint": null,
+    "scf_settings": {
+        "xc": "hf",
+        "k": 6,
+        "L": 40.0,
+        "protocol": [1e-4],
+        "nopen": 1
+    }
+}

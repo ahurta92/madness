@@ -9,6 +9,7 @@ add_subdirectory(moldft)
 # Frozen compatibility baseline for excited-state parity/reference work.
 add_subdirectory(molresponse_legacy)
 add_subdirectory(molresponse_v2)
+add_subdirectory(molresponse_v3)
 add_subdirectory(madqc_v2)
 add_subdirectory(pno)
 add_subdirectory(nemo)

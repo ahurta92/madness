@@ -1,0 +1,18 @@
+{
+    "name": "h2_hf",
+    "description": "H2, Hartree-Fock, closed-shell, minimal test system",
+    "molecule": "H2",
+    "method": "hf",
+    "spin": "restricted",
+    "n_atoms": 2,
+    "n_electrons": 2,
+    "n_occupied": 1,
+    "geometry_source": "bond length 1.4 bohr (0.74 angstrom)",
+    "seawulf_checkpoint": null,
+    "scf_settings": {
+        "xc": "hf",
+        "k": 5,
+        "L": 20.0,
+        "protocol": [1e-4]
+    }
+}

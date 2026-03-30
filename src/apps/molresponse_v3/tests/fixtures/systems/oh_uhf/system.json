@@ -1,0 +1,22 @@
+{
+    "name": "oh_uhf",
+    "description": "OH radical, Hartree-Fock, open-shell (doublet)",
+    "molecule": "OH",
+    "method": "hf",
+    "spin": "unrestricted",
+    "n_atoms": 2,
+    "n_electrons": 9,
+    "n_occupied": 5,
+    "n_alpha": 5,
+    "n_beta": 4,
+    "nopen": 1,
+    "geometry_source": "08_test_fixtures.md, OH bond length 1.832 bohr",
+    "seawulf_checkpoint": null,
+    "scf_settings": {
+        "xc": "hf",
+        "k": 6,
+        "L": 40.0,
+        "protocol": [1e-4],
+        "nopen": 1
+    }
+}

@@ -1,0 +1,378 @@
+{
+  "_description": "MRA reference values extracted from publication-quality calculations",
+  "_sources": {
+    "beta_paper_d06": {
+      "description": "Beta paper, dconv=1e-6, HF, all xyz directions",
+      "base_path": "/gpfs/projects/rjh/adrian/summer2025/beta_projects/raw_data/beta_paper/d06/output",
+      "method": "hf",
+      "basis": "mra-d06",
+      "dconv": 1e-06
+    },
+    "raman_paper_mra_p07": {
+      "description": "Raman paper, MRA calculations with protocol refinement",
+      "base_path": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data",
+      "method": "hf",
+      "basis": "mra-p07"
+    },
+    "h2_tda_test": {
+      "description": "H2 TDA reference from legacy molresponse k=8 + Dalton d-aug-cc-pVQZ",
+      "base_path": "/gpfs/projects/rjh/adrian/development/madness-worktrees/molresponse-feature-next/molresponse_testdata/results/h2_tda_test",
+      "method": "hf_tda"
+    }
+  },
+  "systems": {
+    "H2O": {
+      "sources": {
+        "beta_paper_d06": {
+          "path": "/gpfs/projects/rjh/adrian/summer2025/beta_projects/raw_data/beta_paper/d06/output/H2O",
+          "properties_available": [
+            "alpha",
+            "beta",
+            "raman"
+          ],
+          "frequencies": [
+            0.0,
+            0.019867,
+            0.039733,
+            0.0596,
+            0.079467,
+            0.099334,
+            0.1192,
+            0.13907,
+            0.15893
+          ]
+        },
+        "raman_paper_mra_p07": {
+          "path": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data/H2O/mra-p07",
+          "properties_available": [
+            "alpha",
+            "raman"
+          ],
+          "dalton_bases": [
+            "aug-cc-pVDZ",
+            "aug-cc-pVTZ",
+            "aug-cc-pVQZ",
+            "d-aug-cc-pVQZ"
+          ],
+          "dalton_paths": {
+            "aug-cc-pVDZ": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data/H2O/aug-cc-pVDZ",
+            "aug-cc-pVTZ": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data/H2O/aug-cc-pVTZ",
+            "aug-cc-pVQZ": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data/H2O/aug-cc-pVQZ",
+            "d-aug-cc-pVQZ": "/gpfs/scratch/ahurtado/project_data/data/raman_paper/data/H2O/d-aug-cc-pVQZ"
+          }
+        }
+      },
+      "alpha": {
+        "static": {
+          "tensor": {
+            "xx": 7.901952,
+            "yy": 9.192209,
+            "zz": 8.531042
+          },
+          "isotropic": 8.541734333333332,
+          "source": "beta_paper_d06",
+          "omega": 0.0,
+          "dconv": 1e-06
+        },
+        "dynamic": [
+          {
+            "omega": 0.0,
+            "xx": 7.901952,
+            "yy": 9.192209,
+            "zz": 8.531042
+          },
+          {
+            "omega": 0.019867,
+            "xx": 7.912508,
+            "yy": 9.200593,
+            "zz": 8.540175
+          },
+          {
+            "omega": 0.039733,
+            "xx": 7.944491,
+            "yy": 9.225754,
+            "zz": 8.56777
+          },
+          {
+            "omega": 0.0596,
+            "xx": 7.99893,
+            "yy": 9.268129,
+            "zz": 8.614398
+          },
+          {
+            "omega": 0.079467,
+            "xx": 8.077651,
+            "yy": 9.328309,
+            "zz": 8.68105
+          },
+          {
+            "omega": 0.099334,
+            "xx": 8.183507,
+            "yy": 9.407215,
+            "zz": 8.769177
+          },
+          {
+            "omega": 0.1192,
+            "xx": 8.32074,
+            "yy": 9.506041,
+            "zz": 8.880851
+          },
+          {
+            "omega": 0.13907,
+            "xx": 8.495625,
+            "yy": 9.626435,
+            "zz": 9.01891
+          },
+          {
+            "omega": 0.15893,
+            "xx": 8.717392,
+            "yy": 9.770396,
+            "zz": 9.187058
+          }
+        ]
+      },
+      "beta": {
+        "note": "Full tensor available via gecko extract_beta. Use: gecko load_calculation + extract_beta on the beta_paper_d06 path.",
+        "source": "beta_paper_d06"
+      }
+    },
+    "LiH": {
+      "sources": {
+        "beta_paper_d06": {
+          "path": "/gpfs/projects/rjh/adrian/summer2025/beta_projects/raw_data/beta_paper/d06/output/LiH",
+          "properties_available": [
+            "alpha",
+            "beta",
+            "raman"
+          ],
+          "frequencies": [
+            0.0,
+            0.009299,
+            0.018598,
+            0.027897,
+            0.037195,
+            0.046494,
+            0.055793,
+            0.065092,
+            0.07439
+          ]
+        }
+      },
+      "alpha": {
+        "static": {
+          "tensor": {
+            "xx": 25.27207,
+            "yy": 25.27207,
+            "zz": 21.8656
+          },
+          "isotropic": 24.13658,
+          "source": "beta_paper_d06",
+          "omega": 0.0,
+          "dconv": 1e-06
+        },
+        "dynamic": [
+          {
+            "omega": 0.0,
+            "xx": 25.27207,
+            "yy": 25.27207,
+            "zz": 21.8656
+          },
+          {
+            "omega": 0.009299,
+            "xx": 25.3211,
+            "yy": 25.3211,
+            "zz": 21.91311
+          },
+          {
+            "omega": 0.018598,
+            "xx": 25.46953,
+            "yy": 25.46953,
+            "zz": 22.05753
+          },
+          {
+            "omega": 0.027897,
+            "xx": 25.72152,
+            "yy": 25.72152,
+            "zz": 22.30466
+          },
+          {
+            "omega": 0.037195,
+            "xx": 26.08427,
+            "yy": 26.08427,
+            "zz": 22.66492
+          },
+          {
+            "omega": 0.046494,
+            "xx": 26.5688,
+            "yy": 26.5688,
+            "zz": 23.1548
+          },
+          {
+            "omega": 0.055793,
+            "xx": 27.19063,
+            "yy": 27.19063,
+            "zz": 23.79898
+          },
+          {
+            "omega": 0.065092,
+            "xx": 27.97129,
+            "yy": 27.97129,
+            "zz": 24.63438
+          },
+          {
+            "omega": 0.07439,
+            "xx": 28.9404,
+            "yy": 28.9404,
+            "zz": 25.71722
+          }
+        ]
+      },
+      "beta": {
+        "note": "Full tensor available via gecko extract_beta on the beta_paper_d06 path.",
+        "source": "beta_paper_d06"
+      }
+    },
+    "H2": {
+      "sources": {
+        "h2_tda_test": {
+          "path": "/gpfs/projects/rjh/adrian/development/madness-worktrees/molresponse-feature-next/molresponse_testdata/results/h2_tda_test",
+          "properties_available": [
+            "excitation_energies"
+          ]
+        }
+      },
+      "excited_states": {
+        "tda": {
+          "madness_legacy_k8": {
+            "ground_state_energy_au": -1.1336223365989042,
+            "excitations": [
+              {
+                "root": 1,
+                "irrep": "B1u",
+                "omega_au": 0.46789
+              },
+              {
+                "root": 2,
+                "irrep": "Ag",
+                "omega_au": 0.47771
+              },
+              {
+                "root": 3,
+                "irrep": "B3u",
+                "omega_au": 0.4812
+              },
+              {
+                "root": 4,
+                "irrep": "B2u",
+                "omega_au": 0.4812
+              }
+            ]
+          },
+          "dalton_d_aug_cc_pVQZ": {
+            "ground_state_energy_au": -1.133470928755,
+            "excitations": [
+              {
+                "root": 1,
+                "irrep": "B1u",
+                "omega_au": 0.465376
+              },
+              {
+                "root": 2,
+                "irrep": "Ag",
+                "omega_au": 0.477069
+              },
+              {
+                "root": 3,
+                "irrep": "B3u",
+                "omega_au": 0.480889
+              },
+              {
+                "root": 4,
+                "irrep": "B2u",
+                "omega_au": 0.480889
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "_beta_paper_inventory": {
+    "total_molecules": 72,
+    "molecules": [
+      "BF",
+      "BH2Cl",
+      "BH2F",
+      "BH3",
+      "BHF2",
+      "CH2BH",
+      "CH2NH",
+      "CH3BH2",
+      "CH3Cl",
+      "CH3F",
+      "CH3NH2",
+      "CH3OH",
+      "CH3SH",
+      "CO",
+      "CS",
+      "CSO",
+      "ClCN",
+      "ClF",
+      "FCN",
+      "FNO",
+      "H2O",
+      "HBO",
+      "HBS",
+      "HCCCl",
+      "HCCF",
+      "HCHO",
+      "HCHS",
+      "HCN",
+      "HCONH2",
+      "HCOOH",
+      "HCP",
+      "HCl",
+      "HF",
+      "HNC",
+      "HNO",
+      "HNS",
+      "HOCl",
+      "HOF",
+      "HOOH",
+      "LiBH4",
+      "LiCN",
+      "LiCl",
+      "LiH",
+      "LiH_s",
+      "Mg2",
+      "N2H2",
+      "N2H4",
+      "NH2Cl",
+      "NH2F",
+      "NH2OH",
+      "NH3",
+      "NH3O",
+      "NOCl",
+      "NaCN",
+      "NaCl",
+      "NaH",
+      "NaLi",
+      "O3",
+      "OCl2",
+      "OF2",
+      "P2H4",
+      "PH3",
+      "PH3O",
+      "S2H2",
+      "SCl2",
+      "SF2",
+      "SH2",
+      "SO2",
+      "SiH3Cl",
+      "SiH3F",
+      "SiH4",
+      "SiO"
+    ],
+    "note": "All 72 molecules have alpha + beta at dconv=1e-6. Use gecko to extract any of them."
+  }
+}
