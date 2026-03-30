@@ -5,6 +5,7 @@
 #include <madness/chem/atomutil.h>
 
 #include "GroundState.hpp"
+#include "Perturbations.hpp"
 #include "ResponseFunctions.hpp"
 
 #include <filesystem>
@@ -171,6 +172,47 @@ int main(int argc, char** argv) {
 
         if (world.rank() == 0) {
             print("--- ResponseState Tests PASSED ---\n");
+        }
+
+        // --- Test Perturbation operators ---
+        if (world.rank() == 0) {
+            print("\n--- Perturbation Tests ---");
+        }
+
+        // Need to call prepare() so Q projector is available
+        // Set up protocol for current defaults
+        auto thresh = FunctionDefaults<3>::get_thresh();
+        auto coulop = poperatorT(CoulombOperatorPtr(world, 1e-10, 0.001 * thresh));
+        ground.prepare(world, 0.001 * thresh, coulop);
+
+        // Dipole perturbation in z direction
+        auto rhs_z = molresponse_v3::dipole_perturbation(world, ground, 2);
+        auto norms_z = norm2s(world, rhs_z);
+        if (world.rank() == 0) {
+            print("  dipole_z perturbation: ", rhs_z.size(), "functions");
+            for (size_t i = 0; i < norms_z.size(); i++) {
+                print("    ||Q*mu_z*phi_", i, "|| =", norms_z[i]);
+            }
+        }
+
+        // All three dipole operators
+        auto [mu_x, mu_y, mu_z] = molresponse_v3::dipole_operators(world);
+        if (world.rank() == 0) {
+            print("  dipole operators: x, y, z constructed");
+        }
+
+        // Dipole perturbation for all 3 directions
+        const char* dirs[] = {"x", "y", "z"};
+        for (int d = 0; d < 3; d++) {
+            auto rhs = molresponse_v3::dipole_perturbation(world, ground, d);
+            auto norms = norm2s(world, rhs);
+            if (world.rank() == 0) {
+                print("  dipole_", dirs[d], ": ||rhs|| =", norms[0]);
+            }
+        }
+
+        if (world.rank() == 0) {
+            print("--- Perturbation Tests PASSED ---\n");
         }
 
         world.gop.fence();

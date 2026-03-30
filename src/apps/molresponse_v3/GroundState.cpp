@@ -133,6 +133,15 @@ void GroundState::prepare(World& world, double vtol,
     // Build QProjector from current alpha orbitals
     q_projector_ = QProjector<double, 3>(scf_->get_amo());
 
+    // Ensure SCF's gradient operators are initialized (needed by
+    // make_fock_matrix -> kinetic_energy_matrix which uses gradop)
+    scf_->gradop = gradient_operator<double, 3>(world);
+    if (scf_->param.deriv() == "bspline") {
+        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_bspline1();
+    } else if (scf_->param.deriv() == "ble") {
+        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_ble1();
+    }
+
     // Build V_local for the response solver (multiplicative potential)
     build_v_local(world, vtol, coulop);
 
