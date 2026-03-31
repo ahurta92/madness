@@ -4,6 +4,7 @@
 #include <madness/world/worldmem.h>
 #include <madness/chem/atomutil.h>
 
+#include "FDSolver.hpp"
 #include "GroundState.hpp"
 #include "Perturbations.hpp"
 #include "ResponseFunctions.hpp"
@@ -264,6 +265,51 @@ int main(int argc, char** argv) {
         if (world.rank() == 0) {
             print("  alpha_zz (1 iter) =", alpha_zz, "(reference: ~8.53)");
             print("--- FD Iteration Test PASSED ---\n");
+        }
+
+        // --- Full static polarizability solve ---
+        if (world.rank() == 0) {
+            print("\n======================================");
+            print("  Static Polarizability Solve (H2)");
+            print("======================================\n");
+        }
+
+        const char* dir_names[] = {"x", "y", "z"};
+        double alpha_tensor[3] = {};
+
+        for (int d = 0; d < 3; d++) {
+            if (world.rank() == 0) {
+                print("--- Solving dipole_", dir_names[d], " ---");
+            }
+
+            molresponse_v3::RealResponseState pert_d;
+            pert_d.x_alpha = molresponse_v3::dipole_perturbation(world, ground, d);
+
+            auto result = molresponse_v3::fd_solve(
+                world,
+                molresponse_v3::ResponseType::Static,
+                pert_d, ground,
+                /*omega=*/0.0,
+                /*maxiter=*/15,
+                /*dconv=*/FunctionDefaults<3>::get_thresh());
+
+            alpha_tensor[d] = result.alpha;
+
+            if (world.rank() == 0) {
+                print("  alpha_", dir_names[d], dir_names[d], " = ", result.alpha,
+                      " converged=", result.converged,
+                      " iters=", result.iterations, "\n");
+            }
+        }
+
+        if (world.rank() == 0) {
+            double iso = (alpha_tensor[0] + alpha_tensor[1] + alpha_tensor[2]) / 3.0;
+            print("\n--- Static Polarizability Summary ---");
+            print("  alpha_xx =", alpha_tensor[0]);
+            print("  alpha_yy =", alpha_tensor[1]);
+            print("  alpha_zz =", alpha_tensor[2]);
+            print("  isotropic =", iso);
+            print("--- End Polarizability ---\n");
         }
 
         world.gop.fence();

@@ -7,12 +7,14 @@
     "n_atoms": 1,
     "n_electrons": 2,
     "n_occupied": 1,
-    "geometry_source": "single atom at origin",
+    "geometry_source": "GECKO_MOL_LIB/beta_set/He.mol",
     "seawulf_checkpoint": null,
     "scf_settings": {
         "xc": "hf",
         "k": 6,
-        "L": 20.0,
-        "protocol": [1e-2]
+        "L": 200.0,
+        "protocol": [
+            0.01
+        ]
     }
 }
