@@ -48,6 +48,22 @@ static const MoleculeReference H2O_REF = {
     {4, {0.31778600, 0.39966806, 0.49630384, 0.65994464}}
 };
 
+// BeH2 legacy reference
+static const MoleculeReference BeH2_REF = {
+    "BeH2", -15.7732181961,
+    {18.809856, 18.809856, 19.412931},
+    {4, {0.25948557, 0.25948661, 0.33376130, 0.33377215}}
+};
+
+// Li atom (UHF, nopen=1) — no legacy MRA reference.
+// Literature HF alpha ~ 164 au (spherical: xx=yy=zz).
+// We use 0.0 as expected to signal "no reference, symmetry check only".
+static const MoleculeReference Li_REF = {
+    "Li (UHF)", 0.0,
+    {0.0, 0.0, 0.0},  // no reference — will run symmetry-only checks
+    {0, {}}
+};
+
 struct TestResult {
     std::string test_name;
     bool passed;
@@ -150,28 +166,41 @@ int main(int argc, char** argv) {
         auto coulop = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
         gs.prepare(world, 0.001 * thresh, coulop);
 
-        // Determine which reference to use based on orbital count
+        // Determine which reference to use based on orbital count + spin
         const MoleculeReference* ref = nullptr;
-        if (gs.num_orbitals() == 1) {
+        bool symmetry_only = false;  // no reference values, just check symmetry
+        if (gs.num_alpha() == 1 && gs.is_spin_restricted()) {
             ref = &H2_REF;
-        } else if (gs.num_orbitals() == 5) {
+        } else if (gs.num_alpha() == 5 && gs.is_spin_restricted()) {
             ref = &H2O_REF;
+        } else if (gs.num_alpha() == 3 && gs.is_spin_restricted()) {
+            ref = &BeH2_REF;
+        } else if (!gs.is_spin_restricted()) {
+            ref = &Li_REF;  // generic unrestricted — symmetry checks only
+            symmetry_only = true;
         }
 
         if (!ref) {
             if (world.rank() == 0) {
-                print("No reference data for molecule with ", gs.num_orbitals(), " orbitals");
-                print("Supported: H2 (1 orbital), H2O (5 orbitals)");
+                print("No reference data for molecule with ", gs.num_alpha(),
+                      " alpha orbitals, restricted=", gs.is_spin_restricted());
+                print("Supported: H2 (1), BeH2 (3), H2O (5), any unrestricted (symmetry only)");
             }
             finalize();
             return 1;
         }
 
         if (world.rank() == 0) {
-            print("\nReference: ", ref->name, " (legacy k=8)");
-            print("  alpha_xx=", ref->alpha.xx, " alpha_yy=", ref->alpha.yy,
-                  " alpha_zz=", ref->alpha.zz);
-            print("  isotropic=", ref->alpha.isotropic());
+            if (symmetry_only) {
+                print("\nReference: ", ref->name, " (NO reference values — symmetry checks only)");
+                print("  spin_restricted=", gs.is_spin_restricted());
+                print("  num_alpha=", gs.num_alpha(), " num_beta=", gs.num_beta());
+            } else {
+                print("\nReference: ", ref->name, " (legacy k=8)");
+                print("  alpha_xx=", ref->alpha.xx, " alpha_yy=", ref->alpha.yy,
+                      " alpha_zz=", ref->alpha.zz);
+                print("  isotropic=", ref->alpha.isotropic());
+            }
             print("  tolerance=", tol, " au\n");
         }
 
@@ -188,6 +217,9 @@ int main(int argc, char** argv) {
 
             RealResponseState pert;
             pert.x_alpha = dipole_perturbation(world, gs, d);
+            if (!gs.is_spin_restricted()) {
+                pert.x_beta = dipole_perturbation_beta(world, gs, d);
+            }
 
             auto solve_result = fd_solve(
                 world, ResponseType::Static, pert, gs,
@@ -196,10 +228,12 @@ int main(int argc, char** argv) {
 
             alpha_tensor[d] = solve_result.alpha;
 
-            auto tr = check_value(
-                std::string("alpha_") + dir_names[d] + dir_names[d],
-                ref_vals[d], solve_result.alpha, tol);
-            results.push_back(tr);
+            if (!symmetry_only) {
+                auto tr = check_value(
+                    std::string("alpha_") + dir_names[d] + dir_names[d],
+                    ref_vals[d], solve_result.alpha, tol);
+                results.push_back(tr);
+            }
 
             if (world.rank() == 0) {
                 print("");
@@ -208,11 +242,30 @@ int main(int argc, char** argv) {
 
         // Isotropic
         double iso = (alpha_tensor[0] + alpha_tensor[1] + alpha_tensor[2]) / 3.0;
-        results.push_back(check_value("isotropic", ref->alpha.isotropic(), iso, tol));
+        if (!symmetry_only) {
+            results.push_back(check_value("isotropic", ref->alpha.isotropic(), iso, tol));
+        }
 
         // Symmetry check: xx == yy for linear/spherical molecules
         results.push_back(check_value("symmetry_xx_yy",
             0.0, std::abs(alpha_tensor[0] - alpha_tensor[1]), 1e-6));
+
+        // For atoms (1 atom, spherical): xx == yy == zz
+        if (gs.molecule().natom() == 1) {
+            results.push_back(check_value("spherical_xx_zz",
+                0.0, std::abs(alpha_tensor[0] - alpha_tensor[2]), tol * 0.1));
+        }
+
+        // Sanity: alpha should be positive and reasonable
+        results.push_back(check_value("alpha_positive",
+            1.0, (iso > 0.0) ? 1.0 : 0.0, 0.5));
+
+        if (symmetry_only && world.rank() == 0) {
+            print("  Computed alpha_xx=", alpha_tensor[0],
+                  " alpha_yy=", alpha_tensor[1],
+                  " alpha_zz=", alpha_tensor[2]);
+            print("  isotropic=", iso);
+        }
 
         // Print summary
         if (world.rank() == 0) {
