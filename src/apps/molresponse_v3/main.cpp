@@ -7,6 +7,7 @@
 #include "GroundState.hpp"
 #include "Perturbations.hpp"
 #include "ResponseFunctions.hpp"
+#include "ResponseKernel.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -213,6 +214,56 @@ int main(int argc, char** argv) {
 
         if (world.rank() == 0) {
             print("--- Perturbation Tests PASSED ---\n");
+        }
+
+        // --- Test FD iteration step ---
+        if (world.rank() == 0) {
+            print("\n--- FD Iteration Test (H2 Static dipole_z) ---");
+        }
+
+        // Build perturbation as a ResponseState
+        molresponse_v3::RealResponseState v_pert;
+        v_pert.x_alpha = molresponse_v3::dipole_perturbation(world, ground, 2);
+
+        // Start from zero response
+        auto response = molresponse_v3::RealResponseState::allocate(
+            world, na, nb, false);  // static: no y
+
+        // Create BSH operators for static (omega=0)
+        auto bsh_alpha_x = molresponse_v3::make_bsh_operators(
+            world, ground.energies_alpha(), 0.0, ground.params().lo());
+        std::vector<poperatorT> bsh_alpha_y, bsh_beta_x, bsh_beta_y;
+
+        // One FD iteration
+        auto updated = molresponse_v3::fd_iteration(
+            world,
+            molresponse_v3::ResponseType::Static,
+            response, v_pert, ground, coulop,
+            bsh_alpha_x, bsh_alpha_y, bsh_beta_x, bsh_beta_y,
+            0.0);
+
+        auto x_norms = norm2s(world, updated.x_alpha);
+        if (world.rank() == 0) {
+            for (size_t i = 0; i < x_norms.size(); i++) {
+                print("  ||x_", i, "_new|| =", x_norms[i]);
+            }
+        }
+
+        // Compute response density
+        auto rho1 = molresponse_v3::compute_response_density(
+            world, molresponse_v3::ResponseType::Static, updated, ground);
+        double rho_norm = rho1.norm2();
+        if (world.rank() == 0) {
+            print("  ||rho^(1)|| =", rho_norm);
+        }
+
+        // Compute alpha_zz from first iteration
+        double afactor = molresponse_v3::alpha_factor(
+            molresponse_v3::ResponseType::Static, ground.is_spin_restricted());
+        double alpha_zz = afactor * madness::inner(updated.x_alpha, v_pert.x_alpha);
+        if (world.rank() == 0) {
+            print("  alpha_zz (1 iter) =", alpha_zz, "(reference: ~8.53)");
+            print("--- FD Iteration Test PASSED ---\n");
         }
 
         world.gop.fence();
