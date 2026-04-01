@@ -12,6 +12,10 @@ namespace molresponse_v3 {
 
 using namespace madness;
 
+/// Print level for solver output.
+/// 0: silent, 1: convergence only, 2: per-iteration, 3: debug (inner products, Fock)
+enum class PrintLevel { Silent = 0, Normal = 1, Verbose = 2, Debug = 3 };
+
 /// Result of one frequency-dependent response solve.
 struct FDSolveResult {
     RealResponseState response;     // converged response functions
@@ -27,13 +31,6 @@ struct FDSolveResult {
 /// Solves (A - omega*B) x = v_p for one perturbation at one frequency
 /// using BSH iteration with KAIN acceleration. Handles Static (omega=0),
 /// Full (omega!=0), and TDA response types.
-///
-/// The solver loop:
-///   1. Compute x_new = fd_iteration(current, perturbation, gs, ...)
-///   2. Form residual r = x_new - x
-///   3. KAIN update: x = KAIN(x, r)
-///   4. Step restriction if needed
-///   5. Check convergence (density change + function residual)
 inline FDSolveResult fd_solve(
     World& world,
     ResponseType type,
@@ -43,7 +40,8 @@ inline FDSolveResult fd_solve(
     int maxiter = 25,
     double dconv = 1e-4,
     double maxrotn = 0.5,
-    int maxsub = 10) {
+    int maxsub = 10,
+    PrintLevel print_level = PrintLevel::Normal) {
 
     double lo = gs.params().lo();
     double thresh = FunctionDefaults<3>::get_thresh();
@@ -78,14 +76,11 @@ inline FDSolveResult fd_solve(
     auto x = RealResponseState::allocate(world, na, nb, include_y);
 
     // KAIN solver operates on the flat vector
-    // We need: allocator, inner product via the nonlinear solver interface
-    auto x_flat = x.flat();
     long flat_size = x.total_size();
-
     auto allocator = vector_function_allocator<double, 3>(world, flat_size);
     XNonlinearSolver<vector_real_function_3d, double,
                       vector_function_allocator<double, 3>>
-        kain(allocator, false);  // no printing
+        kain(allocator, false);
     kain.set_maxsub(maxsub);
 
     // Previous density for convergence tracking
@@ -95,8 +90,9 @@ inline FDSolveResult fd_solve(
     result.converged = false;
     result.iterations = 0;
 
-    // Print Fock matrix once for diagnostics
-    if (world.rank() == 0) {
+    // Debug: print Fock matrix once
+    // Fock is a replicated Tensor — safe to print from rank 0 only
+    if (print_level >= PrintLevel::Debug && world.rank() == 0) {
         const auto& F = gs.focka();
         print("  DIAG focka:");
         for (long i = 0; i < F.dim(0); i++) {
@@ -111,10 +107,13 @@ inline FDSolveResult fd_solve(
     }
 
     for (int iter = 0; iter < maxiter; iter++) {
-        // Log <x|x> before iteration
-        if (world.rank() == 0) {
+
+        // Debug: <x|x> — collective operation, ALL ranks must participate
+        if (print_level >= PrintLevel::Debug) {
             double xx = madness::inner(x.flat(), x.flat());
-            print("  <x|x> =", xx, " (iter", iter, "start)");
+            if (world.rank() == 0) {
+                print("  <x|x> =", xx, " (iter", iter, "start)");
+            }
         }
 
         // 1. One FD iteration step
@@ -140,7 +139,7 @@ inline FDSolveResult fd_solve(
         if (res_norm > maxrotn) {
             double s = maxrotn / res_norm;
             gaxpy(world, s, kain_flat, 1.0 - s, x_old_flat);
-            if (world.rank() == 0) {
+            if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
                 print("  STEP_RESTRICT iter=", iter, " norm=", res_norm,
                       " scale=", s);
             }
@@ -155,17 +154,17 @@ inline FDSolveResult fd_solve(
             if (include_y) truncate(world, x.y_beta, thresh);
         }
 
-        // 7. Density change
+        // 7. Density change — collective operation (norm2 involves MPI)
         auto rho = compute_response_density(world, type, x, gs);
         double drho = (rho - rho_old).norm2();
         rho_old = rho;
 
-        // 8. Compute alpha
+        // 8. Compute alpha — collective operation (inner involves MPI)
         double afactor = alpha_factor(type, gs.is_spin_restricted());
         double alpha = afactor * madness::inner(x.flat(), perturbation.flat());
 
         // 9. Report
-        if (world.rank() == 0) {
+        if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
             print("  iter=", iter, " res=", res_norm,
                   " drho=", drho, " alpha=", alpha);
         }
@@ -179,9 +178,8 @@ inline FDSolveResult fd_solve(
         if (drho < density_target && res_norm < residual_target && iter > 0) {
             result.converged = true;
             result.response = std::move(x);
-            if (world.rank() == 0) {
-                print("  CONVERGED at iter=", iter,
-                      " alpha=", alpha);
+            if (print_level >= PrintLevel::Normal && world.rank() == 0) {
+                print("  CONVERGED at iter=", iter, " alpha=", alpha);
             }
             return result;
         }
@@ -189,7 +187,7 @@ inline FDSolveResult fd_solve(
 
     // Did not converge
     result.response = std::move(x);
-    if (world.rank() == 0) {
+    if (print_level >= PrintLevel::Normal && world.rank() == 0) {
         print("  NOT CONVERGED after ", maxiter, " iterations",
               " alpha=", result.alpha);
     }

@@ -235,7 +235,9 @@ int main(int argc, char** argv) {
             auto solve_result = fd_solve(
                 world, ResponseType::Static, pert, gs,
                 /*omega=*/0.0, /*maxiter=*/15,
-                /*dconv=*/thresh);
+                /*dconv=*/thresh,
+                /*maxrotn=*/0.5, /*maxsub=*/10,
+                PrintLevel::Debug);
 
             alpha_tensor[d] = solve_result.alpha;
 
@@ -278,6 +280,55 @@ int main(int argc, char** argv) {
             print("  isotropic=", iso);
         }
 
+        // ============================================================
+        // Dynamic (frequency-dependent) test
+        // For H2: test at omega=0.029 and compare alpha_zz against
+        // legacy dynamic data (should be slightly larger than static)
+        // ============================================================
+        bool run_dynamic = parser.key_exists("dynamic") ||
+                           (!symmetry_only && gs.num_orbitals() == 1);
+
+        if (run_dynamic && !symmetry_only) {
+            double omega = 0.029;  // close to legacy 0.029092
+            if (parser.key_exists("omega")) {
+                omega = std::stod(parser.value("omega"));
+            }
+
+            if (world.rank() == 0) {
+                print("\n--- Dynamic Polarizability (omega=", omega, ") ---");
+            }
+
+            // Solve dipole_z at omega (Full response: x + y channels)
+            RealResponseState pert_dyn;
+            pert_dyn.x_alpha = dipole_perturbation(world, gs, 2); // z
+            pert_dyn.y_alpha = pert_dyn.x_alpha; // y perturbation = x perturbation for dipole
+
+            auto dyn_result = fd_solve(
+                world, ResponseType::Full, pert_dyn, gs,
+                omega, /*maxiter=*/15, /*dconv=*/thresh,
+                /*maxrotn=*/0.5, /*maxsub=*/10,
+                PrintLevel::Verbose);
+
+            if (world.rank() == 0) {
+                print("  alpha_zz(omega=", omega, ") =", dyn_result.alpha,
+                      " converged=", dyn_result.converged);
+            }
+
+            // Dynamic alpha should be larger than static (dispersion)
+            results.push_back(check_value("dynamic_gt_static",
+                1.0, (dyn_result.alpha > alpha_tensor[2]) ? 1.0 : 0.0, 0.5));
+
+            // Should be positive
+            results.push_back(check_value("dynamic_positive",
+                1.0, (dyn_result.alpha > 0.0) ? 1.0 : 0.0, 0.5));
+
+            // For H2 at omega~0.029: legacy gives alpha_zz ~ 6.58 (vs static 6.46)
+            if (ref == &H2_REF) {
+                results.push_back(check_value("dynamic_zz_h2",
+                    6.58, dyn_result.alpha, 0.2));  // loose tolerance
+            }
+        }
+
         // Print summary
         if (world.rank() == 0) {
             print("\n============================================");
@@ -313,4 +364,5 @@ int main(int argc, char** argv) {
         finalize();
         return 2;
     }
+    finalize();
 }

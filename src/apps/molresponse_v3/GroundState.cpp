@@ -45,6 +45,11 @@ GroundState GroundState::from_archive(World& world,
     params.set_user_defined_value("prefix", prefix);
 
     // For open-shell: infer nopen from nmo_alpha and total electrons.
+    if (world.rank() == 0) {
+        print("ARCHIVE_HEADER: spin_restricted=", header.spin_restricted,
+              " nmo_alpha=", header.nmo_alpha, " L=", header.L,
+              " k=", header.k, " xc=", header.xc);
+    }
     if (!header.spin_restricted) {
         int nelec = static_cast<int>(molecule.total_nuclear_charge());
         int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
