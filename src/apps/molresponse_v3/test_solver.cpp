@@ -58,10 +58,22 @@ static const MoleculeReference BeH2_REF = {
 // Li atom (UHF, nopen=1)
 // Literature HF alpha = 170.02019 au (spherical: xx=yy=zz)
 // Source: Phys. Rev. A 91, 022501 (2015)
+// Dynamic reference: Dalton cc-pV5Z UHF
+//   omega=0.00: 170.085, omega=0.02: 186.465, omega=0.04: 262.614
 static const MoleculeReference Li_REF = {
     "Li (UHF)", -7.432672458,
     {170.02019, 170.02019, 170.02019},
     {0, {}}
+};
+
+struct LiDynamicRef {
+    double omega;
+    double alpha;
+};
+static const LiDynamicRef Li_DYNAMIC_REFS[] = {
+    {0.00, 170.085},
+    {0.02, 186.465},
+    {0.04, 262.614},
 };
 
 struct TestResult {
@@ -288,46 +300,67 @@ int main(int argc, char** argv) {
         // legacy dynamic data (should be slightly larger than static)
         // ============================================================
         bool run_dynamic = parser.key_exists("dynamic") ||
-                           (!symmetry_only && gs.num_orbitals() == 1);
+                           (!symmetry_only && (gs.num_orbitals() == 1 || ref == &Li_REF));
 
         if (run_dynamic && !symmetry_only) {
-            double omega = 0.029;  // close to legacy 0.029092
-            if (parser.key_exists("omega")) {
-                omega = std::stod(parser.value("omega"));
-            }
 
-            if (world.rank() == 0) {
-                print("\n--- Dynamic Polarizability (omega=", omega, ") ---");
-            }
+            // Build frequency list and reference values based on molecule
+            struct DynPoint { double omega; double ref_alpha; };
+            std::vector<DynPoint> dyn_points;
 
-            // Solve dipole_z at omega (Full response: x + y channels)
-            RealResponseState pert_dyn;
-            pert_dyn.x_alpha = dipole_perturbation(world, gs, 2); // z
-            pert_dyn.y_alpha = pert_dyn.x_alpha; // y perturbation = x perturbation for dipole
-
-            auto dyn_result = fd_solve(
-                world, ResponseType::Full, pert_dyn, gs,
-                omega, /*maxiter=*/15, /*dconv=*/thresh,
-                /*maxrotn=*/0.5, /*maxsub=*/10,
-                PrintLevel::Verbose);
-
-            if (world.rank() == 0) {
-                print("  alpha_zz(omega=", omega, ") =", dyn_result.alpha,
-                      " converged=", dyn_result.converged);
-            }
-
-            // Dynamic alpha should be larger than static (dispersion)
-            results.push_back(check_value("dynamic_gt_static",
-                1.0, (dyn_result.alpha > alpha_tensor[2]) ? 1.0 : 0.0, 0.5));
-
-            // Should be positive
-            results.push_back(check_value("dynamic_positive",
-                1.0, (dyn_result.alpha > 0.0) ? 1.0 : 0.0, 0.5));
-
-            // For H2 at omega~0.029: legacy gives alpha_zz ~ 6.58 (vs static 6.46)
             if (ref == &H2_REF) {
-                results.push_back(check_value("dynamic_zz_h2",
-                    6.58, dyn_result.alpha, 0.2));  // loose tolerance
+                dyn_points = {{0.029, 6.58}};
+            } else if (ref == &Li_REF) {
+                // Dalton cc-pV5Z UHF references
+                dyn_points = {{0.02, 186.465}, {0.04, 262.614}};
+            }
+
+            // Override with command-line omega if provided
+            if (parser.key_exists("omega")) {
+                double omega = std::stod(parser.value("omega"));
+                dyn_points = {{omega, 0.0}};  // no reference
+            }
+
+            for (const auto& dp : dyn_points) {
+                if (world.rank() == 0) {
+                    print("\n--- Dynamic Polarizability (omega=", dp.omega, ") ---");
+                }
+
+                // Solve dipole_z at omega (Full response: x + y channels)
+                RealResponseState pert_dyn;
+                pert_dyn.x_alpha = dipole_perturbation(world, gs, 2); // z
+                pert_dyn.y_alpha = pert_dyn.x_alpha;
+                if (!gs.is_spin_restricted()) {
+                    pert_dyn.x_beta = dipole_perturbation_beta(world, gs, 2);
+                    pert_dyn.y_beta = pert_dyn.x_beta;
+                }
+
+                auto dyn_result = fd_solve(
+                    world, ResponseType::Full, pert_dyn, gs,
+                    dp.omega, /*maxiter=*/25, /*dconv=*/thresh,
+                    /*maxrotn=*/10.0, /*maxsub=*/10,
+                    PrintLevel::Verbose);
+
+                if (world.rank() == 0) {
+                    print("  alpha_zz(omega=", dp.omega, ") =", dyn_result.alpha,
+                          " converged=", dyn_result.converged);
+                }
+
+                // Dynamic alpha should be larger than static (dispersion)
+                std::string label = "dynamic_w" + std::to_string(dp.omega).substr(0,4);
+                results.push_back(check_value(label + "_gt_static",
+                    1.0, (dyn_result.alpha > alpha_tensor[2]) ? 1.0 : 0.0, 0.5));
+
+                results.push_back(check_value(label + "_positive",
+                    1.0, (dyn_result.alpha > 0.0) ? 1.0 : 0.0, 0.5));
+
+                // Check against reference if available
+                if (dp.ref_alpha > 0.0) {
+                    // Loose tolerance — k=6 vs cc-pV5Z
+                    double dyn_tol = dp.ref_alpha * 0.02;  // 2%
+                    results.push_back(check_value(label + "_vs_ref",
+                        dp.ref_alpha, dyn_result.alpha, dyn_tol));
+                }
             }
         }
 
