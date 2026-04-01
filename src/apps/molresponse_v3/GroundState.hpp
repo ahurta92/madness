@@ -95,8 +95,12 @@ public:
     const tensorT& hamiltonian() const { return focka(); }
     const tensorT& hamiltonian_no_diag() const { return focka_no_diag(); }
 
-    /// Projector onto virtual space: Q = 1 - |phi><phi|
+    /// Alpha projector onto virtual space: Q_alpha = 1 - |phi_alpha><phi_alpha|
     const QProjector<double, 3>& Q() const;
+    const QProjector<double, 3>& Q_alpha() const;
+
+    /// Beta projector (only for unrestricted): Q_beta = 1 - |phi_beta><phi_beta|
+    const QProjector<double, 3>& Q_beta() const;
 
     // -----------------------------------------------------------------
     // Direct SCF access for advanced use
@@ -117,7 +121,8 @@ private:
     tensorT fockb_;
     tensorT focka_no_diag_;
     tensorT fockb_no_diag_;
-    QProjector<double, 3> q_projector_;
+    QProjector<double, 3> q_alpha_;
+    QProjector<double, 3> q_beta_;
     bool prepared_ = false;
 
     /// Read just the archive header to extract L, k, xc, etc.

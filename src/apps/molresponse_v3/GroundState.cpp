@@ -130,8 +130,11 @@ void GroundState::prepare(World& world, double vtol,
         }
     }
 
-    // Build QProjector from current alpha orbitals
-    q_projector_ = QProjector<double, 3>(scf_->get_amo());
+    // Build QProjectors from current orbitals
+    q_alpha_ = QProjector<double, 3>(scf_->get_amo());
+    if (!is_spin_restricted()) {
+        q_beta_ = QProjector<double, 3>(scf_->get_bmo());
+    }
 
     // Ensure SCF's gradient operators are initialized (needed by
     // make_fock_matrix -> kinetic_energy_matrix which uses gradop)
@@ -316,7 +319,17 @@ const tensorT& GroundState::fockb_no_diag() const {
 
 const QProjector<double, 3>& GroundState::Q() const {
     MADNESS_CHECK(prepared_);
-    return q_projector_;
+    return q_alpha_;
+}
+
+const QProjector<double, 3>& GroundState::Q_alpha() const {
+    MADNESS_CHECK(prepared_);
+    return q_alpha_;
+}
+
+const QProjector<double, 3>& GroundState::Q_beta() const {
+    MADNESS_CHECK(prepared_);
+    return q_beta_;
 }
 
 // ---------------------------------------------------------------------------

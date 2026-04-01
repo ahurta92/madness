@@ -315,50 +315,50 @@ inline RealResponseState fd_iteration(
     // --- Alpha x-channel (ispin=0) ---
     auto gamma_alpha_x = compute_gamma(world, type,
         current.x_alpha, current.y_alpha,
-        gs.orbitals_alpha(), rho, coulop, gs.Q(), c_xc, lo, /*ispin=*/0);
+        gs.orbitals_alpha(), rho, coulop, gs.Q_alpha(), c_xc, lo, /*ispin=*/0);
 
     result.x_alpha = fd_iteration_step(world,
         current.x_alpha, gs.orbitals_alpha(),
         perturbation.x_alpha,
         gs.V_local(), gs.focka_no_diag(),
-        gamma_alpha_x, gs.Q(), bsh_alpha_x, c_xc, lo);
+        gamma_alpha_x, gs.Q_alpha(), bsh_alpha_x, c_xc, lo);
 
     // --- Alpha y-channel (Full only, ispin=0) ---
     if (type == ResponseType::Full) {
         // For y-channel: exchange terms are K[phi,y]+K[x,phi] (swapped from x)
         auto gamma_alpha_y = compute_gamma(world, type,
             current.y_alpha, current.x_alpha,  // swap x and y
-            gs.orbitals_alpha(), rho, coulop, gs.Q(), c_xc, lo, /*ispin=*/0);
+            gs.orbitals_alpha(), rho, coulop, gs.Q_alpha(), c_xc, lo, /*ispin=*/0);
 
         result.y_alpha = fd_iteration_step(world,
             current.y_alpha, gs.orbitals_alpha(),
             perturbation.y_alpha.empty() ? perturbation.x_alpha : perturbation.y_alpha,
             gs.V_local(), gs.focka_no_diag(),
-            gamma_alpha_y, gs.Q(), bsh_alpha_y, c_xc, lo);
+            gamma_alpha_y, gs.Q_alpha(), bsh_alpha_y, c_xc, lo);
     }
 
     // --- Beta channels (unrestricted only, ispin=1) ---
     if (!gs.is_spin_restricted()) {
         auto gamma_beta_x = compute_gamma(world, type,
             current.x_beta, current.y_beta,
-            gs.orbitals_beta(), rho, coulop, gs.Q(), c_xc, lo, /*ispin=*/1);
+            gs.orbitals_beta(), rho, coulop, gs.Q_beta(), c_xc, lo, /*ispin=*/1);
 
         result.x_beta = fd_iteration_step(world,
             current.x_beta, gs.orbitals_beta(),
             perturbation.x_beta,
             gs.V_local(), gs.fockb_no_diag(),
-            gamma_beta_x, gs.Q(), bsh_beta_x, c_xc, lo);
+            gamma_beta_x, gs.Q_beta(), bsh_beta_x, c_xc, lo);
 
         if (type == ResponseType::Full) {
             auto gamma_beta_y = compute_gamma(world, type,
                 current.y_beta, current.x_beta,
-                gs.orbitals_beta(), rho, coulop, gs.Q(), c_xc, lo, /*ispin=*/1);
+                gs.orbitals_beta(), rho, coulop, gs.Q_beta(), c_xc, lo, /*ispin=*/1);
 
             result.y_beta = fd_iteration_step(world,
                 current.y_beta, gs.orbitals_beta(),
                 perturbation.y_beta.empty() ? perturbation.x_beta : perturbation.y_beta,
                 gs.V_local(), gs.fockb_no_diag(),
-                gamma_beta_y, gs.Q(), bsh_beta_y, c_xc, lo);
+                gamma_beta_y, gs.Q_beta(), bsh_beta_y, c_xc, lo);
         }
     }
 
