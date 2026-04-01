@@ -526,7 +526,7 @@ namespace madness
                         bmo[i] = madness::project(bmo[i], k, thresh, false);
                     world.gop.fence();
                 }
-                set_thresh(world, amo, thresh);
+                set_thresh(world, bmo, thresh);
 
                 //                normalize(world, bmo);
                 //                bmo = transform(world, bmo, Q3(matrix_inner(world, bmo,
