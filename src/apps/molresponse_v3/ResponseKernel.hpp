@@ -21,13 +21,15 @@ enum class ResponseType { Static, Full, TDA };
 // Response density
 // =========================================================================
 
-/// Compute response density from one spin channel.
+/// Compute response density from one spin channel (no spin factor).
 ///
-/// Static: 2 * sum(x_i * phi_i)     [y implied = x]
-/// Full:   sum((x_i + y_i) * phi_i) [x,y independent]
-/// TDA:    sum(x_i * phi_i)          [y = 0]
+/// Returns the bare spin-channel density:
+///   Static: sum(x_i * phi_i)        [y implied = x]
+///   Full:   sum((x_i + y_i) * phi_i) [x,y independent]
+///   TDA:    sum(x_i * phi_i)          [y = 0]
 ///
-/// The factor of 2 in Static accounts for y=x in the omega->0 limit.
+/// The spin factor (2x for restricted Static/TDA) is applied by
+/// compute_response_density, NOT here.
 inline real_function_3d compute_spin_density(
     World& world,
     ResponseType type,
@@ -39,7 +41,7 @@ inline real_function_3d compute_spin_density(
 
     switch (type) {
     case ResponseType::Static:
-        return 2.0 * sum(world, xphi, true);
+        return sum(world, xphi, true);
 
     case ResponseType::Full: {
         auto yphi = mul(world, y, phi, true);
@@ -54,8 +56,10 @@ inline real_function_3d compute_spin_density(
 
 /// Compute total response density handling both spins.
 ///
-/// Restricted: applies spin factor (2x for Static/TDA, already in spin_density).
-/// Unrestricted: sums alpha + beta contributions without extra factor.
+/// Restricted Static: rho = 2 * sum(x_alpha * phi_alpha)  [factor 2 from y=x]
+/// Unrestricted Static: rho = sum(x_alpha * phi_alpha) + sum(x_beta * phi_beta)
+/// Restricted Full: rho = sum((x+y)_alpha * phi_alpha)    [no extra factor]
+/// Unrestricted Full: rho = sum above for alpha + beta
 inline real_function_3d compute_response_density(
     World& world,
     ResponseType type,
@@ -66,10 +70,15 @@ inline real_function_3d compute_response_density(
         world, type, state.x_alpha, state.y_alpha, gs.orbitals_alpha());
 
     if (gs.is_spin_restricted()) {
+        // For restricted Static/TDA: factor 2 from y=x (B-matrix dropped)
+        // For restricted Full: no extra factor (x+y already in spin_density)
+        if (type == ResponseType::Static || type == ResponseType::TDA) {
+            rho_alpha = 2.0 * rho_alpha;
+        }
         return rho_alpha;
     }
 
-    // Unrestricted: add beta contribution
+    // Unrestricted: sum alpha + beta (no doubling — each spin explicit)
     auto rho_beta = compute_spin_density(
         world, type, state.x_beta, state.y_beta, gs.orbitals_beta());
     return rho_alpha + rho_beta;

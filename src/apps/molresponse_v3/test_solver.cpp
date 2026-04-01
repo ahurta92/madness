@@ -55,12 +55,12 @@ static const MoleculeReference BeH2_REF = {
     {4, {0.25948557, 0.25948661, 0.33376130, 0.33377215}}
 };
 
-// Li atom (UHF, nopen=1) — no legacy MRA reference.
-// Literature HF alpha ~ 164 au (spherical: xx=yy=zz).
-// We use 0.0 as expected to signal "no reference, symmetry check only".
+// Li atom (UHF, nopen=1)
+// Literature HF alpha = 170.02019 au (spherical: xx=yy=zz)
+// Source: Phys. Rev. A 91, 022501 (2015)
 static const MoleculeReference Li_REF = {
-    "Li (UHF)", 0.0,
-    {0.0, 0.0, 0.0},  // no reference — will run symmetry-only checks
+    "Li (UHF)", -7.432672458,
+    {170.02019, 170.02019, 170.02019},
     {0, {}}
 };
 
@@ -186,6 +186,8 @@ int main(int argc, char** argv) {
             ref = &H2O_REF;
         } else if (gs.num_alpha() == 3 && gs.is_spin_restricted()) {
             ref = &BeH2_REF;
+        } else if (!gs.is_spin_restricted() && gs.molecule().natom() == 1) {
+            ref = &Li_REF;  // Li atom (or any UHF atom)
         } else if (!gs.is_spin_restricted()) {
             ref = &Li_REF;  // generic unrestricted — symmetry checks only
             symmetry_only = true;
@@ -234,10 +236,10 @@ int main(int argc, char** argv) {
 
             auto solve_result = fd_solve(
                 world, ResponseType::Static, pert, gs,
-                /*omega=*/0.0, /*maxiter=*/15,
+                /*omega=*/0.0, /*maxiter=*/25,
                 /*dconv=*/thresh,
-                /*maxrotn=*/0.5, /*maxsub=*/10,
-                PrintLevel::Debug);
+                /*maxrotn=*/10.0, /*maxsub=*/10,
+                PrintLevel::Verbose);
 
             alpha_tensor[d] = solve_result.alpha;
 

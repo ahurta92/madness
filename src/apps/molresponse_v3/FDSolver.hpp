@@ -31,6 +31,27 @@ struct FDSolveResult {
 /// Solves (A - omega*B) x = v_p for one perturbation at one frequency
 /// using BSH iteration with KAIN acceleration. Handles Static (omega=0),
 /// Full (omega!=0), and TDA response types.
+/// Project a response state to the current FunctionDefaults k/thresh.
+/// Used when carrying over response functions between protocol steps.
+inline void project_response_state(World& world, RealResponseState& state) {
+    int k = FunctionDefaults<3>::get_k();
+    double thresh = FunctionDefaults<3>::get_thresh();
+
+    auto reproject = [&](vector_real_function_3d& v) {
+        if (v.empty()) return;
+        reconstruct(world, v);
+        for (auto& f : v) {
+            f = project(f, k, thresh, true);
+        }
+        truncate(world, v, thresh);
+    };
+
+    reproject(state.x_alpha);
+    reproject(state.y_alpha);
+    reproject(state.x_beta);
+    reproject(state.y_beta);
+}
+
 inline FDSolveResult fd_solve(
     World& world,
     ResponseType type,
@@ -41,7 +62,8 @@ inline FDSolveResult fd_solve(
     double dconv = 1e-4,
     double maxrotn = 0.5,
     int maxsub = 10,
-    PrintLevel print_level = PrintLevel::Normal) {
+    PrintLevel print_level = PrintLevel::Normal,
+    const RealResponseState* initial_guess = nullptr) {
 
     double lo = gs.params().lo();
     double thresh = FunctionDefaults<3>::get_thresh();
@@ -72,8 +94,19 @@ inline FDSolveResult fd_solve(
         }
     }
 
-    // Initialize response state (zero)
-    auto x = RealResponseState::allocate(world, na, nb, include_y);
+    // Initialize response state: from initial guess or zero
+    RealResponseState x;
+    if (initial_guess && initial_guess->total_size() > 0) {
+        x = *initial_guess;
+        // Project to current k/thresh in case protocol changed
+        project_response_state(world, x);
+        if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
+            double xx = 0.0; // computed below
+            print("  Starting from initial guess (projected to current protocol)");
+        }
+    } else {
+        x = RealResponseState::allocate(world, na, nb, include_y);
+    }
 
     // KAIN solver operates on the flat vector
     long flat_size = x.total_size();
@@ -90,19 +123,16 @@ inline FDSolveResult fd_solve(
     result.converged = false;
     result.iterations = 0;
 
-    // Debug: print Fock matrix once
+    // Debug: print Fock matrices once
     // Fock is a replicated Tensor — safe to print from rank 0 only
     if (print_level >= PrintLevel::Debug && world.rank() == 0) {
-        const auto& F = gs.focka();
+        const auto& Fa = gs.focka();
         print("  DIAG focka:");
-        for (long i = 0; i < F.dim(0); i++) {
-            std::string row = "    [" + std::to_string(i) + "]";
-            for (long j = 0; j < F.dim(1); j++) {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), " %10.6f", F(i, j));
-                row += buf;
-            }
-            print(row);
+        print(Fa);
+        if (!gs.is_spin_restricted()) {
+            const auto& Fb = gs.fockb();
+            print("  DIAG fockb:");
+            print(Fb);
         }
     }
 
