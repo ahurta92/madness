@@ -162,9 +162,20 @@ int main(int argc, char** argv) {
         }
 
         // Prepare ground state
+        // Try to use fock.json from the archive directory for correct Fock matrix
         double thresh = FunctionDefaults<3>::get_thresh();
         auto coulop = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
-        gs.prepare(world, 0.001 * thresh, coulop);
+        auto archive_dir = std::filesystem::path(archive_path).parent_path();
+        std::string fock_json;
+        for (const auto& name : {"moldft.fock.json", "mad.fock.json"}) {
+            auto candidate = archive_dir / name;
+            if (std::filesystem::exists(candidate)) {
+                fock_json = candidate.string();
+                if (world.rank() == 0) print("Using Fock from:", fock_json);
+                break;
+            }
+        }
+        gs.prepare(world, 0.001 * thresh, coulop, fock_json);
 
         // Determine which reference to use based on orbital count + spin
         const MoleculeReference* ref = nullptr;

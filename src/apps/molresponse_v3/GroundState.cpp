@@ -136,14 +136,12 @@ void GroundState::prepare(World& world, double vtol,
         q_beta_ = QProjector<double, 3>(scf_->get_bmo());
     }
 
-    // Ensure SCF's gradient operators are initialized (needed by
-    // make_fock_matrix -> kinetic_energy_matrix which uses gradop)
-    scf_->gradop = gradient_operator<double, 3>(world);
-    if (scf_->param.deriv() == "bspline") {
-        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_bspline1();
-    } else if (scf_->param.deriv() == "ble") {
-        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_ble1();
-    }
+    // Initialize SCF's internal state for the current protocol.
+    // set_protocol sets FunctionDefaults (k, thresh, cubic_cell),
+    // vtol (used by apply_potential for mul_sparse), coulop, gradop, mask.
+    // Without this, apply_potential and make_fock_matrix produce wrong results
+    // because vtol is uninitialized and the box boundaries may be wrong.
+    scf_->set_protocol<3>(world, thresh);
 
     // Build V_local for the response solver (multiplicative potential)
     build_v_local(world, vtol, coulop);
@@ -243,10 +241,7 @@ void GroundState::build_fock_matrices(World& world, double vtol,
         auto vnuc = scf_->potentialmanager->vnuclear();
         vnuc.truncate(vtol);
 
-        // SCF needs the coulop set for exchange computation
-        scf_->coulop = poperatorT(CoulombOperatorPtr(
-            world, scf_->param.lo(), 0.001 * thresh));
-
+        // coulop already set by set_protocol in prepare()
         auto vcoul = apply(*scf_->coulop, rho);
         vcoul.truncate(vtol);
         rho.clear();

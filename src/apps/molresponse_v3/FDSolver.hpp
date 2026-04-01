@@ -95,7 +95,28 @@ inline FDSolveResult fd_solve(
     result.converged = false;
     result.iterations = 0;
 
+    // Print Fock matrix once for diagnostics
+    if (world.rank() == 0) {
+        const auto& F = gs.focka();
+        print("  DIAG focka:");
+        for (long i = 0; i < F.dim(0); i++) {
+            std::string row = "    [" + std::to_string(i) + "]";
+            for (long j = 0; j < F.dim(1); j++) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), " %10.6f", F(i, j));
+                row += buf;
+            }
+            print(row);
+        }
+    }
+
     for (int iter = 0; iter < maxiter; iter++) {
+        // Log <x|x> before iteration
+        if (world.rank() == 0) {
+            double xx = madness::inner(x.flat(), x.flat());
+            print("  <x|x> =", xx, " (iter", iter, "start)");
+        }
+
         // 1. One FD iteration step
         auto x_new = fd_iteration(world, type, x, perturbation, gs, coulop,
                                    bsh_alpha_x, bsh_alpha_y,
