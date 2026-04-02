@@ -123,6 +123,22 @@ inline FDSolveResult fd_solve(
     result.converged = false;
     result.iterations = 0;
 
+    // Print alpha equation being solved
+    if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
+        double af = alpha_factor(type, gs.is_spin_restricted());
+        if (gs.is_spin_restricted() && type == ResponseType::Static) {
+            print("  Equation: alpha = ", af, " * <x_a|r|phi_a>");
+        } else if (gs.is_spin_restricted() && type == ResponseType::Full) {
+            print("  Equation: alpha = ", af, " * [<x_a|r|phi_a> + <y_a|r|phi_a>]");
+        } else if (!gs.is_spin_restricted() && type == ResponseType::Static) {
+            print("  Equation: alpha = ", af, " * [<x_a|r|phi_a> + <x_b|r|phi_b>]");
+        } else {
+            print("  Equation: alpha = ", af, " * [<x_a|r|phi_a> + <y_a|r|phi_a> + <x_b|r|phi_b> + <y_b|r|phi_b>]");
+        }
+        print("  n_alpha=", na, " n_beta=", nb, " omega=", omega,
+              " include_y=", include_y);
+    }
+
     // Debug: print Fock matrices once
     // Fock is a replicated Tensor — safe to print from rank 0 only
     if (print_level >= PrintLevel::Debug && world.rank() == 0) {
@@ -147,20 +163,49 @@ inline FDSolveResult fd_solve(
         }
 
         // 1. One FD iteration step
+        int debug_level = static_cast<int>(print_level);
         auto x_new = fd_iteration(world, type, x, perturbation, gs, coulop,
                                    bsh_alpha_x, bsh_alpha_y,
-                                   bsh_beta_x, bsh_beta_y, omega);
+                                   bsh_beta_x, bsh_beta_y, omega,
+                                   debug_level);
 
         // 2. Flatten for KAIN
         auto x_new_flat = x_new.flat();
         auto x_old_flat = x.flat();
 
-        // 3. Residual
+        // 3. Residual (total and per-channel)
         auto residual_flat = sub(world, x_new_flat, x_old_flat);
         std::vector<double> rnorms = norm2s(world, residual_flat);
         double res_norm = 0.0;
         for (auto n : rnorms) res_norm += n * n;
         res_norm = std::sqrt(res_norm);
+
+        // Per-channel residuals
+        if (print_level >= PrintLevel::Debug) {
+            auto res_xa = sub(world, x_new.x_alpha, x.x_alpha);
+            double rn_xa = norm2(world, res_xa);
+
+            double rn_ya = 0.0;
+            if (include_y) {
+                auto res_ya = sub(world, x_new.y_alpha, x.y_alpha);
+                rn_ya = norm2(world, res_ya);
+            }
+
+            double rn_xb = 0.0, rn_yb = 0.0;
+            if (!gs.is_spin_restricted()) {
+                auto res_xb = sub(world, x_new.x_beta, x.x_beta);
+                rn_xb = norm2(world, res_xb);
+                if (include_y) {
+                    auto res_yb = sub(world, x_new.y_beta, x.y_beta);
+                    rn_yb = norm2(world, res_yb);
+                }
+            }
+
+            if (world.rank() == 0) {
+                print("    res: x_a=", rn_xa, " y_a=", rn_ya,
+                      " x_b=", rn_xb, " y_b=", rn_yb, " total=", res_norm);
+            }
+        }
 
         // 4. KAIN update
         auto kain_flat = kain.update(x_old_flat, residual_flat);
@@ -189,14 +234,46 @@ inline FDSolveResult fd_solve(
         double drho = (rho - rho_old).norm2();
         rho_old = rho;
 
-        // 8. Compute alpha — collective operation (inner involves MPI)
+        // 8. Compute alpha with per-channel decomposition
+        // All inner products are collective — all ranks participate
+        double ip_xa = madness::inner(x.x_alpha, perturbation.x_alpha);
+        double ip_ya = include_y ? madness::inner(x.y_alpha, perturbation.y_alpha) : 0.0;
+        double ip_xb = (!gs.is_spin_restricted()) ?
+            madness::inner(x.x_beta, perturbation.x_beta) : 0.0;
+        double ip_yb = (!gs.is_spin_restricted() && include_y) ?
+            madness::inner(x.y_beta, perturbation.y_beta) : 0.0;
+
         double afactor = alpha_factor(type, gs.is_spin_restricted());
-        double alpha = afactor * madness::inner(x.flat(), perturbation.flat());
+        double alpha = afactor * (ip_xa + ip_ya + ip_xb + ip_yb);
 
         // 9. Report
         if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
             print("  iter=", iter, " res=", res_norm,
                   " drho=", drho, " alpha=", alpha);
+        }
+
+        // Debug: per-channel norms and alpha decomposition
+        if (print_level >= PrintLevel::Debug) {
+            // Norms — collective operations
+            auto norm_xa = norm2(world, x.x_alpha);
+            auto norm_ya = include_y ? norm2(world, x.y_alpha) : 0.0;
+            auto norm_xb = (!gs.is_spin_restricted()) ? norm2(world, x.x_beta) : 0.0;
+            auto norm_yb = (!gs.is_spin_restricted() && include_y) ? norm2(world, x.y_beta) : 0.0;
+
+            if (world.rank() == 0) {
+                print("    ||x_a||=", norm_xa, " ||y_a||=", norm_ya,
+                      " ||x_b||=", norm_xb, " ||y_b||=", norm_yb);
+                // Alpha decomposition
+                // Static restricted:  alpha = -4 * <x_a|r|phi_a>
+                // Dynamic restricted: alpha = -2 * [<x_a|r|phi_a> + <y_a|r|phi_a>]
+                // Static UHF:         alpha = -2 * [<x_a|r|phi_a> + <x_b|r|phi_b>]
+                // Dynamic UHF:        alpha = -1 * [<x_a|r|phi_a> + <y_a|r|phi_a> + <x_b|r|phi_b> + <y_b|r|phi_b>]
+                print("    <x_a|vp_a>=", ip_xa, " <y_a|vp_a>=", ip_ya,
+                      " <x_b|vp_b>=", ip_xb, " <y_b|vp_b>=", ip_yb);
+                print("    factor=", afactor,
+                      " sum=", ip_xa + ip_ya + ip_xb + ip_yb,
+                      " alpha=", alpha);
+            }
         }
 
         // 10. Convergence

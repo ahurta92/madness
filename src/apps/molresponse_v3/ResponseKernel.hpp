@@ -301,6 +301,8 @@ inline vector_real_function_3d fd_iteration_step(
 /// For Full: updates both x and y (with swapped exchange coupling for y).
 /// For unrestricted: applies alpha and beta channels separately with
 ///   shared total response density but separate Fock/exchange/BSH.
+///
+/// @param debug  if >= 3, print per-channel norms after each step
 inline RealResponseState fd_iteration(
     World& world,
     ResponseType type,
@@ -312,7 +314,8 @@ inline RealResponseState fd_iteration(
     const std::vector<poperatorT>& bsh_alpha_y,   // empty for Static/TDA
     const std::vector<poperatorT>& bsh_beta_x,    // empty if restricted
     const std::vector<poperatorT>& bsh_beta_y,    // empty if restricted or Static/TDA
-    double omega) {
+    double omega,
+    int debug = 0) {
 
     // Total response density (shared across spins for Coulomb)
     auto rho = compute_response_density(world, type, current, gs);
@@ -369,6 +372,23 @@ inline RealResponseState fd_iteration(
                 gs.V_local(), gs.fockb_no_diag(),
                 gamma_beta_y, gs.Q_beta(), bsh_beta_y, c_xc, lo);
         }
+    }
+
+    // Debug: per-channel norms (collective — all ranks must participate in norm2s)
+    if (debug >= 3) {
+        auto print_norm = [&](const char* name, const vector_real_function_3d& v) {
+            if (!v.empty()) {
+                auto norms = norm2s(world, v);
+                double total = 0;
+                for (auto n : norms) total += n * n;
+                if (world.rank() == 0)
+                    print("  fd_iter", name, "norm=", std::sqrt(total));
+            }
+        };
+        print_norm("x_alpha", result.x_alpha);
+        print_norm("y_alpha", result.y_alpha);
+        print_norm("x_beta", result.x_beta);
+        print_norm("y_beta", result.y_beta);
     }
 
     return result;
@@ -482,12 +502,32 @@ inline std::pair<Tensor<double>, Tensor<double>> diagonalize_subspace(
 // Property computation helpers
 // =========================================================================
 
-/// Alpha factor for polarizability: alpha_AB = factor * <x_A | v_B>
+/// Alpha factor for polarizability: alpha = factor * (ip_xa + ip_ya + ip_xb + ip_yb)
+///
+/// The physical formula is:  α = -Σ_k n_k [⟨x_k|vp_k⟩ + ⟨y_k|vp_k⟩]
+/// where n_k = 2 (restricted) or 1 (unrestricted per spin channel).
+///
+/// The code computes ip_xa, ip_ya, ip_xb, ip_yb. For Static, y is not
+/// solved so ip_ya = ip_yb = 0 — the factor absorbs the missing y=x.
+///
+///   Restricted Static:     -4.0  (n=2, y=x not solved → ×2)
+///   Restricted Dynamic:    -2.0  (n=2, x+y both solved)
+///   Unrestricted Static:   -2.0  (n=1, y=x not solved → ×2)
+///   Unrestricted Dynamic:  -2.0  (*)
+///
+/// (*) Naively n_k=1 with x+y both solved gives -1. But the iteration
+///     density for unrestricted (compute_response_density) does NOT
+///     include the y=x doubling that restricted gets for Static:
+///       Restricted Static:   ρ = 2·Σ x_a·φ_a
+///       Unrestricted Static: ρ = Σ x_a·φ_a + Σ x_b·φ_b  (no ×2)
+///     This halved density produces response functions x,y with half the
+///     normalization. The -2 factor (instead of -1) compensates, keeping
+///     the iteration and property formula self-consistent. Matches v2.
 inline double alpha_factor(ResponseType type, bool restricted) {
     if (restricted) {
         return (type == ResponseType::Full) ? -2.0 : -4.0;
     } else {
-        return (type == ResponseType::Full) ? -1.0 : -2.0;
+        return -2.0;  // both static and dynamic; see note (*) above
     }
 }
 

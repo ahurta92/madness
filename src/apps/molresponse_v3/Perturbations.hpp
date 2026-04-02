@@ -48,10 +48,8 @@ dipole_perturbation_beta(World& world, const GroundState& gs, int axis) {
         real_functor_3d(new MomentFunctor(dir)));
     mu.truncate(FunctionDefaults<3>::get_thresh());
 
-    // For unrestricted, beta Q projector would be built from beta orbitals.
-    // For now, apply the same Q (alpha) — proper beta Q is future work.
     auto rhs = mul(world, mu, gs.orbitals_beta());
-    rhs = gs.Q()(rhs);
+    rhs = gs.Q_beta()(rhs);
     truncate(world, rhs, FunctionDefaults<3>::get_thresh());
     return rhs;
 }
