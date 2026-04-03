@@ -72,6 +72,12 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<std::vector<double>>("nuclear.frequencies", {0.0}, "frequencies for nuclear response");
         initialize<bool>("quadratic", false, "Compute quadratic response properties from defined perturbations");
         initialize<std::string>("localize", "canon", "localization method", {"pm", "boys", "new", "canon"});
+        initialize<size_t>("maxiter", 25, "maximum number of response iterations");
+        initialize<std::string>("deriv", "abgv", "derivative method", {"abgv", "bspline", "ble"});
+        initialize<std::string>("dft_deriv", "abgv", "derivative method for gga potentials", {"abgv", "bspline", "ble"});
+        initialize<bool>("first_order", false, "compute first-order response");
+        initialize<bool>("second_order", false, "compute second-order response");
+        initialize<bool>("third_order", false, "compute third-order response");
     }
 
     std::string get_tag() const override {

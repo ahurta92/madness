@@ -101,7 +101,6 @@ inline FDSolveResult fd_solve(
         // Project to current k/thresh in case protocol changed
         project_response_state(world, x);
         if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
-            double xx = 0.0; // computed below
             print("  Starting from initial guess (projected to current protocol)");
         }
     } else {

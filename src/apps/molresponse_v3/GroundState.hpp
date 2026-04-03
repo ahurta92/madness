@@ -114,6 +114,7 @@ public:
 private:
     std::shared_ptr<SCF> scf_;
     int original_k_;
+    int current_k_ = 0;  // k that orbitals are currently projected to
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;

@@ -66,6 +66,7 @@ GroundState GroundState::from_archive(World& world,
     // Step 5: Build GroundState
     GroundState gs(world, scf);
     gs.original_k_ = header.k;
+    gs.current_k_ = header.k;
     return gs;
 }
 
@@ -104,30 +105,31 @@ GroundState::read_archive_header(World& world,
 void GroundState::prepare(World& world, double vtol,
                            const poperatorT& coulop,
                            const std::string& fock_json_file) {
-    auto current_k = FunctionDefaults<3>::get_k();
+    auto target_k = FunctionDefaults<3>::get_k();
     auto thresh = FunctionDefaults<3>::get_thresh();
 
-    // Re-project orbitals if k or thresh changed
-    if (original_k_ != current_k) {
-        if (original_k_ < current_k) {
-            MADNESS_EXCEPTION(
-                "Cannot project orbitals to higher k than archive", original_k_);
-        }
-        // Reload from archive at original k, then project down
+    // Re-project orbitals if k changed from what they currently are
+    if (current_k_ != target_k) {
+        // Always reload from archive at original k, then project to target
         scf_->load_mos(world);
-        reconstruct(world, scf_->amo);
-        for (auto& orbital : scf_->amo) {
-            orbital = project(orbital, current_k, thresh, true);
+        if (original_k_ != target_k) {
+            reconstruct(world, scf_->amo);
+            for (auto& orbital : scf_->amo) {
+                orbital = project(orbital, target_k, thresh, true);
+            }
+
+            if (!is_spin_restricted()) {
+                reconstruct(world, scf_->bmo);
+                for (auto& orbital : scf_->bmo) {
+                    orbital = project(orbital, target_k, thresh, true);
+                }
+            }
         }
         truncate(world, scf_->amo, thresh);
-
         if (!is_spin_restricted()) {
-            reconstruct(world, scf_->bmo);
-            for (auto& orbital : scf_->bmo) {
-                orbital = project(orbital, current_k, thresh, true);
-            }
             truncate(world, scf_->bmo, thresh);
         }
+        current_k_ = target_k;
     } else {
         truncate(world, scf_->amo, thresh);
         if (!is_spin_restricted()) {
