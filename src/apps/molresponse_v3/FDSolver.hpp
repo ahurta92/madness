@@ -209,15 +209,16 @@ inline FDSolveResult fd_solve(
         // 4. KAIN update
         auto kain_flat = kain.update(x_old_flat, residual_flat);
 
-        // 5. Step restriction
-        if (res_norm > maxrotn) {
-            double s = maxrotn / res_norm;
-            gaxpy(world, s, kain_flat, 1.0 - s, x_old_flat);
-            if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
-                print("  STEP_RESTRICT iter=", iter, " norm=", res_norm,
-                      " scale=", s);
-            }
-        }
+        // 5. Step restriction (disabled — let KAIN handle convergence)
+        // TODO: re-evaluate step restriction after solver is validated
+        // if (res_norm > maxrotn) {
+        //     double s = maxrotn / res_norm;
+        //     gaxpy(world, s, kain_flat, 1.0 - s, x_old_flat);
+        //     if (print_level >= PrintLevel::Verbose && world.rank() == 0) {
+        //         print("  STEP_RESTRICT iter=", iter, " norm=", res_norm,
+        //               " scale=", s);
+        //     }
+        // }
 
         // 6. Update x from KAIN result
         x.from_flat(kain_flat);

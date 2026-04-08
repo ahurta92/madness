@@ -54,12 +54,19 @@ inline real_function_3d compute_spin_density(
     MADNESS_EXCEPTION("Unknown ResponseType", 0);
 }
 
-/// Compute total response density handling both spins.
+/// Compute the physical first-order response density.
 ///
-/// Restricted Static: rho = 2 * sum(x_alpha * phi_alpha)  [factor 2 from y=x]
-/// Unrestricted Static: rho = sum(x_alpha * phi_alpha) + sum(x_beta * phi_beta)
-/// Restricted Full: rho = sum((x+y)_alpha * phi_alpha)    [no extra factor]
-/// Unrestricted Full: rho = sum above for alpha + beta
+/// Returns the full spin-summed response density δρ(r):
+///
+///   δρ = spin_factor × y_factor × Σ_channels [compute_spin_density]
+///
+///   spin_factor: 2 for restricted (each spatial orbital = 2 electrons),
+///                1 for unrestricted (each spin-orbital = 1 electron)
+///   y_factor:    2 for Static/TDA (y=x implied but not solved),
+///                1 for Full (x and y both solved)
+///
+/// This is the PHYSICAL density — no halving convention. The Coulomb
+/// coupling in compute_gamma uses J[ρ] directly (not 2*J).
 inline real_function_3d compute_response_density(
     World& world,
     ResponseType type,
@@ -69,19 +76,20 @@ inline real_function_3d compute_response_density(
     auto rho_alpha = compute_spin_density(
         world, type, state.x_alpha, state.y_alpha, gs.orbitals_alpha());
 
+    real_function_3d rho;
     if (gs.is_spin_restricted()) {
-        // For restricted Static/TDA: factor 2 from y=x (B-matrix dropped)
-        // For restricted Full: no extra factor (x+y already in spin_density)
-        if (type == ResponseType::Static || type == ResponseType::TDA) {
-            rho_alpha = 2.0 * rho_alpha;
-        }
-        return rho_alpha;
+        rho = rho_alpha;
+    } else {
+        auto rho_beta = compute_spin_density(
+            world, type, state.x_beta, state.y_beta, gs.orbitals_beta());
+        rho = rho_alpha + rho_beta;
     }
 
-    // Unrestricted: sum alpha + beta (no doubling — each spin explicit)
-    auto rho_beta = compute_spin_density(
-        world, type, state.x_beta, state.y_beta, gs.orbitals_beta());
-    return rho_alpha + rho_beta;
+    // Physical occupancy factors
+    double spin_factor = gs.is_spin_restricted() ? 2.0 : 1.0;
+    double y_factor = (type == ResponseType::Static || type == ResponseType::TDA) ? 2.0 : 1.0;
+    rho = (spin_factor * y_factor) * rho;
+    return rho;
 }
 
 // =========================================================================
@@ -122,12 +130,11 @@ inline vector_real_function_3d compute_gamma(
     long n = phi.size();
 
     // Coulomb: J[rho] * phi
+    // rho_total is the physical response density (no halving convention),
+    // so the coupling is simply J[rho]*phi — no factor of 2.
     auto J_rho = apply(*coulop, rho_total);
     auto Jphi = mul(world, J_rho, phi, true);
     J_rho.clear();
-
-    // Start with 2 * J * phi
-    scale(world, Jphi, 2.0);
     auto gamma = std::move(Jphi);
 
     // Exchange terms (scaled by c_xc)
@@ -507,28 +514,23 @@ inline std::pair<Tensor<double>, Tensor<double>> diagonalize_subspace(
 /// The physical formula is:  α = -Σ_k n_k [⟨x_k|vp_k⟩ + ⟨y_k|vp_k⟩]
 /// where n_k = 2 (restricted) or 1 (unrestricted per spin channel).
 ///
-/// The code computes ip_xa, ip_ya, ip_xb, ip_yb. For Static, y is not
-/// solved so ip_ya = ip_yb = 0 — the factor absorbs the missing y=x.
+/// The code computes ip_xa, ip_ya, ip_xb, ip_yb. For Static/TDA, y is
+/// not solved (y=x implied) so ip_ya = ip_yb = 0 — the y_factor of 2
+/// absorbs the missing y contribution.
 ///
-///   Restricted Static:     -4.0  (n=2, y=x not solved → ×2)
-///   Restricted Dynamic:    -2.0  (n=2, x+y both solved)
-///   Unrestricted Static:   -2.0  (n=1, y=x not solved → ×2)
-///   Unrestricted Dynamic:  -2.0  (*)
+///   factor = -(spin_factor × y_factor)
 ///
-/// (*) Naively n_k=1 with x+y both solved gives -1. But the iteration
-///     density for unrestricted (compute_response_density) does NOT
-///     include the y=x doubling that restricted gets for Static:
-///       Restricted Static:   ρ = 2·Σ x_a·φ_a
-///       Unrestricted Static: ρ = Σ x_a·φ_a + Σ x_b·φ_b  (no ×2)
-///     This halved density produces response functions x,y with half the
-///     normalization. The -2 factor (instead of -1) compensates, keeping
-///     the iteration and property formula self-consistent. Matches v2.
+///   spin_factor: 2 restricted (n_k=2), 1 unrestricted (n_k=1)
+///   y_factor:    2 Static/TDA (y=x not solved), 1 Full (y solved)
+///
+///   Restricted Static:     -(2×2) = -4.0
+///   Restricted Dynamic:    -(2×1) = -2.0
+///   Unrestricted Static:   -(1×2) = -2.0
+///   Unrestricted Dynamic:  -(1×1) = -1.0
 inline double alpha_factor(ResponseType type, bool restricted) {
-    if (restricted) {
-        return (type == ResponseType::Full) ? -2.0 : -4.0;
-    } else {
-        return -2.0;  // both static and dynamic; see note (*) above
-    }
+    double spin_factor = restricted ? 2.0 : 1.0;
+    double y_factor = (type == ResponseType::Full) ? 1.0 : 2.0;
+    return -(spin_factor * y_factor);
 }
 
 } // namespace molresponse_v3
