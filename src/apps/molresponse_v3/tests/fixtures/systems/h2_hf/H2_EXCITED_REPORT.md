@@ -10,9 +10,9 @@ Ground state archive: `mad.restartdata.00000` from this directory.
 | legacy         | TDA  | 0.46807128 | 0.47785601 | 0.48135613 | 0.48136583 |    10 |    331.4 |
 | **v1 (this branch)** | TDA  | 0.46802021 | 0.47785019 | 0.48134267 | 0.48134267 |    25 |    132.3 |
 | legacy         | RPA  | 0.46556124 | 0.47714269 | 0.48084333 | 0.48084599 |    15 |    377.8 |
-| v1 (this branch) | RPA  | —          | —          | —          | —          |     — | crashes ✗ |
+| **v1 (this branch)** | RPA  | 0.46556163 | 0.47714275 | 0.48084341 | 0.48084342 |    25 |    206 |
 
-Both TDA codes agree to within 5 × 10⁻⁵ a.u. (a single iteration of bsh-residual tolerance). Legacy converges in fewer iterations but each iteration is slower; v1 is ~2.5× faster overall on this system. RPA values are ~3 × 10⁻³ below TDA, as expected for a small Y contribution.
+Both TDA codes agree to within 5 × 10⁻⁵ a.u. (a single iteration of bsh-residual tolerance). Legacy converges in fewer iterations but each iteration is slower; v1 is ~2.5× faster overall on this system. RPA values are ~3 × 10⁻³ below TDA, as expected for a small Y contribution. **v1 and legacy RPA agree to ≤ 5 × 10⁻⁷** on the lowest three roots — the gap on ω₄ (~3 × 10⁻⁶) is at the convergence-test floor; both runs hit `maxiter` before the strict bsh-residual target.
 
 ## Restart from saved state
 
@@ -23,9 +23,19 @@ Both TDA codes agree to within 5 × 10⁻⁵ a.u. (a single iteration of bsh-res
 
 **Restart works on both codes**, but legacy's restart is more efficient because it re-checks convergence on entry. v1's restart correctly resumes from `guess_restart` and converges to the identical answer.
 
-## v1 RPA (full TDDFT) failure mode
+## v1 RPA (full TDDFT) — fixed
 
-v1 RPA crashes during iteration 0 inside the macrotask response-exchange `K[1]` apply, with a malloc-consolidate SIGSEGV (heap corruption, not a null deref). The guess phase completes and produces sensible eigenvalues (lowest 4 = 0.4785 / 0.4822 / 0.4872 / 0.5137 — close to but coarser than the legacy RPA result), so the algorithm shape is correct; the crash is in the response-side exchange machinery, downstream of the per-state inner-product strategy that was missing and is now wired up. Likely root cause: the response exchange is called on an `X_space` whose `Y` slot is freshly zeroed by the new ctor patch, but `MacroTaskExchangeSimple` consumes those Functions before `change_tree_state` finishes — a timing/lifetime issue rather than a logic bug. Fixing this is a separate task; the TDA path is the one validated here.
+v1 RPA initially crashed during iteration 0 with a malloc-consolidate SIGSEGV
+deep inside the response-exchange machinery. Root cause was a hard-coded
+`vector_real_function_3d temp_J(3)` in `J1StrategyFull::compute_J1` and
+`J1StrategyStable::compute_J1` (`ResponseBase.hpp`): the `3` was sized for
+the dipole frequency-response case (3 Cartesian directions). With 4
+excited roots, the loop indexed `temp_J[3]` past the buffer end and
+corrupted the heap; the SIGSEGV manifested in whichever later allocator
+hit the corrupted arena (initially the K[1] macrotask, then the J[1]
+shared_ptr release after switching exchange algorithms). Replacing the
+hardcoded `3` with `x.num_states()` makes RPA converge cleanly and match
+legacy RPA.
 
 ## Reproducing
 
@@ -89,6 +99,7 @@ The v1 codebase had been bit-rotting for some time; the H2 4-root TDA path requi
 9. `ExcitedResponse::initialize` — rebuild `Chi` from scratch after `select_functions`, so `Chi.n_states` matches the trimmed `Chi.x.size()`.
 10. `ExcitedResponse` ctor — set inner-product / J1 / K1 / VXC strategies (mirrors `FrequencyResponse` ctor; was missing entirely).
 11. `ResponseBase::update_residual` — defensive canonical active list and graceful empty-`old_residuals` handling (the first iteration calls it with `Tensor<double>()`).
+12. `J1StrategyFull` / `J1StrategyStable` — `temp_J(3)` → `temp_J(x.num_states())`. Hardcoded for FrequencyResponse's 3 dipole directions; out-of-bounds write for any other state count.
 
 ## Files
 

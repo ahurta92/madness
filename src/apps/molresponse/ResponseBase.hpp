@@ -284,7 +284,10 @@ public:
 
     X_space J =
         X_space::zero_functions(world, x.num_states(), x.num_orbitals());
-    vector_real_function_3d temp_J(3);
+    // V1_PATCH: this used to be hardcoded `temp_J(3)` for the 3 dipole
+    // directions of FrequencyResponse. Excited-state runs with num_states != 3
+    // wrote past the buffer end and corrupted the heap.
+    vector_real_function_3d temp_J(x.num_states());
     for (const auto &b : x.active) {
       temp_J[b] = apply(*coulomb_ops, rho1[b]);
       J.x[b] = mul(world, temp_J[b], phi0.first, false);
@@ -304,7 +307,8 @@ public:
     X_space J =
         X_space::zero_functions(world, x.num_states(), x.num_orbitals());
     // if (world.rank() == 0) { print("J1StrategyStable"); }
-    vector_real_function_3d temp_J(3);
+    // V1_PATCH: see J1StrategyFull above — same hardcoded-3 bug.
+    vector_real_function_3d temp_J(x.num_states());
     for (const auto &b : x.active) {
       temp_J[b] = apply(*coulomb_ops, rho1[b]);
       if (false) {
