@@ -105,6 +105,11 @@ class GroundStateCalculation {
     // Set this so we can read in whats
     // written in the archive
     FunctionDefaults<3>::set_k(k);
+    // V1_PATCH: set cubic cell before reading orbitals; otherwise
+    // Function::load() throws "simulation cells inconsistent" because
+    // FunctionDefaults<3>::get_cell() is empty when first called and
+    // the orbital archive carries the moldft cell.
+    FunctionDefaults<3>::set_cubic_cell(-L, L);
     // Possible to call this function multiple times now
     // Do this to ensure everything works.
     world.gop.fence();

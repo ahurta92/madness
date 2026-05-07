@@ -216,13 +216,13 @@ auto ResponseBase::ComputeHamiltonianPair(World &world) const
     const double lo = 1.e-10;
     Exchange<double, 3> k{world, lo};
     if (r_params.hfexalg() == "multiworld") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient);
     } else if (r_params.hfexalg() == "multiworld_row") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient_row);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
     } else if (r_params.hfexalg() == "largemem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::large_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::large_memory);
     } else if (r_params.hfexalg() == "smallmem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::small_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::small_memory);
     }
     k.set_bra_and_ket(phi0, phi0);
     // k.set_symmetric(true).set_printlevel(r_params.print_level());
@@ -1465,9 +1465,16 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   size_t n = chi.x.size_orbitals();
   bool compute_y = r_params.omega() != 0.0;
   //	compute residual
-  Tensor<double> residual_norms = copy(old_residuals);
+  Tensor<double> residual_norms = (old_residuals.size() == long(m))
+                                      ? copy(old_residuals)
+                                      : Tensor<double>(long(m));
   X_space res(world, m, n);
-  res.set_active(chi.active);
+  // V1_PATCH: chi.active may be stale (X_space's `=` operator overwrites
+  // .x.active but not .active in some paths, e.g. after select_functions).
+  // Use the canonical 0..m-1 list to keep loops below in bounds.
+  std::list<size_t> safe_active;
+  for (size_t i = 0; i < m; ++i) safe_active.push_back(i);
+  res.set_active(safe_active);
   if (compute_y) {
     res = chi - g_chi;
     res.truncate();
@@ -1482,9 +1489,10 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
     } // / norm2(world, gx[b]); }
   } else {
     res.x = chi.x - g_chi.x;
+    // V1_PATCH: force active to canonical list to match res.x.size()
+    res.x.active = safe_active;
     res.x.truncate_rf();
-    for (const auto &b : chi.active) {
-
+    for (const auto &b : safe_active) {
       auto rnorm = norm2s(world, res.x[b]);
       double rms, maxval;
       vector_stats(rnorm, rms, maxval);
@@ -1753,20 +1761,23 @@ void ResponseBase::solve(World &world) {
   for (const auto &iter_thresh : protocol) {
     // We set the protocol and function defaults here for the given threshold of
     set_protocol(world, iter_thresh);
+    // V1_PATCH: build the ground-state Hamiltonian before initialize().
+    // ExcitedResponse::initialize() runs an iterate_trial step that consumes
+    // `hamiltonian`, so leaving check_k after initialize() crashes with an
+    // empty-tensor transform. check_k only touches ground-state quantities,
+    // so it's safe to call before Chi is built.
+    check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
     if (first_protocol) {
       if (r_params.restart()) {
         if (world.rank() == 0) {
           print("   Restarting from file:", r_params.restart_file());
         }
         load(world, r_params.restart_file());
-        first_protocol = false;
       } else {
         this->initialize(world);
       }
-      check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
       first_protocol = false;
     } else {
-      check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
       if (world.rank() == 0) {
         print("Successfully check K not first initialization ");
       }

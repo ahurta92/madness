@@ -102,8 +102,11 @@ void ExcitedResponse::initialize(World &world)
         print("\n   Final initial guess excitation energies:");
         print(omega);
     }
-    // Chi = X_space(world, r_params.num_states(), r_params.num_orbitals());
-    // Select lowest energy functions from guess
+    // V1_PATCH: rebuild Chi from scratch at the requested num_states. Without
+    // this, Chi.n_states stays at 2*num_states (from initialize's earlier
+    // ctor call) while Chi.x is truncated to num_states by select_functions —
+    // the size mismatch crashes update_residual on stale Chi.active indices.
+    Chi = X_space(world, r_params.num_states(), r_params.num_orbitals());
     Chi.x = select_functions(world, trial.x, omega, r_params.num_states(), r_params.num_orbitals());
     Chi.y = response_space(world, r_params.num_states(), r_params.num_orbitals());
     // save the guesses at the very least

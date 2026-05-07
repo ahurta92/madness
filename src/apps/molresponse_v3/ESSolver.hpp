@@ -89,7 +89,11 @@ inline ESSolveResult es_solve(
         // afterwards and truncated to the lowest N, brings the guess into the
         // physically meaningful range before the main iteration starts.
         const long n_trial = 2 * num_roots;
-        auto X_trial = make_initial_guess_tda_rhf(world, gs, n_trial);
+        // Default guess: solid-harmonic × orbital (single-excitation pattern,
+        // mirrors molresponse_legacy::create_trial_functions). Use the random
+        // Gaussian-envelope guess only as a fallback when no harmonics-based
+        // guess exists for the system.
+        auto X_trial = create_solid_harmonics_guess(world, gs, n_trial);
         if (print_level >= PrintLevel::Normal && world.rank() == 0)
             print("ES: refining ", n_trial, " trial states (5 iterations) "
                   "before main solve");

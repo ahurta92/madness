@@ -23,6 +23,12 @@ namespace madness {
 
 struct ResponseParameters : public QCCalculationParametersBase {
     static constexpr char const* tag = "response";
+    // Concrete implementation of the QCCalculationParametersBase pure-virtual
+    // get_tag(); without it the class is abstract and cannot be instantiated
+    // (mirrors the LEGACY_PATCH in molresponse_legacy/response_parameters.h).
+    std::string get_tag() const override {
+        return std::string(tag);
+    }
     ResponseParameters(const ResponseParameters& other) = default;
     ResponseParameters(World& world, const commandlineparser& parser) : ResponseParameters() {
         read_input_and_commandline_options(world, parser, "response");

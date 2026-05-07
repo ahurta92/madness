@@ -113,9 +113,12 @@ namespace madness
         : num_states(num_states), num_orbitals(num_orbitals),
           x(response_matrix(num_states)), active(num_states)
     {
+      // V1_PATCH: initialize each slot with a real zero function (compressed)
+      // so downstream copy/load operations don't crash on null FunctionImpl.
       for (auto &state : x)
       {
-        state = vector_real_function_3d(num_orbitals);
+        state = zero_functions_compressed<double, 3>(world,
+                                                     static_cast<int>(num_orbitals));
       }
       reset_active();
       // world.gop.fence();
@@ -408,6 +411,10 @@ namespace madness
     void push_back(const vector_real_function_3d &f)
     {
       x.push_back(f);
+      // V1_PATCH: keep active in sync with num_states. Without this, transform()
+      // and other paths that build a response_space via repeated push_back leave
+      // active empty even though x has entries — breaking to_vector/from_vector.
+      active.push_back(num_states);
       num_states++;
       // print("im calling response_space push back");
 
@@ -425,6 +432,11 @@ namespace madness
       MADNESS_ASSERT(num_states >= 1);
       x.pop_back();
       num_states--;
+      // V1_PATCH: keep `active` in sync with x. Without this, truncate_rf and
+      // friends iterate active indices that no longer exist in x → null impl
+      // dereference → SIGSEGV. We rebuild the trivial 0..num_states-1 list.
+      active.clear();
+      for (size_t i = 0; i < num_states; ++i) active.push_back(i);
 
       // Be smart with g_states
       if (num_states == 0)
