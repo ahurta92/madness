@@ -43,6 +43,12 @@ GroundState GroundState::from_archive(World& world,
         prefix = prefix.substr(0, pos);
     }
     params.set_user_defined_value("prefix", prefix);
+    // Workaround for QCCalculationParametersBase::tostring<std::string>
+    // case-folding: re-set the prefix value directly via the QCParameter
+    // struct so the original path case is preserved (paths like
+    // /home/User/Projects/... would otherwise lowercase, breaking
+    // SCF::load_mos's archive lookup).
+    params.get_parameter("prefix").set_user_defined_value(prefix);
 
     // For open-shell: infer nopen from nmo_alpha and total electrons.
     if (world.rank() == 0) {

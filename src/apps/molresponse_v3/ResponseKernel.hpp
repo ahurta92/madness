@@ -493,6 +493,97 @@ inline Tensor<double> compute_overlap_matrix(
     return S;
 }
 
+/// Apply T = -1/2 ∇² to a vector of functions via three gradient operators.
+/// Used to assemble the full F0 = T + V_local - c_xc·K0 acting on response
+/// functions; needed for the SUBSPACE matrix in ES (NOT for the BSH driver
+/// where T is absorbed into the Helmholtz Green's function).
+/// Direct port of molresponse_v2/ResponseKernels.hpp:apply_kinetic_flat.
+inline vector_real_function_3d apply_kinetic(World& world,
+                                              const vector_real_function_3d& v) {
+    if (v.empty()) return {};
+    real_derivative_3d Dx(world, 0);
+    real_derivative_3d Dy(world, 1);
+    real_derivative_3d Dz(world, 2);
+    auto dvx  = apply(world, Dx, v);
+    auto dvy  = apply(world, Dy, v);
+    auto dvz  = apply(world, Dz, v);
+    auto dvx2 = apply(world, Dx, dvx);
+    auto dvy2 = apply(world, Dy, dvy);
+    auto dvz2 = apply(world, Dz, dvz);
+    auto result = dvx2;
+    gaxpy(world, 1.0, result, 1.0, dvy2);
+    gaxpy(world, 1.0, result, 1.0, dvz2);
+    scale(world, result, -0.5);
+    truncate(world, result);
+    return result;
+}
+
+/// Compute the FULL response action Λ for SUBSPACE matrix construction:
+///   Λ·X = (T + V_local − c_xc·K0)·X  −  hamiltonian·X  +  γ
+///
+/// vs `compute_lambda` (which is actually Θ and is correct for the BSH
+/// driver but missing T and the diagonal of the Fock matrix), this function
+/// includes T·X via `apply_kinetic` and uses the *full* hamiltonian
+/// (`gs.focka()` not `focka_no_diag()`). It mirrors the legacy
+/// `Compute_Lambda_X` (Lambda_X.cc:33-93): Λ = (F0X − E0X) + γ.
+///
+/// Use `compute_lambda` for the BSH driver (theta = −2·Λ_theta), and use
+/// `compute_lambda_subspace` for `compute_subspace_matrix` (so the
+/// generalized eigenvalues from `diagonalize_subspace` are the true
+/// excitation energies).
+inline vector_real_function_3d compute_lambda_subspace(
+    World& world,
+    ResponseType type,
+    const vector_real_function_3d& x,
+    const vector_real_function_3d& y,
+    const vector_real_function_3d& phi,
+    const real_function_3d& V_local,
+    const Tensor<double>& fock_full,
+    const real_function_3d& rho_response,
+    const poperatorT& coulop,
+    const QProjector<double, 3>& Q,
+    double c_xc,
+    double lo) {
+
+    double vtol = FunctionDefaults<3>::get_thresh() * 0.1;
+
+    // T·X
+    auto Tx = apply_kinetic(world, x);
+
+    // Ground-state exchange K0·X
+    vector_real_function_3d k0x;
+    if (c_xc > 0.0) {
+        Exchange<double, 3> K0(world, lo);
+        K0.set_bra_and_ket(phi, phi);
+        K0.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
+        k0x = K0(x);
+    } else {
+        k0x = zero_functions<double, 3>(world, x.size());
+    }
+
+    // V_local·X − c_xc·K0·X = V0·X
+    auto Vx = mul_sparse(world, V_local, x, vtol);
+    gaxpy(world, 1.0, Vx, -c_xc, k0x);
+
+    // F0·X = T·X + V0·X
+    auto F0x = Tx;
+    gaxpy(world, 1.0, F0x, 1.0, Vx);
+
+    // E0·X = transform(X, hamiltonian_full)
+    auto E0x = transform(world, x, fock_full, vtol, true);
+
+    // Response coupling γ
+    auto gamma = compute_gamma(world, type, x, y, phi,
+                                rho_response, coulop, Q, c_xc, lo);
+
+    // Λ = F0·X − E0·X + γ
+    gaxpy(world, 1.0, F0x, -1.0, E0x);
+    gaxpy(world, 1.0, F0x,  1.0, gamma);
+    truncate(world, F0x);
+
+    return F0x;
+}
+
 /// Diagonalize generalized eigenvalue problem A*U = S*U*diag(omega).
 /// Returns {eigenvalues, transformation_matrix}.
 inline std::pair<Tensor<double>, Tensor<double>> diagonalize_subspace(
@@ -503,6 +594,166 @@ inline std::pair<Tensor<double>, Tensor<double>> diagonalize_subspace(
     Tensor<double> U;
     sygvp(World::get_default(), A, S, 1, U, evals);
     return {evals, U};
+}
+
+// =========================================================================
+// ES bundle helpers — shared by all ES stages (TDA RHF, Full RHF,
+// TDA UHF, Full UHF). See docs/11_excited_state_solver_design.md.
+// =========================================================================
+
+/// Inner product between two states under the type-appropriate metric:
+///   TDA / Static : ⟨a.x|b.x⟩  (positive-definite, identity)
+///   Full         : ⟨a.x|b.x⟩ - ⟨a.y|b.y⟩  (symplectic, indefinite)
+/// Spin: alpha + beta channels are summed when present.
+inline double bundle_inner(World& world, ResponseType type,
+                            const RealResponseState& a,
+                            const RealResponseState& b) {
+    double s = 0.0;
+    if (!a.x_alpha.empty() && !b.x_alpha.empty())
+        s += madness::inner(a.x_alpha, b.x_alpha);
+    if (!a.x_beta.empty() && !b.x_beta.empty())
+        s += madness::inner(a.x_beta, b.x_beta);
+    if (type == ResponseType::Full) {
+        if (!a.y_alpha.empty() && !b.y_alpha.empty())
+            s -= madness::inner(a.y_alpha, b.y_alpha);
+        if (!a.y_beta.empty() && !b.y_beta.empty())
+            s -= madness::inner(a.y_beta, b.y_beta);
+    }
+    return s;
+}
+
+/// Gram-Schmidt orthonormalization of a bundle of response states under
+/// the type-appropriate metric.
+///
+/// For TDA the metric is positive-definite; standard Gram-Schmidt works.
+/// For Full the metric is indefinite (S = ⟨x|x⟩ - ⟨y|y⟩) and exact
+/// metric-orthonormalization needs hyperbolic Gram-Schmidt. For now we
+/// fall back to taking |⟨a|a⟩|^{1/2} as the norm — adequate when the
+/// guess is already roughly metric-orthonormal (the legacy code does
+/// this same pre-iter pass at TDDFT.cc:1667-1672).
+inline void orthonormalize_bundle(World& world, ResponseType type,
+                                   std::vector<RealResponseState>& X) {
+    long n = static_cast<long>(X.size());
+    if (n == 0) return;
+
+    auto subtract = [&](RealResponseState& dst, double c,
+                         const RealResponseState& src) {
+        if (!src.x_alpha.empty())
+            gaxpy(world, 1.0, dst.x_alpha, -c, src.x_alpha);
+        if (!src.x_beta.empty())
+            gaxpy(world, 1.0, dst.x_beta, -c, src.x_beta);
+        if (!src.y_alpha.empty())
+            gaxpy(world, 1.0, dst.y_alpha, -c, src.y_alpha);
+        if (!src.y_beta.empty())
+            gaxpy(world, 1.0, dst.y_beta, -c, src.y_beta);
+    };
+    auto rescale = [&](RealResponseState& s, double f) {
+        if (!s.x_alpha.empty()) scale(world, s.x_alpha, f);
+        if (!s.x_beta.empty())  scale(world, s.x_beta, f);
+        if (!s.y_alpha.empty()) scale(world, s.y_alpha, f);
+        if (!s.y_beta.empty())  scale(world, s.y_beta, f);
+    };
+
+    for (long i = 0; i < n; i++) {
+        for (long j = 0; j < i; j++) {
+            double c = bundle_inner(world, type, X[j], X[i]);
+            subtract(X[i], c, X[j]);
+        }
+        double norm2_val = bundle_inner(world, type, X[i], X[i]);
+        double n_abs = std::sqrt(std::abs(norm2_val));
+        if (n_abs > 1e-12) rescale(X[i], 1.0 / n_abs);
+    }
+}
+
+/// Apply rotation U to the bundle: X_new[i] = sum_j U(j, i) * X[j].
+/// In place. U is N×N where N = X.size().
+inline void rotate_bundle(World& world, std::vector<RealResponseState>& X,
+                           const Tensor<double>& U) {
+    long n = static_cast<long>(X.size());
+    if (n == 0) return;
+
+    long na = X[0].num_alpha();
+    long nb = X[0].is_restricted() ? 0 : X[0].num_beta();
+    bool has_y = X[0].has_y();
+
+    std::vector<RealResponseState> Y(n);
+    for (long i = 0; i < n; i++) {
+        Y[i] = RealResponseState::allocate(world, na, nb, has_y);
+    }
+
+    // Y[new] += U(old, new) * X[old]
+    for (long new_idx = 0; new_idx < n; new_idx++) {
+        for (long old_idx = 0; old_idx < n; old_idx++) {
+            double c = U(old_idx, new_idx);
+            gaxpy(world, 1.0, Y[new_idx].x_alpha, c, X[old_idx].x_alpha);
+            if (has_y)
+                gaxpy(world, 1.0, Y[new_idx].y_alpha, c, X[old_idx].y_alpha);
+            if (nb > 0) {
+                gaxpy(world, 1.0, Y[new_idx].x_beta, c, X[old_idx].x_beta);
+                if (has_y)
+                    gaxpy(world, 1.0, Y[new_idx].y_beta, c, X[old_idx].y_beta);
+            }
+        }
+    }
+
+    double thresh = FunctionDefaults<3>::get_thresh();
+    for (auto& s : Y) {
+        truncate(world, s.x_alpha, thresh);
+        if (has_y) truncate(world, s.y_alpha, thresh);
+        if (nb > 0) {
+            truncate(world, s.x_beta, thresh);
+            if (has_y) truncate(world, s.y_beta, thresh);
+        }
+    }
+    X = std::move(Y);
+}
+
+/// Apply the same N×N rotation U to a vector of vector_real_function_3d
+/// (e.g., a bundle of single-channel state-vectors like Λ_X). Same
+/// convention: out[new] = sum_old U(old, new) * in[old].
+inline void rotate_vector_bundle(
+    World& world,
+    std::vector<vector_real_function_3d>& X,
+    const Tensor<double>& U) {
+
+    long n = static_cast<long>(X.size());
+    if (n == 0) return;
+    long n_orb = static_cast<long>(X[0].size());
+
+    std::vector<vector_real_function_3d> Y(n);
+    for (long i = 0; i < n; i++) {
+        Y[i] = zero_functions<double, 3>(world, n_orb);
+    }
+    for (long new_idx = 0; new_idx < n; new_idx++) {
+        for (long old_idx = 0; old_idx < n; old_idx++) {
+            double c = U(old_idx, new_idx);
+            gaxpy(world, 1.0, Y[new_idx], c, X[old_idx]);
+        }
+    }
+    double thresh = FunctionDefaults<3>::get_thresh();
+    for (auto& v : Y) truncate(world, v, thresh);
+    X = std::move(Y);
+}
+
+/// Build the ES theta for one root, one spin channel:
+///   theta_for_BSH = -2 * (Lambda + shift·x)
+/// where `shift` matches the level-shift used inside `make_bsh_operators`
+/// when ε+ω > 0 (so μ² stays negative).  When shift==0, this reduces to
+///   theta = -2 * Lambda
+/// Mirrors molresponse_legacy/TDDFT.cc:1830-1831 where `apply_shift`
+/// adds `shift·X` to theta_X before the *(-2) and BSH apply.
+inline vector_real_function_3d build_es_theta(
+    World& world,
+    const vector_real_function_3d& Lambda,
+    const vector_real_function_3d& x,
+    double shift = 0.0) {
+    auto theta = copy(world, Lambda, true);
+    if (shift != 0.0) {
+        gaxpy(world, 1.0, theta, shift, x);
+    }
+    scale(world, theta, -2.0);
+    truncate(world, theta);
+    return theta;
 }
 
 // =========================================================================

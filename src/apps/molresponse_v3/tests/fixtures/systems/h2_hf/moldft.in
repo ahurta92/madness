@@ -1,6 +1,6 @@
 dft
     xc hf
-    protocol [1e-4]
+    protocol [1e-4, 1e-6]
     maxiter 30
 end
 molecule
