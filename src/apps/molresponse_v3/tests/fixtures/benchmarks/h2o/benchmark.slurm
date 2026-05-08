@@ -7,7 +7,6 @@
 #SBATCH --time=04:00:00
 # --- Edit these for your account / partition ---
 #SBATCH --partition=hbm-short-96core
-#SBATCH --account=ahurtado
 
 # Excited-state benchmark: H2O (n_occ=5, 4 roots).
 # Runs moldft once, then ES TDA + RPA with both legacy and v1 molresponse,
@@ -20,7 +19,7 @@
 set -euo pipefail
 
 # ---------- Paths (edit if your tree lives elsewhere) ----------
-REPO=${REPO:-$HOME/Projects/madness}
+REPO=${REPO:-/gpfs/projects/rjh/adrian/madness}
 BUILD=${BUILD:-$REPO/build}
 WORK_BASE=${WORK_BASE:-/gpfs/scratch/$USER/madness_es_bench}
 

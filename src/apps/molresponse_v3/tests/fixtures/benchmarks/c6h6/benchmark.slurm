@@ -4,15 +4,14 @@
 #SBATCH --error=es_c6h6_bench-%j.err
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 # NOTE: ntasks-per-node=4 (not 8) because each task replicates the full
 # ground-state orbital set; at 8 tasks/node C6H6 OOMs on Xeon Max (~576GB).
 # See CLAUDE.md "Empirical data" table.
 # NOTE: 24h walltime exceeds hbm-short-96core's limit; switch to a long
 # partition (e.g. hbm-long-96core or extended-96core) before submitting.
 # --- Edit these for your account / partition ---
-#SBATCH --partition=hbm-short-96core
-#SBATCH --account=ahurtado
+#SBATCH --partition=hbm-medium-96core
 
 # Excited-state benchmark: C6H6 benzene (n_occ=21, 4 roots).
 # Designed to *just* fit in memory: 4 tasks/node × ~67GB/task ≈ 270GB/node.
@@ -26,7 +25,7 @@
 set -euo pipefail
 
 # ---------- Paths (edit if your tree lives elsewhere) ----------
-REPO=${REPO:-$HOME/Projects/madness}
+REPO=${REPO:-/gpfs/projects/rjh/adrian/madness}
 BUILD=${BUILD:-$REPO/build}
 WORK_BASE=${WORK_BASE:-/gpfs/scratch/$USER/madness_es_bench}
 
