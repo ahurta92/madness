@@ -11,15 +11,15 @@ it. The gap should grow with `n_occ × n_states`, so we ramp `n_occ`.
 ```
 benchmarks/
 ├── README.md              (this file)
-├── h2o/                   (n_occ=5, ~2 hr / node)
+├── h2o/                   (n_occ=5,  4 nodes × 8 tasks/node × 10 threads, 4 hr,  hbm-short-96core)
 │   ├── benchmark.slurm
 │   ├── response_tda.in
 │   └── response_rpa.in
-├── c2h4/                  (n_occ=8, ~6 hr / 2 nodes)
+├── c2h4/                  (n_occ=8,  4 nodes × 8 tasks/node × 10 threads, 8 hr,  hbm-short-96core)
 │   ├── benchmark.slurm
 │   ├── response_tda.in
 │   └── response_rpa.in
-└── c6h6/                  (n_occ=21, ~24 hr / 4 nodes @ 4 tasks/node)
+└── c6h6/                  (n_occ=21, 8 nodes × 4 tasks/node × 20 threads, 24 hr, needs a long partition)
     ├── benchmark.slurm
     ├── response_tda.in
     └── response_rpa.in
@@ -42,19 +42,22 @@ fixtures in `../systems/{h2o_hf, c2h4_hf, c6h6_hf}/`.
 
 ## Before submitting
 
-The SLURM scripts have **two edits** you almost certainly need:
+Defaults are set for Seawulf Xeon Max HBM nodes (account `ahurtado`,
+partition `hbm-short-96core`). Likely edits per host:
 
-```bash
-# top of each benchmark.slurm:
-#SBATCH --partition=long-40core    # <-- your seawulf partition
-#SBATCH --account=stark            # <-- your account
-```
+- **C6H6 needs a longer partition** — `hbm-short-96core` caps walltime
+  before 24 hr. Switch its `--partition` line to your long-running queue
+  (e.g. `hbm-long-96core` or `extended-96core`) before submitting.
+- The launcher defaults to `mpirun --map-by numa numactl --preferred-many=8-15`
+  (HBM tier preferred). To fall back to plain `srun`:
+  `LAUNCHER=srun sbatch benchmark.slurm`.
+- `source ~/load_xeonmax.sh` must exist and set up your build's runtime
+  environment. If you use modules instead, replace that line.
 
-You may also need to uncomment the `module load` lines if your build
-needs them. The defaults assume:
-- `$REPO=$HOME/Projects/madness`  (overridable via env)
-- `$BUILD=$REPO/build`             (overridable via env)
-- `$WORK_BASE=/gpfs/scratch/$USER/madness_es_bench` (overridable)
+Path overrides (all optional, take env vars):
+- `$REPO=$HOME/Projects/madness`
+- `$BUILD=$REPO/build`
+- `$WORK_BASE=/gpfs/scratch/$USER/madness_es_bench`
 
 ## Build prerequisites
 

@@ -2,16 +2,17 @@
 #SBATCH --job-name=es_c6h6_bench
 #SBATCH --output=es_c6h6_bench-%j.out
 #SBATCH --error=es_c6h6_bench-%j.err
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=8
 #SBATCH --time=24:00:00
 # NOTE: ntasks-per-node=4 (not 8) because each task replicates the full
 # ground-state orbital set; at 8 tasks/node C6H6 OOMs on Xeon Max (~576GB).
 # See CLAUDE.md "Empirical data" table.
+# NOTE: 24h walltime exceeds hbm-short-96core's limit; switch to a long
+# partition (e.g. hbm-long-96core or extended-96core) before submitting.
 # --- Edit these for your account / partition ---
-#SBATCH --partition=long-40core
-#SBATCH --account=stark
+#SBATCH --partition=hbm-short-96core
+#SBATCH --account=ahurtado
 
 # Excited-state benchmark: C6H6 benzene (n_occ=21, 4 roots).
 # Designed to *just* fit in memory: 4 tasks/node × ~67GB/task ≈ 270GB/node.
@@ -44,16 +45,13 @@ done
 [[ -d $FIXTURE ]] || { echo "ERROR: fixture dir not found: $FIXTURE" >&2; exit 1; }
 
 # ---------- Environment ----------
-# Edit module loads for your Seawulf environment.
-# module purge
-# module load intel/oneapi mpi/intel cmake
+export MAD_NUM_THREADS=20
+source ~/load_xeonmax.sh
 
-export MAD_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
-# MPI launcher — try `srun` first; if it doesn't bind correctly on your
-# Seawulf partition, change to `$LAUNCHER` or `srun --mpi=pmix`.
-LAUNCHER=${LAUNCHER:-srun}
+# MPI launcher — Xeon Max default: bind by NUMA, prefer HBM tier (NUMA 8-15).
+# Override on the command line if you need plain srun:
+#   LAUNCHER=srun sbatch benchmark.slurm
+LAUNCHER=${LAUNCHER:-mpirun --map-by numa numactl --preferred-many=8-15}
 
 WORK=$WORK_BASE/${SYSTEM}_${SLURM_JOB_ID:-local}
 mkdir -p "$WORK"

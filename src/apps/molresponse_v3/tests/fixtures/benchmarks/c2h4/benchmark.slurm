@@ -2,13 +2,12 @@
 #SBATCH --job-name=es_c2h4_bench
 #SBATCH --output=es_c2h4_bench-%j.out
 #SBATCH --error=es_c2h4_bench-%j.err
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=8
-#SBATCH --cpus-per-task=4
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 # --- Edit these for your account / partition ---
-#SBATCH --partition=long-40core
-#SBATCH --account=stark
+#SBATCH --partition=hbm-short-96core
+#SBATCH --account=ahurtado
 
 # Excited-state benchmark: C2H4 ethylene (n_occ=8, 4 roots).
 # Runs moldft once, then ES TDA + RPA with both legacy and v1 molresponse,
@@ -40,16 +39,13 @@ done
 [[ -d $FIXTURE ]] || { echo "ERROR: fixture dir not found: $FIXTURE" >&2; exit 1; }
 
 # ---------- Environment ----------
-# Edit module loads for your Seawulf environment.
-# module purge
-# module load intel/oneapi mpi/intel cmake
+export MAD_NUM_THREADS=10
+source ~/load_xeonmax.sh
 
-export MAD_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
-# MPI launcher — try `srun` first; if it doesn't bind correctly on your
-# Seawulf partition, change to `$LAUNCHER` or `srun --mpi=pmix`.
-LAUNCHER=${LAUNCHER:-srun}
+# MPI launcher — Xeon Max default: bind by NUMA, prefer HBM tier (NUMA 8-15).
+# Override on the command line if you need plain srun:
+#   LAUNCHER=srun sbatch benchmark.slurm
+LAUNCHER=${LAUNCHER:-mpirun --map-by numa numactl --preferred-many=8-15}
 
 WORK=$WORK_BASE/${SYSTEM}_${SLURM_JOB_ID:-local}
 mkdir -p "$WORK"
