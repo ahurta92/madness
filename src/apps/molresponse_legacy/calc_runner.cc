@@ -102,6 +102,19 @@ void TDDFT::set_protocol(World& world, double thresh) {
   gradop = gradient_operator<double, 3>(world);
   // GaussianConvolution1DCache<double>::map.clear();//(TODO:molresponse-What
   // is this? Do i need it?)
+  // LEGACY_PATCH: when set_protocol changes k below the archive's k (e.g.
+  // multi-rank flow calls set_protocol(1e-4) -> k=6 before set_protocol(1e-6)
+  // -> k=8, and orbitals are stored at k=8), make_ground_density's gaxpy
+  // mixes k-mismatched trees and asserts in tensoriter.h:185. Project orbitals
+  // to the current k first so make_ground_density operates uniformly.
+  if (!ground_orbitals.empty() &&
+      ground_orbitals[0].k() != FunctionDefaults<NDIM>::get_k()) {
+    for (auto& orb : ground_orbitals) {
+      orb = madness::project(orb, FunctionDefaults<NDIM>::get_k(), thresh, false);
+    }
+    world.gop.fence();
+    madness::truncate(world, ground_orbitals);
+  }
   rho0 = make_ground_density(world, ground_orbitals);
 
   // Create the masking function
