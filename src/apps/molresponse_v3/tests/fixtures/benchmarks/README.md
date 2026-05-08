@@ -72,6 +72,17 @@ make molresponse        -j8           # this is v1
 
 ## Submit
 
+All three at once:
+
+```bash
+cd src/apps/molresponse_v3/tests/fixtures/benchmarks
+./submit_all.sh                # all three: h2o c2h4 c6h6
+./submit_all.sh h2o            # just one
+./submit_all.sh h2o c2h4       # subset, in order
+```
+
+Or by hand:
+
 ```bash
 cd src/apps/molresponse_v3/tests/fixtures/benchmarks/h2o   && sbatch benchmark.slurm
 cd ../c2h4                                                 && sbatch benchmark.slurm
@@ -80,6 +91,8 @@ cd ../c6h6                                                 && sbatch benchmark.s
 
 Each job is independent. C6H6 will take the longest; consider running
 H2O first as a smoke test before committing C6H6's 24-hour reservation.
+The script writes `jobs.txt` next to itself with one `<sys> <jobid>` line
+per submission.
 
 ## After they finish
 
