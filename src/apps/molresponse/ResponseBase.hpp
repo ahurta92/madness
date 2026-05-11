@@ -765,6 +765,29 @@ protected:
     mask = real_function_3d(
         real_factory_3d(world).f(mask3).initial_level(4).norefine());
 
+    // Reproject ground orbitals to the current k before rebuilding the
+    // density. set_protocol may run for a protocol whose k differs from
+    // the moldft-saved k (e.g. running response at thresh=1e-4 / k=6
+    // against a moldft saved at thresh=1e-6 / k=8 for fast iteration).
+    // Without this, the make_ground_density call below operates on
+    // mixed-k functions and crashes with a tensor-conform assertion.
+    // Also invalidate the stored hamiltonian so check_k's recompute
+    // branch runs against the reprojected orbitals.
+    if (!ground_orbitals.empty() &&
+        FunctionDefaults<3>::get_k() != ground_orbitals[0].k()) {
+      for (auto &orbital : ground_orbitals) {
+        orbital = project(orbital, FunctionDefaults<3>::get_k(), thresh, false);
+      }
+      world.gop.fence();
+      truncate(world, ground_orbitals);
+      hamiltonian = Tensor<double>();
+      ham_no_diag = Tensor<double>();
+      if (world.rank() == 0) {
+        print("set_protocol: projected ground orbitals to k=",
+              FunctionDefaults<3>::get_k());
+      }
+    }
+
     ground_density = make_ground_density(world);
     ground_density.truncate(FunctionDefaults<3>::get_thresh());
     // Basic print
