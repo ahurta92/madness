@@ -1755,6 +1755,15 @@ void ResponseBase::solve(World &world) {
           print("   Restarting from file:", r_params.restart_file());
         }
         load(world, r_params.restart_file());
+        // Project the just-loaded Chi to the current protocol's k. The
+        // earlier check_k() call above ran on an empty Chi (load hadn't
+        // happened yet) so it was a no-op for Chi. Without this second
+        // call, a restart file saved at a different thresh/k than the
+        // current protocol causes a tensor-dimension mismatch on the
+        // first operator apply in iterate(). Symmetric: handles both
+        // downscale (saved at finer thresh, current protocol coarser)
+        // and upscale (saved at coarser, current finer).
+        ::check_k(world, Chi, iter_thresh, FunctionDefaults<3>::get_k());
       } else {
         this->initialize(world);
       }
