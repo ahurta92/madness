@@ -861,6 +861,20 @@ protected:
   auto compute_gamma(World &world, const gamma_orbitals &,
                      const XCOperator<double, 3> &xc) const -> X_space;
 
+  /// Compute response gamma = (2J - K) per (state, orbital).
+  ///
+  /// For calc_type "full" or "static", dispatches via ResponseComputeGammaX
+  /// macrotask across MPI subworlds (per-orbital granularity). For "tda"
+  /// falls back to the serial compute_gamma_tda because that path also
+  /// needs the J[rho1] term that the per-orbital macrotask does not
+  /// compute. rho1 is only used in the TDA path; callers that never go
+  /// through TDA may pass an empty vector.
+  auto compute_gamma_dispatch(World &world, const X_space &chi,
+                              const XCOperator<double, 3> &xc,
+                              const std::string &calc_type,
+                              const vector_real_function_3d &rho1) const
+      -> X_space;
+
   auto compute_V0X(World &world, const X_space &X,
                    const XCOperator<double, 3> &xc,
                    bool compute_Y) const -> X_space;

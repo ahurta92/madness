@@ -597,51 +597,7 @@ auto ResponseBase::compute_theta_X(
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  auto gamma =
-      X_space::zero_functions(world, chi.num_states(), chi.num_orbitals());
-  if (calc_type != "tda") {
-
-    std::vector<int> state_index;
-    std::vector<int> ii;
-    auto orbs_per_state =
-        (compute_Y) ? 2 * chi.num_orbitals() : chi.num_orbitals();
-
-    int i = 0;
-    int si = 0;
-    for (auto &b : chi.active) {
-      for (int j = 0; j < orbs_per_state; j++) {
-        state_index.push_back(si);
-        ii.push_back(i++);
-      }
-      si++;
-    }
-
-    ResponseComputeGammaX t;
-    MacroTask gamma_task(world, t);
-
-    gamma.set_active(chi.active);
-    if (compute_Y) {
-      auto vec_chi = chi.to_vector();
-      auto gamma_vec =
-          gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
-      gamma.from_vector(gamma_vec);
-    } else {
-      auto vec_chi = chi.x.to_vector();
-      auto gamma_vec =
-          gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
-      auto gnorm = norm2s_T(world, gamma_vec);
-      // if (world.rank() == 0)
-      // {
-      //   print("gamma_vec norm: ", gnorm);
-      // }
-      gamma.x.from_vector(gamma_vec);
-      // gamma.y = gamma.x;
-    }
-
-    // gamma = compute_gamma(world, {chi, ground_orbitals, rho1}, xc);
-  } else {
-    gamma = compute_gamma_tda(world, {chi, ground_orbitals, rho1}, xc);
-  }
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type, rho1);
 
   if (r_params.print_level() >= 20) {
     print_inner(world, "gammaX", chi, gamma);
@@ -1080,18 +1036,8 @@ auto ResponseBase::compute_lambda_X(
     }
   }
   // put it all together
-  X_space gamma;
-  // compute
-  if (calc_type == "full") {
-    gamma = compute_gamma_full(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else if (calc_type == "static") {
-    gamma = compute_gamma_static(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else {
-    gamma = compute_gamma_tda(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  }
+  X_space gamma = compute_gamma_dispatch(
+      world, chi, xc, calc_type, vector_real_function_3d{});
   if (r_params.print_level() >= 20) {
     auto gamma_mx = inner(Chi_truncated, gamma);
     if (world.rank() == 0) {
@@ -1111,6 +1057,58 @@ auto ResponseBase::compute_lambda_X(
   }
 
   return Lambda_X;
+}
+
+auto ResponseBase::compute_gamma_dispatch(
+    World &world, const X_space &chi, const XCOperator<double, 3> &xc,
+    const std::string &calc_type,
+    const vector_real_function_3d &rho1) const -> X_space {
+
+  // TDA needs the J[rho1] term in addition to (2J - K); the macrotask only
+  // computes the latter per (state, orbital), so fall back to the serial
+  // routine for TDA.
+  if (calc_type == "tda") {
+    return compute_gamma_tda(world, {chi, ground_orbitals, rho1}, xc);
+  }
+
+  const bool compute_Y = (calc_type == "full");
+  auto gamma =
+      X_space::zero_functions(world, chi.num_states(), chi.num_orbitals());
+  gamma.set_active(chi.active);
+
+  // Build flat per-(state, orbital) indices. For RPA also include the Y
+  // half-block, doubling orbs_per_state.
+  std::vector<int> state_index;
+  std::vector<int> ii;
+  const size_t orbs_per_state =
+      compute_Y ? 2 * chi.num_orbitals() : chi.num_orbitals();
+  int i = 0;
+  int si = 0;
+  for (const auto &b : chi.active) {
+    (void)b;
+    for (size_t j = 0; j < orbs_per_state; j++) {
+      state_index.push_back(si);
+      ii.push_back(i++);
+    }
+    si++;
+  }
+
+  ResponseComputeGammaX t;
+  MacroTask gamma_task(world, t);
+
+  if (compute_Y) {
+    auto vec_chi = chi.to_vector();
+    auto gamma_vec =
+        gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
+    gamma.from_vector(gamma_vec);
+  } else {
+    auto vec_chi = chi.x.to_vector();
+    auto gamma_vec =
+        gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+    gamma.x.from_vector(gamma_vec);
+  }
+
+  return gamma;
 }
 
 auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
@@ -1149,18 +1147,8 @@ auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
   X_space V0X = compute_V0X(world, chi_copy, xc, compute_Y);
 
   // put it all together
-  X_space gamma;
-  // compute
-  if (calc_type == "full") {
-    gamma = compute_gamma_full(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else if (calc_type == "static") {
-    gamma = compute_gamma_static(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else {
-    gamma = compute_gamma_tda(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  }
+  X_space gamma = compute_gamma_dispatch(
+      world, chi, xc, calc_type, vector_real_function_3d{});
 
   X_space Lambda_X(
       world, m,
