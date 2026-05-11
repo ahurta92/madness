@@ -1894,8 +1894,9 @@ ExcitedResponse::create_bsh_operators(World &world, const Tensor<double> &shift,
     operators.push_back(temp);
   }
 
-  // Tabular dump of mu, rank 0 only.
-  if (world.rank() == 0) {
+  // Tabular dump of mu. Gated behind print_level >= 2 since
+  // create_bsh_operators runs many times per outer iter.
+  if (world.rank() == 0 && r_params.print_level() >= 2) {
     printf("\n=== BSH exponents mu_{k,p} = sqrt(-2(eps_p + omega_k + shift)) "
            "===\n");
     printf("           ");
@@ -2068,25 +2069,25 @@ void ExcitedResponse::iterate(World &world) {
 
       excited_to_json(j_molresponse, iter, omega);
 
-      if (r_params.print_level() >= 1) {
-
-        if (world.rank() == 0) {
-          print("thresh: ", FunctionDefaults<3>::get_thresh());
-          print("k: ", FunctionDefaults<3>::get_k());
-          print("Chi Norms at start of iteration: ", iter);
-          print("xij norms\n: ", xij_norms);
-          print("xij residual norms\n: ", xij_res_norms);
-          print("Chi_X: ", chi_norms);
-          print("bsh_residuals : ", bsh_residualsX);
-          print("relative_bsh : ", relative_bsh);
-          print("r_params.dconv(): ", r_params.dconv());
-          print("max rotation: ", max_rotation);
-          print("d_residual_max : ", d_residual);
-          print("d_residual_max target : ", conv_den);
-          print("bsh_residual_max : ", max_bsh);
-          print("relative_bsh_residual_max : ", relative_max_bsh);
-          print("relative_bsh_residual_max target : ", relative_max_target);
-        }
+      if (r_params.print_level() >= 1 && world.rank() == 0) {
+        print("thresh: ", FunctionDefaults<3>::get_thresh());
+        print("k: ", FunctionDefaults<3>::get_k());
+        print("Chi Norms at start of iteration: ", iter);
+        print("Chi_X: ", chi_norms);
+        print("bsh_residuals : ", bsh_residualsX);
+        print("relative_bsh : ", relative_bsh);
+        print("r_params.dconv(): ", r_params.dconv());
+        print("max rotation: ", max_rotation);
+        print("d_residual_max : ", d_residual);
+        print("d_residual_max target : ", conv_den);
+        print("bsh_residual_max : ", max_bsh);
+        print("relative_bsh_residual_max : ", relative_max_bsh);
+        print("relative_bsh_residual_max target : ", relative_max_target);
+      }
+      // Verbose per-(state, orbital) tensors: only at print_level >= 2.
+      if (r_params.print_level() >= 2 && world.rank() == 0) {
+        print("xij norms\n: ", xij_norms);
+        print("xij residual norms\n: ", xij_res_norms);
       }
       if ((d_residual < conv_den) and
           ((relative_max_bsh < relative_max_target) or
@@ -2235,22 +2236,27 @@ void ExcitedResponse::iterate(World &world) {
     print(density_residuals);
   }
 
-  /*
+  // End-of-iteration analysis - mirrors legacy iterate_excited.cc:281-297.
+  // Reports per-state ground-orbital decomposition and transition dipoles.
+  // Separators gated on rank 0 + print_level >= 1; analysis() and
+  // analyze_vectors() themselves manage their own gating internally.
   analysis(world, Chi);
-  print("--------------------------------------------------------");
+  if (world.rank() == 0 && r_params.print_level() >= 1)
+    print("--------------------------------------------------------");
   for (size_t i = 0; i < m; i++) {
-      std::string x_state = "x_" + std::to_string(i) + "_";
-      analyze_vectors(world, Chi.X[i], x_state);
+    std::string x_state = "x_" + std::to_string(i) + "_";
+    analyze_vectors(world, Chi.x[i], x_state);
+    if (world.rank() == 0 && r_params.print_level() >= 1)
       print("--------------------------------------------------------");
   }
   if (not r_params.tda()) {
-      for (size_t i = 0; i < m; i++) {
-          std::string y_state = "y_" + std::to_string(i) + "_";
-          analyze_vectors(world, Chi.y[i], y_state);
-          print("--------------------------------------------------------");
-      }
+    for (size_t i = 0; i < m; i++) {
+      std::string y_state = "y_" + std::to_string(i) + "_";
+      analyze_vectors(world, Chi.y[i], y_state);
+      if (world.rank() == 0 && r_params.print_level() >= 1)
+        print("--------------------------------------------------------");
+    }
   }
-   */
 }
 
 auto ExcitedResponse::update_response(
@@ -2296,7 +2302,7 @@ auto ExcitedResponse::update_response(
     }
   }
 
-  if (world.rank() == 0) {
+  if (world.rank() == 0 && r_params.print_level() >= 2) {
     print("Entering Compute Lambda");
   }
 
@@ -2306,8 +2312,7 @@ auto ExcitedResponse::update_response(
   auto [new_omega, rotated_chi, rotated_lambda, rotated_v_x, rotated_gamma_x] =
       rotate_excited_space(world, Chi, temp_Lambda_X, temp_V0X, temp_gamma);
 
-  if (world.rank() == 0) {
-
+  if (world.rank() == 0 && r_params.print_level() >= 2) {
     print("omega_n before transform");
     print(omega);
     print("omega_n after transform");
@@ -2387,9 +2392,14 @@ auto ExcitedResponse::bsh_update_excited(World &world,
   bool compute_y = !r_params.tda();
   Tensor<double> x_shifts(m);
   Tensor<double> y_shifts(m);
-  print("omega before shifts");
   Tensor<double> omega_plus = omega;
-  print(omega);
+  // The "omega before shifts" diagnostic dumps once per call, and
+  // bsh_update_excited runs many times per outer iter. Gate behind
+  // rank 0 + print_level >= 2 to keep ordinary runs quiet.
+  if (world.rank() == 0 && r_params.print_level() >= 2) {
+    print("omega before shifts");
+    print(omega);
+  }
   x_shifts = create_shift(world, ground_energies, omega_plus, "x");
   // Compute Theta X
   // Apply the shifts
