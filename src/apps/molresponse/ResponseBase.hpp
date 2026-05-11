@@ -1008,6 +1008,12 @@ void sort(World &world, Tensor<double> &vals, X_space &f);
 // functions
 auto gram_schmidt(World &world, const response_space &f) -> response_space;
 
+// RPA-aware Gram-Schmidt under the indefinite metric <f|f> - <g|g>.
+// Mirror of legacy TDDFT::gram_schmidt(World&, response_space&, response_space&)
+// at molresponse_legacy/TDDFT.cc:2061. In-place: f and g are orthonormalized
+// jointly using the same coefficients.
+void gram_schmidt(World &world, response_space &f, response_space &g);
+
 /// Computes the transition density between set of two response functions x and
 /// y. Uses std::transform to iterate between x and y vectors \param world
 /// \param orbitals

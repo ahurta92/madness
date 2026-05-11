@@ -2406,6 +2406,31 @@ auto gram_schmidt(World &world, const response_space &f) -> response_space {
   return result;
 }
 
+// RPA-aware Gram-Schmidt under the indefinite metric <f|f> - <g|g>.
+// Mirror of legacy TDDFT::gram_schmidt at molresponse_legacy/TDDFT.cc:2061-2089.
+// In-place: f and g are orthonormalized together using identical scaling and
+// projection coefficients. NOTE: matches legacy in not guarding against
+// non-positive pseudo-norms (norm <= 0). A non-positive norm produces NaN/inf
+// downstream; revisit if observed in practice.
+void gram_schmidt(World &world, response_space &f, response_space &g) {
+  size_t m = f.size();
+
+  for (size_t j = 0; j < m; j++) {
+    double norm = inner(f[j], f[j]) - inner(g[j], g[j]);
+    scale(world, f[j], 1.0 / sqrt(norm));
+    scale(world, g[j], 1.0 / sqrt(norm));
+
+    for (size_t k = j + 1; k < m; k++) {
+      double temp = inner(f[j], f[k]) - inner(g[j], g[k]);
+      gaxpy(world, 1.0, f[k], -temp, f[j]);
+      gaxpy(world, 1.0, g[k], -temp, g[j]);
+    }
+  }
+
+  f.truncate_rf();
+  g.truncate_rf();
+}
+
 auto make_xyz_functions(World &world) -> vector_real_function_3d {
   // Container to return
 
