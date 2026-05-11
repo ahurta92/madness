@@ -1622,50 +1622,44 @@ void ResponseBase::x_space_step_restriction(World &world,
                                             X_space &temp, bool restrict_y,
                                             const double &max_bsh_rotation) {
   size_t m = old_Chi.num_states();
-  size_t n = old_Chi.num_orbitals();
-
-  bool compute_y = r_params.omega() != 0.0;
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
 
-  if (compute_y) {
-
-    auto temp_vecs = to_response_matrix(temp);
-    auto old_vecs = to_response_matrix(old_Chi);
-
-    for (const auto ai : old_Chi.active) {
-
-      auto norm_diff_ai = norm2(world, sub(world, old_vecs[ai], temp_vecs[ai]));
-
-      if (norm_diff_ai > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff_ai;
-        if (world.rank() == 0) {
-          printf(" %d:%f", ai, s);
-        }
-        temp_vecs[ai] = gaxpy_oop(s, old_vecs[ai], 1.0 - s, temp_vecs[ai]);
+  // Mirror legacy TDDFT::x_space_step_restriction at
+  // molresponse_legacy/TDDFT.cc:1921-1949: per-state loop, X and Y blocks
+  // bounded independently with the same scalar bound. Uses the explicit
+  // restrict_y argument (legacy's discipline) rather than testing
+  // r_params.omega() != 0.
+  for (size_t b = 0; b < m; b++) {
+    // X block
+    {
+      double norm_diff = norm2(world, sub(world, old_Chi.x[b], temp.x[b]));
+      if (norm_diff > max_bsh_rotation) {
+        double s = max_bsh_rotation / norm_diff;
+        if (world.rank() == 0)
+          printf(" x%zu:%f", b, s);
+        // Standard step restriction: result = s*temp + (1-s)*old (mostly old).
+        // NOTE: the prior RPA branch passed the gaxpy_oop arguments in the
+        // opposite order, producing mostly-new instead of mostly-old; this
+        // unified path fixes that.
+        temp.x[b] = gaxpy_oop(s, temp.x[b], 1.0 - s, old_Chi.x[b]);
       }
     }
-  } else {
-    for (const auto ai : old_Chi.active) {
-
-      auto norm_diff_ai = norm2(world, sub(world, old_Chi.x[ai], temp.x[ai]));
-
-      if (norm_diff_ai > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff_ai;
-        if (world.rank() == 0) {
-          printf(" %d:%f", ai, s);
-        }
-        temp.x[ai] = gaxpy_oop(s, temp.x[ai], 1.0 - s, old_Chi.x[ai]);
+    // Y block - only when restrict_y is true. Same scalar bound per
+    // legacy convention.
+    if (restrict_y) {
+      double norm_diff = norm2(world, sub(world, old_Chi.y[b], temp.y[b]));
+      if (norm_diff > max_bsh_rotation) {
+        double s = max_bsh_rotation / norm_diff;
+        if (world.rank() == 0)
+          printf(" y%zu:%f", b, s);
+        temp.y[b] = gaxpy_oop(s, temp.y[b], 1.0 - s, old_Chi.y[b]);
       }
     }
   }
 
-  // if (world.rank() == 0)
-  // {
-  //   print("----------------End Step Restriction -----------------");
-  // }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "x_space_restriction", "x_space_restriction",
                            iter_timing);
