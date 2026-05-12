@@ -1948,7 +1948,7 @@ void ExcitedResponse::iterate(World &world) {
   // comment at SCF.cc:2385-2387).
   const double conv_den =
       r_params.dconv() * static_cast<double>(std::max(size_t(5), molecule.natom()));
-  const double relative_max_target = 5.0 * r_params.dconv();
+  const double bsh_target = 5.0 * r_params.dconv();
 
   auto thresh = FunctionDefaults<3>::get_thresh();
   // Honor r_params.maxrotn() if the user set it; fall back to the
@@ -2063,15 +2063,8 @@ void ExcitedResponse::iterate(World &world) {
       // Test convergence and set to true
       auto chi_norms = Chi.norm2s();
       auto rho_norms = norm2s_T(world, rho_omega);
-      auto relative_bsh = copy(bsh_residualsX);
-
-      std::transform(bsh_residualsX.ptr(),
-                     bsh_residualsX.ptr() + bsh_residualsX.size(),
-                     chi_norms.ptr(), relative_bsh.ptr(),
-                     [](auto bsh, auto norm_chi) { return bsh / norm_chi; });
 
       auto max_bsh = bsh_residualsX.absmax();
-      auto relative_max_bsh = relative_bsh.absmax();
 
       function_data_to_json(j_molresponse, iter, chi_norms, bsh_residualsX,
                             rho_norms, density_residuals);
@@ -2084,22 +2077,22 @@ void ExcitedResponse::iterate(World &world) {
         print("Chi Norms at start of iteration: ", iter);
         print("Chi_X: ", chi_norms);
         print("bsh_residuals : ", bsh_residualsX);
-        print("relative_bsh : ", relative_bsh);
         print("r_params.dconv(): ", r_params.dconv());
         print("max rotation: ", max_rotation);
         print("d_residual_max : ", d_residual);
         print("d_residual_max target : ", conv_den);
         print("bsh_residual_max : ", max_bsh);
-        print("relative_bsh_residual_max : ", relative_max_bsh);
-        print("relative_bsh_residual_max target : ", relative_max_target);
+        print("bsh_residual_max target : ", bsh_target);
       }
       // Verbose per-(state, orbital) tensors: only at print_level >= 2.
       if (r_params.print_level() >= 2 && world.rank() == 0) {
         print("xij norms\n: ", xij_norms);
         print("xij residual norms\n: ", xij_res_norms);
       }
+      // Convergence test mirrors SCF.cc:2381-2384: absolute residuals
+      // against dconv-scaled targets, no relative normalization.
       if ((d_residual < conv_den) and
-          ((relative_max_bsh < relative_max_target) or
+          ((max_bsh < bsh_target) or
            r_params.get<bool>("conv_only_dens"))) {
         all_done = true;
       }
