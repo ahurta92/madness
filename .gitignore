@@ -87,6 +87,18 @@ src/apps/molresponse_v3/tests/fixtures/systems/*/moldft.std*
 src/apps/molresponse_v3/tests/fixtures/systems/*/MacroTaskExchangeRow_task.*
 src/apps/molresponse_v3/tests/fixtures/systems/*/*.log
 
+# Benchmark job outputs (stay in scratch, not the source tree)
+src/apps/molresponse_v3/tests/fixtures/benchmarks/**/*.err
+src/apps/molresponse_v3/tests/fixtures/benchmarks/**/*.out
+src/apps/molresponse_v3/tests/fixtures/benchmarks/jobs.txt
+
+# IDE / agent caches
+.claude/
+.vscode/
+
+# Workflow scripts now live in madness_studies/scripts/
+/scripts/
+
 # Test executables sometimes built into source tree by mistake
 src/apps/molresponse_v3/test_es_solver
 src/apps/molresponse_v3/test_v3_solver
