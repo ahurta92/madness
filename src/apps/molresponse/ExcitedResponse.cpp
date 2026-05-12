@@ -784,7 +784,7 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
   }
   //
   A = inner(chi_copy, l_copy);
-  if (world.rank() == 0) {
+  if (world.rank() == 0 && (r_params.print_level() >= 10)) {
     auto am = A - transpose(A);
     print("largest non-symmetric :", am.max());
   }
@@ -797,7 +797,7 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
   auto [new_omega, U] =
       excited_eig(world, S, A, FunctionDefaults<3>::get_thresh());
 
-  if (world.rank() == 0 and r_params.print_level() >= 2) {
+  if (world.rank() == 0 && (r_params.print_level() >= 2)) {
     print("   Eigenvector coefficients from diagonalization:");
     print(U);
     print(new_omega);
@@ -824,7 +824,7 @@ ExcitedResponse::reduce_subspace(World &world, Tensor<double> &S,
   svd(S_copy, l_vecs, s_vals, r_vecs);
 
   // Debugging output
-  if (r_params.print_level() >= 2 and world.rank() == 0) {
+  if (r_params.print_level() >= 2 && world.rank() == 0) {
     print("\n   Singular values of overlap matrix:");
     print(s_vals);
     print("   Left singular vectors of overlap matrix:");
@@ -835,15 +835,15 @@ ExcitedResponse::reduce_subspace(World &world, Tensor<double> &S,
   size_t num_zero = 0;
   for (int64_t i = 0; i < s_vals.dim(0); i++) {
     if (s_vals(i) < 10 * thresh_degenerate) {
-      if (world.rank() == 0 and num_zero == 0)
+      if (world.rank() == 0 && (r_params.print_level() >= 2))
         print("");
-      if (world.rank() == 0)
+      if (world.rank() == 0 && (r_params.print_level() >= 2))
         printf("   Detected singular value (%.8f) below threshold (%.8f). "
                "Reducing subspace size.\n",
                s_vals(i), 10 * thresh_degenerate);
       num_zero++;
     }
-    if (world.rank() == 0 and i == s_vals.dim(0) - 1 and num_zero > 0)
+    if (world.rank() == 0 && (r_params.print_level() >= 2) && i == s_vals.dim(0) - 1 && num_zero > 0)
       print("");
   }
 
@@ -872,7 +872,7 @@ ExcitedResponse::reduce_subspace(World &world, Tensor<double> &S,
     l_vecs_s = copy(l_vecs(_, Slice(0, size_s - 1)));
 
     // Debugging output
-    if (r_params.print_level() >= 2 and world.rank() == 0) {
+    if (r_params.print_level() >= 2 && world.rank() == 0) {
       print("   Reduced size left singular vectors of overlap matrix:");
       print(l_vecs_s);
     }
@@ -889,7 +889,7 @@ ExcitedResponse::reduce_subspace(World &world, Tensor<double> &S,
     mxm(size_s, size_s, size_l, copyA.ptr(), l_vecs_t.ptr(), work.ptr());
 
     // Debugging output
-    if (r_params.print_level() >= 2 and world.rank() == 0) {
+    if (r_params.print_level() >= 2 && world.rank() == 0) {
       print("   Reduced response matrix:");
       print(copyA);
       print("   Reduced overlap matrix:");
