@@ -1946,25 +1946,12 @@ void ExcitedResponse::iterate(World &world) {
   // The "max(5, natom)" floor keeps small molecules from converging too
   // tightly (per SCF's "previous conv was too tight for small systems"
   // comment at SCF.cc:2385-2387).
-  const double conv_den =
-      r_params.dconv() * static_cast<double>(std::max(size_t(5), molecule.natom()));
+  const double dconv = std::max(FunctionDefaults<3>::get_thresh(),
+                                  r_params.dconv());
   const double bsh_target = 5.0 * r_params.dconv();
 
   auto thresh = FunctionDefaults<3>::get_thresh();
-  // Honor r_params.maxrotn() if the user set it; fall back to the
-  // protocol-based heuristic when they leave it at the default (0.5).
-  double max_rotation = r_params.maxrotn();
-  if (max_rotation == 0.5) {
-    if (thresh >= 1e-2) {
-      max_rotation = 2.0;
-    } else if (thresh >= 1e-4) {
-      max_rotation = 0.25;
-    } else if (thresh >= 1e-6) {
-      max_rotation = 0.1;
-    } else if (thresh >= 1e-8) {
-      max_rotation = 0.05;
-    }
-  }
+  const double max_rotation = r_params.maxrotn();
 
   // m residuals for x and y
   Tensor<double> bsh_residualsX(m);
@@ -2052,48 +2039,37 @@ void ExcitedResponse::iterate(World &world) {
 
     if (iter > 0) {
       // Only checking on X components even for full as y are so small
+      // Bail if the density residual explodes - something is badly diverging.
       if (density_residuals.max() > 2) {
         break;
       }
-
-      if (density_residuals.max() > 2) {
-        break;
-      }
-      double d_residual = density_residuals.max();
-      // Test convergence and set to true
-      auto chi_norms = Chi.norm2s();
-      auto rho_norms = norm2s_T(world, rho_omega);
-
-      auto max_bsh = bsh_residualsX.absmax();
+      const double d_residual = density_residuals.max();
+      const auto chi_norms = Chi.norm2s();
+      const auto rho_norms = norm2s_T(world, rho_omega);
+      const double bsh_residual = bsh_residualsX.absmax();
 
       function_data_to_json(j_molresponse, iter, chi_norms, bsh_residualsX,
                             rho_norms, density_residuals);
-
       excited_to_json(j_molresponse, iter, omega);
 
-      if (r_params.print_level() >= 1 && world.rank() == 0) {
-        print("thresh: ", FunctionDefaults<3>::get_thresh());
-        print("k: ", FunctionDefaults<3>::get_k());
-        print("Chi Norms at start of iteration: ", iter);
-        print("Chi_X: ", chi_norms);
-        print("bsh_residuals : ", bsh_residualsX);
-        print("r_params.dconv(): ", r_params.dconv());
-        print("max rotation: ", max_rotation);
-        print("d_residual_max : ", d_residual);
-        print("d_residual_max target : ", conv_den);
-        print("bsh_residual_max : ", max_bsh);
-        print("bsh_residual_max target : ", bsh_target);
+      // Per-iter convergence line, SCF.cc:2260-2262 style (gated at
+      // print_level > 2). The targets are static for the protocol so
+      // they don't need to print every iter.
+      if (world.rank() == 0 && r_params.print_level() > 2) {
+        print("delta rho", d_residual, "bsh_residual", bsh_residual);
       }
-      // Verbose per-(state, orbital) tensors: only at print_level >= 2.
-      if (r_params.print_level() >= 2 && world.rank() == 0) {
-        print("xij norms\n: ", xij_norms);
-        print("xij residual norms\n: ", xij_res_norms);
+      // Per-(state, orbital) diagnostics at higher verbosity.
+      if (world.rank() == 0 && r_params.print_level() > 3) {
+        print("chi_norms:", chi_norms);
+        print("bsh_residuals per state:", bsh_residualsX);
+        print("xij_norms:\n", xij_norms);
+        print("xij_res_norms:\n", xij_res_norms);
       }
+
       // Convergence test mirrors SCF.cc:2381-2384: absolute residuals
-      // against dconv-scaled targets, no relative normalization.
-      if ((d_residual < conv_den) and
-          ((max_bsh < bsh_target) or
-           r_params.get<bool>("conv_only_dens"))) {
+      // against dconv-scaled targets.
+      if ((d_residual < dconv) and
+          (r_params.get<bool>("conv_only_dens") or bsh_residual < bsh_target)) {
         all_done = true;
       }
 
