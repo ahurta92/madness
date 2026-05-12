@@ -1940,21 +1940,30 @@ void ExcitedResponse::iterate(World &world) {
   size_t m = r_params.num_states();   // Number of excited states
   size_t n = r_params.num_orbitals(); // Number of ground state orbitals
 
+  // Convergence targets mirror SCF.cc:2381-2384 in the moldft path:
+  //   density residual < dconv * max(5, natom)
+  //   bsh residual     < 5 * dconv
+  // The "max(5, natom)" floor keeps small molecules from converging too
+  // tightly (per SCF's "previous conv was too tight for small systems"
+  // comment at SCF.cc:2385-2387).
   const double conv_den =
-      std::max(100 * FunctionDefaults<3>::get_thresh(), r_params.dconv());
-  const double relative_max_target =
-      std::max(50 * FunctionDefaults<3>::get_thresh(), .5 * r_params.dconv());
+      r_params.dconv() * static_cast<double>(std::max(size_t(5), molecule.natom()));
+  const double relative_max_target = 5.0 * r_params.dconv();
 
   auto thresh = FunctionDefaults<3>::get_thresh();
-  auto max_rotation = .5;
-  if (thresh >= 1e-2) {
-    max_rotation = 2;
-  } else if (thresh >= 1e-4) {
-    max_rotation = .25;
-  } else if (thresh >= 1e-6) {
-    max_rotation = .1;
-  } else if (thresh >= 1e-8) {
-    max_rotation = .05;
+  // Honor r_params.maxrotn() if the user set it; fall back to the
+  // protocol-based heuristic when they leave it at the default (0.5).
+  double max_rotation = r_params.maxrotn();
+  if (max_rotation == 0.5) {
+    if (thresh >= 1e-2) {
+      max_rotation = 2.0;
+    } else if (thresh >= 1e-4) {
+      max_rotation = 0.25;
+    } else if (thresh >= 1e-6) {
+      max_rotation = 0.1;
+    } else if (thresh >= 1e-8) {
+      max_rotation = 0.05;
+    }
   }
 
   // m residuals for x and y
@@ -1987,7 +1996,7 @@ void ExcitedResponse::iterate(World &world) {
   }
   if (r_params.kain()) {
     for (auto &kain_space_b : kain_x_space) {
-      kain_space_b.set_maxsub(static_cast<int>(10));
+      kain_space_b.set_maxsub(static_cast<int>(r_params.maxsub()));
     }
   }
 
@@ -2366,7 +2375,7 @@ auto ExcitedResponse::update_response(
   if (r_params.kain() && (iter > 0) && true) {
     new_chi = kain_x_space_update(world, rotated_chi, new_res, kain_x_space);
   }
-  if (iter > 0) {
+  if (iter > 0 && r_params.get<bool>("step_restrict")) {
     x_space_step_restriction(world, rotated_chi, new_chi, compute_y, maxrotn);
   }
 
