@@ -4,7 +4,7 @@
 #SBATCH --error=es_tyrosine_bench-%j.err
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=hbm-medium-96core
 
 # Excited-state benchmark: tyrosine (auto-generated from h2o template).

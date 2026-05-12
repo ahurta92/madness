@@ -2,7 +2,7 @@
 #SBATCH --job-name=es_uracil_bench
 #SBATCH --output=es_uracil_bench-%j.out
 #SBATCH --error=es_uracil_bench-%j.err
-#SBATCH --nodes=4
+#SBATCH --nodes=6
 #SBATCH --ntasks-per-node=4
 #SBATCH --time=12:00:00
 #SBATCH --partition=hbm-medium-96core
