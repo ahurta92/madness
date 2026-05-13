@@ -1264,10 +1264,6 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
 
     gamma0.x.from_vector(gamma_vec);
 
-    if (r_params.print_level() >= 20) {
-      print_inner(world, "gamma0", gamma0, gamma0);
-    }
-
     // gamma0.y = gamma0.x;
   }
 
