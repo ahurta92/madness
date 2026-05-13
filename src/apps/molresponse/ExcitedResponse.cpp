@@ -2416,17 +2416,20 @@ auto ExcitedResponse::bsh_update_excited(World &world,
       bsh_X.y[i] = projector(bsh_X.y[i]);
   }
 
-  // Only update non-converged components
-  /*
+  // Apply boundary mask. Zeroes the BSH-applied function near the
+  // simulation-cell boundary so it decays cleanly to zero. Without this,
+  // BSH can leave residual amplitude at the box edge; Q-projection above
+  // removes ground-state character but cannot remove boundary noise
+  // (ground orbitals are also ~0 at the boundary). Iter-by-iter the
+  // boundary contamination grows and contaminates V0*Chi via vnuc's tail
+  // - the exact failure mode observed in TDA's |V0X| doubling between
+  // iter 0 and iter 1 while |Chi|=1.0. Mirrors iterate_trial:610-612.
   for (size_t i = 0; i < m; i++) {
-      bsh_X.X[i] = bsh_X.X[i];
-      bsh_X.X[i] = mask * bsh_X.X[i];
-      if (compute_y) {
-          bsh_X.y[i] = bsh_X.y[i];
-          bsh_X.y[i] = mask * bsh_X.y[i];
-      }
+    bsh_X.x[i] = mask * bsh_X.x[i];
+    if (compute_y) {
+      bsh_X.y[i] = mask * bsh_X.y[i];
+    }
   }
-   */
 
   if (compute_y)
     normalize(world, bsh_X);
