@@ -148,7 +148,6 @@ auto ResponseBase::ComputeHamiltonianPair(World &world) const
   bool debugging = true;
   if (debugging) {
 
-
     auto overlap = matrix_inner(world, phi, phi);
     if (world.rank() == 0) {
       print("check k: overlap");
@@ -216,9 +215,11 @@ auto ResponseBase::ComputeHamiltonianPair(World &world) const
     const double lo = 1.e-10;
     Exchange<double, 3> k{world, lo};
     if (r_params.hfexalg() == "multiworld") {
-      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient);
+      k.set_algorithm(
+          Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient);
     } else if (r_params.hfexalg() == "multiworld_row") {
-      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
+      k.set_algorithm(
+          Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
     } else if (r_params.hfexalg() == "largemem") {
       k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::large_memory);
     } else if (r_params.hfexalg() == "smallmem") {
@@ -365,8 +366,8 @@ auto ResponseBase::update_density(World &world, const X_space &chi,
   return density;
 }
 
-auto ResponseBase::make_density(World &world,
-                                const X_space &chi) const -> vecfuncT {
+auto ResponseBase::make_density(World &world, const X_space &chi) const
+    -> vecfuncT {
   auto density = vector_real_function_3d(chi.num_states());
   auto calc_type = r_params.calc_type();
   auto thresh = FunctionDefaults<3>::get_thresh();
@@ -547,10 +548,11 @@ auto ResponseBase::compute_gamma(World &world, const gamma_orbitals &density,
   // Get sizes
 }
 
-auto ResponseBase::compute_theta_X(
-    World &world, const X_space &chi, const vector_real_function_3d &rho1,
-    const XCOperator<double, 3> &xc,
-    const std::string &calc_type) const -> X_space {
+auto ResponseBase::compute_theta_X(World &world, const X_space &chi,
+                                   const vector_real_function_3d &rho1,
+                                   const XCOperator<double, 3> &xc,
+                                   const std::string &calc_type) const
+    -> X_space {
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
@@ -640,9 +642,10 @@ auto ResponseBase::compute_theta_X(
   return Theta_X;
 }
 
-auto ResponseBase::compute_gamma_full(
-    World &world, const gamma_orbitals &density,
-    const XCOperator<double, 3> &xc) const -> X_space {
+auto ResponseBase::compute_gamma_full(World &world,
+                                      const gamma_orbitals &density,
+                                      const XCOperator<double, 3> &xc) const
+    -> X_space {
   std::shared_ptr<WorldDCPmapInterface<Key<3>>> old_pmap =
       FunctionDefaults<3>::get_pmap();
 
@@ -754,9 +757,10 @@ auto ResponseBase::compute_gamma_full(
   // Get sizes
 }
 
-auto ResponseBase::compute_gamma_static(
-    World &world, const gamma_orbitals &gammaOrbitals,
-    const XCOperator<double, 3> &xc) const -> X_space {
+auto ResponseBase::compute_gamma_static(World &world,
+                                        const gamma_orbitals &gammaOrbitals,
+                                        const XCOperator<double, 3> &xc) const
+    -> X_space {
 
   auto old_pmap = FunctionDefaults<3>::get_pmap();
   auto [xy, phi0, rho1] =
@@ -877,9 +881,10 @@ auto ResponseBase::compute_gamma_static(
   // Get sizes
 }
 
-auto ResponseBase::compute_gamma_tda(
-    World &world, const gamma_orbitals &density,
-    const XCOperator<double, 3> &xc) const -> X_space {
+auto ResponseBase::compute_gamma_tda(World &world,
+                                     const gamma_orbitals &density,
+                                     const XCOperator<double, 3> &xc) const
+    -> X_space {
   auto [d_alpha, phi0, rho1] =
       orbital_load_balance(world, density, r_params.loadbalparts());
   std::shared_ptr<WorldDCPmapInterface<Key<3>>> oldpmap =
@@ -979,10 +984,11 @@ auto ResponseBase::compute_gamma_tda(
   }
 
   if (r_params.print_level() >= 20) {
-    print("------------------------ Gamma Functions Norms  "
-          "------------------");
-    print("Gamma X norms");
-    print(gamma.x.norm2());
+    auto gx_norms = gamma.x.norm2();
+    if (world.rank() == 0) {
+      print("Gamma Function Norms norms");
+      print(gx_norms);
+    }
   }
 
   if (r_params.print_level() >= 1) {
@@ -1009,9 +1015,10 @@ auto ResponseBase::compute_gamma_tda(
   return gamma;
 }
 
-auto ResponseBase::compute_lambda_X(
-    World &world, const X_space &chi, XCOperator<double, 3> &xc,
-    const std::string &calc_type) const -> X_space {
+auto ResponseBase::compute_lambda_X(World &world, const X_space &chi,
+                                    XCOperator<double, 3> &xc,
+                                    const std::string &calc_type) const
+    -> X_space {
   // compute
   bool compute_Y = calc_type == "full";
 
@@ -1036,8 +1043,8 @@ auto ResponseBase::compute_lambda_X(
     }
   }
   // put it all together
-  X_space gamma = compute_gamma_dispatch(
-      world, chi, xc, calc_type, vector_real_function_3d{});
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type,
+                                         vector_real_function_3d{});
   if (r_params.print_level() >= 20) {
     auto gamma_mx = inner(Chi_truncated, gamma);
     if (world.rank() == 0) {
@@ -1061,8 +1068,8 @@ auto ResponseBase::compute_lambda_X(
 
 auto ResponseBase::compute_gamma_dispatch(
     World &world, const X_space &chi, const XCOperator<double, 3> &xc,
-    const std::string &calc_type,
-    const vector_real_function_3d &rho1) const -> X_space {
+    const std::string &calc_type, const vector_real_function_3d &rho1) const
+    -> X_space {
 
   // TDA needs the J[rho1] term in addition to (2J - K); the macrotask only
   // computes the latter per (state, orbital), so fall back to the serial
@@ -1111,10 +1118,10 @@ auto ResponseBase::compute_gamma_dispatch(
   return gamma;
 }
 
-auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
-                                               XCOperator<double, 3> &xc,
-                                               const std::string &calc_type)
-    const -> std::tuple<X_space, X_space, X_space> {
+auto ResponseBase::compute_response_potentials(
+    World &world, const X_space &chi, XCOperator<double, 3> &xc,
+    const std::string &calc_type) const
+    -> std::tuple<X_space, X_space, X_space> {
   // compute
   bool compute_Y = calc_type == "full";
 
@@ -1131,8 +1138,11 @@ auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
     T0X.y = T(world, chi_copy.y);
   }
   if (r_params.print_level() >= 20) {
-    print("inner <X|T0|X>");
-    print(inner(chi_copy, T0X));
+    auto T0_mx = inner(chi_copy, T0X);
+    if (world.rank() == 0) {
+      print("<X|T0|X>");
+      print(T0_mx);
+    }
   }
   molresponse::end_timer(world, "TX", "TX", iter_timing);
 
@@ -1147,8 +1157,8 @@ auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
   X_space V0X = compute_V0X(world, chi_copy, xc, compute_Y);
 
   // put it all together
-  X_space gamma = compute_gamma_dispatch(
-      world, chi, xc, calc_type, vector_real_function_3d{});
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type,
+                                         vector_real_function_3d{});
 
   X_space Lambda_X(
       world, m,
@@ -1467,7 +1477,8 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   // .x.active but not .active in some paths, e.g. after select_functions).
   // Use the canonical 0..m-1 list to keep loops below in bounds.
   std::list<size_t> safe_active;
-  for (size_t i = 0; i < m; ++i) safe_active.push_back(i);
+  for (size_t i = 0; i < m; ++i)
+    safe_active.push_back(i);
   res.set_active(safe_active);
   if (compute_y) {
     res = chi - g_chi;
@@ -1515,9 +1526,10 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   return {res, residual_norms};
 }
 
-auto ResponseBase::kain_rf_space_update(
-    World &world, const X_space &chi, const X_space &residual_chi,
-    response_function_solver &kain_x_space) -> X_space
+auto ResponseBase::kain_rf_space_update(World &world, const X_space &chi,
+                                        const X_space &residual_chi,
+                                        response_function_solver &kain_x_space)
+    -> X_space
 
 {
   if (r_params.print_level() >= 1) {
@@ -1589,9 +1601,10 @@ auto ResponseBase::kain_rf_space_update(
   }
 }
 
-auto ResponseBase::kain_x_space_update(
-    World &world, const X_space &chi, const X_space &residual_chi,
-    response_solver &kain_x_space) -> X_space {
+auto ResponseBase::kain_x_space_update(World &world, const X_space &chi,
+                                       const X_space &residual_chi,
+                                       response_solver &kain_x_space)
+    -> X_space {
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
@@ -1840,8 +1853,8 @@ void check_k(World &world, X_space &Chi,
 /// \param f
 /// \param magnitude
 /// \return
-auto add_randomness(World &world, const response_space &f,
-                    double magnitude) -> response_space {
+auto add_randomness(World &world, const response_space &f, double magnitude)
+    -> response_space {
   // Copy input functions
   response_space f_copy = f.copy();
 
@@ -1907,8 +1920,8 @@ void normalize(World &world, X_space &Chi) {
   }
 }
 
-auto solid_harmonics(World &world,
-                     int n) -> std::map<std::vector<int>, real_function_3d> {
+auto solid_harmonics(World &world, int n)
+    -> std::map<std::vector<int>, real_function_3d> {
   // Container to return
   std::map<std::vector<int>, real_function_3d> result;
 
@@ -2031,9 +2044,10 @@ transition_density(World &world, const vector_real_function_3d &orbitals,
  * @param load_balance
  * @return
  */
-auto ResponseBase::orbital_load_balance(
-    World &world, const gamma_orbitals &gammaOrbitals,
-    const double load_balance) -> gamma_orbitals {
+auto ResponseBase::orbital_load_balance(World &world,
+                                        const gamma_orbitals &gammaOrbitals,
+                                        const double load_balance)
+    -> gamma_orbitals {
   auto X = std::get<0>(gammaOrbitals);
   auto psi0 = std::get<1>(gammaOrbitals);
   auto rho1 = std::get<2>(gammaOrbitals);
@@ -2147,8 +2161,8 @@ auto ResponseBase::project_ao_basis_only(World &world,
   return ao;
 }
 
-auto ResponseBase::project_ao_basis(World &world,
-                                    const AtomicBasisSet &aobasis) -> vecfuncT {
+auto ResponseBase::project_ao_basis(World &world, const AtomicBasisSet &aobasis)
+    -> vecfuncT {
   // Make at_to_bf, at_nbf ... map from atom to first bf on atom, and nbf/atom
   std::vector<int> at_to_bf, at_nbf;
   aobasis.atoms_to_bfn(molecule, at_to_bf, at_nbf);
@@ -2236,8 +2250,8 @@ response_space transform(World &world, const response_space &f,
   return result;
 }
 
-auto transform(World &world, const X_space &x,
-               const Tensor<double> &U) -> X_space {
+auto transform(World &world, const X_space &x, const Tensor<double> &U)
+    -> X_space {
   // Return container
   X_space result(world, x.num_states(), x.num_orbitals());
 
@@ -2247,8 +2261,8 @@ auto transform(World &world, const X_space &x,
   return result;
 }
 
-auto expectation(World &world, const response_space &A,
-                 const response_space &B) -> Tensor<double> {
+auto expectation(World &world, const response_space &A, const response_space &B)
+    -> Tensor<double> {
   // Get sizes
   MADNESS_ASSERT(!A[0].empty());
   MADNESS_ASSERT(A[0].size() == B[0].size());
@@ -2430,11 +2444,12 @@ auto gram_schmidt(World &world, const response_space &f) -> response_space {
 }
 
 // RPA-aware Gram-Schmidt under the indefinite metric <f|f> - <g|g>.
-// Mirror of legacy TDDFT::gram_schmidt at molresponse_legacy/TDDFT.cc:2061-2089.
-// In-place: f and g are orthonormalized together using identical scaling and
-// projection coefficients. NOTE: matches legacy in not guarding against
-// non-positive pseudo-norms (norm <= 0). A non-positive norm produces NaN/inf
-// downstream; revisit if observed in practice.
+// Mirror of legacy TDDFT::gram_schmidt at
+// molresponse_legacy/TDDFT.cc:2061-2089. In-place: f and g are orthonormalized
+// together using identical scaling and projection coefficients. NOTE: matches
+// legacy in not guarding against non-positive pseudo-norms (norm <= 0). A
+// non-positive norm produces NaN/inf downstream; revisit if observed in
+// practice.
 void gram_schmidt(World &world, response_space &f, response_space &g) {
   size_t m = f.size();
 
