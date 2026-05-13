@@ -2250,6 +2250,41 @@ auto ExcitedResponse::update_response(
   Tensor<double> x_shifts(m);
   Tensor<double> y_shifts(m);
 
+  // [CHI-NORMS] diagnostic helper - prints per-state ||x|| and ||y|| for any
+  // X_space, tagged for grep. Gated behind print_level >= 4 alongside the
+  // other per-state-per-orbital tensor prints. Useful for finding Y-leaks
+  // (for TDA all ||y|| should be ~0) and for tracking V0X norm growth that
+  // indicates Chi acquiring near-nucleus character iter-by-iter.
+  //
+  // Two collective-safety rules below:
+  //   1. The early-return must be uniform across ranks - r_params is the
+  //      same everywhere, so all ranks decide identically.
+  //   2. norm2(world, vec) is collective; once we're past the early-return,
+  //      every rank must call it. Print only on rank 0 after collection.
+  auto print_xy_norms = [&](const char *where, const X_space &S) {
+    if (r_params.print_level() < 4)
+      return;
+    const size_t ns = S.num_states();
+    std::vector<double> nx(ns), ny(ns);
+    for (size_t b = 0; b < ns; b++) {
+      nx[b] = norm2(world, S.x[b]);
+      ny[b] = norm2(world, S.y[b]);
+    }
+    if (world.rank() != 0)
+      return;
+    printf("[CHI-NORMS] %-28s iter=%zu  ", where, iter);
+    printf("|x|=");
+    for (size_t b = 0; b < ns; b++)
+      printf(" %.3e", nx[b]);
+    printf("  |y|=");
+    for (size_t b = 0; b < ns; b++)
+      printf(" %.3e", ny[b]);
+    printf("\n");
+    fflush(stdout);
+  };
+
+  print_xy_norms("entry", Chi);
+
   // Top-of-iter Q-projection. Mirrors iterate_trial:549-551. Strips
   // ground-orbital character that accumulated in Chi during the previous
   // iter's rotate_excited_space + BSH + KAIN. Without this, residual
@@ -2284,11 +2319,23 @@ auto ExcitedResponse::update_response(
     print("Entering Compute Lambda");
   }
 
+  print_xy_norms("after Q+GS", Chi);
+
   auto [temp_Lambda_X, temp_V0X, temp_gamma] =
       compute_response_potentials(world, Chi, xc, r_params.calc_type());
 
+  print_xy_norms("after compute_pot Chi", Chi);
+  print_xy_norms("after compute_pot Lambda", temp_Lambda_X);
+  print_xy_norms("after compute_pot V0X", temp_V0X);
+  print_xy_norms("after compute_pot gamma", temp_gamma);
+
   auto [new_omega, rotated_chi, rotated_lambda, rotated_v_x, rotated_gamma_x] =
       rotate_excited_space(world, Chi, temp_Lambda_X, temp_V0X, temp_gamma);
+
+  print_xy_norms("after rotate Chi", Chi);
+  print_xy_norms("after rotate rotated_chi", rotated_chi);
+  print_xy_norms("after rotate rotated_v_x", rotated_v_x);
+  print_xy_norms("after rotate rotated_gamma_x", rotated_gamma_x);
 
   if (world.rank() == 0 && r_params.print_level() >= 2) {
     print("omega_n before transform");
