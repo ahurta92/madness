@@ -1491,6 +1491,20 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
       double rms, maxval;
       vector_stats(rnorm, rms, maxval);
       residual_norms(static_cast<long>(b)) = maxval;
+      // [RES-FULL] additionally report the full-state L2 residual
+      //   full_L2 = sqrt(sum_j ||res.x[b][j]||^2)
+      // This is the natural per-state convergence metric. The max-orbital
+      // 'maxval' is sensitive to one outlier; full_L2 is the actual
+      // 2-norm of the per-state residual vector. If full_L2 drops while
+      // maxval plateaus, the iteration is converging except for one
+      // bad orbital index.
+      if (r_params.print_level() > 2 && world.rank() == 0) {
+        double full_l2_sq = 0.0;
+        for (double v : rnorm)
+          full_l2_sq += v * v;
+        printf("[RES-FULL] state=%zu  max_orb=%.3e  rms=%.3e  full_L2=%.3e\n",
+               b, maxval, rms, std::sqrt(full_l2_sq));
+      }
     } // / norm2(world, g_chi.x[b]); }
   }
   if (r_params.print_level() >= 1) {

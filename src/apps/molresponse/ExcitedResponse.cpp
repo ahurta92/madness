@@ -605,6 +605,33 @@ void ExcitedResponse::iterate_trial(World &world, X_space &guesses) {
       for (auto &bsh_i : bsh_resp.x) {
         bsh_i = projector(bsh_i);
       }
+
+      // [GUESS-RES] diagnostic: same form as update_residual's TDA path,
+      //   residual_b = rotated_chi.x[b] - bsh_resp.x[b]
+      // so guess-phase residuals are directly comparable to main-iter
+      // [RES-FULL] output. Gated at print_level > 2 (uniform across
+      // ranks). Collective-safe: norms computed on all ranks, printed
+      // on rank 0 only.
+      if (r_params.print_level() > 2) {
+        for (size_t b = 0; b < Ni; b++) {
+          auto diff = sub(world, rotated_chi.x[b], bsh_resp.x[b]);
+          auto rnorm = norm2s(world, diff);
+          if (world.rank() == 0) {
+            double maxval = 0.0, full_l2_sq = 0.0;
+            for (double v : rnorm) {
+              if (std::abs(v) > maxval) maxval = std::abs(v);
+              full_l2_sq += v * v;
+            }
+            const double rms =
+                std::sqrt(full_l2_sq / static_cast<double>(rnorm.size()));
+            printf("[GUESS-RES] iter=%zu state=%zu  max_orb=%.3e  rms=%.3e  "
+                   "full_L2=%.3e\n",
+                   iteration, b, maxval, rms, std::sqrt(full_l2_sq));
+            fflush(stdout);
+          }
+        }
+      }
+
       // Save new components
       guesses.x = bsh_resp;
       // Apply mask
