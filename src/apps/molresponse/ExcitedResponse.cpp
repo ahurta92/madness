@@ -1940,17 +1940,38 @@ void ExcitedResponse::iterate(World &world) {
   size_t m = r_params.num_states();   // Number of excited states
   size_t n = r_params.num_orbitals(); // Number of ground state orbitals
 
-  // Convergence targets mirror SCF.cc:2381-2384 in the moldft path:
-  //   density residual < dconv * max(5, natom)
-  //   bsh residual     < 5 * dconv
-  // The "max(5, natom)" floor keeps small molecules from converging too
-  // tightly (per SCF's "previous conv was too tight for small systems"
-  // comment at SCF.cc:2385-2387).
-  const double dconv = std::max(FunctionDefaults<3>::get_thresh(),
-                                  r_params.dconv());
-  const double bsh_target = 5.0 * r_params.dconv();
-
+  // Convergence targets are SCF.cc:2381-2384 style with a protocol floor
+  // appropriate for excited-state response.
+  //
+  // Density residual target: max(thresh, dconv_input). The thresh floor
+  // matches SCF.cc's truncation-floor convention.
+  //
+  // BSH residual target: max(5 * dconv_input, BSH_THRESH_FACTOR * thresh).
+  // The empirical floor for the BSH residual in excited-state runs is
+  // roughly 50-100x thresh (per the protocol-stall study on C2H4 RPA at
+  // protocols 1e-4, 1e-6, 1e-7). Without the thresh floor, a user who
+  // sets dconv tighter than the protocol can deliver would never trip
+  // all_done and the run would burn iters past the noise floor where
+  // more iteration just adds noise rather than refinement.
   auto thresh = FunctionDefaults<3>::get_thresh();
+  constexpr double BSH_THRESH_FACTOR = 50.0;
+  const double dconv = std::max(thresh, r_params.dconv());
+  const double bsh_target_user = 5.0 * r_params.dconv();
+  const double bsh_target_floor = BSH_THRESH_FACTOR * thresh;
+  const double bsh_target = std::max(bsh_target_user, bsh_target_floor);
+
+  // Warn (once per protocol) when the user's requested dconv is tighter
+  // than the protocol's noise floor and the effective target has been
+  // loosened.
+  if (world.rank() == 0 && bsh_target_user < bsh_target_floor) {
+    print("WARNING: requested dconv =", r_params.dconv(),
+          "implies bsh_target =", bsh_target_user,
+          "but protocol thresh =", thresh,
+          "limits achievable bsh_residual to ~", bsh_target_floor,
+          ". Effective bsh_target loosened to the protocol floor;",
+          "tighten the protocol (smaller thresh) for tighter convergence.");
+  }
+
   const double max_rotation = r_params.maxrotn();
 
   // m residuals for x and y
@@ -1977,9 +1998,20 @@ void ExcitedResponse::iterate(World &world) {
   x_residuals = to_response_matrix(residuals);
   // If DFT, initialize the XCOperator<double,3>
 
+  // KAIN solver allocator size must match the length of the vectors that
+  // kain_x_space_update will hand it. For TDA the solver works on X only
+  // (n functions per state); for RPA-style "full" it works on the (X, Y)
+  // concatenated vector (2n functions per state). FrequencyResponse uses
+  // the same conditional size at FrequencyResponse.cpp:40-50; the old
+  // unconditional `n` here was the source of the empty MADNESS_CHECK
+  // crash that fired the first time KAIN ran on excited-state RPA after
+  // the compute_y test was corrected (since prior to that fix the RPA
+  // path through KAIN never executed and the size mismatch never showed).
+  const bool kain_full = (r_params.calc_type() == "full");
+  const size_t kain_vec_size = kain_full ? 2 * n : n;
   response_solver kain_x_space;
   for (size_t b = 0; b < m; b++) {
-    kain_x_space.emplace_back(response_matrix_allocator(world, n));
+    kain_x_space.emplace_back(response_matrix_allocator(world, kain_vec_size));
   }
   if (r_params.kain()) {
     for (auto &kain_space_b : kain_x_space) {
@@ -2395,10 +2427,13 @@ auto ExcitedResponse::update_response(
     x_space_step_restriction(world, rotated_chi, new_chi, compute_y, maxrotn);
   }
 
-  if (compute_y)
-    normalize(world, new_chi);
-  else
-    normalize(world, new_chi.x);
+  // Note: do NOT re-normalize new_chi here. bsh_update_excited already
+  // normalized its output, and the top-of-iter Gram-Schmidt+normalize at
+  // the start of the next update_response re-normalizes Chi anyway. An
+  // extra normalize here would strip the natural scale of KAIN's
+  // extrapolated output (KAIN linear-combines history; the combination
+  // isn't unit-norm) - matches legacy convention which doesn't normalize
+  // between BSH/KAIN and the next iter's top-of-iter discipline.
 
   new_chi.x.truncate_rf();
   if (compute_y)
