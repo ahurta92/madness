@@ -1633,34 +1633,34 @@ void ResponseBase::x_space_step_restriction(World &world,
     molresponse::start_timer(world);
   }
 
-  // Mirror legacy TDDFT::x_space_step_restriction at
-  // molresponse_legacy/TDDFT.cc:1921-1949: per-state loop, X and Y blocks
-  // bounded independently with the same scalar bound. Uses the explicit
-  // restrict_y argument (legacy's discipline) rather than testing
-  // r_params.omega() != 0.
+  // Mirror legacy TDDFT::do_step_restriction(x, y) at
+  // molresponse_legacy/TDDFT.cc:1050-1090: per-state loop using the
+  // COMBINED Euclidean norm of the (dx, dy) delta vector, with a single
+  // scale factor s applied to BOTH X and Y. This couples X and Y
+  // correctly (a 0.5 step in each has total size 0.707, not (0.5, 0.5)
+  // independently) and produces a well-defined positive distance even
+  // for RPA - the indefinite metric used in normalize() is NOT
+  // appropriate here since step size has to be a positive quantity.
+  //
+  // For TDA (restrict_y=false), the Y contribution is zero and this
+  // collapses to a pure X-block restriction.
   for (size_t b = 0; b < m; b++) {
-    // X block
-    {
-      double norm_diff = norm2(world, sub(world, old_Chi.x[b], temp.x[b]));
-      if (norm_diff > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff;
-        if (world.rank() == 0)
-          printf(" x%zu:%f", b, s);
-        // Standard step restriction: result = s*temp + (1-s)*old (mostly old).
-        // NOTE: the prior RPA branch passed the gaxpy_oop arguments in the
-        // opposite order, producing mostly-new instead of mostly-old; this
-        // unified path fixes that.
-        temp.x[b] = gaxpy_oop(s, temp.x[b], 1.0 - s, old_Chi.x[b]);
-      }
-    }
-    // Y block - only when restrict_y is true. Same scalar bound per
-    // legacy convention.
+    const double nx = norm2(world, sub(world, old_Chi.x[b], temp.x[b]));
+    double ny2 = 0.0;
     if (restrict_y) {
-      double norm_diff = norm2(world, sub(world, old_Chi.y[b], temp.y[b]));
-      if (norm_diff > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff;
-        if (world.rank() == 0)
-          printf(" y%zu:%f", b, s);
+      const double ny = norm2(world, sub(world, old_Chi.y[b], temp.y[b]));
+      ny2 = ny * ny;
+    }
+    const double norm_diff = std::sqrt(nx * nx + ny2);
+
+    if (norm_diff > max_bsh_rotation) {
+      const double s = max_bsh_rotation / norm_diff;
+      if (world.rank() == 0)
+        printf(" b%zu:%f", b, s);
+      // Standard step restriction: result = s*temp + (1-s)*old (mostly old).
+      // Same scale factor applied to both X and Y of state b.
+      temp.x[b] = gaxpy_oop(s, temp.x[b], 1.0 - s, old_Chi.x[b]);
+      if (restrict_y) {
         temp.y[b] = gaxpy_oop(s, temp.y[b], 1.0 - s, old_Chi.y[b]);
       }
     }
