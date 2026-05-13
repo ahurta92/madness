@@ -1451,7 +1451,13 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   }
   size_t m = chi.x.size();
   size_t n = chi.x.size_orbitals();
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
   //	compute residual
   Tensor<double> residual_norms = (old_residuals.size() == long(m))
                                       ? copy(old_residuals)
@@ -1508,7 +1514,13 @@ auto ResponseBase::kain_rf_space_update(
 
   auto kain_update = chi.copy();
   kain_update.set_active(chi.active);
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
   if (compute_y) {
     auto chi_vec = chi.to_vector();
     auto res_vec = residual_chi.to_vector();
@@ -1575,7 +1587,13 @@ auto ResponseBase::kain_x_space_update(
   X_space kain_update = chi.copy();
   // kain_update.set_active(chi.active);
 
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
   if (compute_y) {
     auto x_vectors = to_response_matrix(chi);
     auto x_residuals = to_response_matrix(residual_chi);
