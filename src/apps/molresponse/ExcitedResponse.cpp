@@ -619,7 +619,8 @@ void ExcitedResponse::iterate_trial(World &world, X_space &guesses) {
           if (world.rank() == 0) {
             double maxval = 0.0, full_l2_sq = 0.0;
             for (double v : rnorm) {
-              if (std::abs(v) > maxval) maxval = std::abs(v);
+              if (std::abs(v) > maxval)
+                maxval = std::abs(v);
               full_l2_sq += v * v;
             }
             const double rms =
@@ -796,6 +797,13 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
   X_space chi_copy = chi.copy();
   X_space l_copy = lchi.copy();
 
+  if (r_params.print_level() >= 20) {
+    print_inner(world, "[XX-ROT-IN] <chi|chi> entry of rotate_excited_space",
+                chi, chi);
+    print_inner(world, "[XX-ROT-IN] <chi_copy|chi_copy> after copy", chi_copy,
+                chi_copy);
+  }
+
   Tensor<double> S = response_space_inner(chi_copy.x, chi_copy.x) -
                      response_space_inner(chi_copy.y, chi_copy.y);
 
@@ -870,7 +878,8 @@ ExcitedResponse::reduce_subspace(World &world, Tensor<double> &S,
                s_vals(i), 10 * thresh_degenerate);
       num_zero++;
     }
-    if (world.rank() == 0 && (r_params.print_level() >= 10) && i == s_vals.dim(0) - 1 && num_zero > 0)
+    if (world.rank() == 0 && (r_params.print_level() >= 10) &&
+        i == s_vals.dim(0) - 1 && num_zero > 0)
       print("");
   }
 
@@ -1406,8 +1415,8 @@ Tensor<double> ExcitedResponse::GetFullResponseTransformation(
                s_vals(i), 10 * thresh_degenerate);
       num_zero++;
     }
-    if (world.rank() == 0 and i == s_vals.dim(0) - 1 and num_zero > 0
-        and r_params.print_level() >= 10)
+    if (world.rank() == 0 and i == s_vals.dim(0) - 1 and num_zero > 0 and
+        r_params.print_level() >= 10)
       print("");
   }
 
@@ -2423,8 +2432,7 @@ auto ExcitedResponse::update_response(
       rotated_EOX.y = rotated_EOX.y * ham_no_diag;
     }
     if (r_params.print_level() >= 10) {
-      print("<X|(E0-diag(E0)|X>");
-      print(inner(rotated_chi, rotated_EOX));
+      print_inner(world, "<X|E0_no_diag|X>", rotated_chi, rotated_EOX );
     }
   }
   world.gop.fence();

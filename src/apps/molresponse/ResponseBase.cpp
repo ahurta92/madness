@@ -1131,6 +1131,13 @@ auto ResponseBase::compute_response_potentials(
   size_t n = chi.num_orbitals();
   X_space chi_copy = chi.copy();
 
+  if (r_params.print_level() >= 20) {
+    print_inner(world, "[XX-CRP-IN] <chi|chi> at entry of compute_response_potentials",
+                chi, chi);
+    print_inner(world, "[XX-CRP-IN] <chi_copy|chi_copy> after chi.copy()",
+                chi_copy, chi_copy);
+  }
+
   molresponse::start_timer(world);
   X_space T0X = X_space(world, m, n);
   T0X.x = T(world, chi_copy.x);
@@ -1186,6 +1193,10 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
   X_space V0 = X_space::zero_functions(world, m, n);
   V0.set_active(X.active);
 
+  if (r_params.print_level() >= 20) {
+    print_inner(world, "[XX-V0X-IN] <X|X> at entry of compute_V0X", X, X);
+  }
+
   real_function_3d v_nuc, v_j0, v_k0, v_xc;
   if (not r_params.store_potential()) {
     v_nuc = potential_manager->vnuclear();
@@ -1231,41 +1242,81 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     molresponse::start_timer(world);
   }
   // K0 = ground_exchange(ground_orbitals, X, compute_Y, r_params);
-  std::vector<int> state_index;
-  std::vector<int> ii;
-  auto orbs_per_state = (compute_Y) ? 2 * X.num_orbitals() : X.num_orbitals();
-
-  int i = 0;
-  int si = 0;
-  for (auto &b : X.active) {
-    for (int j = 0; j < orbs_per_state; j++) {
-      state_index.push_back(si);
-      ii.push_back(i++);
-    }
-    si++;
-  }
-
   auto gamma0 =
       X_space::zero_functions(world, X.num_states(), X.num_orbitals());
   gamma0.set_active(X.active);
 
-  ResponseComputeGroundExchange t;
-  MacroTask gamma_task(world, t);
+  // [K0X-PATH] env var MAD_K0X_SERIAL=1 switches to the legacy serial path
+  // (one Exchange operator, loop over states - mirrors
+  // global_functions.cc::ground_exchange). Default is the MacroTask path.
+  // The serial path is for A/B diagnostics: if the macrotask is the source
+  // of <X|V0X|X> matrix asymmetry, the serial K0X should be exactly
+  // symmetric while the macrotask K0X is not.
+  const bool use_serial_k0 = std::getenv("MAD_K0X_SERIAL") != nullptr;
 
-  if (compute_Y) {
-    auto vec_chi = X.to_vector();
-    auto gamma_vec =
-        gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
-    gamma0.from_vector(gamma_vec);
+  if (use_serial_k0) {
+    if (world.rank() == 0 && r_params.print_level() >= 2) {
+      print("[K0X-PATH] serial (legacy ground_exchange pattern)");
+    }
+    const double lo = 1.e-10;
+    Exchange<double, 3> k0_op{world, lo};
+    k0_op.set_bra_and_ket(ground_orbitals, ground_orbitals);
+    if (r_params.hfexalg() == "multiworld") {
+      k0_op.set_algorithm(Exchange<double, 3>::multiworld_efficient);
+    } else if (r_params.hfexalg() == "multiworld_row") {
+      k0_op.set_algorithm(Exchange<double, 3>::multiworld_efficient_row);
+    } else if (r_params.hfexalg() == "smallmem") {
+      k0_op.set_algorithm(Exchange<double, 3>::small_memory);
+    } else if (r_params.hfexalg() == "largemem") {
+      k0_op.set_algorithm(Exchange<double, 3>::large_memory);
+    }
+    for (const auto &b : X.active) {
+      gamma0.x[b] = k0_op(X.x[b]);
+      if (compute_Y) {
+        gamma0.y[b] = k0_op(X.y[b]);
+      }
+    }
   } else {
-    auto vec_chi = X.x.to_vector();
-    auto gamma_vec =
-        gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+    if (world.rank() == 0 && r_params.print_level() >= 2) {
+      print("[K0X-PATH] macrotask (ResponseComputeGroundExchange)");
+    }
+    std::vector<int> state_index;
+    std::vector<int> ii;
+    auto orbs_per_state =
+        (compute_Y) ? 2 * X.num_orbitals() : X.num_orbitals();
 
-    gamma0.x.from_vector(gamma_vec);
+    int i = 0;
+    int si = 0;
+    for (auto &b : X.active) {
+      for (int j = 0; j < orbs_per_state; j++) {
+        state_index.push_back(si);
+        ii.push_back(i++);
+      }
+      si++;
+    }
 
-    // gamma0.y = gamma0.x;
+    ResponseComputeGroundExchange t;
+    MacroTask gamma_task(world, t);
+
+    if (compute_Y) {
+      auto vec_chi = X.to_vector();
+      auto gamma_vec =
+          gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
+      gamma0.from_vector(gamma_vec);
+    } else {
+      auto vec_chi = X.x.to_vector();
+      auto gamma_vec =
+          gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+      gamma0.x.from_vector(gamma_vec);
+    }
   }
+
+  // Truncate K0X (gamma0) before it enters the matrix and the V0 subtraction.
+  // Both serial and macrotask K0 paths return un-truncated functions; without
+  // a uniform truncate, per-state noise floors in K0X differ and the
+  // <X_i | K0 | X_j> matrix picks up asymmetric noise that compounds across
+  // iterations (the source of the V0X matrix asymmetry observed in tda_loose).
+  gamma0.truncate();
 
   if (r_params.print_level() >= 20) {
     print_inner(world, "gamma0", X, gamma0);
@@ -1283,9 +1334,16 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
   double safety = 0.1;
   double v_tol = safety * FunctionDefaults<3>::get_thresh();
 
+  // Truncate the local-potential part v0*X to v_tol BEFORE the subtraction
+  // with K0X. K0X is already truncated above (gamma0.truncate()), so adding
+  // the same per-state truncate to v0*X gives both halves of V0X = v0*X -
+  // c_xc*K0X a uniform noise floor before they combine. Without this, v0*X
+  // carries per-state un-truncated noise (the bulk of the asymmetry once
+  // K0X is clean, observed in the tda_loose V0X-SPLIT diagnostic).
   if (compute_Y) {
 
     auto v0vec = X.to_vector() * v0;
+    truncate(world, v0vec, v_tol);
     auto gamma0vec = gamma0.to_vector();
 
     compress(world, gamma0vec, true);
@@ -1295,12 +1353,10 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     truncate(world, v0vec, v_tol);
     V0.from_vector(v0vec);
 
-    /*V0 = X * v0;*/
-    /*V0 = V0 - c_xc * gamma0;*/
-    /*V0.truncate(v_tol);*/
   } else {
 
     auto v0vec = X.x.to_vector() * v0;
+    truncate(world, v0vec, v_tol);
     auto gamma0vec = gamma0.x.to_vector();
     compress(world, gamma0vec, true);
     compress(world, v0vec, true);
@@ -1308,16 +1364,38 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     v0vec = v0vec - c_xc * gamma0vec;
     truncate(world, v0vec, v_tol);
     V0.x.from_vector(v0vec);
-
-    /**/
-    /*V0.x = v0 * X.x;*/
-    /*V0.x = V0.x - c_xc * gamma0.x;*/
-    /*V0.x.truncate_rf(vtol);*/
-    // V0.y = V0.x;
   }
   if (r_params.print_level() >= 20) {
 
     print_inner(world, "xV0x", X, V0);
+
+    // [V0X-SPLIT] Split V0X = v_local*X - c_xc*K0X. V_loc is truncated to
+    // v_tol here to mirror what the production V0 path now does (per-part
+    // truncate before the subtraction), so the printed matrix reflects
+    // what actually enters V0X. gamma0 was already truncated above.
+    {
+      X_space V_loc =
+          X_space::zero_functions(world, X.num_states(), X.num_orbitals());
+      V_loc.set_active(X.active);
+      X_space K0X =
+          X_space::zero_functions(world, X.num_states(), X.num_orbitals());
+      K0X.set_active(X.active);
+
+      if (compute_Y) {
+        auto vloc_vec = X.to_vector() * v0;
+        truncate(world, vloc_vec, v_tol);
+        V_loc.from_vector(vloc_vec);
+        K0X.from_vector(gamma0.to_vector());
+      } else {
+        auto vloc_vec = X.x.to_vector() * v0;
+        truncate(world, vloc_vec, v_tol);
+        V_loc.x.from_vector(vloc_vec);
+        K0X.x.from_vector(gamma0.x.to_vector());
+      }
+      print_inner(world, "[V0X-SPLIT] xV_localX (v_nuc+2J+(1-c)Vxc, trunc)",
+                  X, V_loc);
+      print_inner(world, "[V0X-SPLIT] xK0X (exchange, post-trunc)", X, K0X);
+    }
   }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "V0_add", "V0_add", iter_timing);
