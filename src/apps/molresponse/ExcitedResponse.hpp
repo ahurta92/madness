@@ -141,6 +141,7 @@ private:
  * @return X_space
  */
     X_space bsh_update_excited(World& world, const Tensor<double>& omega, X_space& theta_X,
+                               const X_space& chi,
                                QProjector<double, 3>& projector);
     void analysis(World& world, const X_space& chi);
     void save(World& world, const std::string& name) override;

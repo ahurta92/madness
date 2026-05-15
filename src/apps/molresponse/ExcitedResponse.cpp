@@ -804,6 +804,70 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
                 chi_copy);
   }
 
+  // TDA and RPA need different diagonalization machinery:
+  //
+  //   TDA: S = <X|X> (positive definite, ~ I after GS+normalize).
+  //        Use SVD-prefiltered standard generalized eig via
+  //        get_fock_transformation (mirrors legacy deflateTDA →
+  //        diagonalizeFockMatrix path that converges in
+  //        molresponse_legacy on C2H4 etc.). The Y block is zero
+  //        for TDA so it's left out of S and A entirely.
+  //
+  //   RPA: S = <X|X> - <Y|Y> (indefinite metric). Use sygvp via
+  //        excited_eig with the indefinite-metric-aware swap/phase
+  //        cleanup. Y contributes to S, A and to the rotation.
+  //
+  // The two paths previously shared excited_eig + the full X_space inner,
+  // which silently included a zero Y block for TDA but routed through
+  // RPA-style cluster handling — that worked for RPA (where the omega
+  // spectrum is structured) but for TDA's closely-spaced bound-state
+  // omegas the swap/phase logic could permute state identity between
+  // iterations and the iteration stopped reducing residuals.
+  if (r_params.tda()) {
+    if (world.rank() == 0 && r_params.print_level() >= 1) {
+      print("[ROT-PATH] TDA branch (get_fock_transformation)");
+    }
+    Tensor<double> S = response_space_inner(chi_copy.x, chi_copy.x);
+    if (world.rank() == 0 && r_params.print_level() >= 10) {
+      auto sm = S - transpose(S);
+      print("max |S - S^T| =", sm.max());
+    }
+    S = 0.5 * (S + transpose(S));
+    if (world.rank() == 0 && (r_params.print_level() >= 10)) {
+      print("\n   Overlap Matrix (TDA):");
+      print(S);
+    }
+
+    A = response_space_inner(chi_copy.x, l_copy.x);
+    if (world.rank() == 0 && (r_params.print_level() >= 10)) {
+      auto am = A - transpose(A);
+      print("largest non-symmetric :", am.max());
+    }
+    A = 0.5 * (A + transpose(A));
+    if (world.rank() == 0 && (r_params.print_level() >= 10)) {
+      print("\n   Lambda Matrix (TDA):");
+      print(A);
+    }
+
+    Tensor<double> new_omega(S.dim(0));
+    Tensor<double> U = get_fock_transformation(
+        world, S, A, new_omega, FunctionDefaults<3>::get_thresh());
+    if (world.rank() == 0 && (r_params.print_level() >= 10)) {
+      print("   TDA eigenvector coefficients (get_fock_transformation):");
+      print(U);
+      print(new_omega);
+    }
+
+    auto [rotated_chi, rotated_l_chi, rotated_v_chi, rotated_gamma_chi] =
+        rotate_excited_vectors(world, U, chi, lchi, v_chi, gamma_chi);
+    return {new_omega, rotated_chi, rotated_l_chi, rotated_v_chi,
+            rotated_gamma_chi};
+  }
+
+  // RPA path (unchanged): indefinite S, excited_eig / sygvp.
+  if (world.rank() == 0 && r_params.print_level() >= 1) {
+    print("[ROT-PATH] RPA branch (excited_eig / sygvp)");
+  }
   Tensor<double> S = response_space_inner(chi_copy.x, chi_copy.x) -
                      response_space_inner(chi_copy.y, chi_copy.y);
 
@@ -814,10 +878,10 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
   S = 0.5 * (S + transpose(S));
 
   if (world.rank() == 0 && (r_params.print_level() >= 10)) {
-    print("\n   Overlap Matrix:");
+    print("\n   Overlap Matrix (RPA):");
     print(S);
   }
-  //
+
   A = inner(chi_copy, l_copy);
   if (world.rank() == 0 && (r_params.print_level() >= 10)) {
     auto am = A - transpose(A);
@@ -825,7 +889,7 @@ ExcitedResponse::rotate_excited_space(World &world, X_space &chi, X_space &lchi,
   }
   A = 0.5 * (A + transpose(A));
   if (world.rank() == 0 && (r_params.print_level() >= 10)) {
-    print("\n   Lambda Matrix:");
+    print("\n   Lambda Matrix (RPA):");
     print(A);
   }
 
@@ -1288,32 +1352,91 @@ ExcitedResponse::rotate_excited_vectors(World &world, const Tensor<double> &U,
                                         const X_space &l_chi,
                                         const X_space &v0_chi,
                                         const X_space &gamma_chi) {
-  // compute the unitary transformation matrix U that diagonalizes
-  // the response matrix
+  // Apply the diagonalization eigenvectors U to the response vectors and
+  // their associated potentials.
+  //
+  // TDA: Y = 0 by construction. Only .x needs to be transformed. We
+  //      explicitly DO NOT touch .y so that (a) zero work is wasted and
+  //      (b) any accidental Y entry from prior code paths cannot get
+  //      smeared across states by U.
+  // RPA: both .x and .y are real response components and both must be
+  //      rotated by U.
+  //
+  // Diagnostic: print U and per-state ||rotated_chi.x[i] - chi.x[i]||
+  // so we can see directly whether the rotation moves chi at all and
+  // whether it permutes states between iterations (large U off-diagonals
+  // = state mixing).
 
-  // Start timer
   if (r_params.print_level() >= 1)
     molresponse::start_timer(world);
 
-  auto rotated_chi = transform(world, chi, U);
-  auto rotated_l_chi = transform(world, l_chi, U);
-  auto rotated_v_chi = transform(world, v0_chi, U);
-  auto rotated_gamma_chi = transform(world, gamma_chi, U);
+  const bool compute_y = (r_params.calc_type() == "full");
+
+  X_space rotated_chi(world, chi.num_states(), chi.num_orbitals());
+  X_space rotated_l_chi(world, l_chi.num_states(), l_chi.num_orbitals());
+  X_space rotated_v_chi(world, v0_chi.num_states(), v0_chi.num_orbitals());
+  X_space rotated_gamma_chi(world, gamma_chi.num_states(),
+                            gamma_chi.num_orbitals());
+
+  rotated_chi.x = transform(world, chi.x, U);
+  rotated_l_chi.x = transform(world, l_chi.x, U);
+  rotated_v_chi.x = transform(world, v0_chi.x, U);
+  rotated_gamma_chi.x = transform(world, gamma_chi.x, U);
+
+  if (compute_y) {
+    rotated_chi.y = transform(world, chi.y, U);
+    rotated_l_chi.y = transform(world, l_chi.y, U);
+    rotated_v_chi.y = transform(world, v0_chi.y, U);
+    rotated_gamma_chi.y = transform(world, gamma_chi.y, U);
+  }
+  // For TDA we deliberately leave the .y fields as the freshly
+  // constructed zero functions (X_space ctor sets them to zero).
+
+  if (world.rank() == 0 && r_params.print_level() >= 1) {
+    print("[ROT-VECS]",
+          compute_y ? "RPA (transform .x and .y)" : "TDA (transform .x only)");
+  }
+
+  // [ROT-DELTA] Per-state diagnostic: did the rotation actually move
+  // chi? Collective-safe (norm2 must run on all ranks).
+  if (r_params.print_level() >= 4) {
+    const size_t ns = chi.num_states();
+    std::vector<double> dx(ns), drot(ns);
+    for (size_t b = 0; b < ns; ++b) {
+      auto diff = sub(world, rotated_chi.x[b], chi.x[b]);
+      dx[b] = norm2(world, diff);
+      drot[b] = norm2(world, rotated_chi.x[b]);
+    }
+    if (world.rank() == 0) {
+      printf("[ROT-DELTA] |rotated_chi.x - chi.x|: ");
+      for (size_t b = 0; b < ns; ++b)
+        printf(" %.3e", dx[b]);
+      printf("\n");
+      printf("[ROT-DELTA] |rotated_chi.x|:         ");
+      for (size_t b = 0; b < ns; ++b)
+        printf(" %.3e", drot[b]);
+      printf("\n");
+      print("[ROT-DELTA] U =");
+      print(U);
+      fflush(stdout);
+    }
+  }
 
   if (r_params.print_level() >= 10) {
     Tensor<double> S;
-    S = response_space_inner(rotated_chi.x, rotated_chi.x) -
-        response_space_inner(rotated_chi.y, rotated_chi.y);
+    if (compute_y) {
+      S = response_space_inner(rotated_chi.x, rotated_chi.x) -
+          response_space_inner(rotated_chi.y, rotated_chi.y);
+    } else {
+      S = response_space_inner(rotated_chi.x, rotated_chi.x);
+    }
     if (world.rank() == 0) {
-      print("\n  After apply transform Overlap Matrix:");
+      print("\n  After apply transform Overlap Matrix",
+            compute_y ? "(RPA):" : "(TDA):");
       print(S);
     }
   }
 
-  // Transform the vectors of functions
-  // Truncate happens in here
-  // we do transform here
-  // End timer
   if (r_params.print_level() >= 1)
     molresponse::end_timer(world, "Transform orbs.:");
 
@@ -2362,20 +2485,30 @@ auto ExcitedResponse::update_response(
   // iter's rotate_excited_space + BSH + KAIN. Without this, residual
   // ground-state contamination is amplified by BSH into the
   // omega = -epsilon(core) ghost eigenvector.
-  for (size_t i = 0; i < m; ++i)
-    Chi.x[i] = projector(Chi.x[i]);
-  if (compute_y) {
+  //
+  // Kill-switch: MAD_DISABLE_TOPQ=1 skips this block (matches legacy
+  // update_x_space_excited which has GS+normalize but no top-of-iter Q).
+  const bool disable_topq = std::getenv("MAD_DISABLE_TOPQ") != nullptr;
+  if (!disable_topq) {
     for (size_t i = 0; i < m; ++i)
-      Chi.y[i] = projector(Chi.y[i]);
+      Chi.x[i] = projector(Chi.x[i]);
+    if (compute_y) {
+      for (size_t i = 0; i < m; ++i)
+        Chi.y[i] = projector(Chi.y[i]);
+    }
+  } else if (world.rank() == 0 && r_params.print_level() >= 1) {
+    print("[SWITCH] MAD_DISABLE_TOPQ=1 (skipping top-of-iter Q-projection)");
   }
 
-  // Top-of-iter Gram-Schmidt + normalize, twice (the "twice is enough"
-  // idiom for classical GS). Mirrors iterate_trial:658-670. Replaces a
-  // commented block that had three latent bugs: used Chi.X (field is .x),
-  // called a 2-arg gram_schmidt(x, y) that did not exist (now added in
-  // ResponseBase), and discarded the gram_schmidt return value. Keeps
-  // the trial basis orthonormal across diagonalizations.
-  for (size_t pass = 0; pass < 2; ++pass) {
+  // Top-of-iter Gram-Schmidt + normalize. Legacy uses one pass; current's
+  // default is two passes ("twice is enough" classical GS idiom). Override
+  // via env MAD_GS_PASSES=N (default 2). Set to 1 to mirror legacy.
+  const char* gs_passes_env = std::getenv("MAD_GS_PASSES");
+  const size_t gs_passes = gs_passes_env ? std::stoul(gs_passes_env) : 2;
+  if (gs_passes != 2 && world.rank() == 0 && r_params.print_level() >= 1) {
+    print("[SWITCH] MAD_GS_PASSES =", gs_passes);
+  }
+  for (size_t pass = 0; pass < gs_passes; ++pass) {
     if (compute_y) {
       // RPA: jointly orthonormalize (X, Y) under <X|X> - <Y|Y>.
       gram_schmidt(world, Chi.x, Chi.y);
@@ -2432,7 +2565,7 @@ auto ExcitedResponse::update_response(
       rotated_EOX.y = rotated_EOX.y * ham_no_diag;
     }
     if (r_params.print_level() >= 10) {
-      print_inner(world, "<X|E0_no_diag|X>", rotated_chi, rotated_EOX );
+      print_inner(world, "<X|E0_no_diag|X>", rotated_chi, rotated_EOX);
     }
   }
   world.gop.fence();
@@ -2446,14 +2579,72 @@ auto ExcitedResponse::update_response(
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  theta_X = rotated_v_x - rotated_EOX + rotated_gamma_x;
+  // [THETA-PATH] A/B hypothesis test:
+  // Default uses the rotated pre-rotation components (rotation-only
+  // paradigm). MAD_RECOMPUTE_THETA=1 recomputes V0X and gamma on
+  // rotated_chi (legacy Compute_Theta_X discipline). Goal: see if
+  // recomputing fixes TDA convergence, which would point to per-state
+  // numerical drift accumulating in transform(world, X, U) outputs.
+  const bool recompute_theta = std::getenv("MAD_RECOMPUTE_THETA") != nullptr;
+  X_space theta_v_x;
+  X_space theta_gamma_x;
+  if (recompute_theta) {
+    if (world.rank() == 0 && r_params.print_level() >= 1) {
+      print("[THETA-PATH] recompute on rotated_chi");
+    }
+    auto [unused_lambda, recomp_v_x, recomp_gamma_x] =
+        compute_response_potentials(world, rotated_chi, xc,
+                                    r_params.calc_type());
+    theta_v_x = recomp_v_x;
+    theta_gamma_x = recomp_gamma_x;
+  } else {
+    if (world.rank() == 0 && r_params.print_level() >= 1) {
+      print("[THETA-PATH] use rotated components");
+    }
+    theta_v_x = rotated_v_x;
+    theta_gamma_x = rotated_gamma_x;
+  }
+  // Per-component <X|.|X> dumps for parity with legacy Compute_Theta_X
+  // (Theta_X.cc:43-83), gated at print_level >= 20.
+  if (r_params.print_level() >= 20) {
+    auto v_v0    = inner(rotated_chi, theta_v_x);
+    auto v_e0nd  = inner(rotated_chi, rotated_EOX);
+    auto v_gamma = inner(rotated_chi, theta_gamma_x);
+    if (world.rank() == 0) {
+      print("---------------Theta ----------------");
+      print("<X|V0|X>");
+      print(v_v0);
+      print("<X|(E0-diag(E0)|X>");
+      print(v_e0nd);
+      print("<X|Gamma|X>");
+      print(v_gamma);
+    }
+  }
+
+  theta_X = theta_v_x - rotated_EOX + theta_gamma_x;
+  if (r_params.print_level() >= 20) {
+    auto v_th = inner(rotated_chi, theta_X);
+    if (world.rank() == 0) {
+      print("<X|Theta not truncated|X>");
+      print(v_th);
+    }
+  }
+  // Match legacy Compute_Theta_X discipline: truncate after assembly.
+  theta_X.truncate();
+  if (r_params.print_level() >= 20) {
+    auto v_th = inner(rotated_chi, theta_X);
+    if (world.rank() == 0) {
+      print("<X|Theta truncated|X>");
+      print(v_th);
+    }
+  }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "compute_ThetaX_add", "compute_ThetaX_add",
                            iter_timing);
   }
 
-  X_space new_chi = bsh_update_excited(world, new_omega, theta_X, projector);
-  // res = Chi - new_chi;
+  X_space new_chi =
+      bsh_update_excited(world, new_omega, theta_X, rotated_chi, projector); // res = Chi - new_chi;
   auto [new_res, bsh] =
       update_residual(world, rotated_chi, new_chi, r_params.calc_type(),
                       old_residuals, xres_old);
@@ -2483,7 +2674,7 @@ auto ExcitedResponse::update_response(
 
 auto ExcitedResponse::bsh_update_excited(World &world,
                                          const Tensor<double> &omega,
-                                         X_space &theta_X,
+                                         X_space &theta_X, const X_space &chi,
                                          QProjector<double, 3> &projector)
     -> X_space {
   size_t m = theta_X.num_states();
@@ -2501,13 +2692,22 @@ auto ExcitedResponse::bsh_update_excited(World &world,
   }
   x_shifts = create_shift(world, ground_energies, omega_plus, "x");
   // Compute Theta X
-  // Apply the shifts
-  theta_X.x = apply_shift(world, x_shifts, theta_X.x, Chi.x);
+  // Apply the shifts.
+  // The "f" argument to apply_shift is the current iterate. Previously
+  // this passed the class member Chi.x, which is the *pre-rotation*
+  // chi (Chi gets reassigned at end of each iter from new_chi.copy(),
+  // so during update_response Chi.x is the iter's INPUT chi, not the
+  // rotated one that built theta_X). Mirrors iterate_trial:586 which
+  // correctly passes the iterate (guesses.x there). For C2H4 in the
+  // current bound-state regime shifts are all zero (no continuum), so
+  // this is a no-op; but the inconsistency is real and would matter
+  // for any state pushed past the BSH-stability boundary.
+  theta_X.x = apply_shift(world, x_shifts, theta_X.x, chi.x);
   theta_X.x = theta_X.x * -2;
   theta_X.x.truncate_rf();
 
   if (compute_y) {
-    //   theta_X.y = apply_shift(world, y_shifts, theta_X.y, Chi.y);
+    //   theta_X.y = apply_shift(world, y_shifts, theta_X.y, chi.y);
     theta_X.y = theta_X.y * -2;
     theta_X.y.truncate_rf();
   }
@@ -2545,11 +2745,19 @@ auto ExcitedResponse::bsh_update_excited(World &world,
   // boundary contamination grows and contaminates V0*Chi via vnuc's tail
   // - the exact failure mode observed in TDA's |V0X| doubling between
   // iter 0 and iter 1 while |Chi|=1.0. Mirrors iterate_trial:610-612.
-  for (size_t i = 0; i < m; i++) {
-    bsh_X.x[i] = mask * bsh_X.x[i];
-    if (compute_y) {
-      bsh_X.y[i] = mask * bsh_X.y[i];
+  //
+  // Kill-switch: MAD_DISABLE_MASK=1 skips this block (matches legacy
+  // update_x_space_excited which has the mask block commented out).
+  const bool disable_mask = std::getenv("MAD_DISABLE_MASK") != nullptr;
+  if (!disable_mask) {
+    for (size_t i = 0; i < m; i++) {
+      bsh_X.x[i] = mask * bsh_X.x[i];
+      if (compute_y) {
+        bsh_X.y[i] = mask * bsh_X.y[i];
+      }
     }
+  } else if (world.rank() == 0 && r_params.print_level() >= 1) {
+    print("[SWITCH] MAD_DISABLE_MASK=1 (skipping post-BSH boundary mask)");
   }
 
   if (compute_y)
