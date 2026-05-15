@@ -1,7 +1,7 @@
 
 #include <madness/constants.h>
 #include <madness/mra/mra.h>
-#include <madness/mra/nonlinsol.h>  // The kain solver
+#include <madness/mra/nonlinsol.h> // The kain solver
 #include <madness/mra/operator.h>
 #include <math.h>
 #include <stdio.h>
@@ -30,22 +30,36 @@
 #include "molresponse/timer.h"
 #include "molresponse/x_space.h"
 
-X_space TDDFT::Compute_Lambda_X(World& world,
-                                X_space& Chi,
+X_space TDDFT::Compute_Lambda_X(World &world, X_space &Chi,
                                 XCOperator<double, 3> xc,
                                 std::string calc_type) {
   // compute
 
   bool compute_Y = calc_type.compare("full") == 0;
 
-  X_space Lambda_X;  // = X_space(world, Chi.num_states(), Chi.num_orbitals());
+  // [XX-CRP-IN] LEGACY_PATCH: mirror current diagnostic at entry of
+  // Compute_Lambda_X (analog of compute_response_potentials in current).
+  if (r_params.print_level() >= 20) {
+    auto xx = inner(Chi, Chi);
+    if (world.rank() == 0) {
+      print("[XX-CRP-IN] <chi|chi> at entry of Compute_Lambda_X");
+      print(xx);
+    }
+  }
+
+  X_space Lambda_X; // = X_space(world, Chi.num_states(), Chi.num_orbitals());
   X_space F0X = compute_F0X(world, Chi, xc, compute_Y);
   X_space Chi_truncated = Chi.copy();
   Chi_truncated.truncate();
   if (r_params.print_level() >= 20) {
-    // LEGACY_PATCH: compute collective inner() on all ranks, print only on rank 0
+    // LEGACY_PATCH: compute collective inner() on all ranks, print only on rank
+    // 0
     auto xf0x = inner(Chi_truncated, F0X);
-    if (world.rank() == 0) { print("---------------Lambda ----------------"); print("<X|F0|X>"); print(xf0x); }
+    if (world.rank() == 0) {
+      print("---------------Lambda ----------------");
+      print("<X|F0|X>");
+      print(xf0x);
+    }
   }
   // put it all together
 
@@ -58,35 +72,49 @@ X_space TDDFT::Compute_Lambda_X(World& world,
   }
   if (r_params.print_level() >= 20) {
     auto xe0x = inner(Chi_truncated, E0X);
-    if (world.rank() == 0) { print("<X|E0|X>"); print(xe0x); }
+    if (world.rank() == 0) {
+      print("<X|E0|X>");
+      print(xe0x);
+    }
   }
 
   // put it all together
   X_space gamma;
 
   // compute
-  if (calc_type.compare("full") == 0) {
+  if (calc_type == "full") {
     gamma = compute_gamma_full(world, Chi, xc);
-  } else if (calc_type.compare("static") == 0) {
+  } else if (calc_type == "static") {
     gamma = compute_gamma_static(world, Chi, xc);
-  } else {
+  } else if (calc_type == "tda") {
     gamma = compute_gamma_tda(world, Chi, xc);
+  } else {
+    throw std::runtime_error("Invalid calc_type in Compute_Lambda_X");
   }
   if (r_params.print_level() >= 20) {
     auto xgx = inner(Chi_truncated, gamma);
-    if (world.rank() == 0) { print("<X|Gamma|X>"); print(xgx); }
+    if (world.rank() == 0) {
+      print("<X|Gamma|X>");
+      print(xgx);
+    }
   }
 
   Lambda_X = (F0X - E0X) + gamma;
   if (r_params.print_level() >= 20) {
     auto xlx = inner(Chi_truncated, Lambda_X);
-    if (world.rank() == 0) { print("<X|Lambda not truncated|X>"); print(xlx); }
+    if (world.rank() == 0) {
+      print("<X|Lambda not truncated|X>");
+      print(xlx);
+    }
   }
   Lambda_X.truncate();
 
   if (r_params.print_level() >= 20) {
     auto xlxt = inner(Chi_truncated, Lambda_X);
-    if (world.rank() == 0) { print("<X|Lambda_truncated|X>"); print(xlxt); }
+    if (world.rank() == 0) {
+      print("<X|Lambda_truncated|X>");
+      print(xlxt);
+    }
   }
 
   return Lambda_X;
