@@ -241,7 +241,14 @@ namespace madness
       MADNESS_ASSERT(size() > 0);
       MADNESS_ASSERT(same_size(*this, rhs_y)); // assert that same size
       World &world = x[rhs_y.active.front()][0].world();
-      auto result = response_space(world, size(), size_orbitals());
+      // LEGACY_PATCH: use zero_functions so the result has properly sized
+      // inner vector<Function> per state. The bare response_space(world,m,n)
+      // ctor only sizes the outer dim and leaves inner vectors empty,
+      // so the subsequent from_vector writes to OOB indices — undefined
+      // behavior that propagated as a factor-of-two error in gamma
+      // assembly (visible in <X|Gamma|X> at iter 0 for TDA).
+      auto result =
+          response_space::zero_functions(world, size(), size_orbitals());
       result.active = rhs_y.active;
 
       result.from_vector(this->to_vector() + rhs_y.to_vector());

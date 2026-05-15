@@ -882,77 +882,80 @@ auto ResponseBase::compute_gamma_static(World &world,
 }
 
 auto ResponseBase::compute_gamma_tda(World &world,
-                                     const gamma_orbitals &density,
+                                     const vector_real_function_3d &phi0,
+                                     const response_space &x,
                                      const XCOperator<double, 3> &xc) const
     -> X_space {
-  auto [d_alpha, phi0, rho1] =
-      orbital_load_balance(world, density, r_params.loadbalparts());
-  std::shared_ptr<WorldDCPmapInterface<Key<3>>> oldpmap =
-      FunctionDefaults<3>::get_pmap();
-  size_t num_states = d_alpha.num_states();
-  size_t num_orbitals = d_alpha.num_orbitals();
+  // TDA response Hartree-XC kernel acting on the trial states.
+  //
+  //   gamma_b = 2 * J[rho1_b] * phi0  -  c_xc * K1[x_b] * phi0
+  //                                    + (1-c_xc) * W[rho1_b] * phi0
+  //
+  // where rho1_b = sum_p x_{b,p} * phi0_p is the transition density.
+  // Q-projection is applied per state at the end so gamma_b is orthogonal
+  // to the occupied subspace.
+  //
+  // Signature takes (world, phi0, x, xc) so the dependence on the trial
+  // vectors and ground orbitals is explicit. No class-member Chi or
+  // rho_omega is read; no load balancing is done here — the caller is
+  // responsible for arranging a sensible pmap before calling.
+  const size_t num_states = x.size();
+  const size_t num_orbitals = phi0.size();
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  X_space gamma(world, num_states, num_orbitals);
-  // x functions
-  vector_real_function_3d phi_phi;
-  real_function_3d temp_J;
-  response_space J(world, num_states, num_orbitals);
-  response_space k1_x(world, num_states, num_orbitals);
-  response_space W(world, num_states, num_orbitals);
+  // zero_functions so .x and .y are fully allocated (size num_orbitals
+  // per state) before any X_space arithmetic. Bare X_space ctor leaves
+  // inner vectors empty which makes downstream to_vector/from_vector
+  // OOB-access and silently corrupts arithmetic results.
+  X_space gamma = X_space::zero_functions(world, num_states, num_orbitals);
+  auto J    = response_space::zero_functions(world, num_states, num_orbitals);
+  auto k1_x = response_space::zero_functions(world, num_states, num_orbitals);
+  auto W    = response_space::zero_functions(world, num_states, num_orbitals);
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_zero_functions",
                            "gamma_zero_functions", iter_timing);
   }
 
+  // Per-state loop: for each excited state b in [0, num_states):
+  //   rho1_b      = sum_p x[b][p] * phi0[p]               (transition density)
+  //   J[b][p]     = poisson(rho1_b) * phi0[p]
+  //   W[b][p]     = (apply_xc_kernel(rho1_b)) * phi0[p]   (if hybrid/DFT)
+  //   k1_x[b][p]  = newK(x[b], phi0, phi0)[p]             (response exchange)
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
 
-  auto rho = transition_densityTDA(world, phi0, d_alpha.x);
+  const double c_xc = xcf.hf_exchange_coefficient();
+  const bool need_W = (c_xc != 1.0);
 
-  auto compute_jx = [&, &phi0 = phi0](auto rho_alpha) {
-    auto temp_J = apply(*shared_coulomb_operator, rho_alpha);
-    temp_J.truncate();
-    return mul(world, temp_J, phi0);
-  };
+  for (size_t b = 0; b < num_states; ++b) {
+    real_function_3d rho1_b = dot(world, x[b], phi0);
+    rho1_b.truncate();
 
-  std::transform(rho.begin(), rho.end(), J.begin(), compute_jx);
+    real_function_3d v_j_b = apply(*shared_coulomb_operator, rho1_b);
+    v_j_b.truncate();
+    J[b] = mul(world, v_j_b, phi0);
+
+    if (need_W) {
+      real_function_3d v_w_b = xc.apply_xc_kernel(rho1_b);
+      W[b] = mul(world, v_w_b, phi0);
+    }
+  }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "J[omega]", "J[omega]", iter_timing);
   }
 
-  // Create Coulomb potential on ground_orbitals
-  if (xcf.hf_exchange_coefficient() != 1.0) {
-    auto compute_wx = [&, &phi0 = phi0](auto rho_alpha) {
-      auto xc_rho = xc.apply_xc_kernel(rho_alpha);
-      return mul(world, xc_rho, phi0);
-    };
-    if (r_params.print_level() >= 1) {
-      molresponse::start_timer(world);
-    }
-    // for every transition density apply the exchange kernel and multiply the
-    // vector of orbitals
-    std::transform(rho.begin(), rho.end(), W.begin(), compute_wx);
-    W = W.copy();
-
-    if (r_params.print_level() >= 1) {
-      molresponse::end_timer(world, "XC[omega]", "XC[omega]", iter_timing);
-    }
-  }
-
+  // Response exchange K1 per state. Each newK call is the operator
+  //   K1|x_b>_p = sum_i phi0[i] * poisson(phi0[i] * x[b][p])
+  // wired through MADNESS's Exchange<double,3>.
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-
-  for (size_t b = 0; b < num_states; b++) {
-    vecfuncT x;
-    x = d_alpha.x[b];
-    k1_x[b] = newK(x, phi0, phi0);
+  for (size_t b = 0; b < num_states; ++b) {
+    k1_x[b] = newK(x[b], phi0, phi0);
   }
-
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "K[omega]", "K[omega]", iter_timing);
   }
@@ -964,7 +967,25 @@ auto ResponseBase::compute_gamma_tda(World &world,
   J.truncate_rf();
   W.truncate_rf();
 
-  gamma.x = (J * 2) - k1_x * xcf.hf_exchange_coefficient() + W;
+  // [GAMMA-PARTS] print <X|2J|X>, <X|c_xc*K1|X>, <X|W|X> for parity with
+  // legacy diagnostics. Gated at print_level >= 20.
+  if (r_params.print_level() >= 20) {
+    response_space twoJ = J * 2;
+    response_space cK1  = k1_x * c_xc;
+    auto v_2j = response_space_inner(x, twoJ);
+    auto v_k1 = response_space_inner(x, cK1);
+    auto v_w  = response_space_inner(x, W);
+    if (world.rank() == 0) {
+      print("[GAMMA-PARTS] <X|2J|X>");
+      print(v_2j);
+      print("[GAMMA-PARTS] <X|c_xc*K1|X>");
+      print(v_k1);
+      print("[GAMMA-PARTS] <X|W|X>");
+      print(v_w);
+    }
+  }
+
+  gamma.x = (J * 2) - k1_x * c_xc + W;
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_truncate_add", "gamma_truncate_add",
                            iter_timing);
@@ -973,7 +994,7 @@ auto ResponseBase::compute_gamma_tda(World &world,
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  QProjector<double, 3> projector(ground_orbitals);
+  QProjector<double, 3> projector(phi0);
   for (size_t i = 0; i < num_states; i++) {
     gamma.x[i] = projector(gamma.x[i]);
     truncate(world, gamma.x[i]);
@@ -998,13 +1019,6 @@ auto ResponseBase::compute_gamma_tda(World &world,
   J.clear();
   k1_x.clear();
   W.clear();
-
-  d_alpha.clear();
-  phi0.clear();
-
-  if (world.size() > 1) {
-    FunctionDefaults<3>::set_pmap(oldpmap); // ! DON'T FORGET !
-  }
 
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_clear_functions",
@@ -1075,8 +1089,9 @@ auto ResponseBase::compute_gamma_dispatch(
   // computes the latter per (state, orbital), so fall back to the serial
   // routine for TDA.
   if (calc_type == "tda") {
-    return compute_gamma_tda(world, {chi, ground_orbitals, rho1}, xc);
+    return compute_gamma_tda(world, ground_orbitals, chi.x, xc);
   }
+  (void)rho1; // unused outside of TDA path
 
   const bool compute_Y = (calc_type == "full");
   auto gamma =
@@ -1139,11 +1154,18 @@ auto ResponseBase::compute_response_potentials(
   }
 
   molresponse::start_timer(world);
-  X_space T0X = X_space(world, m, n);
+  // LEGACY_PATCH: zero_functions so .x and .y are sized properly. Plain
+  // X_space ctor leaves the inner vectors empty; T0X.x = T(...) only
+  // populates .x, leaving .y with empty inner storage that to_vector
+  // would later index out of bounds.
+  X_space T0X = X_space::zero_functions(world, m, n);
   T0X.x = T(world, chi_copy.x);
   if (compute_Y) {
     T0X.y = T(world, chi_copy.y);
   }
+  // Match legacy Compute_F0X discipline: T0X carries derivatives which
+  // sharpen tree detail, so truncate before it enters Lambda.
+  T0X.truncate();
   if (r_params.print_level() >= 20) {
     auto T0_mx = inner(chi_copy, T0X);
     if (world.rank() == 0) {
@@ -1159,19 +1181,75 @@ auto ResponseBase::compute_response_potentials(
   if (compute_Y) {
     E0X.y = E0X.y * hamiltonian;
   }
+  // Match legacy Compute_Lambda_X discipline: E0X is truncated before
+  // entering Lambda assembly (Lambda_X.cc:53).
+  E0X.truncate();
+  if (r_params.print_level() >= 20) {
+    auto E0_mx = inner(chi_copy, E0X);
+    if (world.rank() == 0) {
+      print("<X|E0|X>");
+      print(E0_mx);
+    }
+  }
   molresponse::end_timer(world, "E0X", "E0X", iter_timing);
 
   X_space V0X = compute_V0X(world, chi_copy, xc, compute_Y);
+  if (r_params.print_level() >= 20) {
+    auto V0_mx = inner(chi_copy, V0X);
+    if (world.rank() == 0) {
+      print("<X|V0|X>");
+      print(V0_mx);
+    }
+  }
+
+  // F0X = T0X + V0X. Printed for parity with legacy Compute_F0X diagnostic
+  // (TDDFT.cc compute_F0X prints <X|F0|X> at print_level >= 20).
+  if (r_params.print_level() >= 20) {
+    // LEGACY_PATCH: zero_functions ctor (see T0X note above).
+    X_space F0X_diag = X_space::zero_functions(world, m, n);
+    F0X_diag = T0X + V0X;
+    auto F0_mx = inner(chi_copy, F0X_diag);
+    if (world.rank() == 0) {
+      print("<X|F0|X>");
+      print(F0_mx);
+    }
+  }
 
   // put it all together
   X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type,
                                          vector_real_function_3d{});
+  if (r_params.print_level() >= 20) {
+    auto G_mx = inner(chi_copy, gamma);
+    if (world.rank() == 0) {
+      print("<X|Gamma|X>");
+      print(G_mx);
+    }
+  }
 
-  X_space Lambda_X(
-      world, m,
-      n); // = X_space(world, chi.num_states(), chi.num_orbitals());
+  // LEGACY_PATCH: zero_functions ctor (see T0X note above) so .y is
+  // properly sized before the arithmetic + assignment.
+  X_space Lambda_X = X_space::zero_functions(world, m, n);
 
   Lambda_X = (T0X + V0X - E0X) + gamma;
+  if (r_params.print_level() >= 20) {
+    auto L_mx = inner(chi_copy, Lambda_X);
+    if (world.rank() == 0) {
+      print("<X|Lambda not truncated|X>");
+      print(L_mx);
+    }
+  }
+  // Match legacy Compute_Lambda_X discipline: truncate Lambda after
+  // assembly (Lambda_X.cc:85). Without this, untruncated kinetic and
+  // E0 noise contaminates <X|Lambda|X>, breaking the diagonalization
+  // for closely-spaced bound-state omegas.
+  Lambda_X.truncate();
+  if (r_params.print_level() >= 20) {
+    auto L_mx = inner(chi_copy, Lambda_X);
+    if (world.rank() == 0) {
+      print("<X|Lambda_truncated|X>");
+      print(L_mx);
+    }
+  }
 
   return {Lambda_X, V0X, gamma};
 }
@@ -1695,23 +1773,57 @@ auto ResponseBase::kain_x_space_update(World &world, const X_space &chi,
   // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
   // the residual metric.
   bool compute_y = (r_params.calc_type() == "full");
+
+  // [KAIN-IO] Per-state diagnostic. Collective-safe: norm2(world, vec) is
+  // collective, so all ranks compute, then rank 0 prints. Goal is to
+  // identify whether KAIN extrapolation is divergent (large ||kain_update||
+  // while ||chi||, ||residual|| are sane) vs being fed bad input. Gated
+  // at print_level > 3 to align with other per-state diagnostics.
+  const bool kain_io = r_params.print_level() > 3;
   if (compute_y) {
     auto x_vectors = to_response_matrix(chi);
     auto x_residuals = to_response_matrix(residual_chi);
     // compute the norm of the residuals
 
     for (const auto &i : Chi.active) {
+      double n_chi = 0.0, n_res = 0.0;
+      if (kain_io) {
+        n_chi = norm2(world, x_vectors[i]);
+        n_res = norm2(world, x_residuals[i]);
+      }
       auto temp = kain_x_space[i].update(x_vectors[i], x_residuals[i]);
       truncate(world, temp);
+      double n_out = 0.0;
+      if (kain_io) n_out = norm2(world, temp);
       std::copy(temp.begin(), temp.begin() + n, kain_update.x[i].begin());
       std::copy(temp.begin() + n, temp.end(), kain_update.y[i].begin());
+      if (kain_io && world.rank() == 0) {
+        printf("[KAIN-IO] full  state=%zu  |chi(2n)|=%.3e  |res(2n)|=%.3e  "
+               "|kain_out(2n)|=%.3e\n",
+               i, n_chi, n_res, n_out);
+        fflush(stdout);
+      }
     };
   } else {
     // first compute the residuals
     for (const auto &i : Chi.active) {
+      double n_chi = 0.0, n_res = 0.0;
+      if (kain_io) {
+        n_chi = norm2(world, chi.x[i]);
+        n_res = norm2(world, residual_chi.x[i]);
+      }
       kain_update.x[i] = kain_x_space[i].update(chi.x[i], residual_chi.x[i]);
       // truncate the update
       truncate(world, kain_update.x[i]);
+      if (kain_io) {
+        double n_out = norm2(world, kain_update.x[i]);
+        if (world.rank() == 0) {
+          printf("[KAIN-IO] tda   state=%zu  |chi|=%.3e  |res|=%.3e  "
+                 "|kain_out|=%.3e\n",
+                 i, n_chi, n_res, n_out);
+          fflush(stdout);
+        }
+      }
     }
   }
 

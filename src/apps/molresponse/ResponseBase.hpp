@@ -873,7 +873,9 @@ protected:
   static auto orbital_load_balance(World &world, const gamma_orbitals &,
                                    double load_balance) -> gamma_orbitals;
 
-  auto compute_gamma_tda(World &world, const gamma_orbitals &density,
+  auto compute_gamma_tda(World &world,
+                         const vector_real_function_3d &phi0,
+                         const response_space &x,
                          const XCOperator<double, 3> &xc) const -> X_space;
 
   auto compute_gamma_static(World &world, const gamma_orbitals &,
