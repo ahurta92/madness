@@ -40,6 +40,18 @@ struct ResponseStateX<ClosedShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
 
+  /// In-place axpy across all components: *this += alpha * other.
+  /// Used by streaming theta assembly in FDSolver / ESSolver step().
+  void axpy(World &world, double alpha,
+            const ResponseStateX<ClosedShell> &other) {
+    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
+  }
+
+  /// Truncate all per-component vecfuncTs in place.
+  void truncate_all(World &world, double thresh) {
+    madness::truncate(world, x_alpha, thresh);
+  }
+
   // ---- flatten / from_flat / flat_size ----
   // Pack all component vecfuncTs into a single flat vector (KAIN
   // operates on flat vectors). The flatten/from_flat round-trip
@@ -79,6 +91,17 @@ struct ResponseStateX<OpenShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
   std::size_t num_beta()  const { return x_beta.size(); }
+
+  void axpy(World &world, double alpha,
+            const ResponseStateX<OpenShell> &other) {
+    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
+    gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
+  }
+
+  void truncate_all(World &world, double thresh) {
+    madness::truncate(world, x_alpha, thresh);
+    madness::truncate(world, x_beta,  thresh);
+  }
 
   std::size_t flat_size() const { return x_alpha.size() + x_beta.size(); }
   std::vector<real_function_3d> flatten() const {
@@ -127,6 +150,17 @@ struct ResponseStateXY<ClosedShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
 
+  void axpy(World &world, double alpha,
+            const ResponseStateXY<ClosedShell> &other) {
+    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
+    gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
+  }
+
+  void truncate_all(World &world, double thresh) {
+    madness::truncate(world, x_alpha, thresh);
+    madness::truncate(world, y_alpha, thresh);
+  }
+
   std::size_t flat_size() const { return x_alpha.size() + y_alpha.size(); }
   std::vector<real_function_3d> flatten() const {
     auto v = x_alpha;
@@ -174,6 +208,21 @@ struct ResponseStateXY<OpenShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
   std::size_t num_beta()  const { return x_beta.size(); }
+
+  void axpy(World &world, double alpha,
+            const ResponseStateXY<OpenShell> &other) {
+    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
+    gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
+    gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
+    gaxpy(world, 1.0, y_beta,  alpha, other.y_beta);
+  }
+
+  void truncate_all(World &world, double thresh) {
+    madness::truncate(world, x_alpha, thresh);
+    madness::truncate(world, y_alpha, thresh);
+    madness::truncate(world, x_beta,  thresh);
+    madness::truncate(world, y_beta,  thresh);
+  }
 
   std::size_t flat_size() const {
     return 2 * (x_alpha.size() + x_beta.size());

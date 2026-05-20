@@ -226,7 +226,90 @@ public:
     print("");
   }
 
-  /// One outer iteration. Algorithm:
+  /// One outer iteration. Dispatches on `policy_.stream_theta`:
+  ///   - false (default): step_rotate_pieces() — keeps V0x/E0x/gamma
+  ///     for all roots in memory, rotates them by U, assembles Theta
+  ///     from the rotated pieces. ~8M Storage peak. Faster (no
+  ///     recompute) but heavier.
+  ///   - true: step_recompute_pieces() — drops V0x/E0x/gamma after
+  ///     building Lambda, rotates only X, then recomputes V0x/E0x/
+  ///     gamma against the rotated X to stream Theta in place.
+  ///     ~3-4M Storage peak. ~2× the per-iter kernel work but big
+  ///     memory savings.
+  State step(State in) {
+    return policy_.stream_theta
+        ? step_recompute_pieces(std::move(in))
+        : step_rotate_pieces(std::move(in));
+  }
+
+private:
+  /// Top-of-iter Q-projection + Gram-Schmidt orthonormalization.
+  /// Shared by both step() variants.
+  void apply_top_of_iter_discipline(State &out, int M) {
+    for (int s = 0; s < M; ++s) {
+      out.roots[s].x_alpha = target_.Qa(out.roots[s].x_alpha);
+      if constexpr (std::is_same_v<Shell, OpenShell>) {
+        out.roots[s].x_beta = target_.Qb(out.roots[s].x_beta);
+      }
+    }
+    std::vector<vecfuncT> flats(M);
+    for (int s = 0; s < M; ++s) flats[s] = out.roots[s].flatten();
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < i; ++j) {
+          const double c = madness::inner(flats[j], flats[i]);
+          madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
+        }
+        const double n2 = madness::inner(flats[i], flats[i]);
+        const double nrm = std::sqrt(std::abs(n2));
+        if (nrm > 1.0e-12)
+          madness::scale(world_, flats[i], 1.0 / nrm);
+      }
+    }
+    for (int s = 0; s < M; ++s) out.roots[s].from_flat(flats[s]);
+  }
+
+  /// Pack a per-root Storage into a flat vecfuncT (α + β concat).
+  /// Used by both variants for the subspace rs::* ops.
+  vecfuncT pack_storage(const Storage &s) const {
+    vecfuncT v = s.x_alpha;
+    if constexpr (std::is_same_v<Shell, OpenShell>) {
+      v.insert(v.end(), s.x_beta.begin(), s.x_beta.end());
+    }
+    return v;
+  }
+
+  /// Unpack a flat vecfuncT back into a Storage's α (+ β) components.
+  void unpack_storage(Storage &s, const vecfuncT &v,
+                     std::size_t n_alpha, std::size_t n_beta) const {
+    if constexpr (std::is_same_v<Shell, OpenShell>) {
+      s.x_alpha = vecfuncT(v.begin(), v.begin() + n_alpha);
+      s.x_beta  = vecfuncT(v.begin() + n_alpha,
+                           v.begin() + n_alpha + n_beta);
+    } else {
+      (void)n_beta;
+      (void)n_alpha;
+      s.x_alpha = v;
+    }
+  }
+
+  /// Final stage shared by both variants — KAIN apply, explosion
+  /// guard, banner, log. Mutates out in place.
+  void finalize_iter(const State &in, State &out,
+                     const std::vector<Storage> &x_pre_bsh) {
+    (void)in;
+    kain_.apply(x_pre_bsh, out.roots);
+    for (double r : out.last_bsh_residual) {
+      if (r > policy_.explosion_guard) { out.diverged = true; break; }
+    }
+    print_iter_banner(out);
+    append_convergence_log(out);
+  }
+
+public:
+  /// "Keep pieces, rotate them, assemble Theta from rotated pieces."
+  /// Default variant — fastest, highest memory.
+  /// Algorithm:
   ///   1. Per root, build V0x, T0x, E0x_full, E0x (no-diag), gamma.
   ///   2. Assemble Lambda = T0x + V0x - E0x_full + gamma.
   ///   3. Build A = <X | Lambda>, S = <X | X>, diagonalize → omega, U.
@@ -234,11 +317,7 @@ public:
   ///      Lambda-only and can be discarded).
   ///   5. Assemble Theta = V0x - E0x + gamma  (from rotated pieces).
   ///   6. BSH apply → new X; residual = || X_old - X_new ||.
-  ///
-  /// Same shape regardless of (Type, Shell). FD solver will share
-  /// V0x / E0x / gamma kernel bodies and skip steps (1.T0x), (2), (3),
-  /// (4), and add a perturbation source term in step (5).
-  State step(State in) {
+  State step_rotate_pieces(State in) {
     State out;
     out.iter  = in.iter + 1;
     out.roots = in.roots;
@@ -416,6 +495,122 @@ public:
 
     print_iter_banner(out);
     append_convergence_log(out);
+    return out;
+  }
+
+  /// "Stream Lambda, drop pieces, recompute V0x/E0x/gamma after
+  /// rotation to assemble Theta in place." Memory-conscious variant.
+  /// Algorithm:
+  ///   0. Top-of-iter Q + GS (shared).
+  ///   1+2. Per root, stream Lambda = T0x + V0x − E0x_full + gamma,
+  ///        freeing each kernel temporary after it's folded in.
+  ///   3. Subspace A = <X|Λ>, S = <X|X>, diagonalize → omega, U.
+  ///   4. Rotate X only (drop Lambda).
+  ///   5. RECOMPUTE V0x, E0x_nodi, gamma against rotated X, stream
+  ///      Theta = V0x − E0x + gamma in place.
+  ///   6. BSH apply → new X.
+  ///   7. KAIN (shared).
+  ///
+  /// Peak memory: ~3-4M Storage (vs ~8M for step_rotate_pieces).
+  /// Cost: ~2× the per-iter kernel work (each V0x/E0x/gamma computed
+  /// twice — once for Lambda, once for Theta).
+  State step_recompute_pieces(State in) {
+    State out;
+    out.iter  = in.iter + 1;
+    out.roots = in.roots;
+    const int M = target_.n_roots;
+    const double thr = madness::FunctionDefaults<3>::get_thresh();
+
+    // ---- 0. top-of-iter discipline ----------------------------------------
+    apply_top_of_iter_discipline(out, M);
+
+    // ---- 1 + 2. per-root Lambda assembly (streamed) -----------------------
+    std::vector<Storage> lambda(M);
+    std::vector<madness::real_function_3d> rho_alpha(M);
+    out.last_density_residual.assign(M, 0.0);
+    for (int s = 0; s < M; ++s) {
+      rho_alpha[s] = K::compute_density(world_, target_, out.roots[s]);
+      if (!in.rho_alpha_prev.empty()) {
+        auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
+        out.last_density_residual[s] = drho.norm2();
+      }
+
+      // Stream Lambda = T0x + V0x − E0x_full + gamma. Each temporary
+      // is scoped: built, axpy'd into lambda[s], then freed.
+      lambda[s] = K::compute_T0x(world_, target_, out.roots[s]);
+      {
+        auto V = K::compute_V0x(world_, target_, out.roots[s]);
+        lambda[s].axpy(world_, +1.0, V);
+      }
+      {
+        auto Efull = K::compute_E0x_full(world_, target_, out.roots[s]);
+        lambda[s].axpy(world_, -1.0, Efull);
+      }
+      {
+        auto G = K::compute_gamma(world_, target_, out.roots[s], rho_alpha[s]);
+        lambda[s].axpy(world_, +1.0, G);
+      }
+      lambda[s].truncate_all(world_, thr);
+    }
+    out.rho_alpha_prev = std::move(rho_alpha);
+
+    // ---- 3. subspace A, S, diagonalize ------------------------------------
+    constexpr bool open_shell = std::is_same_v<Shell, OpenShell>;
+    std::size_t n_alpha = 0, n_beta = 0;
+    if constexpr (open_shell) {
+      n_alpha = out.roots[0].x_alpha.size();
+      n_beta  = out.roots[0].x_beta.size();
+    }
+    response_space X_rs(M), Lambda_rs(M);
+    for (int s = 0; s < M; ++s) {
+      X_rs[s]      = pack_storage(out.roots[s]);
+      Lambda_rs[s] = pack_storage(lambda[s]);
+    }
+    auto A     = rs::inner(X_rs, Lambda_rs);
+    auto S_mat = rs::inner(X_rs, X_rs);
+    auto [omega_new, U] = rs::diagonalize(A, S_mat);
+    out.omega = omega_new;
+    print_debug_iter(A, S_mat, omega_new, U);
+
+    // ---- 4. rotate X only; drop Lambda ------------------------------------
+    rs::transform(world_, X_rs, U);
+    for (int s = 0; s < M; ++s)
+      unpack_storage(out.roots[s], X_rs[s], n_alpha, n_beta);
+    lambda.clear();  // free Lambda — not needed past here
+
+    // ---- 5 + 6. Recompute V0x/E0x/gamma against rotated X, stream Theta
+    //              + BSH apply per root --------------------------------------
+    // KAIN's "x_old" is the rotated state (pre-BSH), same as
+    // step_rotate_pieces. Snapshot before BSH overwrites out.roots.
+    std::vector<Storage> x_pre_bsh = out.roots;
+    out.last_bsh_residual.assign(M, 0.0);
+    for (int s = 0; s < M; ++s) {
+      // ρ on rotated X (different from the pre-rotation ρ we used for
+      // Lambda — gamma here needs the rotated coupling).
+      auto rho_rot = K::compute_density(world_, target_, out.roots[s]);
+
+      // Stream Theta = V0x − E0x_nodi + gamma, scoped temporaries.
+      auto theta = K::compute_V0x(world_, target_, out.roots[s]);
+      {
+        auto E = K::compute_E0x(world_, target_, out.roots[s]);
+        theta.axpy(world_, -1.0, E);
+      }
+      {
+        auto G = K::compute_gamma(world_, target_, out.roots[s], rho_rot);
+        theta.axpy(world_, +1.0, G);
+      }
+      theta.truncate_all(world_, thr);
+
+      // BSH
+      auto x_new = K::bsh_apply(world_, target_, out.roots[s],
+                                theta, omega_new(s));
+      out.last_bsh_residual[s] =
+          K::compute_residual_norm(world_, out.roots[s], x_new);
+      out.roots[s] = std::move(x_new);
+    }
+
+    // ---- 7. KAIN + guard + banner + log -----------------------------------
+    finalize_iter(in, out, x_pre_bsh);
     return out;
   }
 

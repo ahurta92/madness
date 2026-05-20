@@ -31,6 +31,16 @@ struct ConvergencePolicy {
   double bsh_user_factor     =  5.0;  // bsh_target  >= 5  * dconv_user
   double density_thresh_factor = 1.0; // density_target >= 1 * thresh
 
+  // ESSolver memory mode. When true, step() streams Lambda assembly
+  // and DROPS V0x/E0x/gamma after the subspace rotation, then
+  // RECOMPUTES the rotated pieces to assemble Theta. Costs ~2× the
+  // per-root kernel work (V0x/E0x/gamma evaluated twice per iter)
+  // but cuts peak memory from ~8M Storage to ~3-4M. Set true when
+  // n_occ × n_roots × k³ × leaves is the memory bottleneck.
+  // Default false: current "keep pieces, rotate them, assemble Theta
+  // from rotated pieces" layout.
+  bool stream_theta = false;
+
   // Diverging-residual bail-out. Triggers only on a runaway residual
   // (BSH residual > guard). The legacy ES guard was 2.0 in normalised
   // units, but FD's iter-1 residual from a "x = perturbation" guess is

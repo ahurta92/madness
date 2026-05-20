@@ -216,59 +216,59 @@ public:
     print("");
   }
 
-  /// One outer iteration. Skips stages 2-4 of the ESSolver shape.
+  /// One outer iteration. Streamed-theta layout: for each response
+  /// in turn, build theta in place (V0x → += gamma → -= E0x → += source)
+  /// then BSH-apply, freeing the intermediates before moving to the next
+  /// response. Peak memory ≈ `in + out + 1 theta + 1 temp + 1 new_x`
+  /// instead of the materialize-V0x/E0x/gamma-for-all-responses-up-front
+  /// layout's `~5M Storage` peak.
   State step(State in) {
     State out;
     out.iter      = in.iter + 1;
-    out.responses  = in.responses;
+    out.responses = in.responses;
     const int M   = target_.n_responses();
+    const double thr = madness::FunctionDefaults<3>::get_thresh();
 
-    // ---- 1. per-channel building blocks ----------------------------------
-    std::vector<Storage> V0x(M), E0x(M), gamma(M);
-    std::vector<madness::real_function_3d> rho_alpha(M);
     out.last_density_residual.assign(M, 0.0);
-    for (int c = 0; c < M; ++c) {
-      rho_alpha[c] = K::compute_density(world_, target_.gs, out.responses[c]);
-      gamma[c]     = K::compute_gamma(world_, target_.gs, out.responses[c],
-                                      rho_alpha[c]);
-      V0x[c]       = K::compute_V0x(world_, target_.gs, out.responses[c]);
-      E0x[c]       = K::compute_E0x(world_, target_.gs, out.responses[c]);
-      if (!in.rho_alpha_prev.empty()) {
-        auto drho = rho_alpha[c] - in.rho_alpha_prev[c];
-        out.last_density_residual[c] = drho.norm2();
-      }
-    }
-    out.rho_alpha_prev = std::move(rho_alpha);
-
-    // ---- 5. Theta = V0x - E0x + gamma + perturbation_source --------------
-    std::vector<Storage> theta(M);
-    for (int c = 0; c < M; ++c) {
-      theta[c] = K::compute_theta(world_, V0x[c], E0x[c], gamma[c]);
-      add_perturbation_source(world_, theta[c], target_.responses[c]);
-    }
-
-    // ---- 6. BSH apply + residual -----------------------------------------
-    // Each channel's raw BSH update goes into out.responses[c], and the
-    // per-channel BSH residual is the raw ||x_old − x_BSH|| (it's
-    // recorded BEFORE KAIN damping so convergence tracking measures
-    // the dynamics, not the damped step).
     out.last_bsh_residual.assign(M, 0.0);
-    for (int c = 0; c < M; ++c) {
-      auto x_new = K::bsh_apply(world_, target_.gs, out.responses[c],
-                                theta[c], target_.responses[c].omega);
-      out.last_bsh_residual[c] =
-          K::compute_residual_norm(world_, out.responses[c], x_new);
-      out.responses[c] = std::move(x_new);
+    out.rho_alpha_prev.resize(M);
+
+    for (int r = 0; r < M; ++r) {
+      // ρ (one density function per response; kept for next iter's Δρ check)
+      auto rho = K::compute_density(world_, target_.gs, in.responses[r]);
+      if (!in.rho_alpha_prev.empty()) {
+        auto drho = rho - in.rho_alpha_prev[r];
+        out.last_density_residual[r] = drho.norm2();
+      }
+
+      // θ = V0x − E0x + γ, streamed via Storage::axpy
+      auto theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
+      {
+        auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
+        theta.axpy(world_, -1.0, E0x);                          // theta -= E0x
+      }
+      {
+        auto gamma = K::compute_gamma(world_, target_.gs,
+                                      in.responses[r], rho);
+        theta.axpy(world_, +1.0, gamma);                        // theta += γ
+      }
+      add_perturbation_source(world_, theta, target_.responses[r]); // theta += V_p
+      theta.truncate_all(world_, thr);
+
+      // BSH apply
+      auto x_new = K::bsh_apply(world_, target_.gs, in.responses[r],
+                                theta, target_.responses[r].omega);
+      out.last_bsh_residual[r] =
+          K::compute_residual_norm(world_, in.responses[r], x_new);
+
+      out.responses[r]      = std::move(x_new);
+      out.rho_alpha_prev[r] = std::move(rho);
     }
 
-    // ---- 7. KAIN acceleration + step restriction --------------------------
-    // Operates on the flat concat of all responses. Reuses the
-    // residual ||x_old − x_BSH|| (computed by KAIN internally on the
-    // flat vector). policy_.kain=false disables and falls back to
-    // the raw BSH iteration.
+    // ---- KAIN + step restriction (over flat in/out responses) ------------
     kain_.apply(in.responses, out.responses);
 
-    // Explosion guard.
+    // Explosion guard
     for (double r : out.last_bsh_residual) {
       if (r > policy_.explosion_guard) { out.diverged = true; break; }
     }
