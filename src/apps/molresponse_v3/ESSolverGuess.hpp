@@ -117,6 +117,52 @@ make_initial_guess_tda_rhf(World &world, GroundState &gs, long num_roots,
   return X;
 }
 
+/// Initial guess for **TDA open-shell (UHF)** excited states.
+///
+/// Same algorithm as the RHF version but generates BOTH α and β
+/// response channels per state — n_alpha α-functions and n_beta
+/// β-functions each. Each spin channel gets independent random noise,
+/// is multiplied by the atom envelope, Q-projected against the
+/// corresponding ground orbitals, and finally `orthonormalize_bundle`
+/// orthogonalizes across roots using the combined (α + β) inner
+/// product.
+inline std::vector<RealResponseState>
+make_initial_guess_tda_uhf(World &world, GroundState &gs, long num_roots,
+                           double envelope_exponent = 0.01,
+                           double random_magnitude = 1.0e3) {
+
+  MADNESS_CHECK(!gs.is_spin_restricted());
+  const long n_alpha = gs.num_alpha();
+  const long n_beta  = gs.num_beta();
+
+  auto envelope = build_atom_envelope(world, gs.molecule(), envelope_exponent);
+
+  std::vector<RealResponseState> X(num_roots);
+  for (long s = 0; s < num_roots; s++) {
+    X[s] = RealResponseState::allocate(world, n_alpha, n_beta,
+                                       /*include_y=*/false);
+    add_random_noise(world, X[s].x_alpha, random_magnitude);
+    add_random_noise(world, X[s].x_beta,  random_magnitude);
+    for (auto &f : X[s].x_alpha) f = envelope * f;
+    for (auto &f : X[s].x_beta)  f = envelope * f;
+  }
+
+  // Q-project against ground orbitals — per spin.
+  const auto &Qa = gs.Q_alpha();
+  const auto &Qb = gs.Q_beta();
+  for (auto &state : X) {
+    state.x_alpha = Qa(state.x_alpha);
+    state.x_beta  = Qb(state.x_beta);
+  }
+
+  // Gram-Schmidt across roots — orthonormalize_bundle uses both α and β
+  // inner-product contributions, matching the OpenShell-TDA subspace
+  // metric in ESSolver<TDA, OpenShell>.
+  orthonormalize_bundle(world, ResponseType::TDA, X);
+
+  return X;
+}
+
 // Cartesian moment functor: r → x^i · y^j · z^k.
 // Direct port of the local copy in molresponse_legacy/TDDFT.cc (the
 // comment there says SCF.cc's version "wasn't linking right" so it was
