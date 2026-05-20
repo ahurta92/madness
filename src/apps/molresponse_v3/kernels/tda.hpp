@@ -44,24 +44,36 @@ namespace molresponse_v3 {
 
 using poperatorT = std::shared_ptr<madness::real_convolution_3d>;
 
-/// Read-only problem definition. Closed-shell runs leave *_beta empty.
+/// Zeroth-order data that response kernels read against. Field names
+/// match `SCF::amo / bmo / aeps / beps / focka / fockb / Qa /
+/// Qb` so a v3 reader who's familiar with `SCF.cc` finds the same
+/// names. Closed-shell runs leave the `*_b` fields empty.
+///
+/// TODO(DFT): when c_xc != 1.0 (hybrid / pure DFT), gamma needs the
+/// W = xc.apply_xc_kernel(rho) · phi term — see
+/// molresponse_legacy/iterate_gamma.cc:114-123. Requires capturing an
+/// XCOperator handle here.
+///
+/// TODO(load-balancing): per-response orbital load balance once we
+/// fan out across MPI ranks. Exchange ops in compute_gamma / V0x are
+/// O(N²) in n_occupied.
 struct ResponseGroundState {
-  std::vector<madness::real_function_3d> phi0_alpha;
-  madness::Tensor<double>                eps_alpha;
-  std::vector<madness::real_function_3d> phi0_beta;
-  madness::Tensor<double>                eps_beta;
+  std::vector<madness::real_function_3d> amo;      // alpha occupied orbitals
+  madness::Tensor<double>                aeps;     // alpha orbital energies
+  std::vector<madness::real_function_3d> bmo;      // beta occupied orbitals (empty if CS)
+  madness::Tensor<double>                beps;
 
   madness::real_function_3d V_local_alpha;
   madness::real_function_3d V_local_beta;
 
-  madness::Tensor<double>   fock_full_alpha;       // for Lambda
-  madness::Tensor<double>   fock_full_beta;
-  madness::Tensor<double>   fock_no_diag_alpha;    // for Theta
-  madness::Tensor<double>   fock_no_diag_beta;
+  madness::Tensor<double>   focka;             // full alpha Fock (for Lambda)
+  madness::Tensor<double>   fockb;
+  madness::Tensor<double>   focka_no_diag;     // off-diag alpha Fock (for Theta)
+  madness::Tensor<double>   fockb_no_diag;
 
   poperatorT                              coulop;
-  madness::QProjector<double, 3>          Q_alpha;
-  madness::QProjector<double, 3>          Q_beta;
+  madness::QProjector<double, 3>          Qa;    // alpha virtual-space projector
+  madness::QProjector<double, 3>          Qb;
   double                                  c_xc = 1.0;
   double                                  lo   = 1.0e-10;
 
@@ -107,6 +119,25 @@ make_bsh_operators(madness::World &world,
   return ops;
 }
 
+/// Compact wrapper around `madness::Exchange::set_bra_and_ket(bra, ket)`
+/// + apply. Each call constructs an Exchange operator with the
+/// multiworld-efficient-row algorithm and applies it to `apply_to`.
+/// Used 4-9× per compute_gamma / compute_V0x; one-line replacement
+/// for the 5-line Exchange<double, 3> ... set_bra_and_ket ... set_algorithm
+/// ... apply pattern.
+inline std::vector<madness::real_function_3d>
+apply_exchange(madness::World &world,
+               const std::vector<madness::real_function_3d> &bra,
+               const std::vector<madness::real_function_3d> &ket,
+               const std::vector<madness::real_function_3d> &apply_to,
+               double lo) {
+  madness::Exchange<double, 3> K(world, lo);
+  K.set_bra_and_ket(bra, ket);
+  K.set_algorithm(madness::Exchange<double, 3>::
+                      ExchangeAlgorithm::multiworld_efficient_row);
+  return K(apply_to);
+}
+
 } // namespace detail_tda
 
 // =========================================================================
@@ -120,18 +151,18 @@ struct Kernels<TDA, ClosedShell> {
 
   // ---- per-state operator applications (the shared building blocks) ----
 
-  /// rho1 = 2 * sum_p phi0_alpha[p] * x_alpha[p].
+  /// rho1 = 2 * sum_p amo[p] * x_alpha[p].
   static madness::real_function_3d
   compute_density(madness::World &world,
-                  const ResponseGroundState &target,
+                  const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho1 = dot(world, target.phi0_alpha, state.x_alpha);
+    auto rho1 = dot(world, g0.amo, state.x_alpha);
     rho1.scale(2.0);
     rho1.truncate();
     return rho1;
   }
 
-  /// gamma = Q( J[rho1]*phi0_alpha - c_xc * K[phi0_alpha, x_alpha](phi0_alpha) ).
+  /// gamma = Q( J[rho1]*amo - c_xc * K[amo, x_alpha](amo) ).
   ///
   /// Returns Storage so the (Type, Shell) uniform shape holds: ES Full
   /// will return gamma with both x_alpha and y_alpha components; OpenShell
@@ -139,21 +170,18 @@ struct Kernels<TDA, ClosedShell> {
   /// x_alpha only.
   static State
   compute_gamma(madness::World &world,
-                const ResponseGroundState &target,
+                const ResponseGroundState &g0,
                 const State    &state,
                 const madness::real_function_3d &rho1) {
-    auto J_rho = apply(*target.coulop, rho1);
-    auto gamma = mul(world, J_rho, target.phi0_alpha, true);
+    auto J_rho = apply(*g0.coulop, rho1);
+    auto gamma = mul(world, J_rho, g0.amo, true);
 
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> Kpx(world, target.lo);
-      Kpx.set_bra_and_ket(target.phi0_alpha, state.x_alpha);
-      Kpx.set_algorithm(madness::Exchange<double, 3>::
-                            ExchangeAlgorithm::multiworld_efficient_row);
-      auto Kpx_phi = Kpx(target.phi0_alpha);
-      gaxpy(world, 1.0, gamma, -target.c_xc, Kpx_phi);
+    if (g0.c_xc > 0.0) {
+      auto Kpx_phi = detail_tda::apply_exchange(world, g0.amo, state.x_alpha,
+                                                 g0.amo, g0.lo);
+      gaxpy(world, 1.0, gamma, -g0.c_xc, Kpx_phi);
     }
-    gamma = target.Q_alpha(gamma);
+    gamma = g0.Qa(gamma);
     truncate(world, gamma);
     return State{std::move(gamma)};
   }
@@ -161,17 +189,14 @@ struct Kernels<TDA, ClosedShell> {
   /// V0·x = V_local * x - c_xc * K[phi0, phi0](x).
   static State
   compute_V0x(madness::World &world,
-              const ResponseGroundState &target,
+              const ResponseGroundState &g0,
               const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
-    auto Vx = mul_sparse(world, target.V_local_alpha, state.x_alpha, vtol);
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> K0(world, target.lo);
-      K0.set_bra_and_ket(target.phi0_alpha, target.phi0_alpha);
-      K0.set_algorithm(madness::Exchange<double, 3>::
-                           ExchangeAlgorithm::multiworld_efficient_row);
-      auto k0x = K0(state.x_alpha);
-      gaxpy(world, 1.0, Vx, -target.c_xc, k0x);
+    auto Vx = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
+    if (g0.c_xc > 0.0) {
+      auto k0x = detail_tda::apply_exchange(world, g0.amo, g0.amo,
+                                             state.x_alpha, g0.lo);
+      gaxpy(world, 1.0, Vx, -g0.c_xc, k0x);
     }
     return State{std::move(Vx)};
   }
@@ -188,11 +213,11 @@ struct Kernels<TDA, ClosedShell> {
   /// diag + off-diag). Used to assemble Lambda for the subspace matrix.
   static State
   compute_E0x_full(madness::World &world,
-                   const ResponseGroundState &target,
+                   const ResponseGroundState &g0,
                    const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     return State{transform(world, state.x_alpha,
-                           target.fock_full_alpha, vtol, true)};
+                           g0.focka, vtol, true)};
   }
 
   /// E0·x with the OFF-DIAGONAL Fock only. Used to assemble Theta for
@@ -200,11 +225,11 @@ struct Kernels<TDA, ClosedShell> {
   /// Green's function. In a canonical basis this is the zero vector.
   static State
   compute_E0x(madness::World &world,
-              const ResponseGroundState &target,
+              const ResponseGroundState &g0,
               const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     return State{transform(world, state.x_alpha,
-                           target.fock_no_diag_alpha, vtol, true)};
+                           g0.focka_no_diag, vtol, true)};
   }
 
   // ---- assemblies (pure linear combinations of the pieces above) ----
@@ -244,21 +269,21 @@ struct Kernels<TDA, ClosedShell> {
   /// The shift matches the one inside make_bsh_operators(omega).
   static State
   bsh_apply(madness::World &world,
-            const ResponseGroundState &target,
+            const ResponseGroundState &g0,
             const State    &state,
             const State    &theta,
             double          omega) {
-    const double shift = detail_tda::bsh_shift(target.eps_alpha, omega);
+    const double shift = detail_tda::bsh_shift(g0.aeps, omega);
 
     auto rhs = madness::copy(world, theta.x_alpha);
     gaxpy(world, 1.0, rhs, shift, state.x_alpha);
     scale(world, rhs, -2.0);
     truncate(world, rhs);
 
-    auto bsh_ops = detail_tda::make_bsh_operators(world, target.eps_alpha,
-                                                  omega, target.lo);
+    auto bsh_ops = detail_tda::make_bsh_operators(world, g0.aeps,
+                                                  omega, g0.lo);
     auto new_x   = apply(world, bsh_ops, rhs);
-    new_x        = target.Q_alpha(new_x);
+    new_x        = g0.Qa(new_x);
     truncate(world, new_x);
     return State{std::move(new_x)};
   }
@@ -296,10 +321,10 @@ struct Kernels<TDA, OpenShell> {
   /// rho = Σ_p φ_α_p · x_α_p + Σ_p φ_β_p · x_β_p.
   static madness::real_function_3d
   compute_density(madness::World &world,
-                  const ResponseGroundState &target,
+                  const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho_a = dot(world, target.phi0_alpha, state.x_alpha);
-    auto rho_b = dot(world, target.phi0_beta,  state.x_beta);
+    auto rho_a = dot(world, g0.amo, state.x_alpha);
+    auto rho_b = dot(world, g0.bmo,  state.x_beta);
     auto rho1  = rho_a + rho_b;
     rho1.truncate();
     return rho1;
@@ -311,35 +336,27 @@ struct Kernels<TDA, OpenShell> {
   /// from Static, which has K[φ,x](φ) + K[x,φ](φ) per spin.)
   static State
   compute_gamma(madness::World &world,
-                const ResponseGroundState &target,
+                const ResponseGroundState &g0,
                 const State    &state,
                 const madness::real_function_3d &rho1) {
-    auto J_rho = apply(*target.coulop, rho1);
+    auto J_rho = apply(*g0.coulop, rho1);
 
     // alpha
-    auto gamma_a = mul(world, J_rho, target.phi0_alpha, true);
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> Kpx_a(world, target.lo);
-      Kpx_a.set_bra_and_ket(target.phi0_alpha, state.x_alpha);
-      Kpx_a.set_algorithm(madness::Exchange<double, 3>::
-                              ExchangeAlgorithm::multiworld_efficient_row);
-      auto Kpx_a_phi = Kpx_a(target.phi0_alpha);
-      gaxpy(world, 1.0, gamma_a, -target.c_xc, Kpx_a_phi);
+    auto gamma_a = mul(world, J_rho, g0.amo, true);
+    if (g0.c_xc > 0.0) {
+      auto Kpx_a_phi = detail_tda::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
+      gaxpy(world, 1.0, gamma_a, -g0.c_xc, Kpx_a_phi);
     }
-    gamma_a = target.Q_alpha(gamma_a);
+    gamma_a = g0.Qa(gamma_a);
     truncate(world, gamma_a);
 
     // beta
-    auto gamma_b = mul(world, J_rho, target.phi0_beta, true);
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> Kpx_b(world, target.lo);
-      Kpx_b.set_bra_and_ket(target.phi0_beta, state.x_beta);
-      Kpx_b.set_algorithm(madness::Exchange<double, 3>::
-                              ExchangeAlgorithm::multiworld_efficient_row);
-      auto Kpx_b_phi = Kpx_b(target.phi0_beta);
-      gaxpy(world, 1.0, gamma_b, -target.c_xc, Kpx_b_phi);
+    auto gamma_b = mul(world, J_rho, g0.bmo, true);
+    if (g0.c_xc > 0.0) {
+      auto Kpx_b_phi = detail_tda::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
+      gaxpy(world, 1.0, gamma_b, -g0.c_xc, Kpx_b_phi);
     }
-    gamma_b = target.Q_beta(gamma_b);
+    gamma_b = g0.Qb(gamma_b);
     truncate(world, gamma_b);
 
     return State{std::move(gamma_a), std::move(gamma_b)};
@@ -348,27 +365,19 @@ struct Kernels<TDA, OpenShell> {
   /// V0·x = V_local · x − c_xc · K[φ, φ](x), per spin.
   static State
   compute_V0x(madness::World &world,
-              const ResponseGroundState &target,
+              const ResponseGroundState &g0,
               const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
 
-    auto Vx_a = mul_sparse(world, target.V_local_alpha, state.x_alpha, vtol);
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> K0_a(world, target.lo);
-      K0_a.set_bra_and_ket(target.phi0_alpha, target.phi0_alpha);
-      K0_a.set_algorithm(madness::Exchange<double, 3>::
-                             ExchangeAlgorithm::multiworld_efficient_row);
-      auto k0_ax = K0_a(state.x_alpha);
-      gaxpy(world, 1.0, Vx_a, -target.c_xc, k0_ax);
+    auto Vx_a = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
+    if (g0.c_xc > 0.0) {
+      auto k0_ax = detail_tda::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
+      gaxpy(world, 1.0, Vx_a, -g0.c_xc, k0_ax);
     }
-    auto Vx_b = mul_sparse(world, target.V_local_beta, state.x_beta, vtol);
-    if (target.c_xc > 0.0) {
-      madness::Exchange<double, 3> K0_b(world, target.lo);
-      K0_b.set_bra_and_ket(target.phi0_beta, target.phi0_beta);
-      K0_b.set_algorithm(madness::Exchange<double, 3>::
-                             ExchangeAlgorithm::multiworld_efficient_row);
-      auto k0_bx = K0_b(state.x_beta);
-      gaxpy(world, 1.0, Vx_b, -target.c_xc, k0_bx);
+    auto Vx_b = mul_sparse(world, g0.V_local_beta, state.x_beta, vtol);
+    if (g0.c_xc > 0.0) {
+      auto k0_bx = detail_tda::apply_exchange(world, g0.bmo, g0.bmo, state.x_beta, g0.lo);
+      gaxpy(world, 1.0, Vx_b, -g0.c_xc, k0_bx);
     }
     return State{std::move(Vx_a), std::move(Vx_b)};
   }
@@ -386,26 +395,26 @@ struct Kernels<TDA, OpenShell> {
   /// E0·x with the FULL Fock per spin (Lambda assembly: T0 + V0 − E0_full + γ).
   static State
   compute_E0x_full(madness::World &world,
-                   const ResponseGroundState &target,
+                   const ResponseGroundState &g0,
                    const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     auto Ea = transform(world, state.x_alpha,
-                        target.fock_full_alpha, vtol, true);
+                        g0.focka, vtol, true);
     auto Eb = transform(world, state.x_beta,
-                        target.fock_full_beta,  vtol, true);
+                        g0.fockb,  vtol, true);
     return State{std::move(Ea), std::move(Eb)};
   }
 
   /// E0·x with the OFF-DIAGONAL Fock per spin (Theta assembly).
   static State
   compute_E0x(madness::World &world,
-              const ResponseGroundState &target,
+              const ResponseGroundState &g0,
               const State    &state) {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     auto Ea = transform(world, state.x_alpha,
-                        target.fock_no_diag_alpha, vtol, true);
+                        g0.focka_no_diag, vtol, true);
     auto Eb = transform(world, state.x_beta,
-                        target.fock_no_diag_beta,  vtol, true);
+                        g0.fockb_no_diag,  vtol, true);
     return State{std::move(Ea), std::move(Eb)};
   }
 
@@ -453,32 +462,32 @@ struct Kernels<TDA, OpenShell> {
   /// Per-spin BSH apply, each side with its own ε and shift.
   static State
   bsh_apply(madness::World &world,
-            const ResponseGroundState &target,
+            const ResponseGroundState &g0,
             const State    &state,
             const State    &theta,
             double          omega) {
     // alpha
-    const double shift_a = detail_tda::bsh_shift(target.eps_alpha, omega);
+    const double shift_a = detail_tda::bsh_shift(g0.aeps, omega);
     auto rhs_a = madness::copy(world, theta.x_alpha);
     gaxpy(world, 1.0, rhs_a, shift_a, state.x_alpha);
     scale(world, rhs_a, -2.0);
     truncate(world, rhs_a);
-    auto bsh_a = detail_tda::make_bsh_operators(world, target.eps_alpha,
-                                                omega, target.lo);
+    auto bsh_a = detail_tda::make_bsh_operators(world, g0.aeps,
+                                                omega, g0.lo);
     auto new_xa = apply(world, bsh_a, rhs_a);
-    new_xa      = target.Q_alpha(new_xa);
+    new_xa      = g0.Qa(new_xa);
     truncate(world, new_xa);
 
     // beta
-    const double shift_b = detail_tda::bsh_shift(target.eps_beta, omega);
+    const double shift_b = detail_tda::bsh_shift(g0.beps, omega);
     auto rhs_b = madness::copy(world, theta.x_beta);
     gaxpy(world, 1.0, rhs_b, shift_b, state.x_beta);
     scale(world, rhs_b, -2.0);
     truncate(world, rhs_b);
-    auto bsh_b = detail_tda::make_bsh_operators(world, target.eps_beta,
-                                                omega, target.lo);
+    auto bsh_b = detail_tda::make_bsh_operators(world, g0.beps,
+                                                omega, g0.lo);
     auto new_xb = apply(world, bsh_b, rhs_b);
-    new_xb      = target.Q_beta(new_xb);
+    new_xb      = g0.Qb(new_xb);
     truncate(world, new_xb);
 
     return State{std::move(new_xa), std::move(new_xb)};

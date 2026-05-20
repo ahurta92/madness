@@ -36,19 +36,19 @@ build_response_ground_state_open_shell(madness::World &world, GroundState &gs,
                                int n_roots, double c_xc = 1.0,
                                double lo = 1.0e-10) {
   ResponseGroundState t;
-  t.phi0_alpha          = gs.orbitals_alpha();
-  t.eps_alpha           = gs.energies_alpha();
+  t.amo          = gs.orbitals_alpha();
+  t.aeps           = gs.energies_alpha();
   t.V_local_alpha       = gs.V_local();
-  t.fock_full_alpha     = gs.focka();
-  t.fock_no_diag_alpha  = gs.focka_no_diag();
-  t.Q_alpha             = gs.Q_alpha();
+  t.focka     = gs.focka();
+  t.focka_no_diag  = gs.focka_no_diag();
+  t.Qa             = gs.Q_alpha();
 
-  t.phi0_beta           = gs.orbitals_beta();
-  t.eps_beta            = gs.energies_beta();
+  t.bmo           = gs.orbitals_beta();
+  t.beps            = gs.energies_beta();
   t.V_local_beta        = gs.V_local();         // HF: same potential both spins
-  t.fock_full_beta      = gs.fockb();
-  t.fock_no_diag_beta   = gs.fockb_no_diag();
-  t.Q_beta              = gs.Q_beta();
+  t.fockb      = gs.fockb();
+  t.fockb_no_diag   = gs.fockb_no_diag();
+  t.Qb              = gs.Q_beta();
 
   t.coulop = poperatorT(madness::CoulombOperatorPtr(
       world, lo, madness::FunctionDefaults<3>::get_thresh()));
@@ -65,12 +65,12 @@ build_response_ground_state_closed_shell(madness::World &world, GroundState &gs,
                                  int n_roots, double c_xc = 1.0,
                                  double lo = 1.0e-10) {
   ResponseGroundState t;
-  t.phi0_alpha          = gs.orbitals_alpha();
-  t.eps_alpha           = gs.energies_alpha();
+  t.amo          = gs.orbitals_alpha();
+  t.aeps           = gs.energies_alpha();
   t.V_local_alpha       = gs.V_local();
-  t.fock_full_alpha     = gs.focka();
-  t.fock_no_diag_alpha  = gs.focka_no_diag();
-  t.Q_alpha             = gs.Q_alpha();
+  t.focka     = gs.focka();
+  t.focka_no_diag  = gs.focka_no_diag();
+  t.Qa             = gs.Q_alpha();
   // beta side stays empty — closed-shell.
 
   // Shared Coulomb (Poisson) operator. The existing solvers build this

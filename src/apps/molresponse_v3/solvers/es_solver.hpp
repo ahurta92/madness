@@ -254,9 +254,9 @@ public:
     {
       // Q-project each root, per spin.
       for (int s = 0; s < M; ++s) {
-        out.roots[s].x_alpha = target_.Q_alpha(out.roots[s].x_alpha);
+        out.roots[s].x_alpha = target_.Qa(out.roots[s].x_alpha);
         if constexpr (std::is_same_v<Shell, OpenShell>) {
-          out.roots[s].x_beta = target_.Q_beta(out.roots[s].x_beta);
+          out.roots[s].x_beta = target_.Qb(out.roots[s].x_beta);
         }
       }
       // Gram-Schmidt + normalize across roots. The flat representation

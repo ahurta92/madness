@@ -19,8 +19,26 @@
 // Same `ConvergencePolicy`, same `iterate` / `iterate_protocol`,
 // same Storage-typed kernel signatures as ESSolver. The differences
 // are concentrated here: no T0x / Lambda / sygv / rotation, BSH ops
-// could be cached per channel (deferred — built inside K::bsh_apply
+// could be cached per response (deferred — built inside K::bsh_apply
 // for now, same as ES).
+//
+// TODO(streaming): step() currently materializes V0x, E0x, gamma as
+// separate vectors of Storage and assembles theta from them — peak
+// is ~6M Storage instances in flight (in + out + V0x + E0x + gamma
+// + theta). Refactor to stream the assembly per response: theta starts
+// as V0x, then E0x is computed as a temporary and subtracted in
+// place, then gamma is added in place, then perturbation_source is
+// added. Peak drops to in + out + theta + ~1 temporary ≈ 2M + 3.
+// This also sets up future per-response MacroTaskQ parallelism: each
+// worker owns 1 response's buffers, not the whole bundle.
+//
+// TODO(VBC): for cubic response properties (β, dα/dQ for Raman) we
+// need a Kernels<Type, Shell>::compute_second_order_vector kernel
+// mirroring molresponse_v2/VBCMacrotask.hpp::compute_vbc_i. Pattern:
+// given two first-order response vectors B and C, build ζ_BC =
+// Σ y_B·x_C, apply compute_g (a 3-input J+K-like operator), apply
+// V_pert·c_x, project onto virtuals, combine. Same shape but on 2×
+// the storage. Plan the Kernels API so this plugs in cleanly.
 // =========================================================================
 
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
