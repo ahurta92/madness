@@ -99,10 +99,14 @@ apply_kinetic(madness::World &world,
   return result;
 }
 
+/// Pick a level-shift so the per-orbital BSH μ² stays positive.
+/// `eps` carries OCCUPIED orbital energies only (HOMO last). When
+/// `HOMO + omega` would push μ² = -2(ε_HOMO + omega) ≤ 0, return
+/// a shift that pushes the effective energy below zero by `guard`.
 inline double bsh_shift(const madness::Tensor<double> &eps, double omega) {
   constexpr double guard = 0.05;
-  double lumo_shifted = eps(eps.size() - 1) + omega;
-  return (lumo_shifted >= 0.0) ? -guard - lumo_shifted : 0.0;
+  const double homo_shifted = eps(eps.size() - 1) + omega;
+  return (homo_shifted >= 0.0) ? -guard - homo_shifted : 0.0;
 }
 
 inline std::vector<poperatorT>
