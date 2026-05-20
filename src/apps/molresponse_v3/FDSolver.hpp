@@ -4,6 +4,7 @@
 #include "GroundState.hpp"
 #include "ResponseFunctions.hpp"
 #include "ResponseKernel.hpp"
+#include "kernels/tags.hpp"  // PrintLevel
 
 #include <madness/mra/mra.h>
 #include <madness/mra/nonlinsol.h>
@@ -11,10 +12,6 @@
 namespace molresponse_v3 {
 
 using namespace madness;
-
-/// Print level for solver output.
-/// 0: silent, 1: convergence only, 2: per-iteration, 3: debug (inner products, Fock)
-enum class PrintLevel { Silent = 0, Normal = 1, Verbose = 2, Debug = 3 };
 
 /// Result of one frequency-dependent response solve.
 struct FDSolveResult {

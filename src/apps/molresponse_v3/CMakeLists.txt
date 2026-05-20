@@ -8,6 +8,12 @@ endif()
 add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADresponse2;MADchem")
 add_mad_executable(test_v3_solver "test_solver.cpp;GroundState.cpp" "MADresponse2;MADchem")
 add_mad_executable(test_es_solver "test_es_solver.cpp;GroundState.cpp" "MADresponse2;MADchem")
+add_mad_executable(test_v3_es_skeleton
+                   "tests/test_v3_es_skeleton.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
+add_mad_executable(test_v3_fd_skeleton
+                   "tests/test_v3_fd_skeleton.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3

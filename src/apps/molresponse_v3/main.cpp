@@ -11,6 +11,23 @@
 #include "ResponseFunctions.hpp"
 #include "ResponseKernel.hpp"
 
+// Skeleton headers for the new (Type, Shell)-templated ES solver.
+// Explicit instantiations at namespace scope below force the
+// compiler to type-check the bodies even though no call site exists
+// yet. See docs/12_solver_architecture_sketch.md.
+#include "kernels/full.hpp"
+#include "kernels/static.hpp"
+#include "kernels/tags.hpp"
+#include "kernels/tda.hpp"
+#include "solvers/build_response_ground_state.hpp"
+#include "solvers/convergence_policy.hpp"
+#include "solvers/es_solver.hpp"
+#include "solvers/fd_solver.hpp"
+#include "solvers/fd_problem.hpp"
+#include "solvers/iterate.hpp"
+#include "solvers/iterate_protocol.hpp"
+#include "solvers/response_state.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -18,6 +35,29 @@
 
 using namespace madness;
 using namespace molresponse_v3;
+
+// Force compile-time validation of the closed-shell TDA specialization.
+// OpenShell instantiation is deferred until Kernels<TDA, OpenShell>
+// gets its compute_gamma / compute_lambda / compute_theta / bsh_apply /
+// compute_residual_norm bodies filled in (currently only compute_density
+// is implemented).
+template class molresponse_v3::ESSolver<molresponse_v3::TDA,
+                                        molresponse_v3::ClosedShell>;
+template class molresponse_v3::ESSolver<molresponse_v3::TDA,
+                                        molresponse_v3::OpenShell>;
+
+// Phase 1b: type-check the new FD specializations. Bodies live in
+// kernels/{static,full}.hpp + solvers/fd_solver.hpp; no run-time
+// dispatch wired in yet (legacy fd_solve still drives molresponse_v3
+// frequency-dependent runs).
+template class molresponse_v3::FDSolver<molresponse_v3::Static,
+                                        molresponse_v3::ClosedShell>;
+template class molresponse_v3::FDSolver<molresponse_v3::Full,
+                                        molresponse_v3::ClosedShell>;
+template class molresponse_v3::FDSolver<molresponse_v3::Static,
+                                        molresponse_v3::OpenShell>;
+template class molresponse_v3::FDSolver<molresponse_v3::Full,
+                                        molresponse_v3::OpenShell>;
 
 void print_usage() {
     print("Usage: molresponse_v3 [input_file] [options]");
