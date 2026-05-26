@@ -8,6 +8,9 @@
 #include <madness/mra/mra.h>
 #include <madness/mra/operator.h>
 
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -320,6 +323,133 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
   orthonormalize_bundle(world, ResponseType::TDA, X);
 
   return X;
+}
+
+/// Initial guess for **TDA open-shell (UHF)** excited states using
+/// solid-harmonic-times-orbital trial functions.
+///
+/// Mirrors `create_solid_harmonics_guess` (RHF) but emits both α and β
+/// single-excitation trial states. Each candidate excites a single
+/// orbital in a single spin channel (the other channel remains all zero
+/// for that candidate). Candidates are interleaved by spin so a
+/// downselect that picks the lowest-N by ω sees both spins represented
+/// — important when the SOMO transition is the lowest-ω one.
+///
+/// Total candidate count is `#harmonics × (n_alpha + n_beta)` ≥
+/// `num_roots`; the L heuristic uses `(n_alpha + n_beta)` in place of
+/// `n_occ`.
+inline std::vector<RealResponseState>
+create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) {
+  MADNESS_CHECK(!gs.is_spin_restricted());
+  const long n_a = gs.num_alpha();
+  const long n_b = gs.num_beta();
+  MADNESS_CHECK(n_a + n_b >= 1);
+
+  const long n_pool = n_a + n_b;
+  const int max_l = static_cast<int>(std::max(
+      2.0,
+      std::ceil(std::sqrt(static_cast<double>(num_roots) /
+                          static_cast<double>(n_pool)) -
+                1.0)));
+  auto solids = solid_harmonics(world, max_l);
+  if (world.rank() == 0) {
+    print("ES guess (UHF): created ", solids.size(),
+          " solid harmonics (L<=", max_l, ") for ", num_roots,
+          " trial states across n_alpha=", n_a, " n_beta=", n_b);
+  }
+
+  // Flat (spin, harmonic) list, alternating spin per harmonic so the
+  // sequence interleaves α-candidates with β-candidates.
+  std::vector<std::pair<int, real_function_3d>> spin_harm;
+  spin_harm.reserve(solids.size() * 2);
+  for (const auto &kv : solids) {
+    if (n_a > 0) spin_harm.emplace_back(0, kv.second);
+    if (n_b > 0) spin_harm.emplace_back(1, kv.second);
+  }
+
+  const auto &amo = gs.orbitals_alpha();
+  const auto &bmo = gs.orbitals_beta();
+  const long n_occ_max = std::max(n_a, n_b);
+
+  std::vector<RealResponseState> X;
+  X.reserve(num_roots);
+
+  long count = 0;
+  for (long orb_iter = 0; orb_iter < n_occ_max && count < num_roots;
+       ++orb_iter) {
+    for (const auto &sh : spin_harm) {
+      if (count >= num_roots) break;
+      const int spin = sh.first;
+      const real_function_3d &harmonic = sh.second;
+      const long n_this = (spin == 0) ? n_a : n_b;
+      if (orb_iter >= n_this) continue;
+
+      RealResponseState state = RealResponseState::allocate(
+          world, n_a, n_b, /*include_y=*/false);
+      const long pos     = orb_iter;
+      const long orb_idx = n_this - 1 - orb_iter;
+      if (spin == 0) {
+        state.x_alpha[pos] = harmonic * amo[orb_idx];
+      } else {
+        state.x_beta[pos]  = harmonic * bmo[orb_idx];
+      }
+      X.push_back(std::move(state));
+      ++count;
+    }
+  }
+
+  // Q-project per spin
+  const auto &Qa = gs.Q_alpha();
+  const auto &Qb = gs.Q_beta();
+  for (auto &state : X) {
+    state.x_alpha = Qa(state.x_alpha);
+    state.x_beta  = Qb(state.x_beta);
+  }
+
+  // Truncate
+  const double thresh = FunctionDefaults<3>::get_thresh();
+  for (auto &state : X) {
+    truncate(world, state.x_alpha, thresh);
+    truncate(world, state.x_beta,  thresh);
+  }
+
+  // Gram-Schmidt across roots — orthonormalize_bundle uses combined α+β
+  // metric, matching ESSolver<TDA, OpenShell>.
+  orthonormalize_bundle(world, ResponseType::TDA, X);
+
+  return X;
+}
+
+/// Initial-guess generation mode for ESSolver<TDA, *>. Selected via the
+/// test/binary's `--guess=` CLI knob.
+///
+///   Random         — per-leaf random noise inside an atom-centered
+///                    Gaussian envelope, Q-projected and GS-orthonormalized.
+///                    No symmetry hint — relies entirely on the warmup
+///                    iterations (or KAIN in the main solve) to find the
+///                    low-ω subspace.
+///
+///   SolidHarmonics — (default) single-excitation trials built from
+///                    solid harmonics × occupied orbitals. L is auto-
+///                    sized so #harmonics × n_occ ≥ num_roots. For L=1
+///                    this is just {x, y, z}·φ_occ — pure dipole, which
+///                    is essentially the answer for dipole-allowed
+///                    transitions.
+enum class ESGuessMode { Random, SolidHarmonics };
+
+inline const char *to_string(ESGuessMode m) {
+  switch (m) {
+    case ESGuessMode::Random:         return "random";
+    case ESGuessMode::SolidHarmonics: return "solid_harmonics";
+  }
+  return "unknown";
+}
+
+inline ESGuessMode parse_es_guess_mode(const std::string &s) {
+  if (s == "random")          return ESGuessMode::Random;
+  if (s == "solid_harmonics") return ESGuessMode::SolidHarmonics;
+  throw std::runtime_error("parse_es_guess_mode: unknown guess mode '" +
+                           s + "' (expected: random | solid_harmonics)");
 }
 
 } // namespace molresponse_v3

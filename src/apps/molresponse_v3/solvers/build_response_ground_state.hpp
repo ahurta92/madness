@@ -105,11 +105,21 @@ build_es_problem_tda(madness::World &world, GroundState &gs, int n_roots,
 
 /// Adapt the legacy ESSolverGuess output (vector<RealResponseState>)
 /// into the new per-root storage (vector<ResponseStateX<ClosedShell>>).
+/// Trial-function shape is selected by `mode`; see ESGuessMode docs in
+/// ESSolverGuess.hpp.
 inline ESSolver<TDA, ClosedShell>::State
-build_initial_guess_tda_closed_shell(madness::World &world, GroundState &gs,
-                                     long n_roots) {
-  auto guess = make_initial_guess_tda_rhf(world, gs, n_roots,
-                                          /*has_y=*/false);
+build_initial_guess_tda_closed_shell(
+    madness::World &world, GroundState &gs, long n_roots,
+    ESGuessMode mode = ESGuessMode::SolidHarmonics) {
+  std::vector<RealResponseState> guess;
+  switch (mode) {
+    case ESGuessMode::Random:
+      guess = make_initial_guess_tda_rhf(world, gs, n_roots);
+      break;
+    case ESGuessMode::SolidHarmonics:
+      guess = create_solid_harmonics_guess(world, gs, n_roots);
+      break;
+  }
 
   ESSolver<TDA, ClosedShell>::State s;
   s.roots.resize(n_roots);
@@ -122,9 +132,18 @@ build_initial_guess_tda_closed_shell(madness::World &world, GroundState &gs,
 
 /// Adapter for OpenShell TDA — both α and β response components populated.
 inline ESSolver<TDA, OpenShell>::State
-build_initial_guess_tda_open_shell(madness::World &world, GroundState &gs,
-                                   long n_roots) {
-  auto guess = make_initial_guess_tda_uhf(world, gs, n_roots);
+build_initial_guess_tda_open_shell(
+    madness::World &world, GroundState &gs, long n_roots,
+    ESGuessMode mode = ESGuessMode::SolidHarmonics) {
+  std::vector<RealResponseState> guess;
+  switch (mode) {
+    case ESGuessMode::Random:
+      guess = make_initial_guess_tda_uhf(world, gs, n_roots);
+      break;
+    case ESGuessMode::SolidHarmonics:
+      guess = create_solid_harmonics_guess_uhf(world, gs, n_roots);
+      break;
+  }
 
   ESSolver<TDA, OpenShell>::State s;
   s.roots.resize(n_roots);
@@ -197,16 +216,20 @@ run_oversampled_tda_warmup(madness::World &world, GroundState &gs,
                             int warmup_iters,
                             ConvergencePolicy base_policy,
                             double c_xc = 1.0, double lo = 1.0e-10,
-                            PrintLevel print_level = PrintLevel::Normal) {
+                            PrintLevel print_level = PrintLevel::Normal,
+                            ESGuessMode guess_mode =
+                                ESGuessMode::SolidHarmonics) {
   MADNESS_CHECK(n_roots_warmup >= n_roots_final);
   MADNESS_CHECK(warmup_iters >= 0);
 
   if (n_roots_warmup == n_roots_final && warmup_iters == 0) {
     // No-op fast path — caller wants neither oversample nor warmup.
     if constexpr (std::is_same_v<Shell, ClosedShell>)
-      return build_initial_guess_tda_closed_shell(world, gs, n_roots_final);
+      return build_initial_guess_tda_closed_shell(world, gs, n_roots_final,
+                                                   guess_mode);
     else
-      return build_initial_guess_tda_open_shell(world, gs, n_roots_final);
+      return build_initial_guess_tda_open_shell(world, gs, n_roots_final,
+                                                 guess_mode);
   }
 
   // Force-disable KAIN during warmup — iterate_trial-style pure BSH
@@ -219,7 +242,8 @@ run_oversampled_tda_warmup(madness::World &world, GroundState &gs,
   if (world.rank() == 0 && print_level >= PrintLevel::Normal) {
     print("\n=== TDA warmup ===  n_roots_warmup =", n_roots_warmup,
           "  n_roots_final =", n_roots_final,
-          "  warmup_iters =", warmup_iters);
+          "  warmup_iters =", warmup_iters,
+          "  guess =", to_string(guess_mode));
   }
 
   // Build the oversampled problem and the warm-up solver. Use a
@@ -231,9 +255,11 @@ run_oversampled_tda_warmup(madness::World &world, GroundState &gs,
 
   typename ESSolver<TDA, Shell>::State state;
   if constexpr (std::is_same_v<Shell, ClosedShell>)
-    state = build_initial_guess_tda_closed_shell(world, gs, n_roots_warmup);
+    state = build_initial_guess_tda_closed_shell(world, gs, n_roots_warmup,
+                                                  guess_mode);
   else
-    state = build_initial_guess_tda_open_shell(world, gs, n_roots_warmup);
+    state = build_initial_guess_tda_open_shell(world, gs, n_roots_warmup,
+                                                guess_mode);
 
   for (int i = 0; i < warmup_iters; ++i) {
     state = warmup_solver.step(std::move(state));

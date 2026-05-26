@@ -20,6 +20,7 @@
 #include "../kernels/tda.hpp"
 #include "../solvers/build_response_ground_state.hpp"
 #include "../solvers/convergence_policy.hpp"
+#include "../solvers/es_save_load.hpp"
 #include "../solvers/es_solver.hpp"
 #include "../solvers/iterate.hpp"
 #include "../solvers/iterate_protocol.hpp"
@@ -133,6 +134,8 @@ int main(int argc, char **argv) {
               "[--stream-theta] "
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
+              "[--save-roots=DIR] [--load-roots=DIR] "
+              "[--guess=random|solid_harmonics] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
               "[--kain-cmax=X]");
       }
@@ -163,14 +166,14 @@ int main(int argc, char **argv) {
     const bool stream_theta = parser.key_exists("stream-theta");
     const int tda_warmup_iters = parser.key_exists("tda-warmup-iters")
                                      ? std::stoi(parser.value("tda-warmup-iters"))
-                                     : 0;
+                                     : 3;
     const double cluster_unmix_factor =
         parser.key_exists("cluster-unmix-factor")
             ? std::stod(parser.value("cluster-unmix-factor"))
             : 100.0;
     const double warmup_oversample = parser.key_exists("warmup-oversample")
                                           ? std::stod(parser.value("warmup-oversample"))
-                                          : 1.0;
+                                          : 2.0;
     const bool no_kain = parser.key_exists("no-kain");
     const int kain_maxsub = parser.key_exists("kain-maxsub")
                                 ? std::stoi(parser.value("kain-maxsub"))
@@ -181,6 +184,15 @@ int main(int argc, char **argv) {
     const double kain_cmax = parser.key_exists("kain-cmax")
                                  ? std::stod(parser.value("kain-cmax"))
                                  : 100.0;
+    const std::string save_roots_dir = parser.key_exists("save-roots")
+                                           ? parser.value_raw("save-roots")
+                                           : std::string();
+    const std::string load_roots_dir = parser.key_exists("load-roots")
+                                           ? parser.value_raw("load-roots")
+                                           : std::string();
+    const ESGuessMode guess_mode = parser.key_exists("guess")
+                                       ? parse_es_guess_mode(parser.value("guess"))
+                                       : ESGuessMode::SolidHarmonics;
 
     auto header = GroundState::read_archive_header(world, archive_path);
     int override_k = parser.key_exists("k") ? std::stoi(parser.value("k")) : -1;
@@ -289,7 +301,8 @@ int main(int argc, char **argv) {
             "  ←  step_", (stream_theta ? "recompute_pieces" : "rotate_pieces"));
       print("  tda_warmup_iters =", tda_warmup_iters,
             "  warmup_oversample =", warmup_oversample,
-            "  cluster_unmix_factor =", cluster_unmix_factor);
+            "  cluster_unmix_factor =", cluster_unmix_factor,
+            "  guess =", to_string(guess_mode));
       print("  kain =", policy.kain ? "on" : "off",
             "  kain_maxsub =", kain_maxsub,
             "  maxrotn =", maxrotn,
@@ -322,12 +335,18 @@ int main(int argc, char **argv) {
       using Solver = ESSolver<TDA, ClosedShell>;
       auto problem = build_es_problem_tda<ClosedShell>(
           world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
-      // Warmup phase: run an oversampled solver with KAIN off,
-      // sort + select N lowest, hand off as the main solver's
-      // starting state. No-op when warmup_iters=0 AND oversample=1.
-      auto state0 = run_oversampled_tda_warmup<ClosedShell>(
-          world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
-          policy, /*c_xc=*/1.0, gs.params().lo(), print_level);
+      // Initial state: either reload from a previous --save-roots dir
+      // (skips the warmup entirely), or run the oversampled-warmup
+      // power iteration (no-op fast path when both knobs are off).
+      Solver::State state0;
+      if (!load_roots_dir.empty()) {
+        state0 = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
+      } else {
+        state0 = run_oversampled_tda_warmup<ClosedShell>(
+            world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+            policy, /*c_xc=*/1.0, gs.params().lo(), print_level,
+            guess_mode);
+      }
       Solver solver(world, std::move(problem), main_policy, print_level);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -353,15 +372,27 @@ int main(int argc, char **argv) {
           solver, state0, protocol_thresholds, prepare, proto_policy);
       final_omega     = sf.omega;
       final_residuals = sf.last_bsh_residual;
+      if (!save_roots_dir.empty()) {
+        save_es_roots<TDA, ClosedShell>(world, sf, save_roots_dir,
+                                        /*converged=*/!sf.diverged);
+        if (world.rank() == 0)
+          print("[SAVE] es_roots: wrote", num_roots,
+                "root(s) +/", save_roots_dir, "/roots.json");
+      }
     } else {
       using Solver = ESSolver<TDA, OpenShell>;
       auto problem = build_es_problem_tda<OpenShell>(
           world, gs, num_roots, gs.hf_exchange_coefficient(),
           gs.params().lo());
-      auto state0 = run_oversampled_tda_warmup<OpenShell>(
-          world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
-          policy, gs.hf_exchange_coefficient(), gs.params().lo(),
-          print_level);
+      Solver::State state0;
+      if (!load_roots_dir.empty()) {
+        state0 = load_es_roots<TDA, OpenShell>(world, load_roots_dir);
+      } else {
+        state0 = run_oversampled_tda_warmup<OpenShell>(
+            world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+            policy, gs.hf_exchange_coefficient(), gs.params().lo(),
+            print_level, guess_mode);
+      }
       Solver solver(world, std::move(problem), main_policy, print_level);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -390,6 +421,13 @@ int main(int argc, char **argv) {
           solver, state0, protocol_thresholds, prepare, proto_policy);
       final_omega     = sf.omega;
       final_residuals = sf.last_bsh_residual;
+      if (!save_roots_dir.empty()) {
+        save_es_roots<TDA, OpenShell>(world, sf, save_roots_dir,
+                                      /*converged=*/!sf.diverged);
+        if (world.rank() == 0)
+          print("[SAVE] es_roots: wrote", num_roots,
+                "root(s) +/", save_roots_dir, "/roots.json");
+      }
     }
 
     // -------------------------------------------------------------------
