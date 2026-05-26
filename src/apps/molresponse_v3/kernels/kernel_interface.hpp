@@ -12,16 +12,18 @@
 //                     compute_gamma  (w, g0, s, rho)  → State
 //                     compute_V0x    (w, g0, s)       → State
 //                     compute_E0x    (w, g0, s)       → State   (no-diag)
-//                     compute_theta  (w, V0x, E0x, gamma) → State
 //                     bsh_apply      (w, g0, s, theta, omega) → State
 //                     compute_residual_norm(w, s_old, s_new) → double
 //
-//   ESKernel<K>   — FDKernel + the extra Lambda machinery the ES subspace
-//                   problem needs. Required by ESSolver.
+//   ESKernel<K>   — FDKernel + the extra T0x / Efull pieces the ES
+//                   subspace eigenproblem needs. Required by ESSolver.
 //                   Adds:
 //                     compute_T0x        (w, g0, s)        → State
 //                     compute_E0x_full   (w, g0, s)        → State  (with diag)
-//                     compute_lambda     (w, T0x, V0x, Efull, gamma) → State
+//
+// (θ / Λ assembly is shell-agnostic and lives in kernels/assembly.hpp as
+//  the State-generic `assemble_theta` / `assemble_lambda` free functions,
+//  so it isn't part of the kernel interface.)
 //
 // Current specializations and their required level:
 //   Kernels<Static, *>   — FDKernel  (FD-only)
@@ -98,22 +100,18 @@ MV3_DEFINE_KERNEL_TRAIT(compute_V0x,
     K::compute_V0x(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(compute_E0x,
     K::compute_E0x(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
-MV3_DEFINE_KERNEL_TRAIT(compute_theta,
-    K::compute_theta(MV3_PROBE_W, MV3_PROBE_S, MV3_PROBE_S, MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(bsh_apply,
     K::bsh_apply(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S, MV3_PROBE_S,
                  MV3_PROBE_D));
 MV3_DEFINE_KERNEL_TRAIT(compute_residual_norm,
     K::compute_residual_norm(MV3_PROBE_W, MV3_PROBE_S, MV3_PROBE_S));
 
-// ESKernel-only methods (subspace Lambda machinery)
+// ESKernel-only methods (extra subspace pieces; Λ assembly itself is
+// shell-agnostic — see kernels/assembly.hpp).
 MV3_DEFINE_KERNEL_TRAIT(compute_T0x,
     K::compute_T0x(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(compute_E0x_full,
     K::compute_E0x_full(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
-MV3_DEFINE_KERNEL_TRAIT(compute_lambda,
-    K::compute_lambda(MV3_PROBE_W, MV3_PROBE_S, MV3_PROBE_S, MV3_PROBE_S,
-                      MV3_PROBE_S));
 
 #undef MV3_PROBE_W
 #undef MV3_PROBE_G0
@@ -129,7 +127,6 @@ inline constexpr bool is_fd_kernel_v =
     has_compute_gamma_v<K>    &&
     has_compute_V0x_v<K>      &&
     has_compute_E0x_v<K>      &&
-    has_compute_theta_v<K>    &&
     has_bsh_apply_v<K>        &&
     has_compute_residual_norm_v<K>;
 
@@ -137,8 +134,7 @@ template <typename K>
 inline constexpr bool is_es_kernel_v =
     is_fd_kernel_v<K>           &&
     has_compute_T0x_v<K>        &&
-    has_compute_E0x_full_v<K>   &&
-    has_compute_lambda_v<K>;
+    has_compute_E0x_full_v<K>;
 
 } // namespace molresponse_v3::detail_kernel
 
@@ -168,7 +164,6 @@ concept FDKernel = requires(
   { K::compute_gamma   (w, g0, s, rho)       } -> std::convertible_to<typename K::State>;
   { K::compute_V0x     (w, g0, s)            } -> std::convertible_to<typename K::State>;
   { K::compute_E0x     (w, g0, s)            } -> std::convertible_to<typename K::State>;
-  { K::compute_theta   (w, s, s, s)          } -> std::convertible_to<typename K::State>;
   { K::bsh_apply       (w, g0, s, s, omega)  } -> std::convertible_to<typename K::State>;
   { K::compute_residual_norm(w, s, s)        } -> std::convertible_to<double>;
 };
@@ -181,7 +176,6 @@ concept ESKernel = FDKernel<K> && requires(
 {
   { K::compute_T0x     (w, g0, s)            } -> std::convertible_to<typename K::State>;
   { K::compute_E0x_full(w, g0, s)            } -> std::convertible_to<typename K::State>;
-  { K::compute_lambda  (w, s, s, s, s)       } -> std::convertible_to<typename K::State>;
 };
 
 } // namespace molresponse_v3
@@ -208,8 +202,6 @@ concept ESKernel = FDKernel<K> && requires(
                 #__VA_ARGS__ " is missing `compute_V0x(w, g0, s)`");                                 \
   static_assert(::molresponse_v3::detail_kernel::has_compute_E0x_v<__VA_ARGS__>,                     \
                 #__VA_ARGS__ " is missing `compute_E0x(w, g0, s)`");                                 \
-  static_assert(::molresponse_v3::detail_kernel::has_compute_theta_v<__VA_ARGS__>,                   \
-                #__VA_ARGS__ " is missing `compute_theta(w, V0x, E0x, gamma)`");                     \
   static_assert(::molresponse_v3::detail_kernel::has_bsh_apply_v<__VA_ARGS__>,                       \
                 #__VA_ARGS__ " is missing `bsh_apply(w, g0, s, theta, omega)`");                     \
   static_assert(::molresponse_v3::detail_kernel::has_compute_residual_norm_v<__VA_ARGS__>,           \
@@ -223,8 +215,6 @@ concept ESKernel = FDKernel<K> && requires(
                 #__VA_ARGS__ " is missing `compute_T0x(w, g0, s)`");                                 \
   static_assert(::molresponse_v3::detail_kernel::has_compute_E0x_full_v<__VA_ARGS__>,                \
                 #__VA_ARGS__ " is missing `compute_E0x_full(w, g0, s)`");                            \
-  static_assert(::molresponse_v3::detail_kernel::has_compute_lambda_v<__VA_ARGS__>,                  \
-                #__VA_ARGS__ " is missing `compute_lambda(w, T0x, V0x, Efull, gamma)`");             \
   static_assert(::molresponse_v3::detail_kernel::is_es_kernel_v<__VA_ARGS__>,                        \
                 #__VA_ARGS__ " does not satisfy ESKernel")
 

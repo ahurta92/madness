@@ -174,36 +174,8 @@ struct Kernels<TDA, ClosedShell> {
                            g0.focka_no_diag, vtol, true)};
   }
 
-  // ---- assemblies (pure linear combinations of the pieces above) ----
-
-  /// Lambda = T0x + V0x - E0x_full + gamma.   (subspace matrix input)
-  static State
-  compute_lambda(madness::World &world,
-                 const State    &T0x,
-                 const State    &V0x,
-                 const State    &E0x_full,
-                 const State    &gamma) {
-    auto L = madness::copy(world, T0x.x_alpha);
-    gaxpy(world, 1.0, L,  1.0, V0x.x_alpha);
-    gaxpy(world, 1.0, L, -1.0, E0x_full.x_alpha);
-    gaxpy(world, 1.0, L,  1.0, gamma.x_alpha);
-    truncate(world, L);
-    return State{std::move(L)};
-  }
-
-  /// Theta = V0x - E0x + gamma.               (BSH driver input)
-  /// FD response adds a perturbation source term: Theta_FD = Theta + V_p.
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto T = madness::copy(world, V0x.x_alpha);
-    gaxpy(world, 1.0, T, -1.0, E0x.x_alpha);
-    gaxpy(world, 1.0, T,  1.0, gamma.x_alpha);
-    truncate(world, T);
-    return State{std::move(T)};
-  }
+  // Λ / θ assembly is shell-agnostic: see kernels/assembly.hpp for the
+  // State-generic `assemble_lambda` / `assemble_theta` free functions.
 
   // ---- BSH and residual ----
 
@@ -360,46 +332,7 @@ struct Kernels<TDA, OpenShell> {
     return State{std::move(Ea), std::move(Eb)};
   }
 
-  /// Lambda = T0x + V0x - E0x_full + gamma   per spin.
-  static State
-  compute_lambda(madness::World &world,
-                 const State    &T0x,
-                 const State    &V0x,
-                 const State    &E0x_full,
-                 const State    &gamma) {
-    auto La = madness::copy(world, T0x.x_alpha);
-    gaxpy(world, 1.0, La,  1.0, V0x.x_alpha);
-    gaxpy(world, 1.0, La, -1.0, E0x_full.x_alpha);
-    gaxpy(world, 1.0, La,  1.0, gamma.x_alpha);
-    truncate(world, La);
-
-    auto Lb = madness::copy(world, T0x.x_beta);
-    gaxpy(world, 1.0, Lb,  1.0, V0x.x_beta);
-    gaxpy(world, 1.0, Lb, -1.0, E0x_full.x_beta);
-    gaxpy(world, 1.0, Lb,  1.0, gamma.x_beta);
-    truncate(world, Lb);
-
-    return State{std::move(La), std::move(Lb)};
-  }
-
-  /// Theta = V0x - E0x + gamma   per spin.
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto Ta = madness::copy(world, V0x.x_alpha);
-    gaxpy(world, 1.0, Ta, -1.0, E0x.x_alpha);
-    gaxpy(world, 1.0, Ta,  1.0, gamma.x_alpha);
-    truncate(world, Ta);
-
-    auto Tb = madness::copy(world, V0x.x_beta);
-    gaxpy(world, 1.0, Tb, -1.0, E0x.x_beta);
-    gaxpy(world, 1.0, Tb,  1.0, gamma.x_beta);
-    truncate(world, Tb);
-
-    return State{std::move(Ta), std::move(Tb)};
-  }
+  // Λ / θ assembly is shell-agnostic: see kernels/assembly.hpp.
 
   /// Per-spin BSH apply, each side with its own ε and shift.
   static State

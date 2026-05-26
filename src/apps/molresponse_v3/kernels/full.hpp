@@ -137,24 +137,7 @@ struct Kernels<Full, ClosedShell> {
     return State{std::move(Ex), std::move(Ey)};
   }
 
-  /// Theta = V0x - E0x + gamma   (both x and y components).
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto Tx = madness::copy(world, V0x.x_alpha);
-    gaxpy(world, 1.0, Tx, -1.0, E0x.x_alpha);
-    gaxpy(world, 1.0, Tx,  1.0, gamma.x_alpha);
-    truncate(world, Tx);
-
-    auto Ty = madness::copy(world, V0x.y_alpha);
-    gaxpy(world, 1.0, Ty, -1.0, E0x.y_alpha);
-    gaxpy(world, 1.0, Ty,  1.0, gamma.y_alpha);
-    truncate(world, Ty);
-
-    return State{std::move(Tx), std::move(Ty)};
-  }
+  // θ assembly is shell-agnostic: see kernels/assembly.hpp.
 
   /// Paired BSH apply.
   ///   new_x = Q( BSH(+omega) * (-2 * (theta_x + shift_+ * x_alpha)) )
@@ -343,26 +326,7 @@ struct Kernels<Full, OpenShell> {
                  std::move(Exb), std::move(Eyb)};
   }
 
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto theta_axy = [&](const vecfuncT &Vx, const vecfuncT &Ex,
-                         const vecfuncT &g) {
-      auto T = madness::copy(world, Vx);
-      gaxpy(world, 1.0, T, -1.0, Ex);
-      gaxpy(world, 1.0, T,  1.0, g);
-      truncate(world, T);
-      return T;
-    };
-    auto Txa = theta_axy(V0x.x_alpha, E0x.x_alpha, gamma.x_alpha);
-    auto Tya = theta_axy(V0x.y_alpha, E0x.y_alpha, gamma.y_alpha);
-    auto Txb = theta_axy(V0x.x_beta,  E0x.x_beta,  gamma.x_beta);
-    auto Tyb = theta_axy(V0x.y_beta,  E0x.y_beta,  gamma.y_beta);
-    return State{std::move(Txa), std::move(Tya),
-                 std::move(Txb), std::move(Tyb)};
-  }
+  // θ assembly is shell-agnostic: see kernels/assembly.hpp.
 
   static State
   bsh_apply(madness::World &world,

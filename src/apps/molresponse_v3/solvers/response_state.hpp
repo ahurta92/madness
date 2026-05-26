@@ -47,6 +47,14 @@ struct ResponseStateX<ClosedShell> {
     gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
   }
 
+  /// Deep copy of all component vecfuncTs. The default copy constructor
+  /// shares shared_ptr<FunctionImpl> handles; assemble_* helpers need an
+  /// independent buffer so subsequent in-place axpy cannot corrupt the
+  /// source.
+  ResponseStateX<ClosedShell> copy(World &world) const {
+    return {madness::copy(world, x_alpha)};
+  }
+
   /// Truncate all per-component vecfuncTs in place.
   void truncate_all(World &world, double thresh) {
     madness::truncate(world, x_alpha, thresh);
@@ -96,6 +104,11 @@ struct ResponseStateX<OpenShell> {
             const ResponseStateX<OpenShell> &other) {
     gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
     gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
+  }
+
+  ResponseStateX<OpenShell> copy(World &world) const {
+    return {madness::copy(world, x_alpha),
+            madness::copy(world, x_beta)};
   }
 
   void truncate_all(World &world, double thresh) {
@@ -154,6 +167,11 @@ struct ResponseStateXY<ClosedShell> {
             const ResponseStateXY<ClosedShell> &other) {
     gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
     gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
+  }
+
+  ResponseStateXY<ClosedShell> copy(World &world) const {
+    return {madness::copy(world, x_alpha),
+            madness::copy(world, y_alpha)};
   }
 
   void truncate_all(World &world, double thresh) {
@@ -215,6 +233,13 @@ struct ResponseStateXY<OpenShell> {
     gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
     gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
     gaxpy(world, 1.0, y_beta,  alpha, other.y_beta);
+  }
+
+  ResponseStateXY<OpenShell> copy(World &world) const {
+    return {madness::copy(world, x_alpha),
+            madness::copy(world, y_alpha),
+            madness::copy(world, x_beta),
+            madness::copy(world, y_beta)};
   }
 
   void truncate_all(World &world, double thresh) {

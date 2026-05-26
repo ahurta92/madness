@@ -80,175 +80,6 @@ inner(const response_space &a, const response_space &b) {
   return result;
 }
 
-// Forward declaration — `lowdin_orthonormalize` calls `transform`.
-inline void transform(madness::World &world, response_space &X,
-                      const madness::Tensor<double> &U);
-
-/// Symmetric Löwdin orthonormalization of a bundle of M states.
-///
-/// Given X = [x₁, …, x_M] (each xᵢ a vecfuncT — packed α or α+β
-/// concat for OpenShell), this produces
-///
-///     X' = X · S^{-1/2}      with S = ⟨X|X⟩
-///
-/// so that ⟨X'|X'⟩ = I exactly. Among orthonormalizations of X, this
-/// one minimises ‖X' − X‖_F — equivalently, the unique orthonormal
-/// basis closest to X. Unlike Gram-Schmidt, no slot is privileged:
-/// all slots are perturbed symmetrically toward the orthonormal
-/// limit. This is what we want at top-of-iter when slot identity
-/// must survive across iters for KAIN's per-slot history.
-///
-/// Algorithm (S real symmetric ⇒ V·D·Vᵀ via syev):
-///
-///   1. S = ⟨X|X⟩;  symmetrize S := 0.5·(S + Sᵀ) (cheap, robust).
-///   2. syev(S) → V·D·Vᵀ. Eigenvalues d_i in ascending order.
-///   3. Build S^{-1/2} = V · diag(d_i^{-1/2}) · Vᵀ, with directions
-///      where d_i ≤ d_floor (default 10·thresh) DROPPED (set to 0).
-///      Catches the near-linear-dependent case: if two states have
-///      collapsed onto each other, S has a small eigenvalue and
-///      1/√d would amplify noise; dropping is the safer choice.
-///   4. X' = X · S^{-1/2} via rs::transform.
-///
-/// Returns the number of directions dropped (0 in the well-conditioned
-/// case). A non-zero return is a signal that the bundle has partially
-/// collapsed; caller may want to inject random perturbations or stop.
-///
-/// `thresh < 0` (default) → use FunctionDefaults<3>::get_thresh().
-///
-/// `diag_level`: 0 = silent; 1 = print a one-line [LOWDIN] per call
-/// with S-eigenvalues, condition number, n_dropped, max per-slot
-/// movement ‖X'ᵢ − Xᵢ‖. The diagnostic block performs additional
-/// collective work (snapshot copy + per-slot norm2 + per-slot sub)
-/// — it must be entered or skipped UNIFORMLY across all ranks. The
-/// caller is responsible for passing the same diag_level on every
-/// rank (which is the case when it comes from a uniformly-set
-/// print_level).
-///
-/// **Collective-call discipline.** All madness numerical operations
-/// (`rs::inner`, `rs::transform`, `madness::copy`, `madness::sub`,
-/// `madness::norm2`, `madness::scale`) are collective and must be
-/// called by every rank in lock-step. They are placed at function
-/// scope, never inside `if (rank == 0)` blocks. Only `printf`/`print`
-/// are rank-gated. Tensor-only ops (`syev`, `inner` on Tensors,
-/// `transpose`, element-wise loops on a replicated Tensor) are local
-/// and run identically on every rank by virtue of their inputs being
-/// replicated.
-inline int
-lowdin_orthonormalize(madness::World &world, response_space &X,
-                      double thresh    = -1.0,
-                      int diag_level   = 0) {
-  if (thresh < 0.0)
-    thresh = madness::FunctionDefaults<3>::get_thresh();
-
-  const long M = static_cast<long>(X.size());
-  if (M == 0) return 0;
-  if (M == 1) {
-    // Single-state shortcut: just normalize. inner+scale are collective.
-    const double n2  = madness::inner(X[0], X[0]);
-    const double nrm = std::sqrt(std::abs(n2));
-    if (nrm > 1.0e-12) madness::scale(world, X[0], 1.0 / nrm);
-    if (diag_level >= 1 && world.rank() == 0) {
-      printf("[LOWDIN] M=1  norm=%.6e  (single-state normalize)\n", nrm);
-      fflush(stdout);
-    }
-    return 0;
-  }
-
-  // ---- 0. Optional pre-snapshot (uniform across ranks) ------------------
-  // Allocated only when diag_level >= 1 — but the BRANCH on diag_level
-  // is on a value that is identical on every rank, so all ranks
-  // either build X_before or don't. No collective is gated on rank.
-  response_space X_before;
-  if (diag_level >= 1) {
-    X_before.resize(M);
-    for (long i = 0; i < M; ++i) X_before[i] = madness::copy(world, X[i]);
-  }
-
-  // ---- 1. Overlap, symmetrized ------------------------------------------
-  auto S = rs::inner(X, X);
-  S = 0.5 * (S + madness::transpose(S));
-
-  // ---- 2. Symmetric eigen-decomposition  S = V · diag(D) · Vᵀ ----------
-  madness::Tensor<double> V;
-  madness::Tensor<double> D;
-  madness::syev(S, V, D);
-
-  // ---- 3. S^{-1/2}, regularized -----------------------------------------
-  const double d_floor = 10.0 * thresh;
-  madness::Tensor<double> Dhalf_inv(M);
-  int n_dropped = 0;
-  for (long i = 0; i < M; ++i) {
-    if (D(i) <= d_floor) {
-      // includes any spuriously-negative eigenvalues from noise
-      Dhalf_inv(i) = 0.0;
-      ++n_dropped;
-    } else {
-      Dhalf_inv(i) = 1.0 / std::sqrt(D(i));
-    }
-  }
-
-  // S^{-1/2}(j,i) = Σ_k V(j,k) · Dhalf_inv(k) · V(i,k)
-  // Compute as V_scaled · Vᵀ where V_scaled(j,k) = V(j,k) · Dhalf_inv(k).
-  madness::Tensor<double> V_scaled = madness::copy(V);
-  for (long j = 0; j < M; ++j)
-    for (long k = 0; k < M; ++k)
-      V_scaled(j, k) *= Dhalf_inv(k);
-  auto S_invsqrt = madness::inner(V_scaled, madness::transpose(V));
-
-  // ---- 4. X' = X · S^{-1/2} via rs::transform --------------------------
-  // rs::transform convention is X_new[j] = Σ_i U(i,j) · X_old[i], which
-  // matches X' = X · M with M = S^{-1/2}.
-  rs::transform(world, X, S_invsqrt);
-
-  // ---- 5. Diagnostic (collective work uniform across ranks; printf rank-0) -
-  if (diag_level >= 1) {
-    // Per-slot movement: ‖X'ᵢ − Xᵢ‖. sub+norm2 are collective and run on
-    // every rank for every i (no rank gate). We compute all M norms
-    // first, then a single rank-0 printf consumes them.
-    std::vector<double> movement(M, 0.0);
-    for (long i = 0; i < M; ++i) {
-      auto diff   = madness::sub(world, X[i], X_before[i]);
-      movement[i] = madness::norm2(world, diff);
-    }
-
-    // Verify orthonormality post-Löwdin: <X'|X'> should be ≈ I.
-    // This re-runs rs::inner on the rotated bundle — purely
-    // diagnostic, costs one more m×m inner product per iter.
-    auto S_after = rs::inner(X, X);
-    double off_diag_max = 0.0;
-    double diag_dev_max = 0.0;
-    for (long i = 0; i < M; ++i) {
-      diag_dev_max = std::max(diag_dev_max,
-                              std::fabs(S_after(i, i) - 1.0));
-      for (long j = 0; j < M; ++j)
-        if (i != j)
-          off_diag_max = std::max(off_diag_max,
-                                  std::fabs(S_after(i, j)));
-    }
-
-    if (world.rank() == 0) {
-      // Condition number from extreme eigenvalues (D is ascending).
-      const long i_min = 0, i_max = M - 1;
-      const double d_min = D(i_min);
-      const double d_max = D(i_max);
-      const double cond  = (d_min > 1.0e-30) ? d_max / d_min
-                                              : std::numeric_limits<double>::infinity();
-      double m_max = 0.0;
-      for (double m : movement) m_max = std::max(m_max, m);
-
-      printf("[LOWDIN]  S_evals=[");
-      for (long i = 0; i < M; ++i) printf(" %+.3e", D(i));
-      printf(" ]  cond=%.2e  d_floor=%.2e  dropped=%d"
-             "  ||X'-X||_max=%.3e  |S'-I|_diag=%.2e  |S'-I|_off=%.2e\n",
-             cond, d_floor, n_dropped, m_max,
-             diag_dev_max, off_diag_max);
-      fflush(stdout);
-    }
-  }
-
-  return n_dropped;
-}
-
 /// Output of `diagonalize` — includes evals + U plus diagnostic
 /// data the caller can log to track slot identity across iters:
 ///
@@ -485,6 +316,44 @@ inline void transform(madness::World &world, response_space &X,
   const double thresh = madness::FunctionDefaults<3>::get_thresh();
   for (auto &v : Y) truncate(world, v, thresh);
   X = std::move(Y);
+}
+
+// ----------------------------------------------------------------------
+// State-templated overloads. They flatten each State into the canonical
+// component ordering (`flatten()` already does α (+β) concat per shell)
+// then dispatch to the response_space versions above. The OpenShell
+// bundle metric ⟨x_α|x_α⟩ + ⟨x_β|x_β⟩ and the slot-preserving rotation
+// fall out of `flatten()` for free, so solvers no longer need their own
+// pack/unpack scaffolding.
+//
+// Overload resolution: the non-template response_space variants win when
+// the argument IS a response_space (`std::vector<vector_real_function_3d>`);
+// the templates kick in only when the argument is a
+// `std::vector<ResponseStateX<…>>` etc.
+//
+// Header-only — caller is responsible for having included the relevant
+// `ResponseStateX/XY<…>` definitions before instantiation. No include
+// of response_state.hpp here, to keep kernels/ free of a hard dependency
+// on solvers/.
+// ----------------------------------------------------------------------
+
+template <typename State>
+inline madness::Tensor<double>
+inner(const std::vector<State> &a, const std::vector<State> &b) {
+  response_space ra(a.size()), rb(b.size());
+  for (std::size_t i = 0; i < a.size(); ++i) ra[i] = a[i].flatten();
+  for (std::size_t j = 0; j < b.size(); ++j) rb[j] = b[j].flatten();
+  return inner(ra, rb);
+}
+
+template <typename State>
+inline void
+transform(madness::World &world, std::vector<State> &X,
+          const madness::Tensor<double> &U) {
+  response_space rX(X.size());
+  for (std::size_t i = 0; i < X.size(); ++i) rX[i] = X[i].flatten();
+  transform(world, rX, U);
+  for (std::size_t i = 0; i < X.size(); ++i) X[i].from_flat(rX[i]);
 }
 
 } // namespace rs

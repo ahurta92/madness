@@ -132,7 +132,6 @@ int main(int argc, char **argv) {
               "[--log-convergence=PATH] "
               "[--stream-theta] "
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
-              "[--orthonormalize=gs|lowdin] "
               "[--warmup-oversample=K] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
               "[--kain-cmax=X]");
@@ -169,13 +168,6 @@ int main(int argc, char **argv) {
         parser.key_exists("cluster-unmix-factor")
             ? std::stod(parser.value("cluster-unmix-factor"))
             : 100.0;
-    const std::string orthon_str = parser.key_exists("orthonormalize")
-                                       ? parser.value("orthonormalize")
-                                       : std::string("gs");
-    ConvergencePolicy::OrthonormalizeMode orthon_mode =
-        (orthon_str == "lowdin")
-            ? ConvergencePolicy::OrthonormalizeMode::Lowdin
-            : ConvergencePolicy::OrthonormalizeMode::GramSchmidt;
     const double warmup_oversample = parser.key_exists("warmup-oversample")
                                           ? std::stod(parser.value("warmup-oversample"))
                                           : 1.0;
@@ -287,7 +279,6 @@ int main(int argc, char **argv) {
     policy.stream_theta         = stream_theta;
     policy.tda_warmup_iters     = tda_warmup_iters;
     policy.cluster_unmix_factor = cluster_unmix_factor;
-    policy.orthonormalize_mode  = orthon_mode;
     policy.warmup_oversample_factor = warmup_oversample;
     policy.kain                 = !no_kain;
     policy.kain_maxsub          = kain_maxsub;
@@ -298,10 +289,7 @@ int main(int argc, char **argv) {
             "  ←  step_", (stream_theta ? "recompute_pieces" : "rotate_pieces"));
       print("  tda_warmup_iters =", tda_warmup_iters,
             "  warmup_oversample =", warmup_oversample,
-            "  cluster_unmix_factor =", cluster_unmix_factor,
-            "  orthonormalize =",
-            (orthon_mode == ConvergencePolicy::OrthonormalizeMode::Lowdin
-                 ? "lowdin" : "gram_schmidt"));
+            "  cluster_unmix_factor =", cluster_unmix_factor);
       print("  kain =", policy.kain ? "on" : "off",
             "  kain_maxsub =", kain_maxsub,
             "  maxrotn =", maxrotn,

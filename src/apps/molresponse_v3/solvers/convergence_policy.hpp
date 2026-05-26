@@ -41,26 +41,6 @@ struct ConvergencePolicy {
   // run with closely-clustered omegas.
   double cluster_unmix_factor = 100.0;
 
-  // Top-of-iter orthonormalization mode for the bundle.
-  //
-  //   GramSchmidt  — 2-pass Schmidt orthogonalization in increasing slot
-  //                  order, then per-slot normalize. Slot 0 is anchored
-  //                  (unchanged); higher slots are projected against
-  //                  lower ones. Cheap (m² inner products), order-
-  //                  dependent — when two states are nearly co-linear
-  //                  after BSH+KAIN, the high-index slot loses its
-  //                  identity to the low-index one. Default — matches
-  //                  legacy iterate_trial discipline.
-  //
-  //   Lowdin       — symmetric Löwdin: X' = X · S^{-1/2}. All slots
-  //                  perturbed equally; no privileged index. Drops
-  //                  directions with eigenvalue < 10·thresh (linear-
-  //                  dependence detector). Minimises ‖X' − X‖_F among
-  //                  orthonormalizations. Recommended when [ROT-SLOTS]
-  //                  shows iter-to-iter REORDERED dominance perm.
-  enum class OrthonormalizeMode { GramSchmidt, Lowdin };
-  OrthonormalizeMode orthonormalize_mode = OrthonormalizeMode::GramSchmidt;
-
   // ESSolver memory mode. When true, step() streams Lambda assembly
   // and DROPS V0x/E0x/gamma after the subspace rotation, then
   // RECOMPUTES the rotated pieces to assemble Theta. Costs ~2× the

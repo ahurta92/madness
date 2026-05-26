@@ -19,6 +19,7 @@
 // FD solver can reuse [[ConvergencePolicy]] without duplication.
 // =========================================================================
 
+#include "../kernels/assembly.hpp"   // assemble_lambda, assemble_theta
 #include "../kernels/response_space_ops.hpp"
 #include "../kernels/tags.hpp"
 #include "../kernels/tda.hpp"   // Kernels<TDA, *>; add kernels/full.hpp etc.
@@ -93,11 +94,10 @@ public:
   ///   For larger systems where holding three or four response_spaces
   ///   simultaneously is prohibitive, an alternative is to fold each
   ///   term in place: build Lambda by += T0x, += V0x, -= E0x_full, +=
-  ///   gamma, freeing each piece as soon as it has been added. Doing
-  ///   so would change compute_lambda's signature from "take all
-  ///   pieces" to a streaming-accumulator form. Leaving the current
-  ///   shape for clarity; revisit when memory pressure on a target
-  ///   system demands it.
+  ///   gamma, freeing each piece as soon as it has been added. That
+  ///   would replace `assemble_lambda(...)` with a streaming-accumulator
+  ///   form. Leaving the current shape for clarity; revisit when memory
+  ///   pressure on a target system demands it.
 
   // -- accessors / config -------------------------------------------------
   madness::World&     world() const             { return world_; }
@@ -278,8 +278,11 @@ public:
   }
 
 private:
-  /// Top-of-iter Q-projection + orthonormalization (mode picked by
-  /// `policy_.orthonormalize_mode`). Shared by both step() variants.
+  /// Top-of-iter Q-projection + 2-pass Gram-Schmidt orthonormalization
+  /// of the bundle. Shared by both step() variants. Order-dependent:
+  /// slot 0 anchored, higher slots projected against lower. Operates on
+  /// the flat α (+β for OpenShell) concat so the OpenShell bundle metric
+  /// ⟨x_α|x_α⟩ + ⟨x_β|x_β⟩ comes out of madness::inner for free.
   void apply_top_of_iter_discipline(State &out, int M) {
     // Q-project per spin.
     for (int s = 0; s < M; ++s) {
@@ -289,67 +292,23 @@ private:
       }
     }
 
-    // Flatten — α (+ β for OpenShell) concat per state. The flat
-    // inner product gives the OpenShell bundle metric for free.
     response_space flats(M);
     for (int s = 0; s < M; ++s) flats[s] = out.roots[s].flatten();
 
-    if (policy_.orthonormalize_mode ==
-        ConvergencePolicy::OrthonormalizeMode::Lowdin) {
-      // diag_level is derived from print_level_, which is uniform
-      // across ranks, so all ranks enter or skip the diagnostic
-      // collectives in lock-step inside lowdin_orthonormalize.
-      const int diag_level =
-          (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
-      const int dropped = rs::lowdin_orthonormalize(
-          world_, flats, /*thresh=*/-1.0, diag_level);
-      if (dropped > 0 && print_level_ >= PrintLevel::Normal &&
-          world_.rank() == 0) {
-        print("[LOWDIN] iter", out.iter, ": dropped", dropped,
-              "near-singular direction(s) (bundle partially collapsed)");
-      }
-    } else {
-      // Gram-Schmidt, 2-pass + normalize. Order-dependent: slot 0
-      // anchored, higher slots projected against lower.
-      for (int pass = 0; pass < 2; ++pass) {
-        for (int i = 0; i < M; ++i) {
-          for (int j = 0; j < i; ++j) {
-            const double c = madness::inner(flats[j], flats[i]);
-            madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
-          }
-          const double n2 = madness::inner(flats[i], flats[i]);
-          const double nrm = std::sqrt(std::abs(n2));
-          if (nrm > 1.0e-12)
-            madness::scale(world_, flats[i], 1.0 / nrm);
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < i; ++j) {
+          const double c = madness::inner(flats[j], flats[i]);
+          madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
         }
+        const double n2 = madness::inner(flats[i], flats[i]);
+        const double nrm = std::sqrt(std::abs(n2));
+        if (nrm > 1.0e-12)
+          madness::scale(world_, flats[i], 1.0 / nrm);
       }
     }
 
     for (int s = 0; s < M; ++s) out.roots[s].from_flat(flats[s]);
-  }
-
-  /// Pack a per-root Storage into a flat vecfuncT (α + β concat).
-  /// Used by both variants for the subspace rs::* ops.
-  vecfuncT pack_storage(const Storage &s) const {
-    vecfuncT v = s.x_alpha;
-    if constexpr (std::is_same_v<Shell, OpenShell>) {
-      v.insert(v.end(), s.x_beta.begin(), s.x_beta.end());
-    }
-    return v;
-  }
-
-  /// Unpack a flat vecfuncT back into a Storage's α (+ β) components.
-  void unpack_storage(Storage &s, const vecfuncT &v,
-                     std::size_t n_alpha, std::size_t n_beta) const {
-    if constexpr (std::is_same_v<Shell, OpenShell>) {
-      s.x_alpha = vecfuncT(v.begin(), v.begin() + n_alpha);
-      s.x_beta  = vecfuncT(v.begin() + n_alpha,
-                           v.begin() + n_alpha + n_beta);
-    } else {
-      (void)n_beta;
-      (void)n_alpha;
-      s.x_alpha = v;
-    }
   }
 
   /// Final stage shared by both variants — KAIN apply, explosion
@@ -390,8 +349,7 @@ public:
     // ground-state component is amplified by BSH into the
     // ω = -ε_core ghost eigenvector. Then re-orthonormalize the
     // bundle so the subspace step sees a clean basis. Mirrors legacy
-    // ExcitedResponse.cpp:2483-2517 (top-of-iter Q + Gram-Schmidt or
-    // Löwdin, depending on policy.orthonormalize_mode).
+    // ExcitedResponse.cpp:2483-2517 (top-of-iter Q + Gram-Schmidt).
     apply_top_of_iter_discipline(out, M);
 
     // ---- 1. per-root building blocks --------------------------------------
@@ -422,50 +380,20 @@ public:
     // ---- 2. assemble Lambda per root --------------------------------------
     std::vector<Storage> lambda(M);
     for (int s = 0; s < M; ++s) {
-      lambda[s] = K::compute_lambda(world_, T0x[s], V0x[s],
-                                    E0x_full[s], gamma[s]);
+      lambda[s] = assemble_lambda(world_, T0x[s], V0x[s],
+                                  E0x_full[s], gamma[s]);
     }
 
     // ---- 3. subspace A, S, diagonalize ------------------------------------
-    // Subspace ops live on response_space (= vector<vecfuncT>). For
-    // OpenShell ES TDA, the subspace matrix elements sum over both
-    // spin blocks:
-    //   A_ij = <x_α_i | Λ_α_j> + <x_β_i | Λ_β_j>
-    // We get this for free by CONCATENATING α and β into a single
-    // vecfuncT per state — rs::inner sums over all orbitals already.
-    // Same rotation U applies to both spin blocks (it mixes ROOTS,
-    // not spins), so transform() on the concat is identical to
-    // transforming each spin separately.
-    constexpr bool open_shell = std::is_same_v<Shell, OpenShell>;
-    std::size_t n_alpha = 0, n_beta = 0;
-    if constexpr (open_shell) {
-      n_alpha = out.roots[0].x_alpha.size();
-      n_beta  = out.roots[0].x_beta.size();
-    }
-    auto pack = [&](const Storage &s) -> vecfuncT {
-      vecfuncT v = s.x_alpha;
-      if constexpr (open_shell) {
-        v.insert(v.end(), s.x_beta.begin(), s.x_beta.end());
-      }
-      return v;
-    };
-    auto unpack = [&](Storage &s, const vecfuncT &v) {
-      if constexpr (open_shell) {
-        s.x_alpha = vecfuncT(v.begin(), v.begin() + n_alpha);
-        s.x_beta  = vecfuncT(v.begin() + n_alpha,
-                             v.begin() + n_alpha + n_beta);
-      } else {
-        s.x_alpha = v;
-      }
-    };
-
-    response_space X_rs(M), Lambda_rs(M);
-    for (int s = 0; s < M; ++s) {
-      X_rs[s]      = pack(out.roots[s]);
-      Lambda_rs[s] = pack(lambda[s]);
-    }
-    auto A     = rs::inner(X_rs, Lambda_rs);
-    auto S_mat = rs::inner(X_rs, X_rs);
+    // rs::inner / rs::transform take std::vector<State> directly and
+    // flatten α (+β for OpenShell) under the hood via State::flatten()
+    // / State::from_flat(). For OpenShell that gives the bundle metric
+    //   A_ij = ⟨x_α_i|Λ_α_j⟩ + ⟨x_β_i|Λ_β_j⟩
+    // for free, and the rotation U (which mixes ROOTS, not spins)
+    // applied to the flat concat is identical to applying it per spin
+    // block.
+    auto A     = rs::inner(out.roots, lambda);
+    auto S_mat = rs::inner(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
                                        policy_.cluster_unmix_factor);
@@ -475,28 +403,16 @@ public:
     print_debug_iter(A, S_mat, omega_new, U);
     print_rot_slots(out.iter, diag_result);
 
-    // ---- 4. rotate the response_spaces needed for Theta -------------------
-    response_space V0x_rs(M), E0x_rs(M), gamma_rs(M);
-    for (int s = 0; s < M; ++s) {
-      V0x_rs[s]   = pack(V0x[s]);
-      E0x_rs[s]   = pack(E0x[s]);
-      gamma_rs[s] = pack(gamma[s]);
-    }
-    rs::transform(world_, X_rs,    U);
-    rs::transform(world_, V0x_rs,  U);
-    rs::transform(world_, E0x_rs,  U);
-    rs::transform(world_, gamma_rs, U);
-    for (int s = 0; s < M; ++s) {
-      unpack(out.roots[s], X_rs[s]);
-      unpack(V0x[s],       V0x_rs[s]);
-      unpack(E0x[s],       E0x_rs[s]);
-      unpack(gamma[s],     gamma_rs[s]);
-    }
+    // ---- 4. rotate the response pieces needed for Theta -------------------
+    rs::transform(world_, out.roots, U);
+    rs::transform(world_, V0x,        U);
+    rs::transform(world_, E0x,        U);
+    rs::transform(world_, gamma,      U);
 
     // ---- 5. assemble Theta from rotated pieces ---------------------------
     std::vector<Storage> theta(M);
     for (int s = 0; s < M; ++s) {
-      theta[s] = K::compute_theta(world_, V0x[s], E0x[s], gamma[s]);
+      theta[s] = assemble_theta(world_, V0x[s], E0x[s], gamma[s]);
     }
 
     // ---- 6. BSH apply + residual ------------------------------------------
@@ -599,19 +515,11 @@ public:
     out.rho_alpha_prev = std::move(rho_alpha);
 
     // ---- 3. subspace A, S, diagonalize ------------------------------------
-    constexpr bool open_shell = std::is_same_v<Shell, OpenShell>;
-    std::size_t n_alpha = 0, n_beta = 0;
-    if constexpr (open_shell) {
-      n_alpha = out.roots[0].x_alpha.size();
-      n_beta  = out.roots[0].x_beta.size();
-    }
-    response_space X_rs(M), Lambda_rs(M);
-    for (int s = 0; s < M; ++s) {
-      X_rs[s]      = pack_storage(out.roots[s]);
-      Lambda_rs[s] = pack_storage(lambda[s]);
-    }
-    auto A     = rs::inner(X_rs, Lambda_rs);
-    auto S_mat = rs::inner(X_rs, X_rs);
+    // See step_rotate_pieces for the State-overloaded rs::* contract:
+    // flatten/from_flat happen under the hood, so OpenShell α+β bundle
+    // metric and slot-preserving rotation come for free.
+    auto A     = rs::inner(out.roots, lambda);
+    auto S_mat = rs::inner(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
                                        policy_.cluster_unmix_factor);
@@ -622,9 +530,7 @@ public:
     print_rot_slots(out.iter, diag_result);
 
     // ---- 4. rotate X only; drop Lambda ------------------------------------
-    rs::transform(world_, X_rs, U);
-    for (int s = 0; s < M; ++s)
-      unpack_storage(out.roots[s], X_rs[s], n_alpha, n_beta);
+    rs::transform(world_, out.roots, U);
     lambda.clear();  // free Lambda — not needed past here
 
     // ---- 5 + 6. Recompute V0x/E0x/gamma against rotated X, stream Theta

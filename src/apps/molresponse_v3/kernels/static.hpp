@@ -7,12 +7,13 @@
 // Frequency-dependent response at omega = 0 (the "static" case). For
 // closed shells, Y == X by construction, so Storage = ResponseStateX
 // (X only). The per-root building blocks (compute_density, gamma, V0x,
-// E0x, theta, bsh_apply, compute_residual_norm) are byte-identical to
+// E0x, bsh_apply, compute_residual_norm) are byte-identical to
 // Kernels<TDA, ClosedShell>'s — what's absent here is everything used
-// to build the subspace eigenproblem (T0x, E0x_full, compute_lambda).
-// The FD solver doesn't diagonalize, so omitting those keeps the
-// signature surface honest: a Static-FD step cannot accidentally call
-// a routine it has no business calling.
+// to build the subspace eigenproblem (T0x, E0x_full). The FD solver
+// doesn't diagonalize, so omitting those keeps the signature surface
+// honest: a Static-FD step cannot accidentally call a routine it has
+// no business calling. θ assembly itself is shell-agnostic and lives
+// in kernels/assembly.hpp.
 //
 // The bsh_apply signature takes omega like TDA's so FDSolver can pass
 // channel.omega uniformly (== 0.0 here).
@@ -107,19 +108,7 @@ struct Kernels<Static, ClosedShell> {
                            g0.focka_no_diag, vtol, true)};
   }
 
-  /// Theta = V0x - E0x + gamma.   (BSH driver input; FD adds the
-  /// perturbation source on top of this, see FDSolver::step().)
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto T = madness::copy(world, V0x.x_alpha);
-    gaxpy(world, 1.0, T, -1.0, E0x.x_alpha);
-    gaxpy(world, 1.0, T,  1.0, gamma.x_alpha);
-    truncate(world, T);
-    return State{std::move(T)};
-  }
+  // θ assembly is shell-agnostic: see kernels/assembly.hpp.
 
   /// new_x = Q( BSH(omega) * (-2 * (theta + shift * x)) ).
   /// `omega` is passed for shape uniformity with TDA / Full kernels;
@@ -263,24 +252,7 @@ struct Kernels<Static, OpenShell> {
     return State{std::move(Ea), std::move(Eb)};
   }
 
-  /// Theta = V0x - E0x + gamma  for each spin.
-  static State
-  compute_theta(madness::World &world,
-                const State    &V0x,
-                const State    &E0x,
-                const State    &gamma) {
-    auto Ta = madness::copy(world, V0x.x_alpha);
-    gaxpy(world, 1.0, Ta, -1.0, E0x.x_alpha);
-    gaxpy(world, 1.0, Ta,  1.0, gamma.x_alpha);
-    truncate(world, Ta);
-
-    auto Tb = madness::copy(world, V0x.x_beta);
-    gaxpy(world, 1.0, Tb, -1.0, E0x.x_beta);
-    gaxpy(world, 1.0, Tb,  1.0, gamma.x_beta);
-    truncate(world, Tb);
-
-    return State{std::move(Ta), std::move(Tb)};
-  }
+  // θ assembly is shell-agnostic: see kernels/assembly.hpp.
 
   /// Per-spin BSH apply. Each spin gets its own shift, BSH ops, and Q.
   static State
