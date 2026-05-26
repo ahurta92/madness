@@ -1,0 +1,87 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "_base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/gpfs/software/gcc/13.2.0/bin/g++",
+        "BUILD_SHARED_LIBS": "OFF",
+        "BUILD_TESTING": "ON",
+        "ENABLE_MPI": "ON",
+        "ENABLE_NEVER_SPIN": "OFF",
+        "MADNESS_ENABLE_CEREAL": "OFF"
+      },
+      "environment": {
+        "_comment": "Bakes in the Xeon Max toolchain that ~/load_xeonmax.sh sets up (Intel oneAPI MKL/TBB, OpenMPI 4.1.6 on gcc 13.2, numactl, HDF5). Use $penv{X} to prepend to whatever is already in the parent env so this works equally well whether VS Code Remote-SSH inherited the env or not. Needed because Remote-SSH does NOT source ~/.bashrc on the server, so without these the CMake configure can't find MPI / BLAS / LAPACK.",
+        "MKLROOT":   "/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2",
+        "TBBROOT":   "/gpfs/software/intel/oneAPI/2024_2/tbb/2021.13/env/..",
+        "HDF5DIR":   "/cm/shared/apps/hdf5/1.12.1/lib",
+        "HDF5INCLUDE": "/cm/shared/apps/hdf5/1.12.1/include",
+        "PATH": "/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2/bin/:/gpfs/software/numactl/xeonMax/2.0.16/bin:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/bin:/gpfs/software/gcc/13.2.0/bin:/cm/shared/apps/hdf5/1.12.1/bin:/gpfs/software/cmake/xeonmax/3.27.4/bin:$penv{PATH}",
+        "LD_LIBRARY_PATH": "/gpfs/software/intel/oneAPI/2024_2/tbb/2021.13/env/../lib/intel64/gcc4.8:/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2/lib:/gpfs/software/numactl/xeonMax/2.0.16/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib/openmpi:/gpfs/software/gcc/13.2.0/lib64:/gpfs/software/gcc/13.2.0/lib:/cm/shared/apps/hdf5/1.12.1/lib:/cm/shared/apps/slurm/current/lib64/slurm:/cm/shared/apps/slurm/current/lib64:$penv{LD_LIBRARY_PATH}",
+        "LIBRARY_PATH": "/gpfs/software/intel/oneAPI/2024_2/tbb/2021.13/env/../lib/intel64/gcc4.8:/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2/lib/:/gpfs/software/numactl/xeonMax/2.0.16/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib/openmpi:/gpfs/software/gcc/13.2.0/lib64:/gpfs/software/gcc/13.2.0/lib:/cm/shared/apps/slurm/current/lib64/slurm:/cm/shared/apps/slurm/current/lib64:$penv{LIBRARY_PATH}",
+        "CPATH": "/gpfs/software/intel/oneAPI/2024_2/tbb/2021.13/env/../include:/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2/include:/gpfs/software/numactl/xeonMax/2.0.16/include:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/include:/gpfs/software/gcc/13.2.0/include:/cm/shared/apps/slurm/current/include:$penv{CPATH}",
+        "C_INCLUDE_PATH":   "/gpfs/software/numactl/xeonMax/2.0.16/include:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/include:/gpfs/software/gcc/13.2.0/include:$penv{C_INCLUDE_PATH}",
+        "CPLUS_INCLUDE_PATH": "/gpfs/software/numactl/xeonMax/2.0.16/include:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/include:/gpfs/software/gcc/13.2.0/include:$penv{CPLUS_INCLUDE_PATH}",
+        "CMAKE_PREFIX_PATH":  "/gpfs/software/intel/oneAPI/2024_2/tbb/2021.13/env/..:/gpfs/software/intel/oneAPI/2024_2/mkl/2024.2/lib/cmake:$penv{CMAKE_PREFIX_PATH}",
+        "CMAKE_INCLUDE_PATH": "/gpfs/software/numactl/xeonMax/2.0.16/include:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/include:/gpfs/software/gcc/13.2.0/include:$penv{CMAKE_INCLUDE_PATH}",
+        "CMAKE_LIBRARY_PATH": "/gpfs/software/numactl/xeonMax/2.0.16/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib:/gpfs/software/openmpi/xeonmax/gcc13.2/4.1.6/lib/openmpi:/gpfs/software/gcc/13.2.0/lib64:/gpfs/software/gcc/13.2.0/lib:$penv{CMAKE_LIBRARY_PATH}"
+      }
+    },
+    {
+      "name": "debug-cxx17",
+      "displayName": "Debug · C++17 (current default)",
+      "description": "Matches the current CMakeCache.txt. Use for parity with the running build.",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+    {
+      "name": "debug-cxx20",
+      "displayName": "Debug · C++20 (concepts active)",
+      "description": "Activates the FDKernel / ESKernel concept-gated static_asserts in kernels/kernel_interface.hpp.",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "release-cxx20",
+      "displayName": "Release · C++20",
+      "description": "Optimized build with C++20; for timing / production runs.",
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug-cxx17",
+      "configurePreset": "debug-cxx17",
+      "jobs": 12
+    },
+    {
+      "name": "debug-cxx20",
+      "configurePreset": "debug-cxx20",
+      "jobs": 12
+    },
+    {
+      "name": "release-cxx20",
+      "configurePreset": "release-cxx20",
+      "jobs": 12
+    }
+  ]
+}
