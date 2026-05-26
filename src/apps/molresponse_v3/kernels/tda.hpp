@@ -32,6 +32,8 @@
 // =========================================================================
 
 #include "../solvers/response_state.hpp"
+#include "common_ops.hpp"   // poperatorT + common_ops::{apply_kinetic,
+                            // bsh_shift, make_bsh_operators, apply_exchange}
 #include "tags.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -42,7 +44,6 @@
 
 namespace molresponse_v3 {
 
-using poperatorT = std::shared_ptr<madness::real_convolution_3d>;
 
 /// Zeroth-order data that response kernels read against. Field names
 /// match `SCF::amo / bmo / aeps / beps / focka / fockb / Qa /
@@ -80,69 +81,6 @@ struct ResponseGroundState {
   int                                     n_roots = 0;
 };
 
-namespace detail_tda {
-
-inline std::vector<madness::real_function_3d>
-apply_kinetic(madness::World &world,
-              const std::vector<madness::real_function_3d> &v) {
-  if (v.empty()) return {};
-  std::vector<madness::real_function_3d> result;
-  for (int d = 0; d < 3; ++d) {
-    madness::real_derivative_3d D(world, d);
-    auto dv = apply(world, D, v);
-    auto dv2 = apply(world, D, dv);
-    if (result.empty()) result = std::move(dv2);
-    else gaxpy(world, 1.0, result, 1.0, dv2);
-  }
-  scale(world, result, -0.5);
-  truncate(world, result);
-  return result;
-}
-
-/// Pick a level-shift so the per-orbital BSH μ² stays positive.
-/// `eps` carries OCCUPIED orbital energies only (HOMO last). When
-/// `HOMO + omega` would push μ² = -2(ε_HOMO + omega) ≤ 0, return
-/// a shift that pushes the effective energy below zero by `guard`.
-inline double bsh_shift(const madness::Tensor<double> &eps, double omega) {
-  constexpr double guard = 0.05;
-  const double homo_shifted = eps(eps.size() - 1) + omega;
-  return (homo_shifted >= 0.0) ? -guard - homo_shifted : 0.0;
-}
-
-inline std::vector<poperatorT>
-make_bsh_operators(madness::World &world,
-                   const madness::Tensor<double> &eps, double omega,
-                   double lo) {
-  const double tol = madness::FunctionDefaults<3>::get_thresh();
-  const double shift = bsh_shift(eps, omega);
-  std::vector<poperatorT> ops(eps.size());
-  for (long p = 0; p < eps.size(); ++p) {
-    const double mu = std::sqrt(-2.0 * (eps(p) + omega + shift));
-    ops[p] = poperatorT(madness::BSHOperatorPtr3D(world, mu, lo, tol));
-  }
-  return ops;
-}
-
-/// Compact wrapper around `madness::Exchange::set_bra_and_ket(bra, ket)`
-/// + apply. Each call constructs an Exchange operator with the
-/// multiworld-efficient-row algorithm and applies it to `apply_to`.
-/// Used 4-9× per compute_gamma / compute_V0x; one-line replacement
-/// for the 5-line Exchange<double, 3> ... set_bra_and_ket ... set_algorithm
-/// ... apply pattern.
-inline std::vector<madness::real_function_3d>
-apply_exchange(madness::World &world,
-               const std::vector<madness::real_function_3d> &bra,
-               const std::vector<madness::real_function_3d> &ket,
-               const std::vector<madness::real_function_3d> &apply_to,
-               double lo) {
-  madness::Exchange<double, 3> K(world, lo);
-  K.set_bra_and_ket(bra, ket);
-  K.set_algorithm(madness::Exchange<double, 3>::
-                      ExchangeAlgorithm::multiworld_efficient_row);
-  return K(apply_to);
-}
-
-} // namespace detail_tda
 
 // =========================================================================
 // Kernels<TDA, ClosedShell>
@@ -181,7 +119,7 @@ struct Kernels<TDA, ClosedShell> {
     auto gamma = mul(world, J_rho, g0.amo, true);
 
     if (g0.c_xc > 0.0) {
-      auto Kpx_phi = detail_tda::apply_exchange(world, g0.amo, state.x_alpha,
+      auto Kpx_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha,
                                                  g0.amo, g0.lo);
       gaxpy(world, 1.0, gamma, -g0.c_xc, Kpx_phi);
     }
@@ -198,7 +136,7 @@ struct Kernels<TDA, ClosedShell> {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     auto Vx = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0x = detail_tda::apply_exchange(world, g0.amo, g0.amo,
+      auto k0x = common_ops::apply_exchange(world, g0.amo, g0.amo,
                                              state.x_alpha, g0.lo);
       gaxpy(world, 1.0, Vx, -g0.c_xc, k0x);
     }
@@ -210,7 +148,7 @@ struct Kernels<TDA, ClosedShell> {
   compute_T0x(madness::World &world,
               const ResponseGroundState &/*target*/,
               const State    &state) {
-    return State{detail_tda::apply_kinetic(world, state.x_alpha)};
+    return State{common_ops::apply_kinetic(world, state.x_alpha)};
   }
 
   /// E0·x with the FULL Fock matrix (canonical: diag eps; localized:
@@ -277,14 +215,14 @@ struct Kernels<TDA, ClosedShell> {
             const State    &state,
             const State    &theta,
             double          omega) {
-    const double shift = detail_tda::bsh_shift(g0.aeps, omega);
+    const double shift = common_ops::bsh_shift(g0.aeps, omega);
 
     auto rhs = madness::copy(world, theta.x_alpha);
     gaxpy(world, 1.0, rhs, shift, state.x_alpha);
     scale(world, rhs, -2.0);
     truncate(world, rhs);
 
-    auto bsh_ops = detail_tda::make_bsh_operators(world, g0.aeps,
+    auto bsh_ops = common_ops::make_bsh_operators(world, g0.aeps,
                                                   omega, g0.lo);
     auto new_x   = apply(world, bsh_ops, rhs);
     new_x        = g0.Qa(new_x);
@@ -348,7 +286,7 @@ struct Kernels<TDA, OpenShell> {
     // alpha
     auto gamma_a = mul(world, J_rho, g0.amo, true);
     if (g0.c_xc > 0.0) {
-      auto Kpx_a_phi = detail_tda::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
+      auto Kpx_a_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
       gaxpy(world, 1.0, gamma_a, -g0.c_xc, Kpx_a_phi);
     }
     gamma_a = g0.Qa(gamma_a);
@@ -357,7 +295,7 @@ struct Kernels<TDA, OpenShell> {
     // beta
     auto gamma_b = mul(world, J_rho, g0.bmo, true);
     if (g0.c_xc > 0.0) {
-      auto Kpx_b_phi = detail_tda::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
+      auto Kpx_b_phi = common_ops::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
       gaxpy(world, 1.0, gamma_b, -g0.c_xc, Kpx_b_phi);
     }
     gamma_b = g0.Qb(gamma_b);
@@ -375,12 +313,12 @@ struct Kernels<TDA, OpenShell> {
 
     auto Vx_a = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0_ax = detail_tda::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
+      auto k0_ax = common_ops::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
       gaxpy(world, 1.0, Vx_a, -g0.c_xc, k0_ax);
     }
     auto Vx_b = mul_sparse(world, g0.V_local_beta, state.x_beta, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0_bx = detail_tda::apply_exchange(world, g0.bmo, g0.bmo, state.x_beta, g0.lo);
+      auto k0_bx = common_ops::apply_exchange(world, g0.bmo, g0.bmo, state.x_beta, g0.lo);
       gaxpy(world, 1.0, Vx_b, -g0.c_xc, k0_bx);
     }
     return State{std::move(Vx_a), std::move(Vx_b)};
@@ -391,8 +329,8 @@ struct Kernels<TDA, OpenShell> {
   compute_T0x(madness::World &world,
               const ResponseGroundState &/*target*/,
               const State    &state) {
-    auto Ta = detail_tda::apply_kinetic(world, state.x_alpha);
-    auto Tb = detail_tda::apply_kinetic(world, state.x_beta);
+    auto Ta = common_ops::apply_kinetic(world, state.x_alpha);
+    auto Tb = common_ops::apply_kinetic(world, state.x_beta);
     return State{std::move(Ta), std::move(Tb)};
   }
 
@@ -471,24 +409,24 @@ struct Kernels<TDA, OpenShell> {
             const State    &theta,
             double          omega) {
     // alpha
-    const double shift_a = detail_tda::bsh_shift(g0.aeps, omega);
+    const double shift_a = common_ops::bsh_shift(g0.aeps, omega);
     auto rhs_a = madness::copy(world, theta.x_alpha);
     gaxpy(world, 1.0, rhs_a, shift_a, state.x_alpha);
     scale(world, rhs_a, -2.0);
     truncate(world, rhs_a);
-    auto bsh_a = detail_tda::make_bsh_operators(world, g0.aeps,
+    auto bsh_a = common_ops::make_bsh_operators(world, g0.aeps,
                                                 omega, g0.lo);
     auto new_xa = apply(world, bsh_a, rhs_a);
     new_xa      = g0.Qa(new_xa);
     truncate(world, new_xa);
 
     // beta
-    const double shift_b = detail_tda::bsh_shift(g0.beps, omega);
+    const double shift_b = common_ops::bsh_shift(g0.beps, omega);
     auto rhs_b = madness::copy(world, theta.x_beta);
     gaxpy(world, 1.0, rhs_b, shift_b, state.x_beta);
     scale(world, rhs_b, -2.0);
     truncate(world, rhs_b);
-    auto bsh_b = detail_tda::make_bsh_operators(world, g0.beps,
+    auto bsh_b = common_ops::make_bsh_operators(world, g0.beps,
                                                 omega, g0.lo);
     auto new_xb = apply(world, bsh_b, rhs_b);
     new_xb      = g0.Qb(new_xb);
