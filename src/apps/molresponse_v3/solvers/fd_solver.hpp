@@ -266,7 +266,11 @@ public:
     }
 
     // ---- KAIN + step restriction (over flat in/out responses) ------------
-    kain_.apply(in.responses, out.responses);
+    // diag_level pulled from print_level_; gated uniformly across ranks
+    // inside ResponseSubspaceKain (collective work is unconditional).
+    const int kain_diag =
+        (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
+    kain_.apply(in.responses, out.responses, kain_diag);
 
     // Explosion guard
     for (double r : out.last_bsh_residual) {

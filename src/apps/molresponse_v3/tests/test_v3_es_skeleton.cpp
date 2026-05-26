@@ -129,7 +129,13 @@ int main(int argc, char **argv) {
               "[--num-roots=N] [--maxiter=N] [--dconv=X] "
               "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
               "[--tol=X] [--print-level=0..3] "
-              "[--log-convergence=PATH]");
+              "[--log-convergence=PATH] "
+              "[--stream-theta] "
+              "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
+              "[--orthonormalize=gs|lowdin] "
+              "[--warmup-oversample=K] "
+              "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
+              "[--kain-cmax=X]");
       }
       finalize();
       return 1;
@@ -155,6 +161,34 @@ int main(int argc, char **argv) {
     const std::string log_path = parser.key_exists("log-convergence")
                                      ? parser.value_raw("log-convergence")
                                      : std::string();
+    const bool stream_theta = parser.key_exists("stream-theta");
+    const int tda_warmup_iters = parser.key_exists("tda-warmup-iters")
+                                     ? std::stoi(parser.value("tda-warmup-iters"))
+                                     : 0;
+    const double cluster_unmix_factor =
+        parser.key_exists("cluster-unmix-factor")
+            ? std::stod(parser.value("cluster-unmix-factor"))
+            : 100.0;
+    const std::string orthon_str = parser.key_exists("orthonormalize")
+                                       ? parser.value("orthonormalize")
+                                       : std::string("gs");
+    ConvergencePolicy::OrthonormalizeMode orthon_mode =
+        (orthon_str == "lowdin")
+            ? ConvergencePolicy::OrthonormalizeMode::Lowdin
+            : ConvergencePolicy::OrthonormalizeMode::GramSchmidt;
+    const double warmup_oversample = parser.key_exists("warmup-oversample")
+                                          ? std::stod(parser.value("warmup-oversample"))
+                                          : 1.0;
+    const bool no_kain = parser.key_exists("no-kain");
+    const int kain_maxsub = parser.key_exists("kain-maxsub")
+                                ? std::stoi(parser.value("kain-maxsub"))
+                                : 10;
+    const double maxrotn = parser.key_exists("maxrotn")
+                               ? std::stod(parser.value("maxrotn"))
+                               : 0.5;
+    const double kain_cmax = parser.key_exists("kain-cmax")
+                                 ? std::stod(parser.value("kain-cmax"))
+                                 : 100.0;
 
     auto header = GroundState::read_archive_header(world, archive_path);
     int override_k = parser.key_exists("k") ? std::stoi(parser.value("k")) : -1;
@@ -249,7 +283,40 @@ int main(int argc, char **argv) {
     std::vector<double>     final_residuals;
 
     ConvergencePolicy policy;
-    policy.dconv_user = dconv;
+    policy.dconv_user           = dconv;
+    policy.stream_theta         = stream_theta;
+    policy.tda_warmup_iters     = tda_warmup_iters;
+    policy.cluster_unmix_factor = cluster_unmix_factor;
+    policy.orthonormalize_mode  = orthon_mode;
+    policy.warmup_oversample_factor = warmup_oversample;
+    policy.kain                 = !no_kain;
+    policy.kain_maxsub          = kain_maxsub;
+    policy.maxrotn              = maxrotn;
+    policy.kain_cmax_cap        = kain_cmax;
+    if (world.rank() == 0) {
+      print("  stream_theta =", stream_theta ? "true" : "false",
+            "  ←  step_", (stream_theta ? "recompute_pieces" : "rotate_pieces"));
+      print("  tda_warmup_iters =", tda_warmup_iters,
+            "  warmup_oversample =", warmup_oversample,
+            "  cluster_unmix_factor =", cluster_unmix_factor,
+            "  orthonormalize =",
+            (orthon_mode == ConvergencePolicy::OrthonormalizeMode::Lowdin
+                 ? "lowdin" : "gram_schmidt"));
+      print("  kain =", policy.kain ? "on" : "off",
+            "  kain_maxsub =", kain_maxsub,
+            "  maxrotn =", maxrotn,
+            "  kain_cmax =", kain_cmax);
+    }
+    const long n_roots_warmup = std::max<long>(
+        num_roots,
+        static_cast<long>(std::ceil(warmup_oversample *
+                                     static_cast<double>(num_roots))));
+
+    // After the explicit warmup phase, the main solver should NOT
+    // re-run a warmup window — it's starting from a cleaned state
+    // and KAIN should engage from iter 1.
+    ConvergencePolicy main_policy = policy;
+    main_policy.tda_warmup_iters  = 0;
 
     if (world.rank() == 0) {
       print("\n=== iterate_protocol(ESSolver<TDA, ",
@@ -265,11 +332,15 @@ int main(int argc, char **argv) {
 
     if (restricted) {
       using Solver = ESSolver<TDA, ClosedShell>;
-      auto target = build_response_ground_state_closed_shell(
+      auto problem = build_es_problem_tda<ClosedShell>(
           world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
-      auto state0 = build_initial_guess_tda_closed_shell(
-          world, gs, num_roots);
-      Solver solver(world, target, policy, print_level);
+      // Warmup phase: run an oversampled solver with KAIN off,
+      // sort + select N lowest, hand off as the main solver's
+      // starting state. No-op when warmup_iters=0 AND oversample=1.
+      auto state0 = run_oversampled_tda_warmup<ClosedShell>(
+          world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+          policy, /*c_xc=*/1.0, gs.params().lo(), print_level);
+      Solver solver(world, std::move(problem), main_policy, print_level);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
       auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
@@ -282,8 +353,8 @@ int main(int argc, char **argv) {
         auto coulop_new = poperatorT(
             CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
         gs.prepare(world, 0.001 * new_t, coulop_new, fock_json);
-        solv.set_target(build_response_ground_state_closed_shell(
-            world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo()));
+        solv.set_gs(build_response_ground_state_closed_shell(
+            world, gs, /*c_xc=*/1.0, gs.params().lo()));
         for (auto &root : st.roots)
           for (auto &fn : root.x_alpha)
             fn = madness::project(fn, new_k, new_t);
@@ -296,12 +367,14 @@ int main(int argc, char **argv) {
       final_residuals = sf.last_bsh_residual;
     } else {
       using Solver = ESSolver<TDA, OpenShell>;
-      auto target = build_response_ground_state_open_shell(
+      auto problem = build_es_problem_tda<OpenShell>(
           world, gs, num_roots, gs.hf_exchange_coefficient(),
           gs.params().lo());
-      auto state0 = build_initial_guess_tda_open_shell(
-          world, gs, num_roots);
-      Solver solver(world, target, policy, print_level);
+      auto state0 = run_oversampled_tda_warmup<OpenShell>(
+          world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+          policy, gs.hf_exchange_coefficient(), gs.params().lo(),
+          print_level);
+      Solver solver(world, std::move(problem), main_policy, print_level);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
       auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
@@ -314,9 +387,8 @@ int main(int argc, char **argv) {
         auto coulop_new = poperatorT(
             CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
         gs.prepare(world, 0.001 * new_t, coulop_new, fock_json);
-        solv.set_target(build_response_ground_state_open_shell(
-            world, gs, num_roots, gs.hf_exchange_coefficient(),
-            gs.params().lo()));
+        solv.set_gs(build_response_ground_state_open_shell(
+            world, gs, gs.hf_exchange_coefficient(), gs.params().lo()));
         for (auto &root : st.roots) {
           for (auto &fn : root.x_alpha)
             fn = madness::project(fn, new_k, new_t);

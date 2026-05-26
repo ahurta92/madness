@@ -754,19 +754,29 @@ build_es_theta(World &world, const vector_real_function_3d &Lambda,
 /// The physical formula is:  α = -Σ_k n_k [⟨x_k|vp_k⟩ + ⟨y_k|vp_k⟩]
 /// where n_k = 2 (restricted) or 1 (unrestricted per spin channel).
 ///
-/// The code computes ip_xa, ip_ya, ip_xb, ip_yb. For Static/TDA, y is
-/// not solved (y=x implied) so ip_ya = ip_yb = 0 — the y_factor of 2
-/// absorbs the missing y contribution.
+/// For Static/TDA, y is not solved (y=x implied) so ip_ya = ip_yb = 0
+/// — the y_factor of 2 in af absorbs the missing y contribution.
+/// Empirically validated <1% vs Dalton (d-aug-cc-pVQZ) on H2 / H2O /
+/// C2H4 for Static ClosedShell, ~0.6% on Li UHF Static.
 ///
 ///   factor = -(spin_factor × y_factor)
 ///
 ///   spin_factor: 2 restricted (n_k=2), 1 unrestricted (n_k=1)
-///   y_factor:    2 Static/TDA (y=x not solved), 1 Full (y solved)
+///   y_factor:    2 Static/TDA (y=x implied),
+///                1 Full (y is solved separately)
 ///
 ///   Restricted Static:     -(2×2) = -4.0
 ///   Restricted Dynamic:    -(2×1) = -2.0
 ///   Unrestricted Static:   -(1×2) = -2.0
 ///   Unrestricted Dynamic:  -(1×1) = -1.0
+///
+/// Practical caveat: the density-scale factor inside `compute_density`
+/// (e.g. 4 for Static ClosedShell, 2 for Full ClosedShell) enters the
+/// Coulomb feedback inside compute_gamma and so is part of the self-
+/// consistent equation. The (density-factor, alpha-factor) pair has to
+/// be chosen consistently — if you halve af without compensating
+/// somewhere in the kernel, α will shift (confirmed empirically:
+/// F=4 + af=-2 halved α on H2).
 inline double alpha_factor(ResponseType type, bool restricted) {
   double spin_factor = restricted ? 2.0 : 1.0;
   double y_factor = (type == ResponseType::Full) ? 1.0 : 2.0;

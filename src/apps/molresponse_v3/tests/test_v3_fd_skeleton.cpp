@@ -139,7 +139,7 @@ static int parse_axis(const std::string& s) {
 static double run_static_closed_shell(
     World& world, GroundState& gs, double L, int override_k,
     const std::vector<double>& protocol_thresholds,
-    int axis, int max_iters, double dconv, PrintLevel print_level,
+    int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
     const std::string& log_path = "") {
   using Solver = FDSolver<Static, ClosedShell>;
@@ -149,7 +149,7 @@ static double run_static_closed_shell(
   source.x_alpha = dipole_perturbation(world, gs, axis);
 
   FDProblem<Static, ClosedShell> tgt;
-  tgt.gs = build_response_ground_state_closed_shell(world, gs, /*n_roots=*/1,
+  tgt.gs = build_response_ground_state_closed_shell(world, gs,
                                              gs.hf_exchange_coefficient(),
                                              gs.params().lo());
   tgt.responses.resize(1);
@@ -162,8 +162,6 @@ static double run_static_closed_shell(
   s0.responses.resize(1);
   s0.responses[0].x_alpha = source.x_alpha;
 
-  ConvergencePolicy policy;
-  policy.dconv_user = dconv;
   Solver solver(world, tgt, policy, print_level);
   if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -184,7 +182,7 @@ static double run_static_closed_shell(
     // Fresh target — reuse the shared ES builder for the GS side.
     FDProblem<Static, ClosedShell> new_tgt;
     new_tgt.gs = build_response_ground_state_closed_shell(
-        world, gs, /*n_roots=*/1, gs.hf_exchange_coefficient(),
+        world, gs, gs.hf_exchange_coefficient(),
         gs.params().lo());
     new_tgt.responses.resize(1);
     new_tgt.responses[0].omega          = 0.0;
@@ -217,7 +215,7 @@ static double run_static_closed_shell(
 static double run_full_closed_shell(
     World& world, GroundState& gs, double L, int override_k,
     const std::vector<double>& protocol_thresholds, double omega,
-    int axis, int max_iters, double dconv, PrintLevel print_level,
+    int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
     const std::string& log_path = "") {
   using Solver = FDSolver<Full, ClosedShell>;
@@ -227,7 +225,7 @@ static double run_full_closed_shell(
   source.y_alpha = dipole_perturbation(world, gs, axis);
 
   FDProblem<Full, ClosedShell> tgt;
-  tgt.gs = build_response_ground_state_closed_shell(world, gs, /*n_roots=*/1,
+  tgt.gs = build_response_ground_state_closed_shell(world, gs,
                                              gs.hf_exchange_coefficient(),
                                              gs.params().lo());
   tgt.responses.resize(1);
@@ -239,8 +237,6 @@ static double run_full_closed_shell(
   s0.responses[0].x_alpha = source.x_alpha;
   s0.responses[0].y_alpha = source.y_alpha;
 
-  ConvergencePolicy policy;
-  policy.dconv_user = dconv;
   Solver solver(world, tgt, policy, print_level);
   if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -260,7 +256,7 @@ static double run_full_closed_shell(
 
     FDProblem<Full, ClosedShell> new_tgt;
     new_tgt.gs = build_response_ground_state_closed_shell(
-        world, gs, /*n_roots=*/1, gs.hf_exchange_coefficient(),
+        world, gs, gs.hf_exchange_coefficient(),
         gs.params().lo());
     new_tgt.responses.resize(1);
     new_tgt.responses[0].omega           = omega;
@@ -297,7 +293,7 @@ static double run_full_closed_shell(
 static double run_static_open_shell(
     World& world, GroundState& gs, double L, int override_k,
     const std::vector<double>& protocol_thresholds,
-    int axis, int max_iters, double dconv, PrintLevel print_level,
+    int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
     const std::string& log_path = "") {
   using Solver = FDSolver<Static, OpenShell>;
@@ -310,7 +306,7 @@ static double run_static_open_shell(
   source.x_beta  = src_beta;
 
   FDProblem<Static, OpenShell> tgt;
-  tgt.gs = build_response_ground_state_open_shell(world, gs, /*n_roots=*/1,
+  tgt.gs = build_response_ground_state_open_shell(world, gs,
                                           gs.hf_exchange_coefficient(),
                                           gs.params().lo());
   tgt.responses.resize(1);
@@ -322,8 +318,6 @@ static double run_static_open_shell(
   s0.responses[0].x_alpha = src_alpha;
   s0.responses[0].x_beta  = src_beta;
 
-  ConvergencePolicy policy;
-  policy.dconv_user = dconv;
   Solver solver(world, tgt, policy, print_level);
   if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -341,7 +335,7 @@ static double run_static_open_shell(
 
     FDProblem<Static, OpenShell> new_tgt;
     new_tgt.gs = build_response_ground_state_open_shell(
-        world, gs, /*n_roots=*/1, gs.hf_exchange_coefficient(),
+        world, gs, gs.hf_exchange_coefficient(),
         gs.params().lo());
     new_tgt.responses.resize(1);
     new_tgt.responses[0].omega = 0.0;
@@ -376,7 +370,7 @@ static double run_static_open_shell(
 static double run_full_open_shell(
     World& world, GroundState& gs, double L, int override_k,
     const std::vector<double>& protocol_thresholds, double omega,
-    int axis, int max_iters, double dconv, PrintLevel print_level,
+    int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
     const std::string& log_path = "") {
   using Solver = FDSolver<Full, OpenShell>;
@@ -391,7 +385,7 @@ static double run_full_open_shell(
   source.y_beta  = src_beta;
 
   FDProblem<Full, OpenShell> tgt;
-  tgt.gs = build_response_ground_state_open_shell(world, gs, /*n_roots=*/1,
+  tgt.gs = build_response_ground_state_open_shell(world, gs,
                                           gs.hf_exchange_coefficient(),
                                           gs.params().lo());
   tgt.responses.resize(1);
@@ -405,8 +399,6 @@ static double run_full_open_shell(
   s0.responses[0].x_beta  = src_beta;
   s0.responses[0].y_beta  = src_beta;
 
-  ConvergencePolicy policy;
-  policy.dconv_user = dconv;
   Solver solver(world, tgt, policy, print_level);
   if (!log_path.empty()) solver.set_log_path(log_path);
 
@@ -427,7 +419,7 @@ static double run_full_open_shell(
 
     FDProblem<Full, OpenShell> new_tgt;
     new_tgt.gs = build_response_ground_state_open_shell(
-        world, gs, /*n_roots=*/1, gs.hf_exchange_coefficient(),
+        world, gs, gs.hf_exchange_coefficient(),
         gs.params().lo());
     new_tgt.responses.resize(1);
     new_tgt.responses[0].omega           = omega;
@@ -484,7 +476,9 @@ int main(int argc, char **argv) {
                 "[--maxiter=N] [--dconv=X] "
                 "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
                 "[--tol=X] [--print-level=0..3] "
-                "[--log-convergence=PATH]");
+                "[--log-convergence=PATH] "
+                "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
+                "[--kain-cmax=X]");
         }
         finalize();
         return 1;
@@ -505,6 +499,18 @@ int main(int argc, char **argv) {
                              ? std::stod(parser.value("tol")) : 5e-3;
       const int pl_int = parser.key_exists("print-level")
                              ? std::stoi(parser.value("print-level")) : 1;
+      // KAIN acceleration knobs — same flag set as the ES driver so
+      // FD can be A/B'd kain-on vs kain-off across (Type × Shell).
+      const bool   no_kain     = parser.key_exists("no-kain");
+      const int    kain_maxsub = parser.key_exists("kain-maxsub")
+                                     ? std::stoi(parser.value("kain-maxsub"))
+                                     : 10;
+      const double maxrotn     = parser.key_exists("maxrotn")
+                                     ? std::stod(parser.value("maxrotn"))
+                                     : 0.5;
+      const double kain_cmax   = parser.key_exists("kain-cmax")
+                                     ? std::stod(parser.value("kain-cmax"))
+                                     : 100.0;
       const PrintLevel print_level = static_cast<PrintLevel>(
           std::max(0, std::min(3, pl_int)));
       const std::string log_path =
@@ -569,30 +575,42 @@ int main(int argc, char **argv) {
         print("  omega      =", omega);
         print("  axis       =", axis_label);
         print("  dconv_user =", dconv);
+        print("  kain       =", no_kain ? "off" : "on",
+              "  kain_maxsub =", kain_maxsub,
+              "  maxrotn =", maxrotn,
+              "  kain_cmax =", kain_cmax);
         print("  max_iters  =", max_iters, " per protocol step");
         print("  protocol   =", protocol_thresholds);
       }
+
+      // Assemble the full policy once; threaded into every dispatch.
+      ConvergencePolicy policy;
+      policy.dconv_user  = dconv;
+      policy.kain        = !no_kain;
+      policy.kain_maxsub = kain_maxsub;
+      policy.maxrotn     = maxrotn;
+      policy.kain_cmax_cap = kain_cmax;
 
       double alpha = 0.0;
       if (type_str == "static" && restricted) {
         alpha = run_static_closed_shell(world, gs, header.L, override_k,
                                          protocol_thresholds, axis,
-                                         max_iters, dconv, print_level,
+                                         max_iters, policy, print_level,
                                          fock_json, log_path);
       } else if (type_str == "full" && restricted) {
         alpha = run_full_closed_shell(world, gs, header.L, override_k,
                                        protocol_thresholds, omega, axis,
-                                       max_iters, dconv, print_level,
+                                       max_iters, policy, print_level,
                                        fock_json, log_path);
       } else if (type_str == "static" && !restricted) {
         alpha = run_static_open_shell(world, gs, header.L, override_k,
                                        protocol_thresholds, axis,
-                                       max_iters, dconv, print_level,
+                                       max_iters, policy, print_level,
                                        fock_json, log_path);
       } else if (type_str == "full" && !restricted) {
         alpha = run_full_open_shell(world, gs, header.L, override_k,
                                      protocol_thresholds, omega, axis,
-                                     max_iters, dconv, print_level,
+                                     max_iters, policy, print_level,
                                      fock_json, log_path);
       } else {
         if (world.rank() == 0) print("Unknown --type:", type_str);

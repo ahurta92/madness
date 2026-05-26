@@ -32,6 +32,16 @@
 //                                    (skip KAIN this iter — simpler than
 //                                    SCF's recursive restart)
 //
+// TDA warmup (policy.tda_warmup_iters):
+//   For the first `tda_warmup_iters` apply() calls, KAIN extrapolation
+//   is skipped AND no history is recorded. After warmup, history
+//   recording begins fresh — KAIN starts learning from the warmed-up
+//   bundle, not from the volatile iter-0/iter-1 state. Mirrors legacy
+//   iterate_trial which runs pure BSH+GS for `guess_max_iter` iters
+//   before handing off to the KAIN-accelerated main iter
+//   (ExcitedResponse.cpp:456-666). Step restriction still applies
+//   through warmup, so individual orbitals can't run away.
+//
 // Step restriction (per-orbital, mirrors SCF::do_step_restriction at
 // SCF.cc:2058) is applied AFTER KAIN, also AFTER raw BSH when KAIN is
 // disabled or skipped. For each function p in the flat state:
@@ -66,32 +76,58 @@ public:
   /// Apply per-state KAIN (if enabled) then per-orbital step restriction.
   ///   in[s]  = x_old for state s
   ///   out[s] = raw BSH output for state s; overwritten in place
+  ///
+  /// Warmup behaviour: skips KAIN extrapolation for the first
+  /// `policy.tda_warmup_iters` calls (in addition to the always-skipped
+  /// iter-0). During warmup the history is NOT recorded — when KAIN
+  /// turns on, it starts fresh on the warmed-up bundle so its
+  /// extrapolation isn't poisoned by the rapidly-changing early-iter
+  /// state. Step restriction still applies through the warmup.
+  /// `diag_level`: 0 = silent; ≥1 = one `[KAIN]` line per state per call
+  /// with history length, rcond, max|c|, bailout flag, plus
+  /// `[STEP-REST]` when at least one orbital is clamped. Caller derives
+  /// this from print_level (uniform across ranks). All collective work
+  /// (norm2s, sub, gaxpy, inner) is performed unconditionally; only
+  /// the printf is rank-gated.
   void apply(const std::vector<Storage> &in,
-             std::vector<Storage>       &out) {
+             std::vector<Storage>       &out,
+             int                         diag_level = 0) {
     if (states_.size() != in.size()) {
       states_.clear();
       states_.resize(in.size());
     }
 
-    if (policy_.kain) {
-      if (first_call_) {
-        first_call_ = false;
-        // Iter-0: skip KAIN extrapolation; history empty. Step
-        // restriction still applies below.
+    const bool in_warmup = (calls_consumed_ < policy_.tda_warmup_iters);
+
+    if (policy_.kain && !in_warmup) {
+      if (first_kain_call_) {
+        first_kain_call_ = false;
+        // First post-warmup call: skip extrapolation; history empty.
+        // Step restriction still applies below.
+        if (diag_level >= 1 && world_.rank() == 0) {
+          printf("[KAIN] iter=%d SKIP (first post-warmup call, history empty)\n",
+                 calls_consumed_);
+          fflush(stdout);
+        }
       } else {
         for (std::size_t s = 0; s < in.size(); ++s) {
-          apply_one_state(s, in[s], out[s]);
+          apply_one_state(s, in[s], out[s], diag_level);
         }
       }
     }
 
-    apply_step_restriction(in, out);
+    apply_step_restriction(in, out, diag_level);
+    ++calls_consumed_;
   }
 
   /// Drop all per-state KAIN histories. Call between protocol steps.
+  /// Resets the warmup counter too — protocol transitions get a fresh
+  /// warmup window (the projected state at the new k/thresh is a cold
+  /// guess relative to the post-BSH dynamics at the new resolution).
   void reset() {
     states_.clear();
-    first_call_ = true;
+    first_kain_call_ = true;
+    calls_consumed_  = 0;
   }
 
   void set_policy(const ConvergencePolicy &p) { policy_ = p; }
@@ -103,9 +139,9 @@ private:
   };
 
   /// One state's KAIN update. Mirrors SCF::update_subspace lines
-  /// 1957-2028 step-for-step.
+  /// 1957-2028 step-for-step. `diag_level` controls per-call printing.
   void apply_one_state(std::size_t s_idx, const Storage &s_in,
-                       Storage &s_out) {
+                       Storage &s_out, int diag_level) {
     auto v = s_in.flatten();
     auto x_bsh = s_out.flatten();
     // SCF convention: residual r = v − F(v) (NOT F(v) − v)
@@ -130,20 +166,37 @@ private:
     state.Q = newQ;
 
     // ---- regularized solve with rcond escalation (SCF:1983-2004) -------
+    // Coefficient cap (policy.kain_cmax_cap) controls the bailout
+    // threshold — SCF uses 3.0 (linear-orbital instability bound),
+    // response iterations typically need 50-100 to accelerate strongly
+    // polarizable systems where the leading eigenvector dominates the
+    // residual and the natural KAIN c are intrinsically large.
     double rcond = 1.0e-12;
+    int    n_rcond_escalations = 0;
+    const double cmax_cap = policy_.kain_cmax_cap;
     madness::Tensor<double> c;
     while (true) {
       c = madness::KAIN(state.Q, rcond);
-      if (c.absmax() < 3.0) break;
+      if (c.absmax() < cmax_cap) break;
       if (rcond < 0.01) {
         rcond *= 100.0;
+        ++n_rcond_escalations;
         continue;
       }
       // Bail-out: clear history, leave s_out as raw BSH. KAIN will
       // start re-learning from the next iter. (Simpler than SCF's
       // recursive restart; the user opted for "clear and skip".)
+      const double cmax_bail = c.absmax();
       state.entries.clear();
       state.Q = madness::Tensor<double>();
+      if (diag_level >= 1 && world_.rank() == 0) {
+        printf("[KAIN] iter=%d state=%zu m=%ld rcond=%.1e |c|max=%.3f "
+               "n_escalations=%d  ★ BAILED (cleared history, fell back "
+               "to raw BSH)\n",
+               calls_consumed_, s_idx, m, rcond, cmax_bail,
+               n_rcond_escalations);
+        fflush(stdout);
+      }
       return;
     }
 
@@ -164,6 +217,22 @@ private:
     }
 
     s_out.from_flat(new_v);
+
+    // ---- diagnostic --------------------------------------------------
+    if (diag_level >= 1 && world_.rank() == 0) {
+      // Compact summary: identify whether KAIN is dominated by the
+      // latest entry (|c[m-1]| ≈ 1, rest ≈ 0 → "use raw BSH only",
+      // no acceleration) or actually mixing history (|c| spread).
+      double c_latest = std::fabs(c(m - 1));
+      double c_max    = c.absmax();
+      printf("[KAIN] iter=%d state=%zu m=%ld rcond=%.1e "
+             "|c|max=%.3f c[m-1]=%.3f  n_escalations=%d  c=[",
+             calls_consumed_, s_idx, m, rcond, c_max, c_latest,
+             n_rcond_escalations);
+      for (long k = 0; k < m; ++k) printf(" %+.3e", c(k));
+      printf(" ]\n");
+      fflush(stdout);
+    }
   }
 
   /// Per-orbital step restriction (SCF::do_step_restriction, lines
@@ -171,7 +240,8 @@ private:
   /// its own scale factor. A single bad orbital doesn't dominate the
   /// per-state norm and over-restrict the well-behaved ones.
   void apply_step_restriction(const std::vector<Storage> &in,
-                              std::vector<Storage>       &out) {
+                              std::vector<Storage>       &out,
+                              int                         diag_level) {
     const double maxrotn = policy_.maxrotn;
     if (maxrotn <= 0.0) return;
 
@@ -182,17 +252,31 @@ private:
       auto diff  = madness::sub(world_, v_new, v_old);
       auto norms = madness::norm2s(world_, diff);
       bool changed = false;
+      int  n_clamped = 0;
+      double max_norm = 0.0;
       for (std::size_t p = 0; p < v_new.size(); ++p) {
+        max_norm = std::max(max_norm, norms[p]);
         if (norms[p] > maxrotn) {
           const double scale = maxrotn / norms[p];
           // v_new[p] := scale·v_new[p] + (1−scale)·v_old[p]
           v_new[p].gaxpy(scale, v_old[p], 1.0 - scale, false);
           changed = true;
+          ++n_clamped;
         }
       }
       if (changed) {
         world_.gop.fence();
         out[s].from_flat(v_new);
+      }
+      // Diagnostic: print whenever the cap actually fired. Tells us
+      // whether step restriction is the binding constraint on the
+      // iteration speed.
+      if (diag_level >= 1 && n_clamped > 0 && world_.rank() == 0) {
+        printf("[STEP-REST] iter=%d state=%zu clamped=%d/%zu  "
+               "max_unrestricted=%.3e  cap=%.3e\n",
+               calls_consumed_, s, n_clamped, v_new.size(),
+               max_norm, maxrotn);
+        fflush(stdout);
       }
     }
   }
@@ -200,7 +284,8 @@ private:
   madness::World               &world_;
   ConvergencePolicy             policy_;
   std::vector<PerStateHistory>  states_;
-  bool                          first_call_ = true;
+  bool                          first_kain_call_ = true;
+  int                           calls_consumed_  = 0;
 };
 
 } // namespace molresponse_v3

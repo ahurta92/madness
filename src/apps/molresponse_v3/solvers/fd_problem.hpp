@@ -3,16 +3,12 @@
 
 // =========================================================================
 // FDProblem — read-only problem definition for the frequency-dependent
-// solver. Wraps the ground-state-side `ResponseGroundState` (phi0, eps, V_local,
-// fock, coulop, Q, c_xc, lo) that the per-root kernels already use,
-// and adds a list of `FDPerturbation` entries — one per (perturbation,
-// frequency) combination the solver should iterate.
+// solver. Wraps the ground-state-side `ResponseGroundState` (phi0, eps,
+// V_local, fock, coulop, Q, c_xc, lo) that the per-root kernels already
+// use, and adds a list of `FDPerturbation` entries — one per
+// (perturbation, frequency) combination the solver should iterate.
 //
-// `n_roots` inside ResponseGroundState is repurposed to mean `n_responses` (since
-// the per-storage kernel code is shape-identical between ES and FD).
-//
-// The naming `ResponseGroundState` will be revisited once the FD work proves the
-// (Type, Shell) Kernels design — see TODO at the bottom of the header.
+// Symmetric with ESProblem<Type, Shell> in es_solver.hpp.
 // =========================================================================
 
 #include "../kernels/tda.hpp"          // ResponseGroundState, vecfuncT, poperatorT

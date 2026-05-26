@@ -5,7 +5,7 @@
 // ESSolver<Type, Shell> — one skeleton, six instantiations.
 //
 // step() body is identical across (Type, Shell). Every per-root
-// kernel call has the signature K::foo(world_, target_, state[,
+// kernel call has the signature K::foo(world_, gs_, state[,
 // intermediate]); the Kernels<Type, Shell> specialization decides
 // which fields it reads. Bundle-level ops (subspace matrix,
 // diagonalize, rotate) are shared free functions in
@@ -38,6 +38,21 @@
 
 namespace molresponse_v3 {
 
+/// Read-only problem definition for ESSolver<Type, Shell>. Symmetric
+/// with FDProblem<Type, Shell> in fd_problem.hpp:
+///
+///   gs       — the prepared ground state (zeroth-order data) the
+///              kernels read from. Same object FDSolver uses.
+///   n_roots  — solver-level count of excitation roots to track.
+///
+/// `n_roots` is a solver concern, not a ground-state property, so it
+/// lives on the problem alongside gs rather than inside the gs struct.
+template <typename Type, typename Shell>
+struct ESProblem {
+  ResponseGroundState gs;
+  int                 n_roots = 0;
+};
+
 template <typename Type, typename Shell>
 class ESSolver {
 public:
@@ -60,18 +75,12 @@ public:
     bool                                    diverged = false;
   };
 
-  /// Back-compat ctor — wraps a scalar dconv into a default
-  /// ConvergencePolicy. Used by the existing skeleton test.
-  ESSolver(madness::World &world, ResponseGroundState target, double dconv = 1e-4,
-           PrintLevel print_level = PrintLevel::Normal)
-      : ESSolver(world, std::move(target),
-                 ConvergencePolicy{dconv}, print_level) {}
-
-  /// Preferred ctor — caller supplies a policy directly.
-  ESSolver(madness::World &world, ResponseGroundState target,
+  /// Preferred ctor — caller supplies a problem and a policy.
+  ESSolver(madness::World &world, ESProblem<Type, Shell> problem,
            ConvergencePolicy policy,
            PrintLevel print_level = PrintLevel::Normal)
-      : world_(world), target_(std::move(target)),
+      : world_(world), gs_(std::move(problem.gs)),
+        n_roots_(problem.n_roots),
         policy_(policy), kain_(world, policy),
         print_level_(print_level) {
     refresh_convergence_targets();
@@ -101,18 +110,18 @@ public:
     refresh_convergence_targets();
   }
 
-  /// Swap in a fresh target — used by iterate_protocol's prepare
-  /// callback after the ground-state side has been re-prepped at a
-  /// new (k, thresh). The target carries everything protocol-
-  /// sensitive that isn't part of State (phi0, V_local, coulop, Q,
-  /// fock).  n_roots must match the previous target or the in-flight
-  /// state's roots will be inconsistent. KAIN's stored iterates are
-  /// reset because they live at the old wavelet basis.
-  void set_target(ResponseGroundState t) {
-    target_ = std::move(t);
+  /// Swap in a fresh ground state — used by iterate_protocol's
+  /// prepare callback after the ground-state side has been re-prepped
+  /// at a new (k, thresh). Carries everything protocol-sensitive that
+  /// isn't part of State (phi0, V_local, coulop, Q, fock). KAIN's
+  /// stored iterates are reset because they live at the old wavelet
+  /// basis. n_roots is unchanged.
+  void set_gs(ResponseGroundState gs) {
+    gs_ = std::move(gs);
     kain_.reset();
   }
-  const ResponseGroundState& target() const { return target_; }
+  const ResponseGroundState& gs()      const { return gs_; }
+  int                        n_roots() const { return n_roots_; }
 
   /// Enable per-iter convergence logging to a CSV file. One row per
   /// (iter, state) appended at the end of each step(). Header is
@@ -136,9 +145,9 @@ private:
   void print_header() const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
     print("");
-    print("ESSolver<TDA, ClosedShell>  num_roots =", target_.n_roots,
+    print("ESSolver<TDA, ClosedShell>  num_roots =", n_roots_,
           " thresh =", madness::FunctionDefaults<3>::get_thresh(),
-          " c_xc =", target_.c_xc);
+          " c_xc =", gs_.c_xc);
     print("  policy: dconv_user =", policy_.dconv_user,
           " bsh_target =", targets_.bsh_residual,
           " density_target =", targets_.density_residual,
@@ -177,6 +186,32 @@ private:
     print("[DEBUG] S (overlap):");    print(S_mat);
     print("[DEBUG] omega:");          print(omega_new);
     print("[DEBUG] U:");              print(U);
+  }
+
+  /// Slot-identity diagnostic — emitted per iter at Verbose+. Shows
+  /// whether dominance-sort swapped slots (perm != identity) and
+  /// whether the post-fixup U(i,i) stayed near ±1 (slot identity
+  /// preserved) or dropped (slot picked up character from another).
+  /// Pair this with the per-state residual columns to correlate
+  /// slot-flip events with KAIN history corruption.
+  void print_rot_slots(int iter,
+                       const rs::DiagonalizeResult &r) const {
+    if (print_level_ < PrintLevel::Verbose || world_.rank() != 0) return;
+    const long M = static_cast<long>(r.dominance_perm.size());
+    bool ident = true;
+    for (long i = 0; i < M; ++i)
+      if (r.dominance_perm[i] != i) { ident = false; break; }
+    printf("[ROT-SLOTS] iter=%d  perm=[", iter);
+    for (long i = 0; i < M; ++i)
+      printf(" %ld", r.dominance_perm[i]);
+    printf(" ]  U_diag=[");
+    for (long i = 0; i < r.U_diag.dim(0); ++i)
+      printf(" %+.3f", r.U_diag(i));
+    printf(" ]  omega_asc=[");
+    for (long i = 0; i < r.omega_ascending.dim(0); ++i)
+      printf(" %+.5f", r.omega_ascending(i));
+    printf(" ]%s\n", ident ? "  identity" : "  REORDERED");
+    fflush(stdout);
   }
 
   void print_debug_norms(int s, const State &in,
@@ -243,29 +278,53 @@ public:
   }
 
 private:
-  /// Top-of-iter Q-projection + Gram-Schmidt orthonormalization.
-  /// Shared by both step() variants.
+  /// Top-of-iter Q-projection + orthonormalization (mode picked by
+  /// `policy_.orthonormalize_mode`). Shared by both step() variants.
   void apply_top_of_iter_discipline(State &out, int M) {
+    // Q-project per spin.
     for (int s = 0; s < M; ++s) {
-      out.roots[s].x_alpha = target_.Qa(out.roots[s].x_alpha);
+      out.roots[s].x_alpha = gs_.Qa(out.roots[s].x_alpha);
       if constexpr (std::is_same_v<Shell, OpenShell>) {
-        out.roots[s].x_beta = target_.Qb(out.roots[s].x_beta);
+        out.roots[s].x_beta = gs_.Qb(out.roots[s].x_beta);
       }
     }
-    std::vector<vecfuncT> flats(M);
+
+    // Flatten — α (+ β for OpenShell) concat per state. The flat
+    // inner product gives the OpenShell bundle metric for free.
+    response_space flats(M);
     for (int s = 0; s < M; ++s) flats[s] = out.roots[s].flatten();
-    for (int pass = 0; pass < 2; ++pass) {
-      for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < i; ++j) {
-          const double c = madness::inner(flats[j], flats[i]);
-          madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
+
+    if (policy_.orthonormalize_mode ==
+        ConvergencePolicy::OrthonormalizeMode::Lowdin) {
+      // diag_level is derived from print_level_, which is uniform
+      // across ranks, so all ranks enter or skip the diagnostic
+      // collectives in lock-step inside lowdin_orthonormalize.
+      const int diag_level =
+          (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
+      const int dropped = rs::lowdin_orthonormalize(
+          world_, flats, /*thresh=*/-1.0, diag_level);
+      if (dropped > 0 && print_level_ >= PrintLevel::Normal &&
+          world_.rank() == 0) {
+        print("[LOWDIN] iter", out.iter, ": dropped", dropped,
+              "near-singular direction(s) (bundle partially collapsed)");
+      }
+    } else {
+      // Gram-Schmidt, 2-pass + normalize. Order-dependent: slot 0
+      // anchored, higher slots projected against lower.
+      for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i < M; ++i) {
+          for (int j = 0; j < i; ++j) {
+            const double c = madness::inner(flats[j], flats[i]);
+            madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
+          }
+          const double n2 = madness::inner(flats[i], flats[i]);
+          const double nrm = std::sqrt(std::abs(n2));
+          if (nrm > 1.0e-12)
+            madness::scale(world_, flats[i], 1.0 / nrm);
         }
-        const double n2 = madness::inner(flats[i], flats[i]);
-        const double nrm = std::sqrt(std::abs(n2));
-        if (nrm > 1.0e-12)
-          madness::scale(world_, flats[i], 1.0 / nrm);
       }
     }
+
     for (int s = 0; s < M; ++s) out.roots[s].from_flat(flats[s]);
   }
 
@@ -298,7 +357,9 @@ private:
   void finalize_iter(const State &in, State &out,
                      const std::vector<Storage> &x_pre_bsh) {
     (void)in;
-    kain_.apply(x_pre_bsh, out.roots);
+    const int kain_diag =
+        (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
+    kain_.apply(x_pre_bsh, out.roots, kain_diag);
     for (double r : out.last_bsh_residual) {
       if (r > policy_.explosion_guard) { out.diverged = true; break; }
     }
@@ -321,7 +382,7 @@ public:
     State out;
     out.iter  = in.iter + 1;
     out.roots = in.roots;
-    const int M = target_.n_roots;
+    const int M = n_roots_;
 
     // ---- 0. top-of-iter discipline ----------------------------------------
     // Strip ground-orbital contamination that accumulated during the
@@ -329,35 +390,9 @@ public:
     // ground-state component is amplified by BSH into the
     // ω = -ε_core ghost eigenvector. Then re-orthonormalize the
     // bundle so the subspace step sees a clean basis. Mirrors legacy
-    // ExcitedResponse.cpp:2483-2517 (top-of-iter Q + Gram-Schmidt).
-    {
-      // Q-project each root, per spin.
-      for (int s = 0; s < M; ++s) {
-        out.roots[s].x_alpha = target_.Qa(out.roots[s].x_alpha);
-        if constexpr (std::is_same_v<Shell, OpenShell>) {
-          out.roots[s].x_beta = target_.Qb(out.roots[s].x_beta);
-        }
-      }
-      // Gram-Schmidt + normalize across roots. The flat representation
-      // already sums α and β contributions in the inner product, so
-      // this orthonormalizes against the OpenShell bundle metric for
-      // free. Two-pass GS ("twice is enough").
-      std::vector<vecfuncT> flats(M);
-      for (int s = 0; s < M; ++s) flats[s] = out.roots[s].flatten();
-      for (int pass = 0; pass < 2; ++pass) {
-        for (int i = 0; i < M; ++i) {
-          for (int j = 0; j < i; ++j) {
-            const double c = madness::inner(flats[j], flats[i]);
-            madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
-          }
-          const double n2 = madness::inner(flats[i], flats[i]);
-          const double nrm = std::sqrt(std::abs(n2));
-          if (nrm > 1.0e-12)
-            madness::scale(world_, flats[i], 1.0 / nrm);
-        }
-      }
-      for (int s = 0; s < M; ++s) out.roots[s].from_flat(flats[s]);
-    }
+    // ExcitedResponse.cpp:2483-2517 (top-of-iter Q + Gram-Schmidt or
+    // Löwdin, depending on policy.orthonormalize_mode).
+    apply_top_of_iter_discipline(out, M);
 
     // ---- 1. per-root building blocks --------------------------------------
     // Intermediates are Storage-typed: TDA-ClosedShell carries only
@@ -368,13 +403,13 @@ public:
     std::vector<madness::real_function_3d> rho_alpha(M);
     out.last_density_residual.assign(M, 0.0);
     for (int s = 0; s < M; ++s) {
-      rho_alpha[s]  = K::compute_density(world_, target_, out.roots[s]);
-      gamma[s]      = K::compute_gamma(world_, target_, out.roots[s],
+      rho_alpha[s]  = K::compute_density(world_, gs_, out.roots[s]);
+      gamma[s]      = K::compute_gamma(world_, gs_, out.roots[s],
                                        rho_alpha[s]);
-      V0x[s]        = K::compute_V0x(world_, target_, out.roots[s]);
-      T0x[s]        = K::compute_T0x(world_, target_, out.roots[s]);
-      E0x_full[s]   = K::compute_E0x_full(world_, target_, out.roots[s]);
-      E0x[s]        = K::compute_E0x(world_, target_, out.roots[s]);
+      V0x[s]        = K::compute_V0x(world_, gs_, out.roots[s]);
+      T0x[s]        = K::compute_T0x(world_, gs_, out.roots[s]);
+      E0x_full[s]   = K::compute_E0x_full(world_, gs_, out.roots[s]);
+      E0x[s]        = K::compute_E0x(world_, gs_, out.roots[s]);
 
       // Δρ vs previous iter (per slot — see note in State).
       if (!in.rho_alpha_prev.empty()) {
@@ -431,9 +466,14 @@ public:
     }
     auto A     = rs::inner(X_rs, Lambda_rs);
     auto S_mat = rs::inner(X_rs, X_rs);
-    auto [omega_new, U] = rs::diagonalize(A, S_mat);
+    auto diag_result = rs::diagonalize(A, S_mat,
+                                       /*thresh_degenerate=*/-1.0,
+                                       policy_.cluster_unmix_factor);
+    auto &omega_new = diag_result.omega;
+    auto &U         = diag_result.U;
     out.omega = omega_new;
     print_debug_iter(A, S_mat, omega_new, U);
+    print_rot_slots(out.iter, diag_result);
 
     // ---- 4. rotate the response_spaces needed for Theta -------------------
     response_space V0x_rs(M), E0x_rs(M), gamma_rs(M);
@@ -472,7 +512,7 @@ public:
     std::vector<Storage> x_pre_bsh = out.roots;
     out.last_bsh_residual.assign(M, 0.0);
     for (int s = 0; s < M; ++s) {
-      auto x_new = K::bsh_apply(world_, target_, out.roots[s],
+      auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
                                 theta[s], omega_new(s));
       out.last_bsh_residual[s] =
           K::compute_residual_norm(world_, out.roots[s], x_new);
@@ -484,7 +524,11 @@ public:
     // ---- 7. KAIN acceleration + step restriction --------------------------
     // Feed (rotated x_pre_bsh) → (raw BSH output in out.roots).
     // policy_.kain=false disables.
-    kain_.apply(x_pre_bsh, out.roots);
+    {
+      const int kain_diag =
+          (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
+      kain_.apply(x_pre_bsh, out.roots, kain_diag);
+    }
 
     // Explosion guard — if any per-root BSH residual blows up past
     // policy_.explosion_guard, mark the state diverged and let iterate<>
@@ -518,7 +562,7 @@ public:
     State out;
     out.iter  = in.iter + 1;
     out.roots = in.roots;
-    const int M = target_.n_roots;
+    const int M = n_roots_;
     const double thr = madness::FunctionDefaults<3>::get_thresh();
 
     // ---- 0. top-of-iter discipline ----------------------------------------
@@ -529,7 +573,7 @@ public:
     std::vector<madness::real_function_3d> rho_alpha(M);
     out.last_density_residual.assign(M, 0.0);
     for (int s = 0; s < M; ++s) {
-      rho_alpha[s] = K::compute_density(world_, target_, out.roots[s]);
+      rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
       if (!in.rho_alpha_prev.empty()) {
         auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
         out.last_density_residual[s] = drho.norm2();
@@ -537,17 +581,17 @@ public:
 
       // Stream Lambda = T0x + V0x − E0x_full + gamma. Each temporary
       // is scoped: built, axpy'd into lambda[s], then freed.
-      lambda[s] = K::compute_T0x(world_, target_, out.roots[s]);
+      lambda[s] = K::compute_T0x(world_, gs_, out.roots[s]);
       {
-        auto V = K::compute_V0x(world_, target_, out.roots[s]);
+        auto V = K::compute_V0x(world_, gs_, out.roots[s]);
         lambda[s].axpy(world_, +1.0, V);
       }
       {
-        auto Efull = K::compute_E0x_full(world_, target_, out.roots[s]);
+        auto Efull = K::compute_E0x_full(world_, gs_, out.roots[s]);
         lambda[s].axpy(world_, -1.0, Efull);
       }
       {
-        auto G = K::compute_gamma(world_, target_, out.roots[s], rho_alpha[s]);
+        auto G = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[s]);
         lambda[s].axpy(world_, +1.0, G);
       }
       lambda[s].truncate_all(world_, thr);
@@ -568,9 +612,14 @@ public:
     }
     auto A     = rs::inner(X_rs, Lambda_rs);
     auto S_mat = rs::inner(X_rs, X_rs);
-    auto [omega_new, U] = rs::diagonalize(A, S_mat);
+    auto diag_result = rs::diagonalize(A, S_mat,
+                                       /*thresh_degenerate=*/-1.0,
+                                       policy_.cluster_unmix_factor);
+    auto &omega_new = diag_result.omega;
+    auto &U         = diag_result.U;
     out.omega = omega_new;
     print_debug_iter(A, S_mat, omega_new, U);
+    print_rot_slots(out.iter, diag_result);
 
     // ---- 4. rotate X only; drop Lambda ------------------------------------
     rs::transform(world_, X_rs, U);
@@ -587,22 +636,22 @@ public:
     for (int s = 0; s < M; ++s) {
       // ρ on rotated X (different from the pre-rotation ρ we used for
       // Lambda — gamma here needs the rotated coupling).
-      auto rho_rot = K::compute_density(world_, target_, out.roots[s]);
+      auto rho_rot = K::compute_density(world_, gs_, out.roots[s]);
 
       // Stream Theta = V0x − E0x_nodi + gamma, scoped temporaries.
-      auto theta = K::compute_V0x(world_, target_, out.roots[s]);
+      auto theta = K::compute_V0x(world_, gs_, out.roots[s]);
       {
-        auto E = K::compute_E0x(world_, target_, out.roots[s]);
+        auto E = K::compute_E0x(world_, gs_, out.roots[s]);
         theta.axpy(world_, -1.0, E);
       }
       {
-        auto G = K::compute_gamma(world_, target_, out.roots[s], rho_rot);
+        auto G = K::compute_gamma(world_, gs_, out.roots[s], rho_rot);
         theta.axpy(world_, +1.0, G);
       }
       theta.truncate_all(world_, thr);
 
       // BSH
-      auto x_new = K::bsh_apply(world_, target_, out.roots[s],
+      auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
                                 theta, omega_new(s));
       out.last_bsh_residual[s] =
           K::compute_residual_norm(world_, out.roots[s], x_new);
@@ -639,7 +688,7 @@ public:
   }
 
   void save(const State &s, const std::string &path_prefix) const {
-    for (int b = 0; b < target_.n_roots; ++b) {
+    for (int b = 0; b < n_roots_; ++b) {
       s.roots[b].save(world_, path_prefix + ".root_" + std::to_string(b));
     }
   }
@@ -726,7 +775,8 @@ private:
   }
 
   madness::World            &world_;
-  ResponseGroundState                   target_;
+  ResponseGroundState        gs_;
+  int                        n_roots_ = 0;
   ConvergencePolicy          policy_;
   ConvergencePolicy::Targets targets_{};
   ResponseSubspaceKain<Storage>   kain_;
@@ -743,7 +793,8 @@ private:
 
 // Call-site shape — identical across (Type, Shell):
 //
-//   ESSolver<TDA, ClosedShell> solver(world, build_target(...),
+//   auto problem = build_es_problem_tda<ClosedShell>(world, gs, n_roots);
+//   ESSolver<TDA, ClosedShell> solver(world, problem,
 //                                     ConvergencePolicy{1e-4});
 //   typename ESSolver<TDA, ClosedShell>::State s0 =
 //       build_initial_guess(...);
