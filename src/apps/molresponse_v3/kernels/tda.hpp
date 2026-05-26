@@ -512,4 +512,12 @@ struct Kernels<TDA, OpenShell> {
 
 } // namespace molresponse_v3
 
+// Interface enforcement — TDA is ES-only, so it must satisfy the
+// extended ESKernel contract (FDKernel + Lambda machinery).
+#include "kernel_interface.hpp"
+MV3_ASSERT_ES_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::TDA,
+                                                ::molresponse_v3::ClosedShell>);
+MV3_ASSERT_ES_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::TDA,
+                                                ::molresponse_v3::OpenShell>);
+
 #endif // MOLRESPONSE_V3_KERNELS_TDA_HPP

@@ -331,4 +331,12 @@ struct Kernels<Static, OpenShell> {
 
 } // namespace molresponse_v3
 
+// Interface enforcement — both specializations must satisfy FDKernel.
+// Static is FD-only; no Lambda machinery needed.
+#include "kernel_interface.hpp"
+MV3_ASSERT_FD_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::Static,
+                                                ::molresponse_v3::ClosedShell>);
+MV3_ASSERT_FD_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::Static,
+                                                ::molresponse_v3::OpenShell>);
+
 #endif // MOLRESPONSE_V3_KERNELS_STATIC_HPP

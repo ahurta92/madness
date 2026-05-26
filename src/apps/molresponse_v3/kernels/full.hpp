@@ -417,4 +417,14 @@ struct Kernels<Full, OpenShell> {
 
 } // namespace molresponse_v3
 
+// Interface enforcement — currently FD-only (FDSolver<Full, *>). When
+// ESSolver<Full, *> lands, promote these to MV3_ASSERT_ES_KERNEL after
+// adding compute_T0x / compute_E0x_full / compute_lambda to the Full
+// kernels.
+#include "kernel_interface.hpp"
+MV3_ASSERT_FD_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::Full,
+                                                ::molresponse_v3::ClosedShell>);
+MV3_ASSERT_FD_KERNEL(::molresponse_v3::Kernels<::molresponse_v3::Full,
+                                                ::molresponse_v3::OpenShell>);
+
 #endif // MOLRESPONSE_V3_KERNELS_FULL_HPP
