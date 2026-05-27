@@ -5,6 +5,14 @@ you should immediately know what solver you're in (FD or ES), what type
 definitions are being used (static/full/TDA), and what each algorithmic
 step does. The code should read like the math.
 
+> **Authoritative formulas:** this document describes the *type-system
+> architecture*. For the exact operator formulas, metric/sign
+> conventions, density prefactors, and the legacy source line that is the
+> ground truth for each, see **`operator_contracts.md`** — that file is
+> the numeric reference and is kept in sync with the validated code.
+> Where this design sketch and `operator_contracts.md` differ on a
+> number, `operator_contracts.md` wins.
+
 ---
 
 ## Two Solvers
@@ -59,7 +67,8 @@ into every operator.
 
 - **Storage:** x functions only — {x_i, i = 1..n_occ}
 - **Implicit relation:** y_i = x_i
-- **Response density:** rho^(1) = 2 * sum_i [phi_i * x_i]
+- **Response density:** rho^(1) = 4 * sum_i [phi_i * x_i]
+  (spin factor 2 × y=x factor 2)
 - **BSH shift:** mu_i = sqrt(-2 * epsilon_i), no frequency shift
 - **Used by:** FD solver at omega = 0
 
@@ -67,7 +76,8 @@ into every operator.
 
 - **Storage:** both x and y — {x_i, y_i, i = 1..n_occ}
 - **No implicit relation:** x and y are independent
-- **Response density:** rho^(1) = sum_i [phi_i * (x_i + y_i)]
+- **Response density:** rho^(1) = 2 * sum_i [phi_i * (x_i + y_i)]
+  (spin factor 2; reduces to Static's 4*sum(phi*x) when y=x)
 - **BSH shift:** mu+_i = sqrt(-2*(epsilon_i + omega)) for x,
                   mu-_i = sqrt(-2*(epsilon_i - omega)) for y
 - **Used by:** FD solver at omega != 0, ES solver (full TDDFT/TDHF)
@@ -76,19 +86,21 @@ into every operator.
 
 - **Storage:** x functions only — {x_i, i = 1..n_occ}
 - **Implicit relation:** y_i = 0
-- **Response density:** rho^(1) = sum_i [phi_i * x_i]  (no factor of 2)
+- **Response density:** rho^(1) = 2 * sum_i [phi_i * x_i]
+  (spin factor 2; half of Static, which carries the extra y=x factor)
 - **BSH shift:** mu_i = sqrt(-2 * (epsilon_i + omega)) for x only
 - **Used by:** ES solver (Tamm-Dancoff approximation)
 
 ### Why TDA != Static
 
-Both store only x functions. But:
-- Static assumes y = x → density has factor of 2
-- TDA assumes y = 0 → density has no factor of 2
+Both store only x functions, and both carry the spin factor of 2. But:
+- Static assumes y = x → density picks up an *extra* factor of 2
+  (`4*sum(phi*x)`)
+- TDA assumes y = 0 → density has only the spin factor (`2*sum(phi*x)`)
 
-This changes every operator that depends on the density (Coulomb,
-exchange, XC). They are genuinely different types, not the same type
-with a flag.
+So Static density is exactly twice TDA density. This changes every
+operator that depends on the density (Coulomb, exchange, XC). They are
+genuinely different types, not the same type with a flag.
 
 ### Why Full FD == Full ES (at the building block level)
 
@@ -112,9 +124,12 @@ Given ground-state orbitals {phi_i} and response functions, compute rho^(1).
 
 | Type   | Definition                                    |
 |--------|-----------------------------------------------|
-| Static | rho^(1) = 2 * sum_i [phi_i * x_i]            |
-| Full   | rho^(1) = sum_i [phi_i * (x_i + y_i)]        |
-| TDA    | rho^(1) = sum_i [phi_i * x_i]                |
+| Static | rho^(1) = 4 * sum_i [phi_i * x_i]            |
+| Full   | rho^(1) = 2 * sum_i [phi_i * (x_i + y_i)]    |
+| TDA    | rho^(1) = 2 * sum_i [phi_i * x_i]            |
+
+(Restricted/closed-shell prefactors. Unrestricted halves the spin
+factor: Static 2, Full 1. See `operator_contracts.md` density row.)
 
 #### 2. Coulomb Potential (gamma)
 
@@ -122,12 +137,13 @@ Given the response density, compute the Coulomb potential.
 
 | Type   | Definition                                    |
 |--------|-----------------------------------------------|
-| Static | gamma = J[2 * sum_i(phi_i * x_i)]             |
-| Full   | gamma = J[sum_i(phi_i * (x_i + y_i))]         |
-| TDA    | gamma = J[sum_i(phi_i * x_i)]                 |
+| Static | gamma = J[4 * sum_i(phi_i * x_i)]             |
+| Full   | gamma = J[2 * sum_i(phi_i * (x_i + y_i))]     |
+| TDA    | gamma = J[2 * sum_i(phi_i * x_i)]             |
 
-All three call the same Coulomb operator J, but on different densities.
-The Coulomb operator itself is type-independent.
+All three call the same Coulomb operator J, but on the type's response
+density rho^(1) from #1 above. The Coulomb operator itself is
+type-independent.
 
 #### 3. Exchange Potential (HF)
 
@@ -272,9 +288,17 @@ Valid combinations and their use cases:
 |--------|--------|----------------------------------------|
 | FD     | Static | Polarizability at omega=0, static Raman|
 | FD     | Full   | Dynamic polarizability, hyperpolarizability|
-| ES     | Full   | Full TDDFT/TDHF excited states         |
+| ES     | Full   | Full TDDFT/TDHF excited states (direct (X,Y) iteration, `ESSolver<Full>`)|
+| ES     | Full   | Same, via symmetric reduction (A−B)(A+B)u=ω²u (`ESSolverFullRPA`)|
 | ES     | TDA    | Tamm-Dancoff excited states            |
 | FD     | TDA    | (not standard, but type system allows) |
+
+Full ES is realized two ways that must agree on ω: the generic
+`ESSolver<Full, ClosedShell>` (direct paired-(X,Y) iteration with the
+indefinite-metric subspace step) and the dedicated `ESSolverFullRPA`
+(Davidson on u = X+Y via the symmetric (A−B)(A+B) reduction). They
+cross-validate each other — see `operator_contracts.md` and
+`run_rpa_smoke.sh`.
 
 ---
 
