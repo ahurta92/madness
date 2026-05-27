@@ -8,17 +8,20 @@
 // each protocol level the policy resolves to EFFECTIVE TARGETS using the
 // SCF convention (SCF.cc::solve, lines 2143 + 2382):
 //
-//   dconv          = max(thresh, dconv_user)     // can't beat the protocol
-//   density_target = dconv
-//   bsh_target     = bsh_residual_factor * dconv     // SCF uses 5.0
+//   dconv          = max(thresh, dconv_user)          // can't beat the protocol
+//   density_target = density_residual_factor * dconv  // SCF uses max(5,natom)
+//   bsh_target     = bsh_residual_factor     * dconv  // SCF uses 5.0
 //
-// The single `dconv = max(thresh, dconv_user)` is the key idea: at a
-// given protocol you cannot resolve a residual below ~thresh (past that
-// you're just resolving noise until the next, deeper protocol refines
-// the wavelet basis), so the density target floors at thresh; and you
-// never ask for tighter than the user wants, so it also floors at
-// dconv_user. The BSH residual rides at 5× that, matching SCF::solve's
-// `bsh_residual < 5.0 * dconv` gate.
+// `dconv = max(thresh, dconv_user)` is the key idea: at a given protocol
+// you cannot resolve a residual below ~thresh (past that you're just
+// resolving noise until the next, deeper protocol refines the wavelet
+// basis), so dconv floors at thresh; and you never ask for tighter than
+// the user wants, so it also floors at dconv_user. BOTH gates then ride at
+// ~5× dconv (SCF.cc:2382 uses 5*dconv for bsh and dconv*max(5,natom) for
+// density). The 5× headroom is what lets a single coarse protocol reach
+// "converged" rather than stalling right at the thresh noise floor — at
+// thresh == dconv_user the targets are 5*thresh, comfortably above the
+// per-protocol floor.
 //
 // TODO(study): the factor 5.0 and dconv_user defaults are inherited from
 // SCF; response may want different values. Increasing thresh (deeper
@@ -34,13 +37,23 @@ namespace molresponse_v3 {
 
 struct ConvergencePolicy {
   // User-facing density-convergence target. The effective target at each
-  // protocol is max(thresh, dconv_user) — see effective_for_thresh.
+  // protocol is a multiple of max(thresh, dconv_user) — see
+  // effective_for_thresh.
   double dconv_user = 1.0e-4;
 
-  // BSH residual rides at this multiple of the (protocol-floored) dconv,
-  // matching SCF::solve's `bsh_residual < 5.0 * dconv` gate. Exposed so
-  // the planned convergence-parameter study can sweep it.
-  double bsh_residual_factor = 5.0;
+  // Both gates ride at a multiple of the (protocol-floored) dconv,
+  // matching SCF::solve (SCF.cc:2382):
+  //   bsh     < 5.0 * dconv
+  //   density < dconv * max(5, natom)   -> 5.0 for small molecules
+  // Using 5.0 for both gives each gate ~5x headroom over the per-protocol
+  // noise floor, so a single coarse protocol can actually reach
+  // "converged" instead of stalling right at thresh. (SCF's density gate
+  // loosens further with atom count; we keep a flat factor here since the
+  // response per-state density residual isn't naturally natom-scaled —
+  // revisit in the planned convergence study.) Exposed so the study can
+  // sweep them independently.
+  double bsh_residual_factor     = 5.0;
+  double density_residual_factor = 5.0;
 
   // Cluster-unmix threshold factor in rs::diagonalize. The legacy
   // path uses 100·thresh for TDA (loose) and 10·thresh for Full/RPA
@@ -131,8 +144,8 @@ struct ConvergencePolicy {
     // thresh, won't over-tighten past the user's request.
     const double dconv = std::max(thresh, dconv_user);
     Targets t;
-    t.density_residual = dconv;                          // SCF.cc:2382 (da < dconv)
-    t.bsh_residual     = bsh_residual_factor * dconv;    // SCF.cc:2382 (bsh < 5*dconv)
+    t.density_residual = density_residual_factor * dconv;  // SCF.cc:2382 (da < dconv*max(5,natom))
+    t.bsh_residual     = bsh_residual_factor * dconv;      // SCF.cc:2382 (bsh < 5*dconv)
     return t;
   }
 };
