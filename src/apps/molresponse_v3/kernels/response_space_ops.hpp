@@ -24,6 +24,8 @@
 #include <madness/tensor/tensor_lapack.h>
 
 #include <utility>
+#include <algorithm>
+#include <type_traits>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -248,6 +250,35 @@ diagonalize(const madness::Tensor<double> &A_in,
     ilo = ihi + 1;
   }
 
+  // ---- 5.5 Final ascending sort (port of legacy sort_eigenvalues) ------
+  // After dominance-swap + cluster-unmix canonicalize eigenvector phases
+  // and degenerate-subspace orientation, impose a STABLE ascending-omega
+  // order. Without this, the greedy dominance bubble (step 3) can flip
+  // slot assignment between iters for near-degenerate roots (U ~ 45°
+  // mixed → the swap test is numerically unstable), which corrupts
+  // per-slot KAIN history and drives the iteration into oscillation.
+  // Legacy ExcitedResponse.cpp:1122 applies exactly this as excited_eig's
+  // final step. std::stable_sort preserves the dominance order within
+  // exactly-equal clusters (cleaner than legacy's 1e-8 matching loop).
+  {
+    std::vector<long> order(nmo);
+    for (long i = 0; i < nmo; ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+                     [&](long a, long b) { return evals[a] < evals[b]; });
+    madness::Tensor<double> evals_s(nmo);
+    madness::Tensor<double> U_sorted(U_small.dim(0), U_small.dim(1));
+    std::vector<long> perm_s(nmo);
+    for (long i = 0; i < nmo; ++i) {
+      const long src = order[i];
+      evals_s(i)     = evals(src);
+      U_sorted(_, i) = U_small(_, src);
+      perm_s[i]      = perm[src];
+    }
+    evals   = evals_s;
+    U_small = U_sorted;
+    perm    = perm_s;
+  }
+
   // ---- 6. Transform U back to original size if reduced -----------------
   madness::Tensor<double> U;
   if (num_sv > 0) {
@@ -346,6 +377,91 @@ inner(const std::vector<State> &a, const std::vector<State> &b) {
   return inner(ra, rb);
 }
 
+// Member-presence detection for the State storage blocks. Used by
+// rs::metric to assemble the RPA overlap from whichever blocks a given
+// (Type, Shell) State actually carries. void_t idiom — same pattern as
+// kernel_interface.hpp's MV3_DEFINE_KERNEL_TRAIT.
+namespace detail {
+template <typename, typename = void> struct has_x_beta  : std::false_type {};
+template <typename T> struct has_x_beta <T,
+    std::void_t<decltype(std::declval<T>().x_beta )>> : std::true_type {};
+template <typename, typename = void> struct has_y_alpha : std::false_type {};
+template <typename T> struct has_y_alpha<T,
+    std::void_t<decltype(std::declval<T>().y_alpha)>> : std::true_type {};
+template <typename, typename = void> struct has_y_beta  : std::false_type {};
+template <typename T> struct has_y_beta <T,
+    std::void_t<decltype(std::declval<T>().y_beta )>> : std::true_type {};
+}  // namespace detail
+
+/// RPA subspace overlap S = ⟨a | M | b⟩ with the indefinite metric
+/// M = diag(I_X, −I_Y):
+///
+///   S(i,j) = ⟨X_a_i | X_b_j⟩ − ⟨Y_a_i | Y_b_j⟩   (closed shell)
+///
+/// Assembled block-by-block from whichever members the State carries
+/// (detected at compile time). The de-excitation (y_*) blocks enter
+/// with a minus sign — that's the RPA metric (legacy
+/// ExcitedResponse.cpp:871 S = ⟨X|X⟩ − ⟨Y|Y⟩). The excitation (x_*)
+/// blocks enter with plus. So:
+///   X-only (TDA): S = ⟨X|X⟩                       (= inner(a,b))
+///   XY  (Full)  : S = ⟨X|X⟩ − ⟨Y|Y⟩
+///   + β blocks for OpenShell, same signs per spin.
+///
+/// `if constexpr` discards the branch for any block a given State lacks
+/// (the &State::y_beta etc. is dependent, so it's never instantiated for
+/// types without that member). The sign lives on the scalar inner-product
+/// matrix — no function copies, unlike a negate-the-Y-block approach.
+///
+/// The companion subspace matrix A = inner(roots, lambda) stays the
+/// Euclidean (+) inner; only S carries the sign. As long as the states
+/// are excitation-dominated (‖X‖ > ‖Y‖ per state — true for physical
+/// singlets away from a triplet instability) S stays positive-definite
+/// and the standard sygvp path in `diagonalize` applies unmodified.
+template <typename State>
+inline madness::Tensor<double>
+metric(const std::vector<State> &a, const std::vector<State> &b) {
+  // Pull one named block from every state into a response_space.
+  auto block = [](const std::vector<State> &v,
+                  madness::vector_real_function_3d State::*mem) {
+    response_space rs(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) rs[i] = v[i].*mem;
+    return rs;
+  };
+
+  auto S = inner(block(a, &State::x_alpha), block(b, &State::x_alpha));
+  if constexpr (detail::has_x_beta<State>::value)
+    S += inner(block(a, &State::x_beta),  block(b, &State::x_beta));
+  if constexpr (detail::has_y_alpha<State>::value)
+    S -= inner(block(a, &State::y_alpha), block(b, &State::y_alpha));
+  if constexpr (detail::has_y_beta<State>::value)
+    S -= inner(block(a, &State::y_beta),  block(b, &State::y_beta));
+  return S;
+}
+
+/// Scalar response-metric inner product of two single states — the
+/// per-state form of `metric` above, and the convention used to
+/// normalize response vectors (legacy ResponseBase.cpp::normalize):
+///
+///   x-only  state : ⟨a|b⟩ = ⟨Xa|Xb⟩                  (standard norm)
+///   x-and-y state : ⟨a|b⟩ = ⟨Xa|Xb⟩ − ⟨Ya|Yb⟩        (indefinite RPA metric)
+///
+/// (+ β blocks for OpenShell, same signs per spin.) The de-excitation
+/// (Y) block carries the minus sign; for an X-only state there is no Y
+/// block so this is just the standard ⟨X|X⟩. Same indefinite metric as
+/// the subspace overlap `metric`, so a bundle orthonormalized with this
+/// goes into `diagonalize` with S ≈ I.
+template <typename State>
+inline double metric_inner(const State &a, const State &b) {
+  double s = madness::inner(a.x_alpha, b.x_alpha);
+  if constexpr (detail::has_x_beta<State>::value)
+    s += madness::inner(a.x_beta,  b.x_beta);
+  if constexpr (detail::has_y_alpha<State>::value)
+    s -= madness::inner(a.y_alpha, b.y_alpha);
+  if constexpr (detail::has_y_beta<State>::value)
+    s -= madness::inner(a.y_beta,  b.y_beta);
+  return s;
+}
+
 template <typename State>
 inline void
 transform(madness::World &world, std::vector<State> &X,
@@ -354,6 +470,69 @@ transform(madness::World &world, std::vector<State> &X,
   for (std::size_t i = 0; i < X.size(); ++i) rX[i] = X[i].flatten();
   transform(world, rX, U);
   for (std::size_t i = 0; i < X.size(); ++i) X[i].from_flat(rX[i]);
+}
+
+/// Project every state's response orbitals onto the ground-state virtual
+/// space — i.e. strip occupied-orbital contamination, per spin. Alpha
+/// blocks (x_alpha, y_alpha) go through `Qa`; beta blocks (x_beta,
+/// y_beta) through `Qb`. Which blocks a State carries is detected at
+/// compile time, so this is correct for X-only (TDA) and (X,Y) (Full)
+/// states and for both shells; the beta branches are discarded for
+/// closed shell, so `Qb` is never invoked there.
+///
+/// `Proj` is any callable mapping a vecfunc to its projected vecfunc
+/// (e.g. madness::QProjector<double,3>). Templated so this header keeps
+/// no chem dependency.
+///
+/// Used at the top of each ES iteration: BSH + KAIN leak a little
+/// occupied-orbital character into the bundle, and without re-projection
+/// that residual gets amplified by the next BSH apply into the
+/// ω = −ε_core ghost eigenvector. (Q is idempotent, so re-projecting an
+/// already-clean block — e.g. a Y block that bsh_apply just projected —
+/// is a harmless no-op.) Mirrors legacy ExcitedResponse.cpp:2483-2517.
+template <typename State, typename Proj>
+inline void project(std::vector<State> &roots,
+                    const Proj &Qa, const Proj &Qb) {
+  for (auto &s : roots) {
+    s.x_alpha = Qa(s.x_alpha);
+    if constexpr (detail::has_y_alpha<State>::value) s.y_alpha = Qa(s.y_alpha);
+    if constexpr (detail::has_x_beta <State>::value) s.x_beta  = Qb(s.x_beta);
+    if constexpr (detail::has_y_beta <State>::value) s.y_beta  = Qb(s.y_beta);
+  }
+}
+
+/// In-place modified Gram-Schmidt orthonormalization of a state bundle
+/// in the RESPONSE metric (`metric_inner`): ⟨X|X⟩ for x-only states,
+/// ⟨X|X⟩ − ⟨Y|Y⟩ for x-and-y states. This is the same indefinite metric
+/// the subspace step uses, so the bundle enters `diagonalize` with
+/// S ≈ I. Slot 0 is anchored and each higher slot is projected against
+/// all lower slots, so the input ordering is preserved — important for
+/// keeping per-slot KAIN history aligned.
+///
+/// Two passes by default: a single MGS pass leaves O(machine·κ) residual
+/// overlap for an ill-conditioned bundle; the second cleans it up. A
+/// slot whose metric norm collapses below 1e-12 (linearly dependent on
+/// the lower slots) is left un-normalized rather than blown up.
+template <typename State>
+inline void orthonormalize(madness::World &world, std::vector<State> &roots,
+                           int n_passes = 2) {
+  const std::size_t M = roots.size();
+
+  for (int pass = 0; pass < n_passes; ++pass) {
+    for (std::size_t i = 0; i < M; ++i) {
+      // Project out the lower (already metric-normalized) slots:
+      //   |i⟩ -= ⟨j|i⟩ |j⟩,   inner products in the response metric.
+      for (std::size_t j = 0; j < i; ++j) {
+        const double c = metric_inner(roots[j], roots[i]);
+        roots[i].axpy(world, -c, roots[j]);
+      }
+      // Normalize slot i in the response metric: ⟨X|X⟩ (x-only) or
+      // ⟨X|X⟩ − ⟨Y|Y⟩ (x-and-y). abs() guards the (unphysical) negative-
+      // norm case so a stray slot can't NaN the whole bundle.
+      const double nrm = std::sqrt(std::abs(metric_inner(roots[i], roots[i])));
+      if (nrm > 1.0e-12) roots[i].scale(world, 1.0 / nrm);
+    }
+  }
 }
 
 } // namespace rs

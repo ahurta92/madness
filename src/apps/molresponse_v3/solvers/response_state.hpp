@@ -15,10 +15,19 @@
 // even spell `state.x_beta` because that member does not exist on
 // `ResponseStateX<ClosedShell>`.
 //
-// Save / load: there are two LOGICAL bodies (X-only vs X-and-Y),
-// each instantiated for both shells. Four save() / load() function
-// definitions in this file, but they share the same algorithm
-// pattern per shape.
+// The mechanical per-block operations (axpy, copy, truncate, flatten,
+// from_flat, flat_size) are IDENTICAL modulo "which blocks exist", so
+// each struct exposes a single `blocks()` accessor (pointers to its
+// member vecfuncs, in flatten order) and delegates the operations to
+// the shared `state_ops::` helpers below. Adding or changing one of
+// these operations is then a one-place edit, and a new block layout
+// only has to declare its `blocks()` list. The structs stay plain
+// aggregates (no base class) so the `State{...}` brace-init used all
+// over the kernels keeps working.
+//
+// Save / load stay hand-written per shape: the on-disk format is
+// shape-specific (and predates this header), so it's kept explicit
+// rather than routed through blocks().
 // =========================================================================
 
 #include "../kernels/tags.hpp"
@@ -26,12 +35,83 @@
 #include <madness/mra/mra.h>
 #include <madness/world/parallel_archive.h>
 
+#include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
 namespace molresponse_v3 {
 
 using namespace madness;
+
+// ---- Shared per-block operations ----------------------------------------
+// Generic over any State that exposes:
+//   blocks()        -> std::array<std::vector<real_function_3d>*, N>
+//   blocks() const  -> std::array<const std::vector<real_function_3d>*, N>
+// with the blocks listed in the canonical flatten order. The flatten/
+// from_flat round-trip preserves all storage; that order is stable per
+// State type so KAIN's stored iterates index the same components every
+// iteration.
+namespace state_ops {
+
+template <class S>
+inline void axpy(S &s, World &world, double alpha, const S &other) {
+  auto mine = s.blocks();
+  auto theirs = other.blocks();
+  for (std::size_t b = 0; b < mine.size(); ++b)
+    gaxpy(world, 1.0, *mine[b], alpha, *theirs[b]);
+}
+
+/// Deep copy of every block. The default copy shares
+/// shared_ptr<FunctionImpl> handles; callers that mutate in place
+/// (assemble_*, axpy) need an independent buffer.
+template <class S>
+inline S copy(const S &s, World &world) {
+  S out = s;  // shallow — shares handles, fixed up block-by-block below
+  for (auto *blk : out.blocks()) *blk = madness::copy(world, *blk);
+  return out;
+}
+
+template <class S>
+inline void truncate_all(S &s, World &world, double thresh) {
+  for (auto *blk : s.blocks()) madness::truncate(world, *blk, thresh);
+}
+
+template <class S>
+inline void scale(S &s, World &world, double factor) {
+  for (auto *blk : s.blocks()) madness::scale(world, *blk, factor);
+}
+
+template <class S>
+inline std::size_t flat_size(const S &s) {
+  std::size_t n = 0;
+  for (const auto *blk : s.blocks()) n += blk->size();
+  return n;
+}
+
+template <class S>
+inline std::vector<real_function_3d> flatten(const S &s) {
+  std::vector<real_function_3d> v;
+  v.reserve(flat_size(s));
+  for (const auto *blk : s.blocks())
+    v.insert(v.end(), blk->begin(), blk->end());
+  return v;
+}
+
+/// Unpack a flat vector back into the blocks. Each block must already
+/// be sized (this reads blk->size() to partition) — true on every call
+/// site, where from_flat follows a flatten of an already-shaped state.
+template <class S>
+inline void from_flat(S &s, const std::vector<real_function_3d> &v) {
+  std::size_t off = 0;
+  for (auto *blk : s.blocks()) {
+    const std::size_t n = blk->size();
+    *blk = std::vector<real_function_3d>(v.begin() + off, v.begin() + off + n);
+    off += n;
+  }
+}
+
+}  // namespace state_ops
 
 // ---- ResponseStateX<ClosedShell> ----------------------------------------
 template <>
@@ -40,35 +120,34 @@ struct ResponseStateX<ClosedShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
 
-  /// In-place axpy across all components: *this += alpha * other.
-  /// Used by streaming theta assembly in FDSolver / ESSolver step().
+  // Blocks in flatten order. Sole per-type customization point — every
+  // mechanical op below is generic over this list (see state_ops::).
+  std::array<std::vector<real_function_3d>*, 1> blocks() {
+    return {&x_alpha};
+  }
+  std::array<const std::vector<real_function_3d>*, 1> blocks() const {
+    return {&x_alpha};
+  }
+
   void axpy(World &world, double alpha,
             const ResponseStateX<ClosedShell> &other) {
-    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
+    state_ops::axpy(*this, world, alpha, other);
   }
-
-  /// Deep copy of all component vecfuncTs. The default copy constructor
-  /// shares shared_ptr<FunctionImpl> handles; assemble_* helpers need an
-  /// independent buffer so subsequent in-place axpy cannot corrupt the
-  /// source.
   ResponseStateX<ClosedShell> copy(World &world) const {
-    return {madness::copy(world, x_alpha)};
+    return state_ops::copy(*this, world);
   }
-
-  /// Truncate all per-component vecfuncTs in place.
   void truncate_all(World &world, double thresh) {
-    madness::truncate(world, x_alpha, thresh);
+    state_ops::truncate_all(*this, world, thresh);
   }
-
-  // ---- flatten / from_flat / flat_size ----
-  // Pack all component vecfuncTs into a single flat vector (KAIN
-  // operates on flat vectors). The flatten/from_flat round-trip
-  // preserves all Storage data. Order is stable per Storage type so
-  // KAIN's stored iterates index the same components iter-to-iter.
-  std::size_t flat_size() const { return x_alpha.size(); }
-  std::vector<real_function_3d> flatten() const { return x_alpha; }
+  void scale(World &world, double factor) {
+    state_ops::scale(*this, world, factor);
+  }
+  std::size_t flat_size() const { return state_ops::flat_size(*this); }
+  std::vector<real_function_3d> flatten() const {
+    return state_ops::flatten(*this);
+  }
   void from_flat(const std::vector<real_function_3d>& v) {
-    x_alpha = v;
+    state_ops::from_flat(*this, v);
   }
 
   void save(World &world, const std::string &filename) const {
@@ -100,35 +179,32 @@ struct ResponseStateX<OpenShell> {
   std::size_t num_alpha() const { return x_alpha.size(); }
   std::size_t num_beta()  const { return x_beta.size(); }
 
+  std::array<std::vector<real_function_3d>*, 2> blocks() {
+    return {&x_alpha, &x_beta};
+  }
+  std::array<const std::vector<real_function_3d>*, 2> blocks() const {
+    return {&x_alpha, &x_beta};
+  }
+
   void axpy(World &world, double alpha,
             const ResponseStateX<OpenShell> &other) {
-    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
-    gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
+    state_ops::axpy(*this, world, alpha, other);
   }
-
   ResponseStateX<OpenShell> copy(World &world) const {
-    return {madness::copy(world, x_alpha),
-            madness::copy(world, x_beta)};
+    return state_ops::copy(*this, world);
   }
-
   void truncate_all(World &world, double thresh) {
-    madness::truncate(world, x_alpha, thresh);
-    madness::truncate(world, x_beta,  thresh);
+    state_ops::truncate_all(*this, world, thresh);
   }
-
-  std::size_t flat_size() const { return x_alpha.size() + x_beta.size(); }
+  void scale(World &world, double factor) {
+    state_ops::scale(*this, world, factor);
+  }
+  std::size_t flat_size() const { return state_ops::flat_size(*this); }
   std::vector<real_function_3d> flatten() const {
-    auto v = x_alpha;
-    v.insert(v.end(), x_beta.begin(), x_beta.end());
-    return v;
+    return state_ops::flatten(*this);
   }
   void from_flat(const std::vector<real_function_3d>& v) {
-    const std::size_t na = x_alpha.size();
-    const std::size_t nb = x_beta.size();
-    x_alpha = std::vector<real_function_3d>(
-        v.begin(), v.begin() + na);
-    x_beta  = std::vector<real_function_3d>(
-        v.begin() + na, v.begin() + na + nb);
+    state_ops::from_flat(*this, v);
   }
 
   void save(World &world, const std::string &filename) const {
@@ -163,34 +239,32 @@ struct ResponseStateXY<ClosedShell> {
 
   std::size_t num_alpha() const { return x_alpha.size(); }
 
+  std::array<std::vector<real_function_3d>*, 2> blocks() {
+    return {&x_alpha, &y_alpha};
+  }
+  std::array<const std::vector<real_function_3d>*, 2> blocks() const {
+    return {&x_alpha, &y_alpha};
+  }
+
   void axpy(World &world, double alpha,
             const ResponseStateXY<ClosedShell> &other) {
-    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
-    gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
+    state_ops::axpy(*this, world, alpha, other);
   }
-
   ResponseStateXY<ClosedShell> copy(World &world) const {
-    return {madness::copy(world, x_alpha),
-            madness::copy(world, y_alpha)};
+    return state_ops::copy(*this, world);
   }
-
   void truncate_all(World &world, double thresh) {
-    madness::truncate(world, x_alpha, thresh);
-    madness::truncate(world, y_alpha, thresh);
+    state_ops::truncate_all(*this, world, thresh);
   }
-
-  std::size_t flat_size() const { return x_alpha.size() + y_alpha.size(); }
+  void scale(World &world, double factor) {
+    state_ops::scale(*this, world, factor);
+  }
+  std::size_t flat_size() const { return state_ops::flat_size(*this); }
   std::vector<real_function_3d> flatten() const {
-    auto v = x_alpha;
-    v.insert(v.end(), y_alpha.begin(), y_alpha.end());
-    return v;
+    return state_ops::flatten(*this);
   }
   void from_flat(const std::vector<real_function_3d>& v) {
-    const std::size_t na = x_alpha.size();
-    x_alpha = std::vector<real_function_3d>(
-        v.begin(), v.begin() + na);
-    y_alpha = std::vector<real_function_3d>(
-        v.begin() + na, v.begin() + 2 * na);
+    state_ops::from_flat(*this, v);
   }
 
   void save(World &world, const std::string &filename) const {
@@ -227,49 +301,32 @@ struct ResponseStateXY<OpenShell> {
   std::size_t num_alpha() const { return x_alpha.size(); }
   std::size_t num_beta()  const { return x_beta.size(); }
 
+  std::array<std::vector<real_function_3d>*, 4> blocks() {
+    return {&x_alpha, &y_alpha, &x_beta, &y_beta};
+  }
+  std::array<const std::vector<real_function_3d>*, 4> blocks() const {
+    return {&x_alpha, &y_alpha, &x_beta, &y_beta};
+  }
+
   void axpy(World &world, double alpha,
             const ResponseStateXY<OpenShell> &other) {
-    gaxpy(world, 1.0, x_alpha, alpha, other.x_alpha);
-    gaxpy(world, 1.0, y_alpha, alpha, other.y_alpha);
-    gaxpy(world, 1.0, x_beta,  alpha, other.x_beta);
-    gaxpy(world, 1.0, y_beta,  alpha, other.y_beta);
+    state_ops::axpy(*this, world, alpha, other);
   }
-
   ResponseStateXY<OpenShell> copy(World &world) const {
-    return {madness::copy(world, x_alpha),
-            madness::copy(world, y_alpha),
-            madness::copy(world, x_beta),
-            madness::copy(world, y_beta)};
+    return state_ops::copy(*this, world);
   }
-
   void truncate_all(World &world, double thresh) {
-    madness::truncate(world, x_alpha, thresh);
-    madness::truncate(world, y_alpha, thresh);
-    madness::truncate(world, x_beta,  thresh);
-    madness::truncate(world, y_beta,  thresh);
+    state_ops::truncate_all(*this, world, thresh);
   }
-
-  std::size_t flat_size() const {
-    return 2 * (x_alpha.size() + x_beta.size());
+  void scale(World &world, double factor) {
+    state_ops::scale(*this, world, factor);
   }
+  std::size_t flat_size() const { return state_ops::flat_size(*this); }
   std::vector<real_function_3d> flatten() const {
-    auto v = x_alpha;
-    v.insert(v.end(), y_alpha.begin(), y_alpha.end());
-    v.insert(v.end(), x_beta.begin(),  x_beta.end());
-    v.insert(v.end(), y_beta.begin(),  y_beta.end());
-    return v;
+    return state_ops::flatten(*this);
   }
   void from_flat(const std::vector<real_function_3d>& v) {
-    const std::size_t na = x_alpha.size();
-    const std::size_t nb = x_beta.size();
-    x_alpha = std::vector<real_function_3d>(
-        v.begin(),                  v.begin() + na);
-    y_alpha = std::vector<real_function_3d>(
-        v.begin() + na,             v.begin() + 2 * na);
-    x_beta  = std::vector<real_function_3d>(
-        v.begin() + 2 * na,         v.begin() + 2 * na + nb);
-    y_beta  = std::vector<real_function_3d>(
-        v.begin() + 2 * na + nb,    v.begin() + 2 * na + 2 * nb);
+    state_ops::from_flat(*this, v);
   }
 
   void save(World &world, const std::string &filename) const {

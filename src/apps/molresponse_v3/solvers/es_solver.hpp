@@ -20,9 +20,10 @@
 // =========================================================================
 
 #include "../kernels/assembly.hpp"   // assemble_lambda, assemble_theta
+#include "../kernels/full.hpp"  // Kernels<Full, ClosedShell> (ES-capable)
 #include "../kernels/response_space_ops.hpp"
 #include "../kernels/tags.hpp"
-#include "../kernels/tda.hpp"   // Kernels<TDA, *>; add kernels/full.hpp etc.
+#include "../kernels/tda.hpp"   // Kernels<TDA, *>
 #include "convergence_policy.hpp"
 #include "iterate.hpp"
 #include "response_state.hpp"
@@ -278,39 +279,6 @@ public:
   }
 
 private:
-  /// Top-of-iter Q-projection + 2-pass Gram-Schmidt orthonormalization
-  /// of the bundle. Shared by both step() variants. Order-dependent:
-  /// slot 0 anchored, higher slots projected against lower. Operates on
-  /// the flat α (+β for OpenShell) concat so the OpenShell bundle metric
-  /// ⟨x_α|x_α⟩ + ⟨x_β|x_β⟩ comes out of madness::inner for free.
-  void apply_top_of_iter_discipline(State &out, int M) {
-    // Q-project per spin.
-    for (int s = 0; s < M; ++s) {
-      out.roots[s].x_alpha = gs_.Qa(out.roots[s].x_alpha);
-      if constexpr (std::is_same_v<Shell, OpenShell>) {
-        out.roots[s].x_beta = gs_.Qb(out.roots[s].x_beta);
-      }
-    }
-
-    response_space flats(M);
-    for (int s = 0; s < M; ++s) flats[s] = out.roots[s].flatten();
-
-    for (int pass = 0; pass < 2; ++pass) {
-      for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < i; ++j) {
-          const double c = madness::inner(flats[j], flats[i]);
-          madness::gaxpy(world_, 1.0, flats[i], -c, flats[j]);
-        }
-        const double n2 = madness::inner(flats[i], flats[i]);
-        const double nrm = std::sqrt(std::abs(n2));
-        if (nrm > 1.0e-12)
-          madness::scale(world_, flats[i], 1.0 / nrm);
-      }
-    }
-
-    for (int s = 0; s < M; ++s) out.roots[s].from_flat(flats[s]);
-  }
-
   /// Final stage shared by both variants — KAIN apply, explosion
   /// guard, banner, log. Mutates out in place.
   void finalize_iter(const State &in, State &out,
@@ -345,12 +313,11 @@ public:
 
     // ---- 0. top-of-iter discipline ----------------------------------------
     // Strip ground-orbital contamination that accumulated during the
-    // previous iter's BSH + KAIN steps; without this, the residual
-    // ground-state component is amplified by BSH into the
-    // ω = -ε_core ghost eigenvector. Then re-orthonormalize the
-    // bundle so the subspace step sees a clean basis. Mirrors legacy
-    // ExcitedResponse.cpp:2483-2517 (top-of-iter Q + Gram-Schmidt).
-    apply_top_of_iter_discipline(out, M);
+    // previous iter's BSH + KAIN steps (else BSH amplifies it into the
+    // ω = -ε_core ghost eigenvector), then re-orthonormalize so the
+    // subspace step sees a clean basis.
+    rs::project(out.roots, gs_.Qa, gs_.Qb);
+    rs::orthonormalize(world_, out.roots);
 
     // ---- 1. per-root building blocks --------------------------------------
     // Intermediates are Storage-typed: TDA-ClosedShell carries only
@@ -385,15 +352,22 @@ public:
     }
 
     // ---- 3. subspace A, S, diagonalize ------------------------------------
-    // rs::inner / rs::transform take std::vector<State> directly and
-    // flatten α (+β for OpenShell) under the hood via State::flatten()
-    // / State::from_flat(). For OpenShell that gives the bundle metric
-    //   A_ij = ⟨x_α_i|Λ_α_j⟩ + ⟨x_β_i|Λ_β_j⟩
-    // for free, and the rotation U (which mixes ROOTS, not spins)
-    // applied to the flat concat is identical to applying it per spin
-    // block.
+    // rs::inner / rs::metric / rs::transform take std::vector<State>
+    // directly and flatten α (+β for OpenShell) under the hood. The
+    // subspace matrix A uses the Euclidean (+) inner:
+    //   A_ij = ⟨x_α_i|Λ_α_j⟩ (+ ⟨y_α_i|Λ_y_j⟩ for Full, + β blocks for
+    //   OpenShell).
+    // The overlap S uses rs::metric — the indefinite RPA metric
+    // M = diag(I_X, −I_Y):
+    //   S_ij = ⟨X_i|X_j⟩ − ⟨Y_i|Y_j⟩   (Full)
+    //   S_ij = ⟨X_i|X_j⟩               (TDA — no Y block, M = I, so
+    //                                    rs::metric == rs::inner here).
+    // This is the RPA subspace eigenproblem A c = ω S c with the
+    // correct symplectic metric (legacy ExcitedResponse.cpp:871). The
+    // rotation U mixes ROOTS not spins, so applying it to the flat
+    // concat equals applying per spin block.
     auto A     = rs::inner(out.roots, lambda);
-    auto S_mat = rs::inner(out.roots, out.roots);
+    auto S_mat = rs::metric(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
                                        policy_.cluster_unmix_factor);
@@ -482,7 +456,8 @@ public:
     const double thr = madness::FunctionDefaults<3>::get_thresh();
 
     // ---- 0. top-of-iter discipline ----------------------------------------
-    apply_top_of_iter_discipline(out, M);
+    rs::project(out.roots, gs_.Qa, gs_.Qb);
+    rs::orthonormalize(world_, out.roots);
 
     // ---- 1 + 2. per-root Lambda assembly (streamed) -----------------------
     std::vector<Storage> lambda(M);
@@ -519,7 +494,7 @@ public:
     // flatten/from_flat happen under the hood, so OpenShell α+β bundle
     // metric and slot-preserving rotation come for free.
     auto A     = rs::inner(out.roots, lambda);
-    auto S_mat = rs::inner(out.roots, out.roots);
+    auto S_mat = rs::metric(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
                                        policy_.cluster_unmix_factor);

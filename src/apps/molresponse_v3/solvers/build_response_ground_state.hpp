@@ -25,7 +25,8 @@
 
 #include "../ESSolverGuess.hpp"  // make_initial_guess_tda_rhf / _uhf
 #include "../GroundState.hpp"
-#include "es_solver.hpp"         // ESSolver + ESProblem
+#include "es_solver.hpp"          // ESSolver + ESProblem
+#include "es_solver_full_rpa.hpp" // ESSolverFullRPA + ESProblemFullRPA
 #include "response_state.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -97,6 +98,24 @@ build_es_problem_tda(madness::World &world, GroundState &gs, int n_roots,
     p.gs = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
   else
     p.gs = build_response_ground_state_open_shell(world, gs, c_xc, lo);
+  p.n_roots = n_roots;
+  return p;
+}
+
+/// Build an ES problem for the Full (paired X,Y) excited-state solver.
+/// Currently restricted to ClosedShell — open-shell Full ES is out of
+/// scope. The ground-state side is identical to the TDA path; only the
+/// Type tag changes, which selects different per-iter Kernels and a
+/// different ResponseState storage shape downstream.
+template <typename Shell>
+inline ESProblem<Full, Shell>
+build_es_problem_full(madness::World &world, GroundState &gs, int n_roots,
+                      double c_xc = 1.0, double lo = 1.0e-10) {
+  static_assert(std::is_same_v<Shell, ClosedShell>,
+                "build_es_problem_full only supports ClosedShell today; "
+                "open-shell Full ES is not yet implemented.");
+  ESProblem<Full, Shell> p;
+  p.gs = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
   p.n_roots = n_roots;
   return p;
 }
@@ -189,6 +208,69 @@ slice_state_lowest(const typename ESSolver<TDA, Shell>::State &in,
 
   out.iter     = 0;     // fresh count for the main solver
   out.diverged = false;
+  return out;
+}
+
+/// Build an ES problem for the symmetric-reduction Full RPA solver
+/// (ESSolverFullRPA<ClosedShell>). Ground state is identical to TDA;
+/// distinct ESProblem type keeps ctor calls type-safe.
+template <typename Shell>
+inline ESProblemFullRPA<Shell>
+build_es_problem_full_rpa(madness::World &world, GroundState &gs,
+                          int n_roots,
+                          double c_xc = 1.0, double lo = 1.0e-10) {
+  static_assert(std::is_same_v<Shell, ClosedShell>,
+                "build_es_problem_full_rpa is ClosedShell only.");
+  ESProblemFullRPA<Shell> p;
+  p.gs = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
+  p.n_roots = n_roots;
+  return p;
+}
+
+/// Promote a TDA-ClosedShell ES state into a Full-RPA u-bundle:
+///   u = X + Y, seeded with Y = 0 ⇒ u = X.
+/// The Davidson iteration grows the Y contribution into u as needed
+/// through the chained-BSH preconditioned residual updates.
+inline ESSolverFullRPA<ClosedShell>::State
+promote_tda_to_full_rpa_closed_shell(
+    madness::World &world,
+    const ESSolver<TDA, ClosedShell>::State &in) {
+  ESSolverFullRPA<ClosedShell>::State out;
+  const long M = static_cast<long>(in.roots.size());
+  out.roots.resize(M);
+  for (long s = 0; s < M; ++s)
+    out.roots[s].x_alpha = madness::copy(world, in.roots[s].x_alpha);
+  out.omega = madness::copy(in.omega);
+  out.iter  = 0;
+  return out;
+}
+
+/// Promote a converged (or warmed-up) TDA-ClosedShell ES state into a
+/// Full-ClosedShell ES state. X is copied; Y is initialized to zero.
+///
+/// Y=0 is the TDA limit. The first Full iter couples X and Y via the
+/// cross-density γ[ρ_X+ρ_Y] and the paired BSH(+ω)/BSH(−ω), so Y picks
+/// up amplitude from iter 1. If Y stays at zero (a degenerate fixed
+/// point — would only happen for a coupling-free toy), the Full solver
+/// collapses to TDA in ω, which is also a useful sanity check.
+///
+/// `iter` is reset so the main solver counts from zero. Per-slot residuals
+/// and rho_prev are dropped — the new (X,Y) bundle is going to recompute
+/// them on its first iter anyway.
+inline ESSolver<Full, ClosedShell>::State
+promote_tda_to_full_closed_shell(
+    madness::World &world,
+    const ESSolver<TDA, ClosedShell>::State &in) {
+  ESSolver<Full, ClosedShell>::State out;
+  const long M = static_cast<long>(in.roots.size());
+  out.roots.resize(M);
+  for (long s = 0; s < M; ++s) {
+    out.roots[s].x_alpha = madness::copy(world, in.roots[s].x_alpha);
+    out.roots[s].y_alpha = madness::zero_functions_compressed<double, 3>(
+        world, in.roots[s].x_alpha.size());
+  }
+  out.omega = madness::copy(in.omega);
+  out.iter  = 0;
   return out;
 }
 
