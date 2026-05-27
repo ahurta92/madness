@@ -67,20 +67,22 @@ struct ESRef {
 
 static const ESRef ES_REFS[] = {
   // H2 RHF (legacy from test_es_solver.cpp:42-43, k=8).
-  // DALTON RPA at d-aug-cc-pVQZ: PENDING — run
-  //   bash refs/compute_dalton_d-aug-pvqz.sh h2
-  // and paste the omegas_au here.
+  // DALTON RPA at d-aug-cc-pVQZ (madness_studies/refs/dalton_tdhf.json:h2.rpa).
   {"H2",  1,
    {0.46535391, 0.47696774, 0.48065960, 0.48069615},
-   {},
-   "d-aug-cc-pVQZ (pending)"},
+   {0.46537636, 0.47706849, 0.48088936, 0.48088936},
+   "d-aug-cc-pVQZ"},
   // H2O RHF.
   // Legacy TDA: madness_studies/es_benchmarks/h2o_1942685/run_legacy_tda.
-  // DALTON RPA at aug-cc-pVDZ (refs/dalton_tdhf.json:h2o.rpa).
+  // DALTON RPA at d-aug-cc-pVQZ (madness_studies/refs/dalton_tdhf.json:h2o.rpa).
+  // NB: NOT aug-cc-pVDZ — the lowest roots include diffuse/Rydberg states
+  // (esp. root 3) that need double augmentation to reach the basis-set
+  // limit that complete-basis MRA is compared against. Against aug-cc-pVDZ
+  // root 3 looks ~3.5e-2 off; against d-aug-cc-pVQZ it is ~8e-5.
   {"H2O", 5,
    {0.31953104, 0.38160118, 0.40059069, 0.42073252},
-   {0.31732786, 0.37908704, 0.40334487, 0.44483438},
-   "aug-cc-pVDZ"},
+   {0.31778528, 0.37897397, 0.39965329, 0.40973190},
+   "d-aug-cc-pVQZ"},
   // C2H4 RHF.
   // Legacy TDA: madness_studies/es_benchmarks/c2h4_1942683/run_legacy_tda.
   // DALTON RPA at d-aug-cc-pVQZ (refs/dalton_tdhf.json:c2h4.rpa).
@@ -135,6 +137,8 @@ int main(int argc, char **argv) {
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
+              "[--load-roots-tda=DIR] "
+              "[--type=tda|full|full-rpa] "
               "[--guess=random|solid_harmonics] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
               "[--kain-cmax=X]");
@@ -190,6 +194,22 @@ int main(int argc, char **argv) {
     const std::string load_roots_dir = parser.key_exists("load-roots")
                                            ? parser.value_raw("load-roots")
                                            : std::string();
+    const std::string load_roots_tda_dir =
+        parser.key_exists("load-roots-tda")
+            ? parser.value_raw("load-roots-tda") : std::string();
+    // ES iteration variant: "tda" (default) or "full" (RPA paired X,Y).
+    // Full is ClosedShell-only today; open-shell + full is rejected
+    // below before the dispatch.
+    const std::string es_type = parser.key_exists("type")
+                                    ? parser.value("type")
+                                    : std::string("tda");
+    if (es_type != "tda" && es_type != "full" && es_type != "full-rpa") {
+      if (world.rank() == 0)
+        print("ERROR: --type must be 'tda', 'full', or 'full-rpa', got '",
+              es_type, "'");
+      finalize();
+      return 1;
+    }
     const ESGuessMode guess_mode = parser.key_exists("guess")
                                        ? parse_es_guess_mode(parser.value("guess"))
                                        : ESGuessMode::SolidHarmonics;
@@ -256,6 +276,14 @@ int main(int argc, char **argv) {
     gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
 
     const bool restricted = gs.is_spin_restricted();
+    if ((es_type == "full" || es_type == "full-rpa") && !restricted) {
+      if (world.rank() == 0)
+        print("ERROR: --type=", es_type, " requires a closed-shell "
+              "(restricted) ground state. Open-shell Full ES is not yet "
+              "implemented.");
+      finalize();
+      return 1;
+    }
     const ESRef* ref = find_ref(gs.num_alpha());
     if (!ref) {
       if (world.rank() == 0) {
@@ -285,6 +313,12 @@ int main(int argc, char **argv) {
     // -------------------------------------------------------------------
     madness::Tensor<double> final_omega;
     std::vector<double>     final_residuals;
+    // Convergence gate inputs (captured per branch alongside the omegas).
+    // A run is only a PASS if it actually CONVERGED — without this the
+    // ω-tolerance check alone passes a run that stalled at maxiter with a
+    // residual floor (exactly how the indefinite-metric bug hid as green).
+    bool   final_diverged        = false;
+    double final_residual_target = 0.0;  // solver's own bsh_residual target
 
     ConvergencePolicy policy;
     policy.dconv_user           = dconv;
@@ -331,7 +365,141 @@ int main(int argc, char **argv) {
     solvers::IterateProtocolPolicy proto_policy;
     proto_policy.max_iters_per_step = max_iters;
 
-    if (restricted) {
+    if (restricted && es_type == "full-rpa") {
+      // --- Symmetric-reduction RPA solver (Davidson on u = X+Y) ---
+      using Solver = ESSolverFullRPA<ClosedShell>;
+      auto problem = build_es_problem_full_rpa<ClosedShell>(
+          world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
+
+      // Initial u-bundle. Three modes mirroring --type=full:
+      //   (a) load Full-RPA archive directly (same-type reuse),
+      //   (b) load TDA archive and promote (u = X, Y=0 limit),
+      //   (c) fresh TDA warmup → promote.
+      Solver::State state0;
+      if (!load_roots_dir.empty()) {
+        // Same shape as TDA on disk (ResponseStateX<ClosedShell>), so
+        // we reuse load_es_roots<TDA,ClosedShell> for the u-bundle.
+        // Treating u as if it were X here is fine — the on-disk
+        // contents are vecfuncT<ClosedShell> regardless of label.
+        auto tmp = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
+        state0 = promote_tda_to_full_rpa_closed_shell(world, tmp);
+      } else if (!load_roots_tda_dir.empty()) {
+        auto tda_state =
+            load_es_roots<TDA, ClosedShell>(world, load_roots_tda_dir);
+        state0 = promote_tda_to_full_rpa_closed_shell(world, tda_state);
+      } else {
+        auto tda_state = run_oversampled_tda_warmup<ClosedShell>(
+            world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+            policy, /*c_xc=*/1.0, gs.params().lo(), print_level,
+            guess_mode);
+        state0 = promote_tda_to_full_rpa_closed_shell(world, tda_state);
+      }
+      Solver solver(world, std::move(problem), main_policy, print_level);
+      if (!log_path.empty()) solver.set_log_path(log_path);
+
+      auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
+        set_response_protocol(world, header.L, thresh, override_k);
+        const int    new_k = FunctionDefaults<3>::get_k();
+        const double new_t = FunctionDefaults<3>::get_thresh();
+        if (world.rank() == 0)
+          print("\n--- protocol step: thresh =", new_t,
+                "  k =", new_k, " ---");
+        auto coulop_new = poperatorT(
+            CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
+        gs.prepare(world, 0.001 * new_t, coulop_new, fock_json);
+        solv.set_gs(build_response_ground_state_closed_shell(
+            world, gs, /*c_xc=*/1.0, gs.params().lo()));
+        for (auto &root : st.roots)
+          for (auto &fn : root.x_alpha)
+            fn = madness::project(fn, new_k, new_t);
+      };
+      auto sf = solvers::iterate_protocol(
+          solver, state0, protocol_thresholds, prepare, proto_policy);
+      final_omega     = sf.omega;
+      final_residuals = sf.last_residual;
+      final_diverged        = sf.diverged;
+      final_residual_target = solver.targets().bsh_residual;
+
+      // Recover (X, Y) for downstream diagnostics / save (skipped at
+      // smoke-test stage to keep the dispatch lean — the u-bundle is
+      // saved as-is when --save-roots is set).
+      if (!save_roots_dir.empty()) {
+        // Save the u-bundle in the same on-disk shape as TDA roots
+        // (it's ResponseStateX<ClosedShell> either way). Recovery to
+        // (X, Y) is done in-process at load time on subsequent runs.
+        ESSolver<TDA, ClosedShell>::State as_tda;
+        as_tda.roots.resize(sf.roots.size());
+        for (size_t r = 0; r < sf.roots.size(); ++r)
+          as_tda.roots[r].x_alpha =
+              madness::copy(world, sf.roots[r].x_alpha);
+        as_tda.omega = madness::copy(sf.omega);
+        save_es_roots<TDA, ClosedShell>(world, as_tda, save_roots_dir,
+                                         /*converged=*/!sf.diverged);
+        if (world.rank() == 0)
+          print("[SAVE] full-rpa u-bundle: wrote", num_roots,
+                "root(s) +/", save_roots_dir, "/roots.json");
+      }
+    } else if (restricted && es_type == "full") {
+      // --- Full (paired X,Y) RPA path, ClosedShell only ---
+      using Solver = ESSolver<Full, ClosedShell>;
+      auto problem = build_es_problem_full<ClosedShell>(
+          world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
+
+      // Initial state: precedence is (a) same-type Full archive,
+      // (b) TDA archive promoted to Full with Y=0, (c) fresh TDA
+      // warmup promoted to Full with Y=0.
+      Solver::State state0;
+      if (!load_roots_dir.empty()) {
+        state0 = load_es_roots<Full, ClosedShell>(world, load_roots_dir);
+      } else if (!load_roots_tda_dir.empty()) {
+        auto tda_state =
+            load_es_roots<TDA, ClosedShell>(world, load_roots_tda_dir);
+        state0 = promote_tda_to_full_closed_shell(world, tda_state);
+      } else {
+        auto tda_state = run_oversampled_tda_warmup<ClosedShell>(
+            world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
+            policy, /*c_xc=*/1.0, gs.params().lo(), print_level,
+            guess_mode);
+        state0 = promote_tda_to_full_closed_shell(world, tda_state);
+      }
+      Solver solver(world, std::move(problem), main_policy, print_level);
+      if (!log_path.empty()) solver.set_log_path(log_path);
+
+      auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
+        set_response_protocol(world, header.L, thresh, override_k);
+        const int    new_k = FunctionDefaults<3>::get_k();
+        const double new_t = FunctionDefaults<3>::get_thresh();
+        if (world.rank() == 0)
+          print("\n--- protocol step: thresh =", new_t,
+                "  k =", new_k, " ---");
+        auto coulop_new = poperatorT(
+            CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
+        gs.prepare(world, 0.001 * new_t, coulop_new, fock_json);
+        solv.set_gs(build_response_ground_state_closed_shell(
+            world, gs, /*c_xc=*/1.0, gs.params().lo()));
+        for (auto &root : st.roots) {
+          for (auto &fn : root.x_alpha)
+            fn = madness::project(fn, new_k, new_t);
+          for (auto &fn : root.y_alpha)
+            fn = madness::project(fn, new_k, new_t);
+        }
+        for (auto &rho : st.rho_alpha_prev)
+          rho = madness::project(rho, new_k, new_t);
+      };
+      auto sf = solvers::iterate_protocol(
+          solver, state0, protocol_thresholds, prepare, proto_policy);
+      final_omega     = sf.omega;
+      final_residuals = sf.last_bsh_residual;
+      final_diverged        = sf.diverged;
+      final_residual_target = solver.targets().bsh_residual;
+      if (!save_roots_dir.empty()) {
+        save_es_roots<Full, ClosedShell>(world, sf, save_roots_dir,
+                                          /*converged=*/!sf.diverged);
+        if (world.rank() == 0)
+          print("[SAVE] es_roots: wrote", num_roots,
+                "root(s) +/", save_roots_dir, "/roots.json");
+      }
+    } else if (restricted) {
       using Solver = ESSolver<TDA, ClosedShell>;
       auto problem = build_es_problem_tda<ClosedShell>(
           world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
@@ -372,6 +540,8 @@ int main(int argc, char **argv) {
           solver, state0, protocol_thresholds, prepare, proto_policy);
       final_omega     = sf.omega;
       final_residuals = sf.last_bsh_residual;
+      final_diverged        = sf.diverged;
+      final_residual_target = solver.targets().bsh_residual;
       if (!save_roots_dir.empty()) {
         save_es_roots<TDA, ClosedShell>(world, sf, save_roots_dir,
                                         /*converged=*/!sf.diverged);
@@ -421,6 +591,8 @@ int main(int argc, char **argv) {
           solver, state0, protocol_thresholds, prepare, proto_policy);
       final_omega     = sf.omega;
       final_residuals = sf.last_bsh_residual;
+      final_diverged        = sf.diverged;
+      final_residual_target = solver.targets().bsh_residual;
       if (!save_roots_dir.empty()) {
         save_es_roots<TDA, OpenShell>(world, sf, save_roots_dir,
                                       /*converged=*/!sf.diverged);
@@ -443,9 +615,32 @@ int main(int argc, char **argv) {
       }
     }
 
+    // Convergence gate — checked BEFORE the per-root ω comparison. A run
+    // is only allowed to PASS if it actually converged: not diverged, and
+    // every root's BSH/Davidson residual below the solver's own target.
+    // Without this, the ω-tolerance check passes a run that stalled at
+    // maxiter on a residual floor — which is exactly how the
+    // indefinite-metric bug stayed green (ω within tol, residual ~7e-3,
+    // "stopped at maxiter, not converged"). The reference number is only
+    // meaningful for a converged state.
+    double max_residual = 0.0;
+    for (double r : final_residuals) max_residual = std::max(max_residual, r);
+    const bool solve_converged =
+        !final_diverged && !final_residuals.empty() &&
+        (max_residual <= final_residual_target);
+    if (world.rank() == 0) {
+      print("\n=== convergence gate ===");
+      print("  diverged       =", final_diverged);
+      print("  max_residual   =", max_residual,
+            "   target =", final_residual_target);
+      print("  CONVERGED      =", solve_converged,
+            solve_converged ? "" : "  <-- run did NOT converge → FAIL");
+    }
+
     // Two comparisons:
     //   (a) PASS/FAIL vs legacy molresponse TDA at the same protocol.
-    //       Tight tolerance (default 5 mhartree, --tol overrides).
+    //       A root passes only if the solve CONVERGED and |Δω| < tol
+    //       (default 5 mhartree, --tol overrides).
     //   (b) Informational vs DALTON RPA at the given basis. Not part
     //       of the pass/fail; difference scales with TDA-vs-RPA gap.
     int passed = 0, failed = 0;
@@ -458,12 +653,13 @@ int main(int argc, char **argv) {
                 ref->name, " RHF) ===");
         for (long i = 0; i < n_compare; ++i) {
           double err = std::abs(final_omega(i) - ref->legacy_tda[i]);
-          bool ok = err < tol;
+          bool ok = solve_converged && (err < tol);
           if (world.rank() == 0) {
             print("  [", (ok ? "PASS" : "FAIL"),
                   "]  omega[", i, "]  ref=", ref->legacy_tda[i],
                   "  actual=", final_omega(i),
-                  "  err=", err, "  tol=", tol);
+                  "  err=", err, "  tol=", tol,
+                  (solve_converged ? "" : "  (not converged)"));
           }
           (ok ? passed : failed)++;
         }

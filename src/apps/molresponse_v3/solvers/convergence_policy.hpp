@@ -5,17 +5,27 @@
 // ConvergencePolicy — shared by ESSolver<T,S> and (future) FDSolver<T,S>.
 //
 // Policy carries USER intent (target dconv, behaviour switches). At
-// each protocol level the policy resolves to EFFECTIVE TARGETS by
-// applying floors against the current FunctionDefaults<3>::thresh —
-// you can't ask for a tighter BSH residual than the protocol can
-// support, so the policy floors at K * thresh.
+// each protocol level the policy resolves to EFFECTIVE TARGETS using the
+// SCF convention (SCF.cc::solve, lines 2143 + 2382):
 //
-//   bsh_target     = max(B * dconv_user,  F * thresh)
-//   density_target = max(    dconv_user,  D * thresh)
+//   dconv          = max(thresh, dconv_user)     // can't beat the protocol
+//   density_target = dconv
+//   bsh_target     = bsh_residual_factor * dconv     // SCF uses 5.0
 //
-// Defaults match the discipline that landed in
-// src/apps/molresponse/ExcitedResponse.cpp this session
-// (50× thresh BSH floor with WARNING when violated).
+// The single `dconv = max(thresh, dconv_user)` is the key idea: at a
+// given protocol you cannot resolve a residual below ~thresh (past that
+// you're just resolving noise until the next, deeper protocol refines
+// the wavelet basis), so the density target floors at thresh; and you
+// never ask for tighter than the user wants, so it also floors at
+// dconv_user. The BSH residual rides at 5× that, matching SCF::solve's
+// `bsh_residual < 5.0 * dconv` gate.
+//
+// TODO(study): the factor 5.0 and dconv_user defaults are inherited from
+// SCF; response may want different values. Increasing thresh (deeper
+// protocol) is what actually buys resolution — within a protocol the
+// residual floors at noise after a few iters. A sweep over
+// bsh_residual_factor / protocol ladder is planned to pick response-
+// appropriate values.
 // =========================================================================
 
 #include <algorithm>
@@ -23,13 +33,14 @@
 namespace molresponse_v3 {
 
 struct ConvergencePolicy {
-  // User-facing target.
+  // User-facing density-convergence target. The effective target at each
+  // protocol is max(thresh, dconv_user) — see effective_for_thresh.
   double dconv_user = 1.0e-4;
 
-  // Floor factors against the current protocol thresh.
-  double bsh_thresh_factor   = 50.0;  // bsh_target  >= 50 * thresh
-  double bsh_user_factor     =  5.0;  // bsh_target  >= 5  * dconv_user
-  double density_thresh_factor = 1.0; // density_target >= 1 * thresh
+  // BSH residual rides at this multiple of the (protocol-floored) dconv,
+  // matching SCF::solve's `bsh_residual < 5.0 * dconv` gate. Exposed so
+  // the planned convergence-parameter study can sweep it.
+  double bsh_residual_factor = 5.0;
 
   // Cluster-unmix threshold factor in rs::diagonalize. The legacy
   // path uses 100·thresh for TDA (loose) and 10·thresh for Full/RPA
@@ -116,11 +127,12 @@ struct ConvergencePolicy {
   };
 
   Targets effective_for_thresh(double thresh) const {
+    // SCF convention (SCF.cc:2143): can't resolve below the protocol's
+    // thresh, won't over-tighten past the user's request.
+    const double dconv = std::max(thresh, dconv_user);
     Targets t;
-    t.bsh_residual = std::max(bsh_user_factor * dconv_user,
-                              bsh_thresh_factor * thresh);
-    t.density_residual = std::max(dconv_user,
-                                  density_thresh_factor * thresh);
+    t.density_residual = dconv;                          // SCF.cc:2382 (da < dconv)
+    t.bsh_residual     = bsh_residual_factor * dconv;    // SCF.cc:2382 (bsh < 5*dconv)
     return t;
   }
 };
