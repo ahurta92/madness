@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
-              "[--load-roots-tda=DIR] "
+              "[--load-roots-tda=DIR] [--load-roots-full=DIR] "
               "[--type=tda|full|full-rpa] "
               "[--guess=random|solid_harmonics] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
@@ -197,6 +197,11 @@ int main(int argc, char **argv) {
     const std::string load_roots_tda_dir =
         parser.key_exists("load-roots-tda")
             ? parser.value_raw("load-roots-tda") : std::string();
+    // Seed full-rpa from a converged direct-Full (X,Y) archive: u = X+Y.
+    // The ideal full-rpa seed and a direct/symmetric consistency check.
+    const std::string load_roots_full_dir =
+        parser.key_exists("load-roots-full")
+            ? parser.value_raw("load-roots-full") : std::string();
     // ES iteration variant: "tda" (default) or "full" (RPA paired X,Y).
     // Full is ClosedShell-only today; open-shell + full is rejected
     // below before the dispatch.
@@ -371,10 +376,11 @@ int main(int argc, char **argv) {
       auto problem = build_es_problem_full_rpa<ClosedShell>(
           world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
 
-      // Initial u-bundle. Three modes mirroring --type=full:
+      // Initial u-bundle. Precedence:
       //   (a) load Full-RPA archive directly (same-type reuse),
-      //   (b) load TDA archive and promote (u = X, Y=0 limit),
-      //   (c) fresh TDA warmup → promote.
+      //   (b) load direct-Full (X,Y) archive → u = X+Y (ideal seed),
+      //   (c) load TDA archive and promote (u = X, Y=0 limit),
+      //   (d) fresh TDA warmup → promote.
       Solver::State state0;
       if (!load_roots_dir.empty()) {
         // Same shape as TDA on disk (ResponseStateX<ClosedShell>), so
@@ -383,6 +389,11 @@ int main(int argc, char **argv) {
         // contents are vecfuncT<ClosedShell> regardless of label.
         auto tmp = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
         state0 = promote_tda_to_full_rpa_closed_shell(world, tmp);
+      } else if (!load_roots_full_dir.empty()) {
+        // Seed from a converged direct-Full (X,Y): u = X + Y.
+        auto full_state =
+            load_es_roots<Full, ClosedShell>(world, load_roots_full_dir);
+        state0 = promote_full_to_full_rpa_closed_shell(world, full_state);
       } else if (!load_roots_tda_dir.empty()) {
         auto tda_state =
             load_es_roots<TDA, ClosedShell>(world, load_roots_tda_dir);

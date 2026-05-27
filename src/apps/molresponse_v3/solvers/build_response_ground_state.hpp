@@ -245,6 +245,29 @@ promote_tda_to_full_rpa_closed_shell(
   return out;
 }
 
+/// Promote a converged direct-Full ES state (X,Y) into a Full-RPA
+/// u-bundle: u = X + Y per root. This is the *ideal* full-rpa seed — a
+/// converged direct-Full fixed point gives u exactly, so the symmetric
+/// (A−B)(A+B) iteration should confirm convergence in ~1 step (Davidson
+/// residual ‖(A−B)(A+B)u − ω²u‖ ≈ 0). Doubles as a consistency check
+/// between the direct and symmetric-reduction solvers.
+inline ESSolverFullRPA<ClosedShell>::State
+promote_full_to_full_rpa_closed_shell(
+    madness::World &world,
+    const ESSolver<Full, ClosedShell>::State &in) {
+  ESSolverFullRPA<ClosedShell>::State out;
+  const long M = static_cast<long>(in.roots.size());
+  out.roots.resize(M);
+  for (long s = 0; s < M; ++s) {
+    out.roots[s].x_alpha = madness::copy(world, in.roots[s].x_alpha);
+    gaxpy(world, 1.0, out.roots[s].x_alpha,
+                 1.0, in.roots[s].y_alpha);   // u = X + Y
+  }
+  out.omega = madness::copy(in.omega);
+  out.iter  = 0;
+  return out;
+}
+
 /// Promote a converged (or warmed-up) TDA-ClosedShell ES state into a
 /// Full-ClosedShell ES state. X is copied; Y is initialized to zero.
 ///
