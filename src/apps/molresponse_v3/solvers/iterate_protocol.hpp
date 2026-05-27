@@ -50,6 +50,17 @@ auto maybe_canonicalize(Solver &solver, State &state, int)
 template <typename Solver, typename State>
 void maybe_canonicalize(Solver &, State &, long) { /* no-op */ }
 
+/// SFINAE helper: assign initial root identities once, before the ramp, if
+/// the solver tracks them (ESSolver). No-op for FDSolver (slots are
+/// perturbation channels with their own stable naming).
+template <typename Solver, typename State>
+auto maybe_assign_initial_identity(Solver &solver, State &state, int)
+    -> decltype(solver.ensure_root_identity(state), void()) {
+  solver.ensure_root_identity(state);
+}
+template <typename Solver, typename State>
+void maybe_assign_initial_identity(Solver &, State &, long) { /* no-op */ }
+
 template <typename Solver, typename PrepareFn>
 auto iterate_protocol(Solver &solver,
                       typename Solver::State state,
@@ -57,6 +68,9 @@ auto iterate_protocol(Solver &solver,
                       const PrepareFn &prepare,
                       const IterateProtocolPolicy &policy = {})
     -> typename Solver::State {
+  // Assign stable root identities up front (ES only); loaded bundles keep
+  // the identity they were saved with.
+  maybe_assign_initial_identity(solver, state, 0);
   for (double thresh : thresholds) {
     prepare(thresh, solver, state);
     solver.refresh_convergence_targets();

@@ -25,6 +25,7 @@
 #include "../kernels/tags.hpp"
 #include "../kernels/tda.hpp"   // Kernels<TDA, *>
 #include "convergence_policy.hpp"
+#include "es_root_identity.hpp"
 #include "iterate.hpp"
 #include "response_state.hpp"
 #include "response_subspace_kain.hpp"
@@ -65,6 +66,11 @@ public:
   struct State {
     std::vector<Storage>                    roots;
     madness::Tensor<double>                 omega;
+    /// Stable identity per slot: stable_index[s] is the permanent
+    /// identity of the root currently in roots[s]. Empty until assigned
+    /// (see ensure_root_identity); travels through sort_state_by_omega
+    /// and save/load so a root keeps its id across reorderings/protocols.
+    std::vector<int>                        stable_index;
     std::vector<double>                     last_bsh_residual;
     /// Per-root previous-iter density (for Δρ tracking). Empty on
     /// iter 0, populated thereafter; index s tracks the same root
@@ -616,14 +622,28 @@ public:
     s.last_bsh_residual     = std::move(bsh_new);
     s.last_density_residual = std::move(drho_new);
     s.rho_alpha_prev        = std::move(rho_prev_new);
+    // Keep each root's stable identity attached to its data as slots move.
+    permute_stable_index(s.stable_index, perm);
 
     if (print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
       print("  [sort_state_by_omega] permuted slots to ascending omega:");
       for (long i = 0; i < M; ++i) {
+        const int sid = (i < static_cast<long>(s.stable_index.size()))
+                            ? s.stable_index[i] : -1;
         print("    new slot", i, "<- old slot", perm[i],
-              "  omega =", s.omega(i));
+              "  omega =", s.omega(i),
+              "  root_id =", (sid >= 0 ? make_root_id(sid) : "(none)"));
       }
     }
+  }
+
+  /// Assign initial stable identities (slot i -> stable i) if none exist.
+  /// No-op when stable_index is already populated (e.g. loaded from disk),
+  /// so a restart keeps the identity it was saved with. Called once before
+  /// the protocol ramp via iterate_protocol's SFINAE hook.
+  void ensure_root_identity(State &s) const {
+    assign_initial_stable_index(s.stable_index,
+                                static_cast<int>(s.roots.size()));
   }
 
 private:

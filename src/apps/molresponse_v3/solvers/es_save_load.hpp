@@ -19,8 +19,11 @@
 //
 // `roots.json` is the *index*: it tells the loader (a) what type/shell to
 // expect, (b) which file holds which slot, (c) the ω / residual recorded
-// at save time. Slot index IS the identity; ω is recorded for sanity
-// (caller compares against a reference) — load does not permute by ω.
+// at save time, (d) the per-root STABLE identity (stable_index / root_id /
+// display_name) plus the bundle's slot_permutation (slot -> stable_index).
+// ω is recorded for sanity (caller compares against a reference) — load
+// does not permute by ω. The slot_permutation is what lets a restart match
+// roots by stable identity rather than by raw array slot (doc 03, Inc 9).
 //
 // On load: `iter` is reset to 0 (fresh count for the resumed solver),
 // `rho_alpha_prev` is left empty (ESSolver::step's first-iter check is
@@ -37,6 +40,7 @@
 // rank-0-only (filesystem op); rank 0 broadcasts the parsed metadata.
 // =========================================================================
 
+#include "es_root_identity.hpp"
 #include "es_solver.hpp"
 #include "response_state.hpp"
 #include "../kernels/tags.hpp"
@@ -97,20 +101,38 @@ void save_es_roots(madness::World &world,
   }
 
   if (world.rank() == 0) {
+    const double thresh = madness::FunctionDefaults<3>::get_thresh();
+
+    // Stable identity: use what the state carries, else assign 0..N-1 so a
+    // save always records identity. Display names are grouped at this
+    // protocol boundary (tol = 10 * thresh; matches doc 03).
+    std::vector<int> stable_index = state.stable_index;
+    assign_initial_stable_index(stable_index, n_roots);
+    const std::vector<std::string> display_names =
+        assign_display_names(state.omega, 10.0 * thresh);
+
     nlohmann::json j;
     j["type"]      = detail_save_load::type_tag<Type>();
     j["shell"]     = detail_save_load::shell_tag<Shell>();
     j["n_roots"]   = n_roots;
     j["k"]         = madness::FunctionDefaults<3>::get_k();
-    j["thresh"]    = madness::FunctionDefaults<3>::get_thresh();
+    j["thresh"]    = thresh;
     j["iter"]      = state.iter;
     j["converged"] = converged;
+
+    // slot_permutation[slot] = stable_index — the cross-protocol root map.
+    j["slot_permutation"] = stable_index;
 
     nlohmann::json roots_arr = nlohmann::json::array();
     const long n_omega = state.omega.size();
     for (int s = 0; s < n_roots; ++s) {
       nlohmann::json entry;
-      entry["slot"]  = s;
+      entry["slot"]         = s;
+      entry["stable_index"] = stable_index[s];
+      entry["root_id"]      = make_root_id(stable_index[s]);
+      entry["display_name"] =
+          (static_cast<size_t>(s) < display_names.size()) ? display_names[s]
+                                                          : std::string();
       entry["omega"] = (s < n_omega) ? state.omega(s)
                                      : std::numeric_limits<double>::quiet_NaN();
       entry["bsh_residual"] =
@@ -152,6 +174,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   madness::Tensor<double> omega_recorded;
   std::vector<double> bsh_residual_recorded;
   std::vector<double> drho_residual_recorded;
+  std::vector<int> stable_index_recorded;
 
   if (world.rank() == 0) {
     std::ifstream in(dir + "/roots.json");
@@ -185,6 +208,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
     omega_recorded         = madness::Tensor<double>(n_roots);
     bsh_residual_recorded  .assign(n_roots, 0.0);
     drho_residual_recorded .assign(n_roots, 0.0);
+    stable_index_recorded  .assign(n_roots, 0);
     for (int s = 0; s < n_roots; ++s) {
       const auto &e = j["roots"][s];
       const int slot = e.value("slot", -1);
@@ -192,6 +216,9 @@ load_es_roots(madness::World &world, const std::string &dir) {
       omega_recorded(s)         = e.value("omega", 0.0);
       bsh_residual_recorded[s]  = e.value("bsh_residual", 0.0);
       drho_residual_recorded[s] = e.value("density_residual", 0.0);
+      // Stable identity: legacy files predate it — fall back to slot so
+      // the loaded bundle still carries a well-formed identity vector.
+      stable_index_recorded[s]  = e.value("stable_index", s);
     }
   }
 
@@ -202,10 +229,12 @@ load_es_roots(madness::World &world, const std::string &dir) {
     omega_recorded         = madness::Tensor<double>(n_roots);
     bsh_residual_recorded  .assign(n_roots, 0.0);
     drho_residual_recorded .assign(n_roots, 0.0);
+    stable_index_recorded  .assign(n_roots, 0);
   }
   world.gop.broadcast(omega_recorded.ptr(), n_roots, 0);
   world.gop.broadcast(bsh_residual_recorded.data(),  n_roots, 0);
   world.gop.broadcast(drho_residual_recorded.data(), n_roots, 0);
+  world.gop.broadcast(stable_index_recorded.data(),  n_roots, 0);
 
   // Per-root binary archives — collective.
   State s;
@@ -219,6 +248,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   s.omega                 = std::move(omega_recorded);
   s.last_bsh_residual     = std::move(bsh_residual_recorded);
   s.last_density_residual = std::move(drho_residual_recorded);
+  s.stable_index          = std::move(stable_index_recorded);
   s.iter                  = 0;       // fresh count for the resumed solver
   s.diverged              = false;
   // rho_alpha_prev left empty — first-iter density-residual check in
@@ -230,6 +260,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
                    " dir=", dir);
     for (int b = 0; b < n_roots; ++b) {
       madness::print("       slot=", b,
+                     "  root_id=", make_root_id(s.stable_index[b]),
                      "  omega=", s.omega(b),
                      "  bsh_res=", s.last_bsh_residual[b],
                      "  drho_res=", s.last_density_residual[b]);
