@@ -17,6 +17,9 @@ add_mad_executable(test_v3_fd_skeleton
 add_mad_executable(test_protocol_key
                    "tests/test_protocol_key.cpp"
                    "MADresponse2;MADchem")
+add_mad_executable(test_response_metadata
+                   "tests/test_response_metadata.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3
