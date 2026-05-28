@@ -166,9 +166,13 @@ static double run_static_closed_shell(
   s0.responses[0].x_alpha = source.x_alpha;
 
   if (!load_dir.empty()) {
-    s0 = load_fd_state<Static, ClosedShell>(world, load_dir,
-                                             Perturbation::dipole(axis),
-                                             /*freq=*/0.0);
+    auto loaded = try_load_fd_state<Static, ClosedShell>(
+        world, load_dir, Perturbation::dipole(axis), /*freq=*/0.0);
+    if (loaded) {
+      // Non-exact loads (coarser saved protocol): the first prepare() in
+      // iterate_protocol re-projects to the active (k, thresh).
+      s0 = std::move(loaded->state);
+    }
   }
 
   Solver solver(world, tgt, policy, print_level);
@@ -209,17 +213,22 @@ static double run_static_closed_shell(
 
   solvers::IterateProtocolPolicy proto_policy;
   proto_policy.max_iters_per_step = max_iters;
+  // Save a snapshot at each protocol step. The hook fires while the
+  // active FunctionDefaults<3> still reflects the just-completed protocol,
+  // so save_fd_state picks up the right protocol_key.
+  auto post_step = [&](double, Solver& /*solv*/, Solver::State& st) {
+    if (!save_dir.empty()) {
+      save_fd_state<Static, ClosedShell>(world, st, save_dir,
+                                          Perturbation::dipole(axis),
+                                          /*freq=*/0.0,
+                                          /*converged=*/!st.diverged);
+    }
+  };
   auto sf = solvers::iterate_protocol(solver, s0, protocol_thresholds,
-                                       prepare, proto_policy);
+                                       prepare, post_step, proto_policy);
 
   // alpha_axis,axis = af · <V_pert · phi0 | x_alpha>
   // af = -4 for restricted static.
-  if (!save_dir.empty()) {
-    save_fd_state<Static, ClosedShell>(world, sf, save_dir,
-                                        Perturbation::dipole(axis),
-                                        /*freq=*/0.0,
-                                        /*converged=*/!sf.diverged);
-  }
   const double af = alpha_factor(ResponseType::Static, true);
   auto src_final = dipole_perturbation(world, gs, axis);
   const double ip = inner(src_final, sf.responses[0].x_alpha);
@@ -255,9 +264,9 @@ static double run_full_closed_shell(
   s0.responses[0].y_alpha = source.y_alpha;
 
   if (!load_dir.empty()) {
-    s0 = load_fd_state<Full, ClosedShell>(world, load_dir,
-                                           Perturbation::dipole(axis),
-                                           /*freq=*/omega);
+    auto loaded = try_load_fd_state<Full, ClosedShell>(
+        world, load_dir, Perturbation::dipole(axis), /*freq=*/omega);
+    if (loaded) s0 = std::move(loaded->state);
   }
 
   Solver solver(world, tgt, policy, print_level);
@@ -297,17 +306,19 @@ static double run_full_closed_shell(
 
   solvers::IterateProtocolPolicy proto_policy;
   proto_policy.max_iters_per_step = max_iters;
+  auto post_step = [&](double, Solver& /*solv*/, Solver::State& st) {
+    if (!save_dir.empty()) {
+      save_fd_state<Full, ClosedShell>(world, st, save_dir,
+                                        Perturbation::dipole(axis),
+                                        /*freq=*/omega,
+                                        /*converged=*/!st.diverged);
+    }
+  };
   auto sf = solvers::iterate_protocol(solver, s0, protocol_thresholds,
-                                       prepare, proto_policy);
+                                       prepare, post_step, proto_policy);
 
   // alpha_axis,axis = af · (<src | x_alpha> + <src | y_alpha>)
   // af = -2 for restricted Full.
-  if (!save_dir.empty()) {
-    save_fd_state<Full, ClosedShell>(world, sf, save_dir,
-                                      Perturbation::dipole(axis),
-                                      /*freq=*/omega,
-                                      /*converged=*/!sf.diverged);
-  }
   const double af = alpha_factor(ResponseType::Full, true);
   auto src_final = dipole_perturbation(world, gs, axis);
   const double ip_x = inner(src_final, sf.responses[0].x_alpha);
@@ -350,9 +361,9 @@ static double run_static_open_shell(
   s0.responses[0].x_beta  = src_beta;
 
   if (!load_dir.empty()) {
-    s0 = load_fd_state<Static, OpenShell>(world, load_dir,
-                                           Perturbation::dipole(axis),
-                                           /*freq=*/0.0);
+    auto loaded = try_load_fd_state<Static, OpenShell>(
+        world, load_dir, Perturbation::dipole(axis), /*freq=*/0.0);
+    if (loaded) s0 = std::move(loaded->state);
   }
 
   Solver solver(world, tgt, policy, print_level);
@@ -391,17 +402,19 @@ static double run_static_open_shell(
 
   solvers::IterateProtocolPolicy proto_policy;
   proto_policy.max_iters_per_step = max_iters;
+  auto post_step = [&](double, Solver& /*solv*/, Solver::State& st) {
+    if (!save_dir.empty()) {
+      save_fd_state<Static, OpenShell>(world, st, save_dir,
+                                        Perturbation::dipole(axis),
+                                        /*freq=*/0.0,
+                                        /*converged=*/!st.diverged);
+    }
+  };
   auto sf = solvers::iterate_protocol(solver, s0, protocol_thresholds,
-                                       prepare, proto_policy);
+                                       prepare, post_step, proto_policy);
 
   // alpha = af · (<src_α | x_α> + <src_β | x_β>)
   // af = -2 for unrestricted Static.
-  if (!save_dir.empty()) {
-    save_fd_state<Static, OpenShell>(world, sf, save_dir,
-                                      Perturbation::dipole(axis),
-                                      /*freq=*/0.0,
-                                      /*converged=*/!sf.diverged);
-  }
   const double af = alpha_factor(ResponseType::Static, false);
   auto sa = dipole_perturbation(world, gs, axis);
   auto sb = dipole_perturbation_beta(world, gs, axis);
@@ -445,9 +458,9 @@ static double run_full_open_shell(
   s0.responses[0].y_beta  = src_beta;
 
   if (!load_dir.empty()) {
-    s0 = load_fd_state<Full, OpenShell>(world, load_dir,
-                                         Perturbation::dipole(axis),
-                                         /*freq=*/omega);
+    auto loaded = try_load_fd_state<Full, OpenShell>(
+        world, load_dir, Perturbation::dipole(axis), /*freq=*/omega);
+    if (loaded) s0 = std::move(loaded->state);
   }
 
   Solver solver(world, tgt, policy, print_level);
@@ -492,17 +505,19 @@ static double run_full_open_shell(
 
   solvers::IterateProtocolPolicy proto_policy;
   proto_policy.max_iters_per_step = max_iters;
+  auto post_step = [&](double, Solver& /*solv*/, Solver::State& st) {
+    if (!save_dir.empty()) {
+      save_fd_state<Full, OpenShell>(world, st, save_dir,
+                                      Perturbation::dipole(axis),
+                                      /*freq=*/omega,
+                                      /*converged=*/!st.diverged);
+    }
+  };
   auto sf = solvers::iterate_protocol(solver, s0, protocol_thresholds,
-                                       prepare, proto_policy);
+                                       prepare, post_step, proto_policy);
 
   // alpha = af · ( <src_α | x_α> + <src_α | y_α> + <src_β | x_β> + <src_β | y_β> )
   // af = -1 for unrestricted Full.
-  if (!save_dir.empty()) {
-    save_fd_state<Full, OpenShell>(world, sf, save_dir,
-                                    Perturbation::dipole(axis),
-                                    /*freq=*/omega,
-                                    /*converged=*/!sf.diverged);
-  }
   const double af = alpha_factor(ResponseType::Full, false);
   auto sa = dipole_perturbation(world, gs, axis);
   auto sb = dipole_perturbation_beta(world, gs, axis);

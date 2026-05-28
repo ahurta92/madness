@@ -61,15 +61,21 @@ auto maybe_assign_initial_identity(Solver &solver, State &state, int)
 template <typename Solver, typename State>
 void maybe_assign_initial_identity(Solver &, State &, long) { /* no-op */ }
 
-template <typename Solver, typename PrepareFn>
+/// Run the protocol ramp with a post-step hook called after each
+/// `solvers::iterate(...)` returns. The hook fires while the active
+/// FunctionDefaults<3> still reflects the just-completed protocol, so it
+/// can use `protocol_key()` to label the snapshot. Used by FD save (13c-iii)
+/// to persist a bundle entry per protocol step, enabling lower-protocol
+/// restart precedence. The earlier no-post_step overload below delegates
+/// here with a no-op.
+template <typename Solver, typename PrepareFn, typename PostStepFn>
 auto iterate_protocol(Solver &solver,
                       typename Solver::State state,
                       const std::vector<double> &thresholds,
                       const PrepareFn &prepare,
+                      const PostStepFn &post_step,
                       const IterateProtocolPolicy &policy = {})
     -> typename Solver::State {
-  // Assign stable root identities up front (ES only); loaded bundles keep
-  // the identity they were saved with.
   maybe_assign_initial_identity(solver, state, 0);
   for (double thresh : thresholds) {
     prepare(thresh, solver, state);
@@ -77,6 +83,7 @@ auto iterate_protocol(Solver &solver,
     state = solvers::iterate(
         solver, std::move(state),
         IteratePolicy{policy.max_iters_per_step});
+    post_step(thresh, solver, state);
     if (state.diverged) break;  // bail rather than tighten on garbage
   }
   // Canonicalize output (ES: sort by ascending omega; FD: no-op).
@@ -84,6 +91,20 @@ auto iterate_protocol(Solver &solver,
   // canonical reference set.
   maybe_canonicalize(solver, state, 0);
   return state;
+}
+
+/// Existing overload, kept so ES callers that don't need a post-step hook
+/// don't have to thread a no-op lambda. Delegates to the variant above.
+template <typename Solver, typename PrepareFn>
+auto iterate_protocol(Solver &solver,
+                      typename Solver::State state,
+                      const std::vector<double> &thresholds,
+                      const PrepareFn &prepare,
+                      const IterateProtocolPolicy &policy = {})
+    -> typename Solver::State {
+  auto noop = [](double, Solver &, typename Solver::State &) {};
+  return iterate_protocol(solver, std::move(state), thresholds,
+                          prepare, noop, policy);
 }
 
 } // namespace molresponse_v3::solvers

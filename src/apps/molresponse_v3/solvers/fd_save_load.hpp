@@ -42,8 +42,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace molresponse_v3 {
 
@@ -228,6 +230,118 @@ load_fd_state(madness::World &world,
                    "  converged_at_save=", converged_int != 0);
   }
   return s;
+}
+
+/// Result of try_load_fd_state. When `exact == false`, the caller is
+/// responsible for re-projecting `state` to the active (k, thresh) — the
+/// natural place is the first `prepare(...)` call inside iterate_protocol,
+/// which already does this for every step.
+template <typename Type, typename Shell>
+struct FDRestartResult {
+  typename FDSolver<Type, Shell>::State state;
+  std::string source_protocol_key;
+  bool        exact = false;
+};
+
+/// Restart precedence (Inc 13c-iii). Reads response_metadata.json and picks
+/// the best on-disk bundle for (pert, freq):
+///
+///   1. exact match at the active protocol_key   → exact = true
+///   2. else any saved (thresh, k) that's COARSER-OR-EQUAL to active
+///      (saved_thresh >= active_thresh AND saved_k <= active_k):
+///      pick max k, then min thresh — closest to active = best initial guess
+///   3. else nullopt — caller seeds fresh
+///
+/// Returns nullopt if no metadata file or no compatible record. The
+/// archive load itself is collective, so this function must be called by
+/// every rank.
+template <typename Type, typename Shell>
+std::optional<FDRestartResult<Type, Shell>>
+try_load_fd_state(madness::World &world,
+                  const std::string &dir,
+                  const Perturbation &pert,
+                  double freq) {
+  using State   = typename FDSolver<Type, Shell>::State;
+  using Storage = typename FDSolver<Type, Shell>::Storage;
+
+  const std::string active_key = protocol_key();
+  const double active_thresh   = madness::FunctionDefaults<3>::get_thresh();
+  const int    active_k        = madness::FunctionDefaults<3>::get_k();
+  const std::string fkey       = ResponseMetadata::freq_key(freq);
+  const std::string pdesc      = pert.description();
+
+  // Rank-0 picks the source_key. Empty string ↔ no compatible match.
+  std::string source_key;
+  if (world.rank() == 0) {
+    const std::string meta_path = dir + "/response_metadata.json";
+    if (std::filesystem::exists(meta_path)) {
+      auto meta = ResponseMetadata::load_or_create(meta_path);
+      const auto &j = meta.json();
+      if (j["fd_states"].contains(pdesc) &&
+          j.contains("protocols") && j["protocols"].is_object()) {
+        struct Cand { std::string key; double thresh; int k; };
+        std::vector<Cand> cands;
+        for (const auto &[key, ent] : j["fd_states"][pdesc].items()) {
+          if (!ent.contains(fkey))             continue;
+          if (!j["protocols"].contains(key))   continue;
+          const double t  = j["protocols"][key].value("thresh", 0.0);
+          const int    kk = j["protocols"][key].value("k", 0);
+          if (t >= active_thresh && kk <= active_k) {
+            cands.push_back({key, t, kk});
+          }
+        }
+        // Exact match wins.
+        for (const auto &c : cands) {
+          if (c.key == active_key) { source_key = c.key; break; }
+        }
+        // Else closest-to-active: max k, then min thresh.
+        if (source_key.empty() && !cands.empty()) {
+          auto best = std::max_element(
+              cands.begin(), cands.end(),
+              [](const Cand &a, const Cand &b) {
+                if (a.k != b.k)      return a.k < b.k;       // higher k wins
+                return a.thresh > b.thresh;                  // smaller thresh wins
+              });
+          source_key = best->key;
+        }
+      }
+    }
+  }
+  world.gop.broadcast_serializable(source_key, 0);
+
+  if (source_key.empty()) {
+    if (world.rank() == 0) {
+      madness::print("[LOAD] try_load_fd_state: no compatible bundle for pert=",
+                     pdesc, " freq=", freq, " in ", dir,
+                     " (active_key=", active_key, ")");
+    }
+    return std::nullopt;
+  }
+
+  // Collective load.
+  const std::string archive_basename = response_filename(pdesc, source_key, freq);
+  const std::string archive_path     = dir + "/" + archive_basename;
+
+  FDRestartResult<Type, Shell> r;
+  r.state.responses.resize(1);
+  r.state.responses[0] = Storage::load(world, archive_path);
+  r.state.last_bsh_residual    .clear();
+  r.state.last_density_residual.clear();
+  r.state.rho_alpha_prev       .clear();
+  r.state.iter     = 0;
+  r.state.diverged = false;
+  r.source_protocol_key = source_key;
+  r.exact = (source_key == active_key);
+
+  if (world.rank() == 0) {
+    madness::print("[LOAD] try_load_fd_state: pert=", pdesc,
+                   "  freq=", freq,
+                   "  source_protocol_key=", source_key,
+                   "  active=", active_key,
+                   "  exact=", r.exact,
+                   "  archive=", archive_basename);
+  }
+  return r;
 }
 
 } // namespace molresponse_v3
