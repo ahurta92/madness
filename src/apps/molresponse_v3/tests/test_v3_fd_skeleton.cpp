@@ -24,6 +24,7 @@
 #include "../kernels/tags.hpp"
 #include "../solvers/build_response_ground_state.hpp"  // build_response_ground_state_closed_shell
 #include "../solvers/convergence_policy.hpp"
+#include "../solvers/fd_save_load.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/fd_problem.hpp"
 #include "../solvers/iterate.hpp"
@@ -141,7 +142,8 @@ static double run_static_closed_shell(
     const std::vector<double>& protocol_thresholds,
     int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
-    const std::string& log_path = "") {
+    const std::string& log_path = "",
+    const std::string& save_dir = "") {
   using Solver = FDSolver<Static, ClosedShell>;
 
   // Build target at the first protocol level (rebuilt inside `prepare`).
@@ -205,6 +207,12 @@ static double run_static_closed_shell(
 
   // alpha_axis,axis = af · <V_pert · phi0 | x_alpha>
   // af = -4 for restricted static.
+  if (!save_dir.empty()) {
+    save_fd_state<Static, ClosedShell>(world, sf, save_dir,
+                                        Perturbation::dipole(axis),
+                                        /*freq=*/0.0,
+                                        /*converged=*/!sf.diverged);
+  }
   const double af = alpha_factor(ResponseType::Static, true);
   auto src_final = dipole_perturbation(world, gs, axis);
   const double ip = inner(src_final, sf.responses[0].x_alpha);
@@ -217,7 +225,8 @@ static double run_full_closed_shell(
     const std::vector<double>& protocol_thresholds, double omega,
     int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
-    const std::string& log_path = "") {
+    const std::string& log_path = "",
+    const std::string& save_dir = "") {
   using Solver = FDSolver<Full, ClosedShell>;
 
   ResponseStateXY<ClosedShell> source;
@@ -279,6 +288,12 @@ static double run_full_closed_shell(
 
   // alpha_axis,axis = af · (<src | x_alpha> + <src | y_alpha>)
   // af = -2 for restricted Full.
+  if (!save_dir.empty()) {
+    save_fd_state<Full, ClosedShell>(world, sf, save_dir,
+                                      Perturbation::dipole(axis),
+                                      /*freq=*/omega,
+                                      /*converged=*/!sf.diverged);
+  }
   const double af = alpha_factor(ResponseType::Full, true);
   auto src_final = dipole_perturbation(world, gs, axis);
   const double ip_x = inner(src_final, sf.responses[0].x_alpha);
@@ -295,7 +310,8 @@ static double run_static_open_shell(
     const std::vector<double>& protocol_thresholds,
     int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
-    const std::string& log_path = "") {
+    const std::string& log_path = "",
+    const std::string& save_dir = "") {
   using Solver = FDSolver<Static, OpenShell>;
 
   auto src_alpha = dipole_perturbation(world, gs, axis);
@@ -359,6 +375,12 @@ static double run_static_open_shell(
 
   // alpha = af · (<src_α | x_α> + <src_β | x_β>)
   // af = -2 for unrestricted Static.
+  if (!save_dir.empty()) {
+    save_fd_state<Static, OpenShell>(world, sf, save_dir,
+                                      Perturbation::dipole(axis),
+                                      /*freq=*/0.0,
+                                      /*converged=*/!sf.diverged);
+  }
   const double af = alpha_factor(ResponseType::Static, false);
   auto sa = dipole_perturbation(world, gs, axis);
   auto sb = dipole_perturbation_beta(world, gs, axis);
@@ -372,7 +394,8 @@ static double run_full_open_shell(
     const std::vector<double>& protocol_thresholds, double omega,
     int axis, int max_iters, const ConvergencePolicy& policy, PrintLevel print_level,
     const std::string& fock_json,
-    const std::string& log_path = "") {
+    const std::string& log_path = "",
+    const std::string& save_dir = "") {
   using Solver = FDSolver<Full, OpenShell>;
 
   auto src_alpha = dipole_perturbation(world, gs, axis);
@@ -446,6 +469,12 @@ static double run_full_open_shell(
 
   // alpha = af · ( <src_α | x_α> + <src_α | y_α> + <src_β | x_β> + <src_β | y_β> )
   // af = -1 for unrestricted Full.
+  if (!save_dir.empty()) {
+    save_fd_state<Full, OpenShell>(world, sf, save_dir,
+                                    Perturbation::dipole(axis),
+                                    /*freq=*/omega,
+                                    /*converged=*/!sf.diverged);
+  }
   const double af = alpha_factor(ResponseType::Full, false);
   auto sa = dipole_perturbation(world, gs, axis);
   auto sb = dipole_perturbation_beta(world, gs, axis);
@@ -476,7 +505,7 @@ int main(int argc, char **argv) {
                 "[--maxiter=N] [--dconv=X] "
                 "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
                 "[--tol=X] [--print-level=0..3] "
-                "[--log-convergence=PATH] "
+                "[--log-convergence=PATH] [--save=DIR] "
                 "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
                 "[--kain-cmax=X]");
         }
@@ -517,6 +546,9 @@ int main(int argc, char **argv) {
           parser.key_exists("log-convergence")
               ? parser.value_raw("log-convergence")
               : std::string();
+      const std::string save_dir =
+          parser.key_exists("save") ? parser.value_raw("save")
+                                    : std::string();
 
       auto header = GroundState::read_archive_header(world, archive_path);
       const int override_k = parser.key_exists("k")
@@ -596,17 +628,17 @@ int main(int argc, char **argv) {
         alpha = run_static_closed_shell(world, gs, header.L, override_k,
                                          protocol_thresholds, axis,
                                          max_iters, policy, print_level,
-                                         fock_json, log_path);
+                                         fock_json, log_path, save_dir);
       } else if (type_str == "full" && restricted) {
         alpha = run_full_closed_shell(world, gs, header.L, override_k,
                                        protocol_thresholds, omega, axis,
                                        max_iters, policy, print_level,
-                                       fock_json, log_path);
+                                       fock_json, log_path, save_dir);
       } else if (type_str == "static" && !restricted) {
         alpha = run_static_open_shell(world, gs, header.L, override_k,
                                        protocol_thresholds, axis,
                                        max_iters, policy, print_level,
-                                       fock_json, log_path);
+                                       fock_json, log_path, save_dir);
       } else if (type_str == "full" && !restricted) {
         alpha = run_full_open_shell(world, gs, header.L, override_k,
                                      protocol_thresholds, omega, axis,

@@ -11,6 +11,40 @@ namespace molresponse_v3 {
 
 using namespace madness;
 
+/// Stable identity for an FD perturbation source (doc 13). `description()`
+/// is the canonical string used in archive filenames and as the
+/// `<pert>` key in response_metadata.json — it must round-trip across runs
+/// and contain only filename-safe characters.
+///
+/// This is identity only; the existing dipole_perturbation / magnetic /
+/// nuclear free functions below still build the RHS. Callers dispatch on
+/// `kind` and pass `axis`/`atom` to whichever builder applies.
+struct Perturbation {
+    enum class Kind { Dipole, NuclearDisplacement, Magnetic };
+
+    Kind kind = Kind::Dipole;
+    int  axis = 0;        // 0=x, 1=y, 2=z
+    int  atom = -1;       // for NuclearDisplacement; -1 = N/A
+
+    /// Canonical filename/metadata-key fragment:
+    ///   dipole_x   magnetic_y   nuc_3_z
+    std::string description() const {
+        static const char *ax[] = {"x", "y", "z"};
+        const char *a = (axis >= 0 && axis <= 2) ? ax[axis] : "?";
+        switch (kind) {
+            case Kind::Dipole:               return std::string("dipole_") + a;
+            case Kind::Magnetic:             return std::string("magnetic_") + a;
+            case Kind::NuclearDisplacement:
+                return std::string("nuc_") + std::to_string(atom) + "_" + a;
+        }
+        return "unknown";
+    }
+
+    static Perturbation dipole(int axis)            { return {Kind::Dipole,   axis, -1}; }
+    static Perturbation magnetic(int axis)          { return {Kind::Magnetic, axis, -1}; }
+    static Perturbation nuclear(int atom, int axis) { return {Kind::NuclearDisplacement, axis, atom}; }
+};
+
 /// Construct the dipole perturbation right-hand side for one direction.
 ///
 /// Returns Q * (mu_dir * phi_i) for each occupied orbital phi_i.
