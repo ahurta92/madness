@@ -51,8 +51,10 @@
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -306,6 +308,126 @@ load_es_roots(madness::World &world, const std::string &dir) {
   }
 
   return s;
+}
+
+/// ES restart precedence — the cross-protocol analog of try_load_fd_state.
+/// Reads response_metadata.json at `calc_dir`, finds the best
+/// `excited_states/<key>` bundle for the requested (Type, Shell), and
+/// loads it via the existing load_es_roots (which reads the per-bundle
+/// roots.json — loader's truth per the doc 13 authority split).
+///
+/// Precedence:
+///   1. exact match at the active protocol_key       → exact=true
+///   2. else coarser-or-equal saved (thresh, k):
+///      pick max k, then min thresh — closest = best initial guess
+///   3. else nullopt — caller falls back to fresh guess / warmup
+///
+/// Non-exact loads are auto-reprojected by iterate_protocol's first
+/// prepare() — the same path the solver already takes every protocol
+/// step, so no extra projection code is needed in the test driver.
+///
+/// `calc_dir` is the directory containing response_metadata.json (one
+/// level up from any es_bundle subdir). The aggregate's `bundle_dir`
+/// field gives the basename of the bundle subdir to load.
+template <typename Type, typename Shell>
+struct ESRestartResult {
+  typename ESSolver<Type, Shell>::State state;
+  std::string source_protocol_key;
+  std::string bundle_dir;            // basename, relative to calc_dir
+  bool        exact = false;
+};
+
+template <typename Type, typename Shell>
+std::optional<ESRestartResult<Type, Shell>>
+try_load_es_bundle(madness::World &world, const std::string &calc_dir) {
+  const std::string active_key = protocol_key();
+  const double active_thresh   = madness::FunctionDefaults<3>::get_thresh();
+  const int    active_k        = madness::FunctionDefaults<3>::get_k();
+  const std::string want_type  = detail_save_load::type_tag<Type>();
+  const std::string want_shell = detail_save_load::shell_tag<Shell>();
+
+  // Rank-0 picks (source_key, bundle_dir). Both empty ↔ no match.
+  std::string source_key;
+  std::string bundle_dir;
+  if (world.rank() == 0) {
+    const std::string meta_path = calc_dir + "/response_metadata.json";
+    if (std::filesystem::exists(meta_path)) {
+      auto meta = ResponseMetadata::load_or_create(meta_path);
+      const auto &j = meta.json();
+      if (j.contains("excited_states") && j["excited_states"].is_object() &&
+          j.contains("protocols")      && j["protocols"].is_object()) {
+        struct Cand { std::string key; std::string bdir; double thresh; int k; };
+        std::vector<Cand> cands;
+        for (const auto &[key, ent] : j["excited_states"].items()) {
+          // Type/shell must match the requested instantiation — the loader
+          // also validates, but filter here so we don't pick an unloadable
+          // candidate over a loadable one.
+          if (ent.value("type",  std::string{}) != want_type)  continue;
+          if (ent.value("shell", std::string{}) != want_shell) continue;
+          if (!j["protocols"].contains(key))                    continue;
+          const double t  = j["protocols"][key].value("thresh", 0.0);
+          const int    kk = j["protocols"][key].value("k", 0);
+          if (t >= active_thresh && kk <= active_k) {
+            cands.push_back({
+                key,
+                ent.value("bundle_dir", std::string{}),
+                t, kk});
+          }
+        }
+        // Exact match wins.
+        for (const auto &c : cands) {
+          if (c.key == active_key) {
+            source_key = c.key;
+            bundle_dir = c.bdir;
+            break;
+          }
+        }
+        // Else closest-to-active: max k, then min thresh.
+        if (source_key.empty() && !cands.empty()) {
+          auto best = std::max_element(
+              cands.begin(), cands.end(),
+              [](const Cand &a, const Cand &b) {
+                if (a.k != b.k)      return a.k < b.k;        // higher k wins
+                return a.thresh > b.thresh;                   // smaller thresh wins
+              });
+          source_key = best->key;
+          bundle_dir = best->bdir;
+        }
+      }
+    }
+  }
+  world.gop.broadcast_serializable(source_key, 0);
+  world.gop.broadcast_serializable(bundle_dir, 0);
+
+  if (source_key.empty() || bundle_dir.empty()) {
+    if (world.rank() == 0) {
+      madness::print("[LOAD] try_load_es_bundle: no compatible bundle in ",
+                     calc_dir, " for type=", want_type,
+                     " shell=", want_shell,
+                     " active_key=", active_key);
+    }
+    return std::nullopt;
+  }
+
+  // Collective load — delegate to load_es_roots (reads roots.json + per-
+  // root archives). Aggregate's `bundle_dir` is a basename, so resolve
+  // against calc_dir.
+  const std::string bundle_path =
+      (std::filesystem::path(calc_dir) / bundle_dir).string();
+
+  ESRestartResult<Type, Shell> r;
+  r.state = load_es_roots<Type, Shell>(world, bundle_path);
+  r.source_protocol_key = source_key;
+  r.bundle_dir          = bundle_dir;
+  r.exact               = (source_key == active_key);
+
+  if (world.rank() == 0) {
+    madness::print("[LOAD] try_load_es_bundle: source_protocol_key=", source_key,
+                   "  active=", active_key,
+                   "  exact=", r.exact,
+                   "  bundle_dir=", bundle_dir);
+  }
+  return r;
 }
 
 } // namespace molresponse_v3

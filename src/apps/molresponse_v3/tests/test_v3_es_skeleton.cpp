@@ -138,6 +138,7 @@ int main(int argc, char **argv) {
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
               "[--load-roots-tda=DIR] [--load-roots-full=DIR] "
+              "[--load-best=CALC_DIR] "
               "[--type=tda|full|full-rpa] "
               "[--guess=random|solid_harmonics] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
@@ -191,6 +192,9 @@ int main(int argc, char **argv) {
     const std::string save_roots_dir = parser.key_exists("save-roots")
                                            ? parser.value_raw("save-roots")
                                            : std::string();
+    const std::string load_best_dir = parser.key_exists("load-best")
+                                          ? parser.value_raw("load-best")
+                                          : std::string();
     const std::string load_roots_dir = parser.key_exists("load-roots")
                                            ? parser.value_raw("load-roots")
                                            : std::string();
@@ -518,9 +522,21 @@ int main(int argc, char **argv) {
       // (skips the warmup entirely), or run the oversampled-warmup
       // power iteration (no-op fast path when both knobs are off).
       Solver::State state0;
-      if (!load_roots_dir.empty()) {
-        state0 = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
-      } else {
+      bool seeded = false;
+      // (1) --load-best: cross-protocol restart via response_metadata.json.
+      // Non-exact matches are reprojected by the first prepare().
+      if (!load_best_dir.empty()) {
+        auto loaded =
+            try_load_es_bundle<TDA, ClosedShell>(world, load_best_dir);
+        if (loaded) { state0 = std::move(loaded->state); seeded = true; }
+      }
+      // (2) --load-roots: exact bundle dir (existing 13d/Inc-9 path).
+      if (!seeded && !load_roots_dir.empty()) {
+        state0  = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
+        seeded  = true;
+      }
+      // (3) Fresh: oversampled-warmup power iteration.
+      if (!seeded) {
         state0 = run_oversampled_tda_warmup<ClosedShell>(
             world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
             policy, /*c_xc=*/1.0, gs.params().lo(), print_level,
