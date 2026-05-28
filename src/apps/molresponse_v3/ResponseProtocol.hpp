@@ -5,6 +5,7 @@
 #include <madness/mra/operator.h>
 #include <madness/world/world.h>
 
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -37,6 +38,25 @@ inline double default_thresh_for_k(int k) {
         case 12: return 1e-10;
         default: return 1e-6;   // unknown k — safe middle of the table
     }
+}
+
+/// Canonical, filename-safe protocol identity shared by FD and ES
+/// persistence (doc 13). The join key for property matching is the physical
+/// accuracy (thresh, k) — NOT a positional ramp index, which collides across
+/// runs with different ramps and can't assert "same accuracy". `%.0e` yields
+/// a stable two-digit exponent on glibc, e.g. protocol_key(1e-6, 8) ==
+/// "1e-06_k8". Used for both archive-name suffixes and JSON keys.
+inline std::string protocol_key(double thresh, int k) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.0e_k%d", thresh, k);
+    return {buf};
+}
+
+/// protocol_key built from the active FunctionDefaults<3> — the common funnel
+/// both solvers configure via set_response_protocol() before solving/saving.
+inline std::string protocol_key() {
+    return protocol_key(FunctionDefaults<3>::get_thresh(),
+                        FunctionDefaults<3>::get_k());
 }
 
 /// Configure FunctionDefaults<3> for one response-protocol step.

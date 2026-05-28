@@ -43,6 +43,7 @@
 #include "es_root_identity.hpp"
 #include "es_solver.hpp"
 #include "response_state.hpp"
+#include "../ResponseProtocol.hpp"   // protocol_key(thresh, k)
 #include "../kernels/tags.hpp"
 
 #include <madness/external/nlohmann_json/json.hpp>
@@ -115,10 +116,12 @@ void save_es_roots(madness::World &world,
     j["type"]      = detail_save_load::type_tag<Type>();
     j["shell"]     = detail_save_load::shell_tag<Shell>();
     j["n_roots"]   = n_roots;
-    j["k"]         = madness::FunctionDefaults<3>::get_k();
-    j["thresh"]    = thresh;
-    j["iter"]      = state.iter;
-    j["converged"] = converged;
+    const int k_now = madness::FunctionDefaults<3>::get_k();
+    j["k"]            = k_now;
+    j["thresh"]       = thresh;
+    j["protocol_key"] = protocol_key(thresh, k_now);  // doc 13 join key
+    j["iter"]         = state.iter;
+    j["converged"]    = converged;
 
     // slot_permutation[slot] = stable_index — the cross-protocol root map.
     j["slot_permutation"] = stable_index;
