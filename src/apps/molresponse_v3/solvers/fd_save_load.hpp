@@ -148,6 +148,88 @@ void save_fd_state(madness::World &world,
   world.gop.fence();
 }
 
+/// Exact-match load (Inc 13c-ii). Looks up the archive at
+///   dir/response_filename(pert.description(), protocol_key(), freq)
+/// using the ACTIVE FunctionDefaults<3> (k, thresh) — caller is expected to
+/// have called set_response_protocol() first so the key matches.
+///
+/// Returns a fresh State with one response slot: responses[0] = loaded
+/// Storage; iter=0; diverged=false; last_bsh_residual seeded from the
+/// metadata entry's bsh_residual (for diagnostic continuity — the solver
+/// recomputes on the first step). Density-residual history is not
+/// persisted; the first-iter Δρ guard inside FDSolver::step() handles a
+/// missing rho_alpha_prev (same path as ESSolver after es_load).
+///
+/// Throws if either the archive or the metadata entry is missing.
+/// Cross-protocol fallback (load at a lower protocol than the active one)
+/// is deferred to try_load_fd_state in 13c-iii.
+template <typename Type, typename Shell>
+typename FDSolver<Type, Shell>::State
+load_fd_state(madness::World &world,
+              const std::string &dir,
+              const Perturbation &pert,
+              double freq) {
+  using State   = typename FDSolver<Type, Shell>::State;
+  using Storage = typename FDSolver<Type, Shell>::Storage;
+
+  const std::string key   = protocol_key();
+  const std::string fkey  = ResponseMetadata::freq_key(freq);
+  const std::string pdesc = pert.description();
+  const std::string archive_basename = response_filename(pdesc, key, freq);
+  const std::string archive_path     = dir + "/" + archive_basename;
+
+  // Rank-0 reads the metadata entry (required); broadcasts the small
+  // numeric diagnostics. The archive load below is collective.
+  double bsh_res        = 0.0;
+  int    iter_at_save   = 0;
+  int    converged_int  = 0;   // bool via int for gop.broadcast
+  if (world.rank() == 0) {
+    const std::string meta_path = dir + "/response_metadata.json";
+    if (!std::filesystem::exists(meta_path)) {
+      throw std::runtime_error(
+          "load_fd_state: missing " + meta_path);
+    }
+    auto meta = ResponseMetadata::load_or_create(meta_path);
+    const auto &j = meta.json();
+    if (!j["fd_states"].contains(pdesc) ||
+        !j["fd_states"][pdesc].contains(key) ||
+        !j["fd_states"][pdesc][key].contains(fkey)) {
+      throw std::runtime_error(
+          "load_fd_state: no fd_states/" + pdesc + "/" + key + "/" + fkey +
+          " in " + meta_path);
+    }
+    const auto &e = j["fd_states"][pdesc][key][fkey];
+    bsh_res       = e.value("bsh_residual", 0.0);
+    iter_at_save  = e.value("iter", 0);
+    converged_int = e.value("converged", false) ? 1 : 0;
+  }
+  world.gop.broadcast(bsh_res,       0);
+  world.gop.broadcast(iter_at_save,  0);
+  world.gop.broadcast(converged_int, 0);
+
+  // Collective binary load — same primitive ES uses per-root.
+  State s;
+  s.responses.resize(1);
+  s.responses[0] = Storage::load(world, archive_path);
+
+  s.last_bsh_residual     = {bsh_res};
+  s.last_density_residual = {};      // not persisted; first-iter recomputes
+  s.rho_alpha_prev        .clear();  // first-iter Δρ guard handles empty
+  s.iter                  = 0;
+  s.diverged              = false;
+
+  if (world.rank() == 0) {
+    madness::print("[LOAD] fd_state: pert=", pdesc,
+                   "  protocol_key=", key,
+                   "  freq=", freq,
+                   "  archive=", archive_basename,
+                   "  bsh_res_at_save=", bsh_res,
+                   "  iter_at_save=", iter_at_save,
+                   "  converged_at_save=", converged_int != 0);
+  }
+  return s;
+}
+
 } // namespace molresponse_v3
 
 #endif // MOLRESPONSE_V3_SOLVERS_FD_SAVE_LOAD_HPP
