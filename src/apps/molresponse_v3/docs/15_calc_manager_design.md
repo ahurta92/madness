@@ -92,33 +92,49 @@ parallel region and exploits every restart path we built:
 
 ```
 Phase A — SEED  (at the lowest protocol P0)
-  A1.  static (ω = 0)                         one calc, robust, cheapest   [serial]
-       (skipped if seeding from an ES guess / external initial state)
-  A2.  all other frequencies @ P0,
-       each seeded from static@P0                                         [parallel]
+  A1.  per channel, its ANCHOR solve @ P0          one solve per channel
+       (ω = 0 if the channel has a static request, else its lowest |ω|).
+       Anchors of DIFFERENT channels are independent.              [parallel across channels]
+  A2.  all remaining (channel, ω) @ P0,
+       each seeded from the NEAREST converged state               [parallel across everything]
 
 Phase B — RAMP  (P0 → P1 → … → P_max)
-  every (state, freq) climbs its own ladder,
+  every (channel, ω) climbs its own ladder,
   each step restarting from its own lower-protocol solution    [embarrassingly parallel]
 ```
 
+The unit of parallelism is the **perturbation channel** (dipole_x, dipole_y,
+dipole_z, Nuc0_x, …) — these are physically independent solves and run
+concurrently throughout. There is no single global "static" solve that
+everything waits on.
+
 Rationale:
-- Phase A front-loads the cheap, serializing work. `static@P0` is one state
-  (hard to parallelize *across*), but it is the cheapest solve and the best
-  seed for every dynamic frequency. It is also the cheapest **memory probe**
-  for everything downstream (see below).
-- The only strict serialization is `static@P0` first; once it exists, all
-  other frequencies at P0 run in parallel, each seeded from it.
-- Phase B is embarrassingly parallel: once every `(state, freq)` has a P0
+- Phase A front-loads the cheap work. The only ordering is *within* a channel:
+  one anchor solve before the states that seed from it. Across channels, A1
+  anchors run fully in parallel, and once each channel has an anchor, A2 fans
+  out across every `(channel, ω)`.
+- The anchor doubles as the cheapest **memory probe** for everything downstream
+  (see below). Because `mem ≈ n_occ × n_leaves × k³` and `n_occ`/molecule are
+  the same for every channel, a *single* low-protocol anchor already predicts
+  the high-protocol footprint for all of them.
+- Phase B is embarrassingly parallel: once every `(channel, ω)` has a P0
   solution, each rung of each ladder is independent (restart from its own
   lower protocol). This is where parallelism maxes out — and where the
   expensive high-protocol work lives.
 
-Policy knob — **seeding topology** at low protocol:
-- *star-seed* (default): every dynamic ω seeded directly from `static@P0`
-  (max parallel),
-- *chain*: `static → ω₁ → ω₂ …` (closer guesses, more serial).
-Default to star-seed where solves are cheap (low protocol).
+**Seeding = nearest converged, not a fixed topology.** A fresh `(channel, ω)`
+seeds from whatever converged state is *closest* in (perturbation, frequency,
+protocol) space — typically the same channel's nearest-frequency or
+coarser-protocol solution. This is exactly what the restart precedence in
+`try_load_fd_state` already encodes (exact → coarser protocol → nearby
+frequency → fresh); the scheduler's job is only to *order* work so a near
+neighbor exists when a node runs. (Earlier drafts named fixed *star* / *chain*
+topologies — retired: static-as-hub is just one guess and usually not the
+closest. Seeding an FD from the *nearest excited state* is a plausible future
+extension but is out of scope for now.)
+
+Policy knob — **seed-selection strategy** (the distance metric / preferences
+restart precedence uses), not the topology. Default: nearest converged.
 
 ---
 
@@ -131,8 +147,14 @@ Before scheduling, the manager diffs the plan against
 |---|---|
 | converged at the target `protocol_key` | **skip** |
 | converged at a lower protocol only | **restart** (project up via the restart precedence) |
-| present but not converged | **resume** from the partial archive |
-| absent | **fresh** (seed per the soft edges, else perturbation/guess) |
+| present, not converged, **not diverged** | **resume** from the partial archive |
+| present but **diverged** | **fresh** — discard the diverged archive and re-seed from the nearest *converged* neighbor (never resume a blown-up state) |
+| absent | **fresh** (seed from the nearest converged state, else perturbation/guess) |
+
+The diverged-vs-stalled split matters: a state that merely ran out of iterations
+is a good warm start (resume), but a state flagged `diverged` (explosive growth /
+NaN) would poison the next solve — so it is thrown away and re-seeded from a
+known-good neighbor, not continued.
 
 This makes the manager idempotent and restart-safe: re-running a plan picks up
 exactly where a killed run left off, at state granularity.
@@ -181,8 +203,9 @@ The scheduler is both producer and consumer of the per-state metrics
   scaling by `k³ × leaf-growth(P_low → P_high)` yields a real per-task
   estimate → a clean **pre-flight abort** instead of exit-137.
 
-So `static@P0` does triple duty: cheapest solve, best dynamic seed, and the
-memory probe that sizes every later group.
+So a channel's **anchor solve @ P0** does triple duty: cheapest solve, seed for
+the rest of that channel, and — because `mem` is channel-independent — the
+memory probe that sizes every later group across all channels.
 
 ---
 
@@ -225,6 +248,250 @@ step, and (later) subworld sizing.
 
 x⁽²⁾ / second-order solve (γ) is beyond this sequence — it reuses `FDSolver`
 with a VBC source and the 15b persistence, when γ lands.
+
+---
+
+## Proposed interface (15a)
+
+Header: `calc/calc_manager.hpp` (scheduling — World-free, pure) +
+`calc/calc_executor.hpp` (the FD/ES dispatch — World-bound). The split is the
+whole point: everything that decides *what runs and in what order* is testable
+with a stub executor and a hand-written `response_metadata.json`; everything
+that touches `World`, `iterate_protocol`, and the archive lives behind one
+injected interface.
+
+### Schedulable unit — `CalcNode`
+
+A node is one response state with its own protocol ladder. Identity is a stable
+string (`id`) that doubles as the dependency key — the implicit-by-identity
+contract of the "plan is a DAG" section.
+
+```cpp
+namespace molresponse_v3 {
+
+enum class CalcKind { FD, ES, DerivedFD, NuclearFD /*, VBC (15b) */ };
+
+struct CalcNode {
+  CalcKind            kind;
+  std::string         id;          // "fd:dipole_x@f0.05700" / "es:tda_n5" / ...
+
+  // FD / DerivedFD / NuclearFD payload
+  Perturbation        pert;
+  double              freq = 0.0;  // DerivedFD: filled when its ES converges
+
+  // ES payload
+  bool                tda = true;
+  int                 n_roots = 0;
+
+  std::vector<double> protocols;   // coarse -> fine ladder (from the plan)
+
+  // symbolic resolution (kept symbolic until the molecule / ES is known)
+  std::string         es_root_id;  // DerivedFD: "*" or "es_root_0003"
+
+  // hard edges: must be converged before this node may run. Stored as
+  // node ids; resolution is the readiness gate's metadata lookup, NOT a
+  // pointer graph — ids survive a restart with no in-memory DAG.
+  std::vector<std::string> hard_deps;
+
+  // soft edge: a seed HINT, not a binding. The executor always picks the
+  // NEAREST converged state via try_load_fd_state's restart precedence; this
+  // field only nudges ordering (run the hinted neighbor first). Empty -> pure
+  // nearest-converged / fresh guess. Never required for correctness.
+  std::string         seed_from;
+};
+```
+
+`id` is built from the same string primitives persistence already uses, so a
+node maps one-to-one onto a metadata path:
+- FD/NuclearFD → `"fd:" + pert.description() + "@" + freq_key(freq)` ↔
+  `fd_states/<pert>/<protocol_key>/<freq_key>`.
+- ES → `"es:" + (tda?"tda":"full") + "_n" + n_roots` ↔ `excited_states/<protocol_key>`.
+
+### DAG build — `ResponsePlan → std::vector<CalcNode>`
+
+```cpp
+/// Pure. Expands nuclear_fd (pert.atom < 0) per molecule into one node per
+/// atom×axis; leaves derived_fd "*" symbolic (one node with es_root_id="*",
+/// hard_deps = {the ES node id}). Seeds soft edges: every dynamic FD gets
+/// seed_from = the static (freq=0) node of the same perturbation if present.
+std::vector<CalcNode> build_dag(const ResponsePlan &plan, const Molecule &mol);
+```
+
+VBC (15b) adds `CalcKind::VBC` nodes here, with `hard_deps = {FD(B), FD(C)}`;
+nothing else in the interface changes.
+
+### Reconcile against disk — pure
+
+```cpp
+enum class NodeAction { Skip, Restart, Resume, Fresh };
+
+/// Decide one node's action at one protocol rung, by inspecting the aggregate
+/// metadata json (already loaded — no filesystem here). target_key is
+/// protocol_key(thresh_rung, k_rung). Implements the doc-15 reconcile table,
+/// including the diverged split: present+not-converged+not-diverged -> Resume,
+/// but present+diverged -> Fresh (discard the blown-up archive, re-seed from a
+/// converged neighbor).
+NodeAction reconcile_rung(const CalcNode &node,
+                          const nlohmann::json &metadata,
+                          const std::string &target_key);
+
+/// Readiness gate: are all of node.hard_deps converged at this rung's key?
+/// Implicit-by-identity — looks each dep id up in `metadata`. (v3 analog of
+/// v2 DerivedStateGate.)
+bool deps_ready(const CalcNode &node,
+                const nlohmann::json &metadata,
+                const std::string &target_key);
+```
+
+Both take the metadata as a `const nlohmann::json&` so a test passes a literal
+blob; the only filesystem touch is the manager's single `load_or_create`.
+
+### The two-phase schedule — pure
+
+The unit of execution is a **(node, protocol) rung**, because the two-phase
+schedule interleaves nodes *within* a protocol level (all of P0 before any P1):
+
+```cpp
+struct WorkItem {
+  const CalcNode *node;
+  double          thresh;   // this rung's protocol
+  NodeAction      action;   // decided by reconcile_rung at emit time
+};
+
+/// Emit work in dependency- and seed-respecting waves. A wave is a set of
+/// items with no edges between them — safe to run concurrently (the 15c
+/// group layer fans a wave across subworlds; the 15a skeleton runs a wave
+/// sequentially). The unit of concurrency is the PERTURBATION CHANNEL:
+/// dipole_x / dipole_y / Nuc0_x etc. are independent and share every wave.
+/// Ordering realizes:
+///   Phase A (rung = ramp.front()): each channel's anchor (ω=0 if present,
+///     else lowest |ω|) — anchors of different channels run together — then
+///     all remaining (channel, ω) at P0 in one wave.
+///   Phase B (rung in ramp[1..]):   every (channel, ω) climbs; a rung-P wave
+///     per level.
+/// Seeding is nearest-converged (executor side via try_load_fd_state); a
+/// node's seed_from only biases intra-channel ordering. Nodes whose ladder
+/// doesn't include a rung are skipped for that rung. Gated nodes (deps not yet
+/// ready — e.g. DerivedFD before its ES bundle converges) are held to a later
+/// wave.
+std::vector<std::vector<WorkItem>>
+schedule(const std::vector<CalcNode> &dag,
+         const std::vector<double> &global_ramp,
+         const nlohmann::json &metadata);
+```
+
+`global_ramp` is the coarse→fine union of every node's `protocols` (reusing
+`detail_planner::union_protocols`).
+
+### Injected executor — the only World-bound surface
+
+```cpp
+struct NodeResult {
+  bool                converged = false;
+  std::string         reached_protocol_key;
+  std::vector<double> es_root_freqs;  // ES only: drives DerivedFD expansion
+};
+
+/// One rung of one node. The real impl: set_response_protocol(thresh) ->
+/// gs.prepare(...) -> try_load_fd_state/try_load_es_bundle for the seed ->
+/// construct FDSolver/ESSolver, set_target -> iterate_protocol({thresh}) with
+/// the save+measure_state post_step -> return convergence. Save+metadata are
+/// the executor's job (via save_fd_state / save_es_roots), so the manager
+/// never writes the aggregate itself.
+struct ICalcExecutor {
+  virtual NodeResult run_rung(const WorkItem &item) = 0;
+  virtual ~ICalcExecutor() = default;
+};
+```
+
+Tests substitute a `StubExecutor` that records the call order and writes a
+synthetic metadata entry — exercising gate/reconcile/ordering with zero MRA.
+
+### Top level — `CalcManager`
+
+```cpp
+class CalcManager {
+public:
+  struct Policy {
+    // Seed selection = nearest converged (restart precedence). The knob is
+    // the strategy/metric, not a fixed topology.
+    enum class SeedStrategy { NearestConverged } seed = SeedStrategy::NearestConverged;
+    int max_iters_per_step = 25;
+    // 15c: group sizing knobs land here (node_mem_budget, min/max groups).
+  };
+
+  CalcManager(ResponsePlan plan, std::string calc_dir, Policy policy = {});
+
+  /// Build the DAG for this molecule (expands nuclear_fd, wires soft seeds).
+  void build(const Molecule &mol);
+
+  /// Drive every node to its target protocol against `exec`. Idempotent and
+  /// restart-safe: re-loads metadata between waves, reconciles each rung, and
+  /// resumes exactly where a killed run stopped. When an ES node's rung
+  /// returns converged + es_root_freqs, expands its "*" DerivedFD node into
+  /// concrete per-root nodes (freq = root energy at the final ES protocol),
+  /// appends them to the DAG, and re-schedules.
+  void run(madness::World &world, ICalcExecutor &exec);
+
+private:
+  ResponsePlan          plan_;
+  std::string           calc_dir_;          // holds response_metadata.json
+  Policy                policy_;
+  std::vector<CalcNode> dag_;
+};
+```
+
+`run()` is the only method that isn't pure, and even it is thin: load metadata
+→ `schedule(...)` → for each wave, for each item, `exec.run_rung(item)` (15a:
+sequential; 15c: fan a wave across groups) → handle ES expansion → repeat until
+no work remains. The expensive parts — MRA, MPI, archives — are entirely inside
+the executor and the already-landed persistence/`iterate_protocol` layer.
+
+### What this buys, mapped to 15a
+
+- **Unit-testable scheduler:** `build_dag`, `reconcile_rung`, `deps_ready`,
+  `schedule` are pure functions over `ResponsePlan` / `nlohmann::json`. The
+  whole "skip/restart/resume/fresh" table and the two-phase ordering get gtest
+  coverage with no `World`.
+- **One World-bound seam:** `ICalcExecutor::run_rung`. The real executor is a
+  thin adapter over `iterate_protocol` + `save_fd_state`/`save_es_roots` +
+  `try_load_*` — code paths that already exist and are tested.
+- **Restart-safety falls out:** the manager holds no solved state in memory;
+  every wave re-reads the aggregate and reconciles, so kill/resume works at
+  rung granularity for free.
+- **15b/15c slot in without interface churn:** VBC is a new `CalcKind` + a
+  `build_dag` edge; group sizing is a `schedule`/`run` policy that turns a
+  wave's sequential loop into a subworld fan-out. Neither touches `CalcNode`,
+  the gate, or the executor seam.
+
+### Decided
+
+**Rung-level reconcile — the manager owns the protocol-ladder loop**
+(agreed 2026-05-29). The manager drives every ready node at P0, then every
+node at P1, …; one reconcile + one `exec.run_rung({node, P})` per `(node,
+protocol)`. This buys the all-of-P0-before-any-P1 barrier (so the cheap-level
+memory probe sizes the expensive level), the widest same-level cross-channel
+parallelism, and the finest restart granularity. `iterate_protocol` is invoked
+once per rung (`thresholds = {P}`) rather than running its own full ramp — the
+manager's `for P in ramp` loop replaces the ramp inside `iterate_protocol`.
+
+The node-level alternative (each node carries its whole ladder; one call per
+node; `iterate_protocol` climbs `[P0…Pmax]` internally) was rejected: it gives
+no barrier between protocol levels, so the first node reaches Pmax before
+others finish P0 and the memory probe can't do its job.
+
+### Resolved (folded into the design above)
+
+- **DerivedFD root-frequency provenance (2PA / resonance Raman).** Confirmed:
+  these properties cannot be planned until the ES bundle is converged — the
+  derived-FD frequencies *are* the converged root energies. The ES bundle is
+  internally multi-state and is *not* parallelized across roots (one calc); the
+  `"*"` DerivedFD nodes are gated on ES reaching `protocols.back()`, then
+  expanded to one node per root at that final root energy.
+- **`Molecule` in `build_dag`.** Confirmed needed: vibrational Raman requires
+  ∂/∂Q for every atom in x/y/z, so `build_dag` must expand the `nuclear_all`
+  sentinel into 3·N concrete nodes — the one place the otherwise
+  molecule-independent planner has to see the `Molecule`. Accepted.
 
 ---
 
