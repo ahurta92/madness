@@ -29,6 +29,9 @@ add_mad_executable(test_state_metrics
 add_mad_executable(test_calc_manager
                    "tests/test_calc_manager.cpp"
                    "MADresponse2;MADchem")
+add_mad_executable(test_calc_manager_run
+                   "tests/test_calc_manager_run.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3

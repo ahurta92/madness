@@ -1,0 +1,203 @@
+// ===========================================================================
+// test_calc_manager_run.cpp — end-to-end drive of the calc manager (doc 15,
+// 15a). Sets up a ground state from a moldft archive (same recipe as the FD
+// skeleton test), plans a polarizability request, then lets CalcManager +
+// FdResponseExecutor schedule and solve every FD rung. Validates by reading
+// back response_metadata.json and checking the expected FD states converged.
+//
+// This is an ALLOCATION test (it runs real MRA solves). Usage:
+//   test_calc_manager_run --archive=<moldft restartdata> \
+//       [--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] [--k=N] \
+//       [--maxiter=N] [--dconv=X] [--calc-dir=DIR] [--print-level=0..3]
+// ===========================================================================
+
+#include "../GroundState.hpp"
+#include "../ResponseProtocol.hpp"
+#include "../ResponsePropertyPlanner.hpp"
+#include "../calc/calc_executor.hpp"
+#include "../solvers/convergence_policy.hpp"
+#include "../solvers/response_metadata.hpp"
+
+#include <madness/external/nlohmann_json/json.hpp>
+#include <madness/misc/info.h>
+#include <madness/mra/mra.h>
+#include <madness/world/MADworld.h>
+
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+using namespace madness;
+using namespace molresponse_v3;
+
+namespace {
+
+std::vector<double> parse_csv_doubles(const std::string &s) {
+  return parse_protocol_csv(s);  // reuses the protocol CSV parser
+}
+
+std::vector<char> parse_axes(const std::string &s) {
+  std::vector<char> ax;
+  for (char c : s) {
+    char l = std::tolower(c);
+    if (l == 'x' || l == 'y' || l == 'z') ax.push_back(l);
+  }
+  if (ax.empty()) ax = {'x', 'y', 'z'};
+  return ax;
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  World &world = initialize(argc, argv);
+  int rc = 0;
+  try {
+    startup(world, argc, argv, true);
+    if (world.rank() == 0) {
+      print("\n=========================================================");
+      print(" molresponse_v3 CalcManager run test  (15a, FD/alpha)");
+      print("=========================================================\n");
+    }
+    {
+      commandlineparser parser(argc, argv);
+      if (!parser.key_exists("archive")) {
+        if (world.rank() == 0)
+          print("Usage: test_calc_manager_run --archive=<path> "
+                "[--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] "
+                "[--k=N] [--maxiter=N] [--dconv=X] [--calc-dir=DIR] "
+                "[--print-level=0..3]");
+        finalize();
+        return 1;
+      }
+
+      const std::string archive_path = parser.value_raw("archive");
+      const std::vector<double> freqs =
+          parser.key_exists("omega")
+              ? parse_csv_doubles(parser.value("omega"))
+              : std::vector<double>{0.0};
+      const std::vector<char> axes =
+          parse_axes(parser.key_exists("axes") ? parser.value("axes") : "xyz");
+      const int max_iters = parser.key_exists("maxiter")
+                                ? std::stoi(parser.value("maxiter")) : 25;
+      const double dconv = parser.key_exists("dconv")
+                               ? std::stod(parser.value("dconv")) : 1e-4;
+      const int pl_int = parser.key_exists("print-level")
+                             ? std::stoi(parser.value("print-level")) : 1;
+      const PrintLevel print_level =
+          static_cast<PrintLevel>(std::max(0, std::min(3, pl_int)));
+
+      auto header = GroundState::read_archive_header(world, archive_path);
+      const int override_k =
+          parser.key_exists("k") ? std::stoi(parser.value("k")) : -1;
+
+      std::vector<double> protocol;
+      if (parser.key_exists("protocol"))
+        protocol = parse_protocol_csv(parser.value("protocol"));
+      else
+        protocol.push_back(default_thresh_for_k(header.k));
+      set_response_protocol(world, header.L, protocol.front(), override_k);
+
+      // Molecule (for natom -> nuclear expansion; harmless for pure alpha).
+      Molecule molecule;
+      auto archive_dir = std::filesystem::path(archive_path).parent_path();
+      for (const auto &name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
+        auto candidate = archive_dir / name;
+        if (std::filesystem::exists(candidate)) {
+          std::ifstream ifs(candidate);
+          nlohmann::json j; ifs >> j;
+          nlohmann::json mol_json;
+          if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
+            mol_json = j["tasks"][0]["molecule"];
+          else if (j.contains("molecule"))
+            mol_json = j["molecule"];
+          if (!mol_json.is_null()) molecule.from_json(mol_json);
+          break;
+        }
+      }
+      auto gs = GroundState::from_archive(world, archive_path, molecule);
+      if (world.rank() == 0) gs.print_info();
+
+      std::string fock_json;
+      for (const auto &name : {"moldft.fock.json", "mad.fock.json"}) {
+        auto candidate = archive_dir / name;
+        if (std::filesystem::exists(candidate)) {
+          fock_json = candidate.string();
+          break;
+        }
+      }
+      const double cur_thresh = FunctionDefaults<3>::get_thresh();
+      auto coulop = poperatorT(
+          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * cur_thresh));
+      gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
+
+      ConvergencePolicy policy;
+      policy.dconv_user = dconv;
+
+      const std::string calc_dir =
+          parser.key_exists("calc-dir") ? parser.value_raw("calc-dir")
+                                        : std::string("calc_manager_run");
+
+      // ---- Plan a polarizability request -> ResponsePlan -----------------
+      ResponsePropertyRequest req;
+      req.kind = ResponsePropertyKind::Polarizability;
+      req.frequencies = freqs;
+      req.axes = axes;
+      req.protocol_thresholds = protocol;
+      ResponsePlan plan = plan_one(req);
+
+      if (world.rank() == 0) {
+        print("\nRUN CONFIG:");
+        print("  archive    =", archive_path);
+        print("  shell      =",
+              gs.is_spin_restricted() ? "ClosedShell" : "OpenShell");
+        print("  omega      =", freqs);
+        print("  protocol   =", protocol);
+        print("  calc_dir   =", calc_dir);
+        print("  FD requests=", (int)plan.fd.size());
+      }
+
+      // ---- Drive the calc manager ----------------------------------------
+      CalcManager::Policy mgr_policy;
+      mgr_policy.max_iters_per_step = max_iters;
+      CalcManager mgr(plan, calc_dir, mgr_policy);
+      mgr.build(molecule.natom());
+
+      ExecutorContext ctx{world, gs, header.L, override_k, fock_json,
+                          policy, print_level, calc_dir, max_iters};
+      FdResponseExecutor exec(ctx);
+      mgr.run(world, exec);
+
+      // ---- Validate: every planned FD state converged at the top protocol -
+      const std::string top_key = rung_key(protocol.back());
+      int expected = 0, converged = 0;
+      if (world.rank() == 0) {
+        auto meta = ResponseMetadata::load_or_create(
+            calc_dir + "/response_metadata.json");
+        const auto &j = meta.json();
+        for (const auto &r : plan.fd) {
+          ++expected;
+          const std::string pert = r.pert.description();
+          const std::string fk   = ResponseMetadata::freq_key(r.freq);
+          bool ok = j["fd_states"].contains(pert) &&
+                    j["fd_states"][pert].contains(top_key) &&
+                    j["fd_states"][pert][top_key].contains(fk) &&
+                    j["fd_states"][pert][top_key][fk].value("converged", false);
+          if (ok) ++converged;
+          print("  ", ok ? "[PASS]" : "[FAIL]", pert, "@", r.freq,
+                " key=", top_key);
+        }
+        print("\n", (converged == expected) ? "PASSED" : "FAILED", " (",
+              converged, "/", expected, " FD states converged)");
+        rc = (converged == expected) ? 0 : 1;
+      }
+      world.gop.broadcast(rc, 0);
+    }
+  } catch (const std::exception &e) {
+    if (world.rank() == 0) print("EXCEPTION:", e.what());
+    rc = 2;
+  }
+  finalize();
+  return rc;
+}
