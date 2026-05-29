@@ -20,8 +20,8 @@ add_mad_executable(test_protocol_key
 add_mad_executable(test_response_metadata
                    "tests/test_response_metadata.cpp"
                    "MADresponse2;MADchem")
-add_mad_executable(test_property_planner
-                   "tests/test_property_planner.cpp"
+add_mad_executable(test_response_property_planner
+                   "tests/test_response_property_planner.cpp"
                    "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 

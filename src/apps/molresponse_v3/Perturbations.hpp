@@ -24,25 +24,36 @@ struct Perturbation {
 
     Kind kind = Kind::Dipole;
     int  axis = 0;        // 0=x, 1=y, 2=z
-    int  atom = -1;       // for NuclearDisplacement; -1 = N/A
+    int  atom = -1;       // for NuclearDisplacement; <0 = all-atoms sentinel ("*")
 
     /// Canonical filename/metadata-key fragment:
-    ///   dipole_x   magnetic_y   nuc_3_z
+    ///   dipole_x   magnetic_y   nuc_3_z   nuc_*_z
+    /// A negative `atom` is the all-atoms sentinel — the planner emits one
+    /// such record and the calc manager expands it to one per atom against
+    /// the concrete molecule (mirrors the ES-root "*" sentinel).
     std::string description() const {
         static const char *ax[] = {"x", "y", "z"};
         const char *a = (axis >= 0 && axis <= 2) ? ax[axis] : "?";
         switch (kind) {
             case Kind::Dipole:               return std::string("dipole_") + a;
             case Kind::Magnetic:             return std::string("magnetic_") + a;
-            case Kind::NuclearDisplacement:
-                return std::string("nuc_") + std::to_string(atom) + "_" + a;
+            case Kind::NuclearDisplacement: {
+                const std::string atom_tag = (atom < 0) ? "*" : std::to_string(atom);
+                return std::string("nuc_") + atom_tag + "_" + a;
+            }
         }
         return "unknown";
+    }
+
+    bool is_all_atoms() const {
+        return kind == Kind::NuclearDisplacement && atom < 0;
     }
 
     static Perturbation dipole(int axis)            { return {Kind::Dipole,   axis, -1}; }
     static Perturbation magnetic(int axis)          { return {Kind::Magnetic, axis, -1}; }
     static Perturbation nuclear(int atom, int axis) { return {Kind::NuclearDisplacement, axis, atom}; }
+    /// All-atoms sentinel — calc manager expands per molecule.
+    static Perturbation nuclear_all(int axis)       { return {Kind::NuclearDisplacement, axis, -1}; }
 };
 
 /// Construct the dipole perturbation right-hand side for one direction.
