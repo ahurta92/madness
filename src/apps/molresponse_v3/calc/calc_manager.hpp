@@ -1,0 +1,510 @@
+#ifndef MOLRESPONSE_V3_CALC_CALC_MANAGER_HPP
+#define MOLRESPONSE_V3_CALC_CALC_MANAGER_HPP
+
+// ===========================================================================
+// CalcManager — the scheduling core (doc 15, increment 15a).
+//
+// This header is the WORLD-FREE, PURE half of the calc manager: it turns a
+// ResponsePlan (doc 14 Tier A) into a DAG of CalcNodes, reconciles each node
+// against what is already on disk (response_metadata.json), and emits the
+// two-phase, channel-parallel schedule of (node, protocol) WorkItems.
+//
+// Nothing here touches madness::World, MPI, MRA functions, or the archive.
+// Every function takes the aggregate metadata as a const nlohmann::json& so a
+// test can pass a literal blob. The single World-bound seam is the abstract
+// ICalcExecutor (declared at the bottom): the real FD/ES executor and
+// CalcManager::run() live in calc/calc_executor.hpp (next increment) and are
+// validated on the allocation.
+//
+// Design decisions vs doc 15:
+//   * build_dag takes `int n_atoms`, not a full Molecule. The only reason the
+//     planner needs the molecule is to expand the nuclear_all sentinel into
+//     one node per atom; n_atoms is all that requires. CalcManager::build()
+//     (executor side) extracts natom() from the Molecule and forwards it. This
+//     keeps the whole header molecule-independent and trivially testable.
+//   * reconcile_rung / deps_ready / schedule are keyed off the rung THRESHOLD
+//     (a double), not a pre-built protocol_key string. k is derived once via
+//     default_k_for_thresh, so callers only thread the ramp of thresholds.
+//     (15a assumes the standard thresh->k table; an override_k ramp is a
+//     later concern — see rung_key().)
+//   * deps_ready resolves a node's hard_deps against the DAG (id -> node) so
+//     it can reconstruct each prerequisite's metadata identity. In 15a no
+//     concrete schedulable node carries a hard edge (DerivedFD "*" is a
+//     symbolic expansion template, excluded from scheduling until ES
+//     converges); deps_ready becomes load-bearing for VBC in 15b and is
+//     implemented + tested now so 15b inherits a working gate.
+//   * The reconcile diverged-split reads `entry.value("diverged", false)`
+//     defensively: the FD/ES save paths record `converged` today but not
+//     `diverged`. Recording it is a one-line follow-up on the persistence
+//     side; until then a missing field reads as not-diverged (-> Resume),
+//     which is the safe default.
+// ===========================================================================
+
+#include "../Perturbations.hpp"          // Perturbation
+#include "../ResponseProtocol.hpp"        // protocol_key, default_k_for_thresh
+#include "../ResponsePropertyPlanner.hpp" // ResponsePlan, FDRequest, ESRequest, ...
+#include "../solvers/response_metadata.hpp" // ResponseMetadata::freq_key
+
+#include <madness/external/nlohmann_json/json.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace molresponse_v3 {
+
+// ---------------------------------------------------------------------------
+// Schedulable unit.
+// ---------------------------------------------------------------------------
+
+enum class CalcKind {
+  FD,         // concrete frequency-dependent dipole solve
+  NuclearFD,  // nuclear-displacement FD (shares the fd_states subtree)
+  ES,         // excited-state bundle
+  DerivedFD,  // FD whose frequency comes from a converged ES root
+  VBC,        // 15b: quadratic source (placeholder; not emitted yet)
+};
+
+/// One response state with its own protocol ladder. `id` is a stable string
+/// that doubles as the dependency key (implicit-by-identity — see doc 15).
+struct CalcNode {
+  CalcKind            kind = CalcKind::FD;
+  std::string         id;
+
+  // FD / NuclearFD / DerivedFD payload
+  Perturbation        pert;
+  double              freq = 0.0;   // DerivedFD: 0 until expanded from a root
+
+  // ES payload
+  bool                tda = true;
+  int                 n_roots = 0;
+
+  std::vector<double> protocols;    // coarse -> fine ladder (from the plan)
+
+  // DerivedFD symbolic reference: "*" (all roots) or "es_root_0003".
+  std::string         es_root_id;
+
+  // Hard edges (correctness): node ids that must be converged before this
+  // node runs. Resolved by deps_ready against the DAG + metadata.
+  std::vector<std::string> hard_deps;
+
+  // Soft edge: a seed HINT (node id), never required for correctness. The
+  // executor always picks the nearest converged state via try_load_fd_state's
+  // restart precedence; this only biases intra-channel ordering.
+  std::string         seed_from;
+
+  /// A symbolic node is an expansion template, not directly schedulable:
+  /// a DerivedFD that still references "*" (or no concrete frequency yet).
+  bool is_symbolic() const {
+    return kind == CalcKind::DerivedFD && es_root_id == "*";
+  }
+};
+
+/// Reconcile verdict for one (node, rung). See the doc-15 table.
+enum class NodeAction { Skip, Restart, Resume, Fresh };
+
+/// One (node, protocol) rung of work.
+struct WorkItem {
+  const CalcNode *node = nullptr;
+  double          thresh = 0.0;   // this rung's truncation threshold
+  NodeAction      action = NodeAction::Fresh;
+};
+
+// ---------------------------------------------------------------------------
+// Identity helpers (free functions — also used by the executor later).
+// ---------------------------------------------------------------------------
+
+/// Canonical protocol_key for a rung, derived from the threshold alone using
+/// the standard thresh->k table. (15a: override_k ramps unsupported.)
+inline std::string rung_key(double thresh) {
+  return protocol_key(thresh, default_k_for_thresh(thresh));
+}
+
+inline std::string fd_node_id(const Perturbation &pert, double freq) {
+  return "fd:" + pert.description() + "@" + ResponseMetadata::freq_key(freq);
+}
+inline std::string es_node_id(bool tda, int n_roots) {
+  return std::string("es:") + (tda ? "tda" : "full") + "_n"
+       + std::to_string(n_roots);
+}
+inline std::string derived_fd_node_id(const Perturbation &pert,
+                                       const std::string &es_root_id) {
+  return "dfd:" + pert.description() + "@" + es_root_id;
+}
+
+/// The channel a node belongs to — the unit of cross-node parallelism. FD /
+/// NuclearFD / DerivedFD share a channel per perturbation; an ES bundle is its
+/// own channel.
+inline std::string channel_key(const CalcNode &n) {
+  if (n.kind == CalcKind::ES) return n.id;
+  return n.pert.description();
+}
+
+// ---------------------------------------------------------------------------
+namespace detail_calc {
+
+/// Sorted (coarse -> fine) deduplicated protocol ramp.
+inline std::vector<double> sorted_ramp(std::vector<double> r) {
+  std::sort(r.begin(), r.end(), std::greater<double>{});
+  r.erase(std::unique(r.begin(), r.end(),
+                      [](double a, double b) {
+                        return std::abs(a - b) <= 1e-15 * std::max(a, b);
+                      }),
+          r.end());
+  return r;
+}
+
+inline bool ramp_contains(const std::vector<double> &ramp, double thresh) {
+  for (double t : ramp)
+    if (std::abs(t - thresh) <= 1e-12 * std::max(t, thresh)) return true;
+  return false;
+}
+
+inline bool entry_converged(const nlohmann::json &e) {
+  return e.value("converged", false);
+}
+inline bool entry_diverged(const nlohmann::json &e) {
+  return e.value("diverged", false);
+}
+
+/// FD status entry at an exact (pert, key, freq) or nullptr.
+inline const nlohmann::json *
+fd_entry(const nlohmann::json &meta, const std::string &pert,
+         const std::string &key, const std::string &fkey) {
+  if (!meta.contains("fd_states")) return nullptr;
+  const auto &fs = meta["fd_states"];
+  if (!fs.contains(pert) || !fs[pert].contains(key) ||
+      !fs[pert][key].contains(fkey))
+    return nullptr;
+  return &fs[pert][key][fkey];
+}
+
+/// Is there a COARSER-OR-EQUAL converged FD source for (pert, freq) — i.e. a
+/// stored key whose (thresh,k) is coarser-or-equal to the target and whose
+/// freq entry is converged? Mirrors try_load_fd_state's precedence filter.
+inline bool has_coarser_converged_fd(const nlohmann::json &meta,
+                                     const std::string &pert,
+                                     const std::string &fkey,
+                                     double target_thresh, int target_k) {
+  if (!meta.contains("fd_states") || !meta["fd_states"].contains(pert))
+    return false;
+  if (!meta.contains("protocols")) return false;
+  const auto &protos = meta["protocols"];
+  for (const auto &[key, ent] : meta["fd_states"][pert].items()) {
+    if (!ent.contains(fkey)) continue;
+    if (!entry_converged(ent[fkey])) continue;
+    if (!protos.contains(key)) continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (t >= target_thresh && kk <= target_k) return true;
+  }
+  return false;
+}
+
+/// ES bundle entry at a key, or nullptr.
+inline const nlohmann::json *es_entry(const nlohmann::json &meta,
+                                      const std::string &key) {
+  if (!meta.contains("excited_states") ||
+      !meta["excited_states"].contains(key))
+    return nullptr;
+  return &meta["excited_states"][key];
+}
+
+inline bool has_coarser_converged_es(const nlohmann::json &meta,
+                                     double target_thresh, int target_k) {
+  if (!meta.contains("excited_states") || !meta.contains("protocols"))
+    return false;
+  const auto &protos = meta["protocols"];
+  for (const auto &[key, ent] : meta["excited_states"].items()) {
+    if (!entry_converged(ent)) continue;
+    if (!protos.contains(key)) continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (t >= target_thresh && kk <= target_k) return true;
+  }
+  return false;
+}
+
+} // namespace detail_calc
+
+// ---------------------------------------------------------------------------
+// build_dag — ResponsePlan -> nodes. Pure.
+// ---------------------------------------------------------------------------
+
+/// Expand a ResponsePlan into schedulable nodes:
+///   * fd          -> one FD node each; dynamic ω gets seed_from = the same
+///                    perturbation's static (ω=0) node if the plan has one.
+///   * es          -> one ES node each.
+///   * derived_fd  -> one SYMBOLIC DerivedFD node each (es_root_id kept),
+///                    hard_deps = {the plan's ES node id}. Expanded to
+///                    concrete per-root nodes by the executor once the ES
+///                    bundle converges (run(), next increment).
+///   * nuclear_fd  -> all-atoms sentinel (pert.atom < 0) expands to one node
+///                    per atom in [0, n_atoms); a concrete atom passes through.
+std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
+  std::vector<CalcNode> dag;
+
+  // Pre-index static dipole frequencies per channel for seed hints.
+  auto has_static_fd = [&](const std::string &pdesc) {
+    for (const auto &r : plan.fd)
+      if (r.pert.description() == pdesc && std::abs(r.freq) < 1e-12)
+        return true;
+    return false;
+  };
+
+  for (const auto &r : plan.fd) {
+    CalcNode n;
+    n.kind      = CalcKind::FD;
+    n.pert      = r.pert;
+    n.freq      = r.freq;
+    n.protocols = r.protocols;
+    n.id        = fd_node_id(r.pert, r.freq);
+    if (std::abs(r.freq) >= 1e-12 && has_static_fd(r.pert.description()))
+      n.seed_from = fd_node_id(r.pert, 0.0);
+    dag.push_back(std::move(n));
+  }
+
+  std::string first_es_id;
+  for (const auto &r : plan.es) {
+    CalcNode n;
+    n.kind      = CalcKind::ES;
+    n.tda       = r.tda;
+    n.n_roots   = r.n_roots;
+    n.protocols = r.protocols;
+    n.id        = es_node_id(r.tda, r.n_roots);
+    if (first_es_id.empty()) first_es_id = n.id;
+    dag.push_back(std::move(n));
+  }
+
+  for (const auto &r : plan.derived_fd) {
+    CalcNode n;
+    n.kind       = CalcKind::DerivedFD;
+    n.pert       = r.pert;
+    n.es_root_id = r.es_root_id;
+    n.protocols  = r.protocols;
+    n.id         = derived_fd_node_id(r.pert, r.es_root_id);
+    if (!first_es_id.empty()) n.hard_deps.push_back(first_es_id);
+    dag.push_back(std::move(n));
+  }
+
+  for (const auto &r : plan.nuclear_fd) {
+    if (r.pert.is_all_atoms()) {
+      for (int a = 0; a < n_atoms; ++a) {
+        CalcNode n;
+        n.kind      = CalcKind::NuclearFD;
+        n.pert      = Perturbation::nuclear(a, r.pert.axis);
+        n.freq      = r.freq;
+        n.protocols = r.protocols;
+        n.id        = fd_node_id(n.pert, r.freq);
+        dag.push_back(std::move(n));
+      }
+    } else {
+      CalcNode n;
+      n.kind      = CalcKind::NuclearFD;
+      n.pert      = r.pert;
+      n.freq      = r.freq;
+      n.protocols = r.protocols;
+      n.id        = fd_node_id(r.pert, r.freq);
+      dag.push_back(std::move(n));
+    }
+  }
+
+  return dag;
+}
+
+// ---------------------------------------------------------------------------
+// reconcile_rung — what to do with one node at one rung. Pure.
+// ---------------------------------------------------------------------------
+
+/// Implements the doc-15 reconcile table at threshold `thresh`:
+///   converged at this rung                       -> Skip
+///   else converged at a coarser-or-equal rung    -> Restart
+///   else present, not converged, not diverged    -> Resume
+///   else present, diverged                        -> Fresh
+///   else absent                                   -> Fresh
+NodeAction reconcile_rung(const CalcNode &node, const nlohmann::json &meta,
+                          double thresh) {
+  const int         k   = default_k_for_thresh(thresh);
+  const std::string key = protocol_key(thresh, k);
+
+  if (node.kind == CalcKind::ES) {
+    if (const auto *e = detail_calc::es_entry(meta, key)) {
+      if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
+      return detail_calc::entry_diverged(*e) ? NodeAction::Fresh
+                                             : NodeAction::Resume;
+    }
+    return detail_calc::has_coarser_converged_es(meta, thresh, k)
+               ? NodeAction::Restart
+               : NodeAction::Fresh;
+  }
+
+  // FD / NuclearFD / (concrete) DerivedFD all live in fd_states.
+  const std::string pert = node.pert.description();
+  const std::string fkey = ResponseMetadata::freq_key(node.freq);
+  if (const auto *e = detail_calc::fd_entry(meta, pert, key, fkey)) {
+    if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
+    return detail_calc::entry_diverged(*e) ? NodeAction::Fresh
+                                           : NodeAction::Resume;
+  }
+  return detail_calc::has_coarser_converged_fd(meta, pert, fkey, thresh, k)
+             ? NodeAction::Restart
+             : NodeAction::Fresh;
+}
+
+// ---------------------------------------------------------------------------
+// deps_ready — readiness gate (implicit-by-identity). Pure.
+// ---------------------------------------------------------------------------
+
+/// True iff every hard_dep of `node` is converged at rung `thresh`. Dep ids
+/// are resolved against `dag`; each dep's convergence is checked at the SAME
+/// rung key (the doc-15 "reconstruct prerequisites' identity at the same
+/// protocol_key" contract). A dep id that resolves to no node, or to a node
+/// with no converged entry, gates the node out.
+bool deps_ready(const CalcNode &node, const std::vector<CalcNode> &dag,
+                const nlohmann::json &meta, double thresh) {
+  if (node.hard_deps.empty()) return true;
+  const int         k   = default_k_for_thresh(thresh);
+  const std::string key = protocol_key(thresh, k);
+
+  auto find_node = [&](const std::string &id) -> const CalcNode * {
+    for (const auto &n : dag)
+      if (n.id == id) return &n;
+    return nullptr;
+  };
+
+  for (const auto &dep_id : node.hard_deps) {
+    const CalcNode *dep = find_node(dep_id);
+    if (!dep) return false;
+    bool ok = false;
+    if (dep->kind == CalcKind::ES) {
+      const auto *e = detail_calc::es_entry(meta, key);
+      ok = e && detail_calc::entry_converged(*e);
+    } else {
+      const auto *e = detail_calc::fd_entry(meta, dep->pert.description(),
+                                            key,
+                                            ResponseMetadata::freq_key(dep->freq));
+      ok = e && detail_calc::entry_converged(*e);
+    }
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// schedule — two-phase, channel-parallel waves of WorkItems. Pure.
+// ---------------------------------------------------------------------------
+
+/// Emit work in waves (a wave = items with no edges between them, safe to run
+/// concurrently). Channels (perturbation / ES bundle) are the unit of
+/// parallelism and share every wave. Ordering:
+///   Phase A (rung = ramp.front()):
+///     wave A1 — each channel's ANCHOR (ω=0 if present, else lowest |ω|),
+///     wave A2 — all remaining nodes at this rung.
+///   Phase B (rung in ramp[1..]): one wave per rung of every participating
+///     node (embarrassingly parallel).
+/// A node participates in a rung only if the rung is in its protocols ladder
+/// and reconcile_rung != Skip. Symbolic nodes (DerivedFD "*") are excluded —
+/// they are expansion templates resolved post-ES. Gated nodes (deps not
+/// ready) are dropped from the wave and picked up on a later re-schedule
+/// (after run() updates the metadata). Empty waves are omitted.
+std::vector<std::vector<WorkItem>>
+schedule(const std::vector<CalcNode> &dag,
+         const std::vector<double> &global_ramp,
+         const nlohmann::json &meta) {
+  using detail_calc::ramp_contains;
+  std::vector<std::vector<WorkItem>> waves;
+
+  const std::vector<double> ramp = detail_calc::sorted_ramp(global_ramp);
+  if (ramp.empty()) return waves;
+
+  // Schedulable (non-symbolic) nodes only.
+  std::vector<const CalcNode *> nodes;
+  for (const auto &n : dag)
+    if (!n.is_symbolic()) nodes.push_back(&n);
+
+  // Does node participate at this rung (in ladder, not Skip, deps ready)?
+  auto make_item = [&](const CalcNode *n, double thresh,
+                       WorkItem &out) -> bool {
+    if (!ramp_contains(n->protocols, thresh)) return false;
+    if (!deps_ready(*n, dag, meta, thresh))   return false;
+    const NodeAction a = reconcile_rung(*n, meta, thresh);
+    if (a == NodeAction::Skip) return false;
+    out = WorkItem{n, thresh, a};
+    return true;
+  };
+
+  // ---- Phase A: anchors then the rest, at ramp.front() --------------------
+  const double p0 = ramp.front();
+
+  // Per-channel anchor = the node with freq closest to 0 (static preferred).
+  std::vector<const CalcNode *> channels_seen;
+  auto anchor_of_channel = [&](const std::string &ch) -> const CalcNode * {
+    const CalcNode *best = nullptr;
+    for (const CalcNode *n : nodes) {
+      if (channel_key(*n) != ch) continue;
+      if (!ramp_contains(n->protocols, p0)) continue;
+      if (!best || std::abs(n->freq) < std::abs(best->freq)) best = n;
+    }
+    return best;
+  };
+
+  std::vector<WorkItem> waveA1, waveA2;
+  std::vector<std::string> done_channels;
+  for (const CalcNode *n : nodes) {
+    const std::string ch = channel_key(*n);
+    if (std::find(done_channels.begin(), done_channels.end(), ch) ==
+        done_channels.end()) {
+      done_channels.push_back(ch);
+      if (const CalcNode *anchor = anchor_of_channel(ch)) {
+        WorkItem it;
+        if (make_item(anchor, p0, it)) waveA1.push_back(it);
+      }
+    }
+  }
+  // A2: every other P0 node that isn't its channel's anchor.
+  for (const CalcNode *n : nodes) {
+    const CalcNode *anchor = anchor_of_channel(channel_key(*n));
+    if (n == anchor) continue;
+    WorkItem it;
+    if (make_item(n, p0, it)) waveA2.push_back(it);
+  }
+  if (!waveA1.empty()) waves.push_back(std::move(waveA1));
+  if (!waveA2.empty()) waves.push_back(std::move(waveA2));
+
+  // ---- Phase B: one wave per finer rung -----------------------------------
+  for (size_t i = 1; i < ramp.size(); ++i) {
+    std::vector<WorkItem> wave;
+    for (const CalcNode *n : nodes) {
+      WorkItem it;
+      if (make_item(n, ramp[i], it)) wave.push_back(it);
+    }
+    if (!wave.empty()) waves.push_back(std::move(wave));
+  }
+
+  return waves;
+}
+
+// ---------------------------------------------------------------------------
+// Executor seam (World-bound impl + CalcManager::run land in the next
+// increment, calc/calc_executor.hpp). Declared here so the scheduling side
+// and its tests agree on the contract.
+// ---------------------------------------------------------------------------
+
+struct NodeResult {
+  bool                converged = false;
+  std::string         reached_protocol_key;
+  std::vector<double> es_root_freqs;   // ES only: drives DerivedFD expansion
+};
+
+/// Runs one rung of one node: load nearest seed -> iterate at this protocol
+/// -> save (+metrics). The only World-bound surface of the calc manager.
+struct ICalcExecutor {
+  virtual NodeResult run_rung(const WorkItem &item) = 0;
+  virtual ~ICalcExecutor() = default;
+};
+
+} // namespace molresponse_v3
+
+#endif // MOLRESPONSE_V3_CALC_CALC_MANAGER_HPP
