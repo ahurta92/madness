@@ -1,5 +1,10 @@
 # Property Design
 
+> **Superseded by `14_property_architecture.md`** for the overall framing.
+> The two-tier split (Response Properties = core driver; Chemical Properties
+> = post-processing) and the user-facing specification model live there. This
+> doc retains only the persistence/matching notes that feed it.
+
 Status: **stub.** Property assembly (polarizability, hyperpolarizability,
 resonant Raman, two-photon absorption) is not yet implemented in v3.
 
