@@ -35,6 +35,7 @@
 #include "fd_solver.hpp"
 #include "response_metadata.hpp"
 #include "response_state.hpp"
+#include "state_metrics.hpp"              // measure_state (per-state mem/iters)
 
 #include <madness/external/nlohmann_json/json.hpp>
 #include <madness/mra/mra.h>
@@ -110,6 +111,10 @@ void save_fd_state(madness::World &world,
   // (1) Collective binary save — same per-state primitive ES uses per-root.
   state.responses[0].save(world, archive_path);
 
+  // (1b) Collective per-state metrics (coeffs/bytes/rss/iters) — every rank.
+  const StateMetrics metrics =
+      measure_state(world, state.responses[0], state.iter);
+
   // (2) Rank-0 metadata upsert.
   if (world.rank() == 0) {
     auto meta = ResponseMetadata::load_or_create(
@@ -136,6 +141,7 @@ void save_fd_state(madness::World &world,
         {"iter",         state.iter},
         {"bsh_residual", bsh_res},
         {"archive",      archive_basename},
+        {"metrics",      metrics.to_json()},
     };
     meta.set_fd_state(pdesc, key, fkey, entry);
     meta.save();

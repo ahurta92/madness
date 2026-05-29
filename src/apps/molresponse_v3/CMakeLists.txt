@@ -23,6 +23,9 @@ add_mad_executable(test_response_metadata
 add_mad_executable(test_response_property_planner
                    "tests/test_response_property_planner.cpp"
                    "MADresponse2;MADchem")
+add_mad_executable(test_state_metrics
+                   "tests/test_state_metrics.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3

@@ -44,6 +44,7 @@
 #include "es_solver.hpp"
 #include "response_metadata.hpp"     // ResponseMetadata (doc 13 aggregate)
 #include "response_state.hpp"
+#include "state_metrics.hpp"         // process_rss_gb (bundle RSS)
 #include "../ResponseProtocol.hpp"   // protocol_key(thresh, k)
 #include "../kernels/tags.hpp"
 
@@ -104,6 +105,17 @@ void save_es_roots(madness::World &world,
     state.roots[s].save(world, path);
   }
 
+  // Per-root coefficient counts + worst-task bundle RSS — collective on
+  // every rank, batched into a single sum reduce. coeffs[s] feeds the
+  // memory-scaling study; rss_gb is the OOM-relevant per-task figure.
+  std::vector<std::size_t> root_coeffs(static_cast<size_t>(n_roots), 0);
+  for (int s = 0; s < n_roots; ++s)
+    for (const auto &f : state.roots[s].flatten())
+      root_coeffs[static_cast<size_t>(s)] += f.size_local();
+  world.gop.sum(root_coeffs.data(), static_cast<size_t>(n_roots));
+  double bundle_rss_gb = process_rss_gb();
+  world.gop.max(bundle_rss_gb);
+
   if (world.rank() == 0) {
     const double thresh = madness::FunctionDefaults<3>::get_thresh();
 
@@ -150,9 +162,12 @@ void save_es_roots(madness::World &world,
               ? state.last_density_residual[s]
               : std::numeric_limits<double>::quiet_NaN();
       entry["file"] = detail_save_load::root_file(s);
+      entry["coeffs"] = root_coeffs[static_cast<size_t>(s)];
+      entry["bytes"]  = root_coeffs[static_cast<size_t>(s)] * sizeof(double);
       roots_arr.push_back(entry);
     }
-    j["roots"] = roots_arr;
+    j["roots"]  = roots_arr;
+    j["rss_gb"] = bundle_rss_gb;  // worst-task RSS at this protocol
 
     std::ofstream out(dir + "/roots.json");
     out << j.dump(2) << "\n";
@@ -182,6 +197,8 @@ void save_es_roots(madness::World &world,
         {"converged",        converged},
         {"slot_permutation", stable_index},
         {"roots",            roots_arr},
+        {"iter",             state.iter},
+        {"rss_gb",           bundle_rss_gb},
     };
     meta.set_es_bundle(key, bundle_entry);
     meta.save();
