@@ -377,10 +377,18 @@ public:
         return solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
                                          item.action);
       }
-      if (ctx_.world.rank() == 0)
-        madness::print("[CALC] run_protocol: ES bundle", node.id,
-                       " not supported in 15b-i (TDA closed-shell only): tda=",
-                       node.tda, " restricted=", restricted, " — skipping");
+      if (ctx_.world.rank() == 0) {
+        if (!restricted)
+          madness::print("[CALC] run_protocol: ES bundle", node.id,
+                         "requested on an OPEN-SHELL ground state — open-shell "
+                         "excited states are OUT OF SCOPE (closed-shell only; a "
+                         "future research direction). Skipping.");
+        else  // restricted but !tda
+          madness::print("[CALC] run_protocol: ES bundle", node.id,
+                         "with tda=false (Full/RPA) is not implemented "
+                         "(closed-shell TDA only; direct-Full TBD, FullRPA out "
+                         "of scope). Skipping.");
+      }
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
     }
     if (node.kind == CalcKind::DerivedFD || node.kind == CalcKind::VBC) {

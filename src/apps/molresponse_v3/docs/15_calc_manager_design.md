@@ -368,6 +368,22 @@ step, and (later) subworld sizing.
 
 ---
 
+## Scope: closed-shell focus
+
+The active scope is **closed-shell properties and excited states**. Specifically:
+
+- **Excited states: closed-shell only.** The ES executor solves
+  `ESSolver<TDA, ClosedShell>`. **Open-shell (UHF) excited states are out of
+  scope** — a deliberate future research direction, not a near-term gap. The
+  ES dispatch skips an open-shell ES node with a clear out-of-scope message
+  rather than attempting it.
+- **Full/RPA excited states** (`tda=false`): the symmetric-reduction FullRPA
+  (`u = X+Y`) solver is a separate R&D track and is **not used here**. If a
+  property ever needs paired (X,Y) ES, the direct `ESSolver<Full, ClosedShell>`
+  is the intended path; until then the ES dispatch skips `tda=false`.
+- **FD (linear response)** retains its open-shell path (e.g. Li polarizability)
+  — only the *excited-state* path is closed-shell-only.
+
 ## Increment plan
 
 - **15a — single-group skeleton.** DAG build from a `ResponsePlan`, the
