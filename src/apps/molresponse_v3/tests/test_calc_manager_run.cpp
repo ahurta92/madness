@@ -24,6 +24,8 @@
 #include <madness/world/MADworld.h>
 
 #include <cmath>
+#include <limits>
+#include <set>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -192,17 +194,34 @@ int main(int argc, char **argv) {
                        j["excited_states"][top_key].value("converged", false);
           int n_es = (es_ok && j["excited_states"][top_key].contains("roots"))
                          ? (int)j["excited_states"][top_key]["roots"].size() : 0;
+          // Expected derived frequencies = the DISTINCT freq_key(0.5 * ωₙ) over
+          // the converged roots — degenerate roots collapse to one frequency,
+          // so the count is unique-ωₙ/2 × axes, not n_roots × axes. (0.5 mirrors
+          // the resonant DerivedFDRequest::es_freq_factor default.)
+          std::set<std::string> want_fkeys;
+          if (es_ok && j["excited_states"][top_key].contains("roots"))
+            for (const auto &r : j["excited_states"][top_key]["roots"]) {
+              const double w = r.value(
+                  "omega", std::numeric_limits<double>::quiet_NaN());
+              if (w == w) want_fkeys.insert(ResponseMetadata::freq_key(0.5 * w));
+            }
+          const int want_derived =
+              static_cast<int>(want_fkeys.size()) * static_cast<int>(axes.size());
+          // Count converged derived FDs at the top protocol whose freq matches
+          // an expected ωₙ/2 key (ignores any pre-fix ωₙ orphans on a reused dir).
           int derived = 0;
           if (j.contains("fd_states"))
             for (auto &kv : j["fd_states"].items())
               if (kv.value().contains(top_key))
                 for (auto &fe : kv.value()[top_key].items())
-                  if (fe.value().value("converged", false)) ++derived;
-          const int want_derived = es_roots * (int)axes.size();
-          print("  ES bundle  converged=", es_ok, "  roots=", n_es, "/", es_roots);
+                  if (want_fkeys.count(fe.key()) &&
+                      fe.value().value("converged", false))
+                    ++derived;
+          print("  ES bundle  converged=", es_ok, "  roots=", n_es, "/", es_roots,
+                "  distinct ωₙ/2 freqs=", (int)want_fkeys.size());
           print("  derived FD converged=", derived, "/", want_derived,
                 " key=", top_key);
-          bool ok = es_ok && n_es == es_roots && derived >= want_derived;
+          bool ok = es_ok && n_es == es_roots && derived == want_derived;
           print("\n", ok ? "PASSED" : "FAILED",
                 " (ES + ", derived, "/", want_derived, " derived FD)");
           rc = ok ? 0 : 1;
