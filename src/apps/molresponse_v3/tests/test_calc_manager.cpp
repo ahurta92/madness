@@ -1,6 +1,6 @@
 // ===========================================================================
 // CalcManager scheduling-core tests (doc 15, 15a). Pure C++, no MPI / no MRA
-// runtime — exercises build_dag, reconcile_protocol, deps_ready, and schedule
+// runtime — exercises build_dag, reconcile_protocol, prerequisites_converged, and schedule
 // against hand-written response_metadata.json blobs.
 // ===========================================================================
 
@@ -149,7 +149,7 @@ int main() {
     EXPECT(es && es->kind == CalcKind::ES && es->n_roots == 4, "ES node");
     const CalcNode *d = find_id(dag, "dfd:dipole_x@*");
     EXPECT(d && d->is_symbolic(), "derived FD is symbolic");
-    EXPECT(d && d->hard_deps.size() == 1 && d->hard_deps[0] == "es:tda_n4",
+    EXPECT(d && d->prerequisites.size() == 1 && d->prerequisites[0] == "es:tda_n4",
            "derived FD hard-deps the ES bundle");
   }
 
@@ -202,8 +202,8 @@ int main() {
            "ES coarser converged -> Restart");
   }
 
-  // ====== deps_ready: VBC-like synthetic dep ==============================
-  std::printf("=== deps_ready (synthetic VBC dep) ===\n");
+  // ====== prerequisites_converged: VBC-like synthetic dep ==============================
+  std::printf("=== prerequisites_converged (synthetic VBC dep) ===\n");
   {
     std::vector<CalcNode> dag;
     CalcNode b; b.kind = CalcKind::FD; b.pert = Perturbation::dipole(0);
@@ -211,20 +211,20 @@ int main() {
     CalcNode c; c.kind = CalcKind::FD; c.pert = Perturbation::dipole(1);
     c.freq = 0.07; c.protocols = P; c.id = fd_node_id(c.pert, c.freq);
     CalcNode vbc; vbc.kind = CalcKind::VBC; vbc.id = "vbc:test";
-    vbc.protocols = P; vbc.hard_deps = {b.id, c.id};
+    vbc.protocols = P; vbc.prerequisites = {b.id, c.id};
     dag = {b, c, vbc};
 
     json m = empty_meta();
-    EXPECT(!deps_ready(vbc, dag, m, 1e-6), "deps absent -> not ready");
+    EXPECT(!prerequisites_converged(vbc, dag, m, 1e-6), "deps absent -> not ready");
     put_fd(m, "dipole_x", 1e-6, 0.05, true);
-    EXPECT(!deps_ready(vbc, dag, m, 1e-6), "one dep ready -> still not ready");
+    EXPECT(!prerequisites_converged(vbc, dag, m, 1e-6), "one dep ready -> still not ready");
     put_fd(m, "dipole_y", 1e-6, 0.07, true);
-    EXPECT(deps_ready(vbc, dag, m, 1e-6), "both deps converged -> ready");
+    EXPECT(prerequisites_converged(vbc, dag, m, 1e-6), "both deps converged -> ready");
     // Same deps but at a coarser protocol step must NOT satisfy a finer protocol step.
     json m2 = empty_meta();
     put_fd(m2, "dipole_x", 1e-4, 0.05, true);
     put_fd(m2, "dipole_y", 1e-4, 0.07, true);
-    EXPECT(!deps_ready(vbc, dag, m2, 1e-6),
+    EXPECT(!prerequisites_converged(vbc, dag, m2, 1e-6),
            "deps converged only at coarser protocol step -> not ready at finer");
   }
 

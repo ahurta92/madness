@@ -401,8 +401,8 @@ private:
       if (!sym.is_symbolic()) continue;
       if (expanded_.count(sym.id)) continue;
       // The symbolic node's single hard_dep is its ES bundle id.
-      if (sym.hard_deps.empty()) continue;
-      const std::string &es_id = sym.hard_deps.front();
+      if (sym.prerequisites.empty()) continue;
+      const std::string &es_id = sym.prerequisites.front();
       auto it = es_root_freqs_.find(es_id);
       if (it == es_root_freqs_.end()) continue;  // ES not converged yet
       int root = 0;

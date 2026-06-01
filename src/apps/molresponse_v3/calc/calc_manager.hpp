@@ -22,16 +22,16 @@
 //     one node per atom; n_atoms is all that requires. CalcManager::build()
 //     (executor side) extracts natom() from the Molecule and forwards it. This
 //     keeps the whole header molecule-independent and trivially testable.
-//   * reconcile_protocol / deps_ready / schedule are keyed off the protocol step THRESHOLD
+//   * reconcile_protocol / prerequisites_converged / schedule are keyed off the protocol step THRESHOLD
 //     (a double), not a pre-built protocol_key string. k is derived once via
 //     default_k_for_thresh, so callers only thread the ramp of thresholds.
 //     (15a assumes the standard thresh->k table; an override_k ramp is a
 //     later concern — see protocol_key_at().)
-//   * deps_ready resolves a node's hard_deps against the DAG (id -> node) so
+//   * prerequisites_converged resolves a node's prerequisites against the DAG (id -> node) so
 //     it can reconstruct each prerequisite's metadata identity. In 15a no
 //     concrete schedulable node carries a hard edge (DerivedFD "*" is a
 //     symbolic expansion template, excluded from scheduling until ES
-//     converges); deps_ready becomes load-bearing for VBC in 15b and is
+//     converges); prerequisites_converged becomes load-bearing for VBC in 15b and is
 //     implemented + tested now so 15b inherits a working gate.
 //   * The reconcile diverged-split reads `entry.value("diverged", false)`
 //     defensively: the FD/ES save paths record `converged` today but not
@@ -87,8 +87,8 @@ struct CalcNode {
   std::string         es_root_id;
 
   // Hard edges (correctness): node ids that must be converged before this
-  // node runs. Resolved by deps_ready against the DAG + metadata.
-  std::vector<std::string> hard_deps;
+  // node runs. Resolved by prerequisites_converged against the DAG + metadata.
+  std::vector<std::string> prerequisites;
 
   // Soft edge: a seed HINT (node id), never required for correctness. The
   // executor always picks the nearest converged state via try_load_fd_state's
@@ -238,7 +238,7 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 ///                    perturbation's static (ω=0) node if the plan has one.
 ///   * es          -> one ES node each.
 ///   * derived_fd  -> one SYMBOLIC DerivedFD node each (es_root_id kept),
-///                    hard_deps = {the plan's ES node id}. Expanded to
+///                    prerequisites = {the plan's ES node id}. Expanded to
 ///                    concrete per-root nodes by the executor once the ES
 ///                    bundle converges (run(), next increment).
 ///   * nuclear_fd  -> all-atoms sentinel (pert.atom < 0) expands to one node
@@ -285,7 +285,7 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     n.es_root_id = r.es_root_id;
     n.protocols  = r.protocols;
     n.id         = derived_fd_node_id(r.pert, r.es_root_id);
-    if (!first_es_id.empty()) n.hard_deps.push_back(first_es_id);
+    if (!first_es_id.empty()) n.prerequisites.push_back(first_es_id);
     dag.push_back(std::move(n));
   }
 
@@ -354,7 +354,7 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
 }
 
 // ---------------------------------------------------------------------------
-// deps_ready — readiness gate (implicit-by-identity). Pure.
+// prerequisites_converged — readiness gate (implicit-by-identity). Pure.
 // ---------------------------------------------------------------------------
 
 /// True iff every hard_dep of `node` is converged at protocol step `thresh`. Dep ids
@@ -362,9 +362,9 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
 /// protocol step key (the doc-15 "reconstruct prerequisites' identity at the same
 /// protocol_key" contract). A dep id that resolves to no node, or to a node
 /// with no converged entry, gates the node out.
-bool deps_ready(const CalcNode &node, const std::vector<CalcNode> &dag,
+bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &dag,
                 const nlohmann::json &meta, double thresh) {
-  if (node.hard_deps.empty()) return true;
+  if (node.prerequisites.empty()) return true;
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
 
@@ -374,7 +374,7 @@ bool deps_ready(const CalcNode &node, const std::vector<CalcNode> &dag,
     return nullptr;
   };
 
-  for (const auto &dep_id : node.hard_deps) {
+  for (const auto &dep_id : node.prerequisites) {
     const CalcNode *dep = find_node(dep_id);
     if (!dep) return false;
     bool ok = false;
@@ -428,7 +428,7 @@ schedule(const std::vector<CalcNode> &dag,
   auto make_item = [&](const CalcNode *n, double thresh,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
-    if (!deps_ready(*n, dag, meta, thresh))   return false;
+    if (!prerequisites_converged(*n, dag, meta, thresh))   return false;
     const NodeAction a = reconcile_protocol(*n, meta, thresh);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};

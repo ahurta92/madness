@@ -75,6 +75,21 @@ Both are already implemented as restart precedence in the persistence layer
 nearby frequency → fresh. The scheduler's job is to *order* work so those
 seeds exist when a node runs.
 
+#### Two edge types, two bars — by purpose
+
+The hard/soft split is a difference of *purpose*, which sets a different
+acceptance bar and a different mechanism:
+
+| edge | purpose | bar | mechanism |
+|---|---|---|---|
+| **prerequisite** (hard) | correctness — the dependent physically cannot be built from a partial input (e.g. VBC from a half-solved linear state) | dep must be **converged** | `prerequisites_converged` (or expansion) |
+| **seed** (soft) | efficiency — just a good starting guess | best **non-diverged** snapshot, else fresh | `seed_from` / `try_load_*` |
+
+Naming follows purpose: `CalcNode::prerequisites` + `prerequisites_converged()`
+on the hard side; `seed_from` on the soft side. A prerequisite is *satisfied*
+only when converged; a seed is *available* whenever a non-diverged snapshot
+exists (and is optional — its absence just means a fresh guess).
+
 ### Dependency resolution is implicit-by-identity
 
 Nodes do not store edge lists. A VBC node reconstructs its prerequisites'
@@ -202,6 +217,25 @@ Two gaps to close when this lands (15b):
   expansion is the fix — without it, promoted derived states never run.
 - `try_load_fd_state` seeds only from the *same* frequency at a coarser
   protocol; nearest-*frequency* seeding (step 3) is not yet implemented.
+
+### Resonant β at ES-derived frequencies (15b foresight)
+
+Resonant SHG / hyper-Rayleigh is enhanced when **2ω hits an excited state** ωᵢ,
+i.e. the driver is ω = ωᵢ/2. So the relevant linear states are `FD(B, ωᵢ/2)`
+and `FD(C, ωᵢ/2)`, and VBC (the β source) is built from *those*. This composes
+the two dependency mechanisms and needs two additions:
+
+- **A frequency transform on the ES → derived expansion.** Today
+  `expand_converged_es` sets the derived FD frequency to the root energy
+  (`freq = w`). Resonant β wants `w/2`; other processes want `2ωᵢ` or
+  `ωᵢ ± ωⱼ`. So the symbolic derived node must carry *how* to map a root energy
+  to its FD frequency, not assume identity.
+- **Two-stage expansion.** ES converges → expand `FD(ωᵢ/2)` (promoted, §above)
+  → those converge → VBC gated on them via `prerequisites_converged`. The VBC's
+  prerequisite FDs have no ids until the first expansion, so the VBC is itself
+  symbolic until then. `CalcManager::run` already re-schedules every pass, so
+  the second stage drops in: `expand` also emits VBC nodes once their derived
+  inputs exist, and the strict-converged gate handles the rest.
 
 ---
 
@@ -382,7 +416,7 @@ struct CalcNode {
   // hard edges: must be converged before this node may run. Stored as
   // node ids; resolution is the readiness gate's metadata lookup, NOT a
   // pointer graph — ids survive a restart with no in-memory DAG.
-  std::vector<std::string> hard_deps;
+  std::vector<std::string> prerequisites;
 
   // soft edge: a seed HINT, not a binding. The executor always picks the
   // NEAREST converged state via try_load_fd_state's restart precedence; this
@@ -403,12 +437,12 @@ node maps one-to-one onto a metadata path:
 ```cpp
 /// Pure. Expands nuclear_fd (pert.atom < 0) per molecule into one node per
 /// atom×axis; leaves derived_fd "*" symbolic (one node with es_root_id="*",
-/// hard_deps = {the ES node id}). Seeds soft edges: every dynamic FD gets
+/// prerequisites = {the ES node id}). Seeds soft edges: every dynamic FD gets
 /// seed_from = the static (freq=0) node of the same perturbation if present.
 std::vector<CalcNode> build_dag(const ResponsePlan &plan, const Molecule &mol);
 ```
 
-VBC (15b) adds `CalcKind::VBC` nodes here, with `hard_deps = {FD(B), FD(C)}`;
+VBC (15b) adds `CalcKind::VBC` nodes here, with `prerequisites = {FD(B), FD(C)}`;
 nothing else in the interface changes.
 
 ### Reconcile against disk — pure
@@ -426,10 +460,10 @@ NodeAction reconcile_protocol(const CalcNode &node,
                           const nlohmann::json &metadata,
                           const std::string &target_key);
 
-/// Readiness gate: are all of node.hard_deps converged at this protocol step's key?
+/// Readiness gate: are all of node.prerequisites converged at this protocol step's key?
 /// Implicit-by-identity — looks each dep id up in `metadata`. (v3 analog of
 /// v2 DerivedStateGate.)
-bool deps_ready(const CalcNode &node,
+bool prerequisites_converged(const CalcNode &node,
                 const nlohmann::json &metadata,
                 const std::string &target_key);
 ```
@@ -540,7 +574,7 @@ the executor and the already-landed persistence/`iterate_protocol` layer.
 
 ### What this buys, mapped to 15a
 
-- **Unit-testable scheduler:** `build_dag`, `reconcile_protocol`, `deps_ready`,
+- **Unit-testable scheduler:** `build_dag`, `reconcile_protocol`, `prerequisites_converged`,
   `schedule` are pure functions over `ResponsePlan` / `nlohmann::json`. The
   whole "skip/restart/resume/fresh" table and the two-phase ordering get gtest
   coverage with no `World`.
