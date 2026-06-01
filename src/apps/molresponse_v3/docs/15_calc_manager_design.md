@@ -151,6 +151,24 @@ extension but is out of scope for now.)
 Policy knob — **seed-selection strategy** (the distance metric / preferences
 restart precedence uses), not the topology. Default: nearest converged.
 
+### Cross-type seeding: ES root → derived FD (implemented, optional)
+
+**Status: implemented for derived FDs (closed-shell), behind a toggle.** A
+promoted derived FD seeds its initial guess from the converged ES-root vector
+(`es_root_id` selects the root): the root is `ResponseStateX` (X only), seeded
+into the FD `Full` guess as `x = y = X`. Guess precedence in
+`solve_fd_protocol`: disk FD partial (restart) → ES-root seed (fresh derived
+FD) → perturbation source. Controlled by `ExecutorContext::seed_derived_from_es_root`
+(default on; `--no-es-seed` in the run test turns it off for A/B), and the solve
+logs `seed=<source|fd_restart|es_root> iters=<n>` so the payoff is measurable.
+
+Caveat: the derived FD is at ωₙ/2 (off-resonance), where the ES root is not the
+dominant response component, so the seed may help only modestly there — it is
+clearly the right guess for a future *at-resonance* (factor 1.0) derived FD.
+**FUTURE:** the seed should be selectable per node, and could be a *mixture* of
+ES roots to target an in-between frequency (a weighted combination of nearby
+roots' vectors), not just a single root.
+
 ### Future: cross-type seeding (ES ↔ FD)
 
 `CalcNode::seed_from` is a free node-id string, deliberately *unconstrained* to

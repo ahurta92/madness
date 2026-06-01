@@ -179,6 +179,7 @@ int main(int argc, char **argv) {
 
       ExecutorContext ctx{world, gs, header.L, fock_json,
                           policy, print_level, calc_dir, max_iters};
+      if (parser.key_exists("no-es-seed")) ctx.seed_derived_from_es_root = false;
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
 

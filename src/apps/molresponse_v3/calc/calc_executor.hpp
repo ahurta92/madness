@@ -77,12 +77,24 @@ struct ExecutorContext {
   PrintLevel        print_level = PrintLevel::Normal;
   std::string       calc_dir;      // holds response_metadata.json + archives
   int               max_iters = 25;
+  // Cross-type seed toggle (optional): a derived FD starts from its converged
+  // ES-root vector rather than the perturbation source. Off => fresh source
+  // guess. FUTURE: make the seed selectable per node, and allow a MIXTURE of
+  // roots to target in-between frequencies (not just a single root's vector).
+  bool              seed_derived_from_es_root = true;
 };
 
 // ---------------------------------------------------------------------------
 namespace detail_exec {
 
 inline bool is_static_freq(double freq) { return std::abs(freq) < 1e-12; }
+
+/// Parse a derived-FD provenance label "es_root_NNNN" -> NNNN; -1 otherwise.
+inline int es_root_index(const std::string &label) {
+  const std::string pre = "es_root_";
+  if (label.rfind(pre, 0) != 0) return -1;
+  try { return std::stoi(label.substr(pre.size())); } catch (...) { return -1; }
+}
 
 /// Alpha-spin perturbation source vector for one (pert) at the active
 /// protocol. Throws for sources 15a does not build.
@@ -161,7 +173,8 @@ void reproject_state(State &st, int k, double thresh) {
 /// first prepare(). Saves the result (+ metrics) through save_fd_state.
 template <typename Type, typename Shell>
 NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
-                         double freq, double thresh, NodeAction action) {
+                         double freq, double thresh, NodeAction action,
+                         const std::string &es_root_id = std::string()) {
   using namespace madness;
   using Solver = FDSolver<Type, Shell>;
   World &world = ctx.world;
@@ -185,16 +198,45 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   detail_exec::fill_source<Type, Shell>(world, gs, pert,
                                         tgt.responses[0].source);
 
-  // Initial guess: the source carrier IS a valid Storage, so copy it.
+  // Initial-guess precedence (the source carrier IS a valid Storage):
+  //   1. disk FD partial at this (pert, freq) — restart (skipped if Fresh);
+  //   2. else the converged ES-root vector if this is a derived FD and the
+  //      cross-type seed is enabled (optional, ctx.seed_derived_from_es_root);
+  //   3. else the perturbation source.
   typename Solver::State s0;
   s0.responses.resize(1);
   s0.responses[0] = tgt.responses[0].source;
+  const char *seed_kind = "source";
 
-  // Seed from disk unless the reconcile said Fresh.
+  bool seeded = false;
   if (action != NodeAction::Fresh) {
     auto loaded =
         try_load_fd_state<Type, Shell>(world, ctx.calc_dir, pert, freq);
-    if (loaded) s0 = std::move(loaded->state);
+    if (loaded) {
+      s0 = std::move(loaded->state);
+      seeded = true;
+      seed_kind = "fd_restart";
+    }
+  }
+  // Cross-type seed: a derived FD (es_root_id set) starts from its converged
+  // ES-root vector. The root is ResponseStateX (X only); for FD Full we seed
+  // x = y = X. Only Full/ClosedShell derived FDs use it, and only when enabled.
+  if constexpr (std::is_same_v<Type, Full> &&
+                std::is_same_v<Shell, ClosedShell>) {
+    if (!seeded && ctx.seed_derived_from_es_root && !es_root_id.empty()) {
+      const int idx = detail_exec::es_root_index(es_root_id);
+      if (idx >= 0) {
+        auto esb = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
+        if (esb && idx < static_cast<int>(esb->state.roots.size())) {
+          s0.responses[0].x_alpha =
+              madness::copy(world, esb->state.roots[idx].x_alpha);
+          s0.responses[0].y_alpha =
+              madness::copy(world, esb->state.roots[idx].x_alpha);
+          seeded = true;
+          seed_kind = "es_root";
+        }
+      }
+    }
   }
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level);
@@ -257,6 +299,10 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
+  if (world.rank() == 0)
+    madness::print("[CALC] fd solve: pert=", pert.description(), " freq=", freq,
+                   " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
+                   " converged=", r.converged);
   return r;
 }
 
@@ -414,15 +460,15 @@ public:
 
     if (restricted && is_static)
       return solve_fd_protocol<Static, ClosedShell>(ctx_, node.pert, node.freq,
-                                                 item.thresh, item.action);
+                                                 item.thresh, item.action, node.es_root_id);
     if (restricted && !is_static)
       return solve_fd_protocol<Full, ClosedShell>(ctx_, node.pert, node.freq,
-                                               item.thresh, item.action);
+                                               item.thresh, item.action, node.es_root_id);
     if (!restricted && is_static)
       return solve_fd_protocol<Static, OpenShell>(ctx_, node.pert, node.freq,
-                                               item.thresh, item.action);
+                                               item.thresh, item.action, node.es_root_id);
     return solve_fd_protocol<Full, OpenShell>(ctx_, node.pert, node.freq,
-                                          item.thresh, item.action);
+                                          item.thresh, item.action, node.es_root_id);
   }
 
 private:
