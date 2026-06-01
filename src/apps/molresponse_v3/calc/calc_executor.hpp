@@ -44,6 +44,8 @@
 #include "../solvers/convergence_policy.hpp"
 #include "../solvers/fd_problem.hpp"
 #include "../solvers/fd_save_load.hpp"
+#include "../solvers/es_save_load.hpp"
+#include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
 #include "../solvers/response_metadata.hpp"
@@ -55,6 +57,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -258,6 +261,102 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 }
 
 // ---------------------------------------------------------------------------
+// Excited-state bundle solve (15b-i: TDA closed-shell only).
+// ---------------------------------------------------------------------------
+
+/// Solve a TDA closed-shell excited-state bundle of `n_roots` at one protocol
+/// step. Mirrors solve_fd_protocol: set protocol -> prepare GS -> build problem
+/// -> guess (Fresh = fresh solid-harmonics trial; else nearest on-disk bundle
+/// via the restart precedence) -> iterate_protocol over the single step (guarded
+/// set_gs/reproject prepare + save_es_roots post-step) -> return the converged
+/// excitation energies in NodeResult::es_root_freqs (which drive DerivedFD
+/// expansion). The bundle saves to a per-protocol subdir `es__<key>` under
+/// calc_dir so lower-protocol restart works.
+inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
+                                            double thresh, NodeAction action) {
+  using namespace madness;
+  using Solver = ESSolver<TDA, ClosedShell>;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+
+  auto problem = build_es_problem_tda<ClosedShell>(
+      world, gs, n_roots, gs.hf_exchange_coefficient(), gs.params().lo());
+
+  Solver::State s0;
+  bool seeded = false;
+  if (action != NodeAction::Fresh) {
+    auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
+    if (loaded) { s0 = std::move(loaded->state); seeded = true; }
+  }
+  if (!seeded)
+    s0 = build_initial_guess_tda_closed_shell(world, gs, n_roots,
+                                              ESGuessMode::SolidHarmonics);
+
+  Solver solver(world, std::move(problem), ctx.policy, ctx.print_level);
+
+  // Single-step guard (as in solve_fd_protocol): re-prepare the ground state
+  // only on an actual protocol change; otherwise just re-project the roots.
+  double prepared_t = t0;
+  auto prepare = [&](double th, Solver &solv, Solver::State &st) {
+    const double cur_t = FunctionDefaults<3>::get_thresh();
+    const bool changed =
+        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
+        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
+    if (changed) {
+      set_response_protocol(world, ctx.L, th);
+      const double new_t = FunctionDefaults<3>::get_thresh();
+      auto coulop = poperatorT(
+          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
+      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
+      solv.set_gs(build_response_ground_state_closed_shell(
+          world, gs, gs.hf_exchange_coefficient(), gs.params().lo()));
+      prepared_t = new_t;
+    }
+    const int    k  = FunctionDefaults<3>::get_k();
+    const double tt = FunctionDefaults<3>::get_thresh();
+    for (auto &root : st.roots)
+      for (auto &fn : root.x_alpha) fn = madness::project(fn, k, tt);
+    for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
+  };
+
+  auto converged_now = [](const Solver::State &st, const Solver &sv) {
+    if (st.diverged) return false;
+    double mb = 0.0, md = 0.0;
+    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
+    for (double r : st.last_density_residual) md = std::max(md, r);
+    const auto &t = sv.targets();
+    return mb <= t.bsh_residual && md <= t.density_residual;
+  };
+
+  auto post_step = [&](double, Solver &solv, Solver::State &st) {
+    const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
+    save_es_roots<TDA, ClosedShell>(world, st, dir,
+                                    /*converged=*/converged_now(st, solv));
+  };
+
+  solvers::IterateProtocolPolicy pp;
+  pp.max_iters_per_step = ctx.max_iters;
+  const std::vector<double> one_protocol = {thresh};
+  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
+                                      prepare, post_step, pp);
+
+  NodeResult r;
+  r.converged = converged_now(sf, solver);
+  r.reached_protocol_key = protocol_key();
+  for (long i = 0; i < sf.omega.size(); ++i)
+    r.es_root_freqs.push_back(sf.omega(i));
+  return r;
+}
+
+// ---------------------------------------------------------------------------
 // FdResponseExecutor — dispatches the runtime (Type × Shell) for FD nodes.
 // ---------------------------------------------------------------------------
 
@@ -268,12 +367,28 @@ public:
   NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
 
-    if (node.kind == CalcKind::ES || node.kind == CalcKind::DerivedFD ||
-        node.kind == CalcKind::VBC) {
-      if (ctx_.world.rank() == 0) {
-        madness::print("[CALC] run_protocol: node", node.id, "kind not handled by "
-                       "the 15a FD executor (ES/DerivedFD/VBC) — skipping");
+    if (node.kind == CalcKind::ES) {
+      const bool restricted = ctx_.gs.is_spin_restricted();
+      if (node.tda && restricted) {
+        if (ctx_.world.rank() == 0)
+          madness::print("[CALC] run_protocol: ES bundle", node.id,
+                         " n_roots=", node.n_roots, " thresh=", item.thresh,
+                         " (TDA closed-shell)  action=", action_name(item.action));
+        return solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
+                                         item.action);
       }
+      if (ctx_.world.rank() == 0)
+        madness::print("[CALC] run_protocol: ES bundle", node.id,
+                       " not supported in 15b-i (TDA closed-shell only): tda=",
+                       node.tda, " restricted=", restricted, " — skipping");
+      return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
+    }
+    if (node.kind == CalcKind::DerivedFD || node.kind == CalcKind::VBC) {
+      // DerivedFD should have been promoted to FD on expansion; VBC is 15b+.
+      if (ctx_.world.rank() == 0)
+        madness::print("[CALC] run_protocol: node", node.id,
+                       "kind not handled (DerivedFD should be promoted; VBC "
+                       "is 15b+) — skipping");
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
     }
 
@@ -382,6 +497,9 @@ public:
     for (;;) {
       world.gop.fence();
       auto meta = ResponseMetadata::load_or_create(meta_path);
+      // Grow the DAG from any ES bundle converged ON DISK (idempotent and
+      // restart-safe: reads roots from metadata, not in-memory run state).
+      expand_converged_es(world, meta.json());
       auto waves = schedule(dag_, ramp, meta.json());
       if (waves.empty()) {
         if (world.rank() == 0)
@@ -401,13 +519,9 @@ public:
       if (world.rank() == 0)
         madness::print("[CALC] run: wave of", (int)waves.front().size(),
                        "protocol step(s): {", sig, "}");
-      for (const auto &item : waves.front()) {
-        NodeResult res = exec.run_protocol(item);
-        maybe_record_es_roots(item, res);
-      }
+      for (const auto &item : waves.front())
+        exec.run_protocol(item);
       world.gop.fence();
-
-      expand_converged_es(world);   // dormant until the ES executor lands
     }
   }
 
@@ -432,49 +546,56 @@ private:
     return s;
   }
 
-  /// Stash ES root frequencies from a converged ES protocol step for expansion. (ES
-  /// solves aren't wired in 15a, so this stays empty; kept so the ES executor
-  /// only has to populate NodeResult::es_root_freqs.)
-  void maybe_record_es_roots(const WorkItem &item, const NodeResult &res) {
-    if (item.node->kind == CalcKind::ES && res.converged &&
-        !res.es_root_freqs.empty()) {
-      es_root_freqs_[item.node->id] = res.es_root_freqs;
-    }
-  }
+  /// Turn each symbolic DerivedFD "*" whose ES bundle has CONVERGED ON DISK into
+  /// one promoted FD node per root (freq = root energy at the ES bundle's top
+  /// protocol). Reads roots straight from response_metadata.json so it is
+  /// restart-safe (works on a resumed run where the ES converged in a previous
+  /// process) and idempotent (new nodes are deduped against existing dag_ ids;
+  /// re-running is a no-op). Deterministic across ranks: same metadata + same
+  /// dag_ in, same nodes appended in the same order.
+  void expand_converged_es(madness::World &world, const nlohmann::json &meta) {
+    if (!meta.contains("excited_states")) return;
+    std::set<std::string> have;
+    for (const auto &n : dag_) have.insert(n.id);
 
-  /// Turn each symbolic DerivedFD "*" whose ES bundle has converged into one
-  /// concrete FD node per root (freq = root energy). Appends to dag_. No-op
-  /// when no ES roots are known yet (15a). Idempotent via expanded_.
-  void expand_converged_es(madness::World &world) {
     std::vector<CalcNode> additions;
     for (const auto &sym : dag_) {
       if (!sym.is_symbolic()) continue;
-      if (expanded_.count(sym.id)) continue;
-      // The symbolic node's single hard_dep is its ES bundle id.
-      if (sym.prerequisites.empty()) continue;
+      if (sym.prerequisites.empty()) continue;          // no ES dependency
       const std::string &es_id = sym.prerequisites.front();
-      auto it = es_root_freqs_.find(es_id);
-      if (it == es_root_freqs_.end()) continue;  // ES not converged yet
-      int root = 0;
-      for (double w : it->second) {
+      // Resolve the ES node to its top protocol (derived FDs start once the ES
+      // bundle has reached its finest protocol).
+      const CalcNode *es = nullptr;
+      for (const auto &n : dag_) if (n.id == es_id) { es = &n; break; }
+      if (!es || es->protocols.empty()) continue;
+      const std::string es_key = protocol_key_at(es->protocols.back());
+      if (!meta["excited_states"].contains(es_key)) continue;
+      const auto &b = meta["excited_states"][es_key];
+      if (!b.value("converged", false)) continue;       // ES not converged yet
+      if (!b.contains("roots") || !b["roots"].is_array()) continue;
+
+      for (size_t i = 0; i < b["roots"].size(); ++i) {
+        const double w = b["roots"][i].value(
+            "omega", std::numeric_limits<double>::quiet_NaN());
+        if (!(w == w)) continue;                         // skip NaN omega
         CalcNode c;
-        // Promote: a derived FD at ω = root energy is an ordinary FD point.
-        // Solving it as CalcKind::FD lets the FD executor run it and the normal
-        // skip / restart / nearest-frequency-seed logic apply uniformly.
-        c.kind      = CalcKind::FD;
-        c.pert      = sym.pert;
-        c.freq      = w;
-        c.protocols = sym.protocols;
-        c.es_root_id = make_es_root_label(root++);  // provenance: source ES root
-        c.id        = fd_node_id(c.pert, w);  // concrete -> fd_states subtree
+        // A derived FD at ω = root energy is an ordinary FD point -> kind FD,
+        // so the FD executor solves it and skip/restart/seed logic is uniform.
+        c.kind       = CalcKind::FD;
+        c.pert       = sym.pert;
+        c.freq       = w;
+        c.protocols  = sym.protocols;
+        c.es_root_id = make_es_root_label(static_cast<int>(i));  // provenance
+        c.id         = fd_node_id(c.pert, w);
+        if (have.count(c.id)) continue;                  // dedup -> idempotent
+        have.insert(c.id);
         additions.push_back(std::move(c));
       }
-      expanded_.insert(sym.id);
     }
     if (!additions.empty()) {
       if (world.rank() == 0)
         madness::print("[CALC] expanded", (int)additions.size(),
-                       "derived FD node(s) from converged ES roots");
+                       "derived FD node(s) from converged ES roots (metadata)");
       for (auto &c : additions) dag_.push_back(std::move(c));
     }
   }
@@ -489,8 +610,6 @@ private:
   std::string           calc_dir_;
   Policy                policy_;
   std::vector<CalcNode> dag_;
-  std::map<std::string, std::vector<double>> es_root_freqs_;
-  std::set<std::string> expanded_;
 };
 
 } // namespace molresponse_v3
