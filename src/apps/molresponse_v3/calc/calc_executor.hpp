@@ -197,23 +197,36 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level);
 
+  // The protocol + ground state + target are already set up above for `thresh`.
+  // iterate_protocol calls prepare() before the (single) step; re-doing the
+  // expensive gs.prepare()/build_gs() there would DOUBLE the per-step prep cost
+  // (ground-state projection dominates — ~half of wall time per solve). So only
+  // re-prepare if the protocol actually changed; otherwise just re-project the
+  // (possibly coarser-loaded) state into the active basis.
+  double prepared_t = t0;
   auto prepare = [&](double th, Solver &solv, typename Solver::State &st) {
-    set_response_protocol(world, ctx.L, th, ctx.override_k);
-    const int    new_k = FunctionDefaults<3>::get_k();
-    const double new_t = FunctionDefaults<3>::get_thresh();
-    auto coulop = poperatorT(
-        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-    gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
+    const double cur_t = FunctionDefaults<3>::get_thresh();
+    const bool changed =
+        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
+        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
+    if (changed) {
+      set_response_protocol(world, ctx.L, th, ctx.override_k);
+      const double new_t = FunctionDefaults<3>::get_thresh();
+      auto coulop = poperatorT(
+          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
+      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
 
-    FDProblem<Type, Shell> nt;
-    nt.gs = detail_exec::build_gs<Shell>(world, gs);
-    nt.responses.resize(1);
-    nt.responses[0].omega = freq;
-    detail_exec::fill_source<Type, Shell>(world, gs, pert,
-                                          nt.responses[0].source);
-    solv.set_target(std::move(nt));
-
-    detail_exec::reproject_state(st, new_k, new_t);
+      FDProblem<Type, Shell> nt;
+      nt.gs = detail_exec::build_gs<Shell>(world, gs);
+      nt.responses.resize(1);
+      nt.responses[0].omega = freq;
+      detail_exec::fill_source<Type, Shell>(world, gs, pert,
+                                            nt.responses[0].source);
+      solv.set_target(std::move(nt));
+      prepared_t = new_t;
+    }
+    detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
+                                 FunctionDefaults<3>::get_thresh());
   };
 
   auto post_step = [&](double, Solver & /*solv*/, typename Solver::State &st) {
