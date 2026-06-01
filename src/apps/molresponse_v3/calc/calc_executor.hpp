@@ -328,6 +328,32 @@ struct CalcManagerPolicy {
   int          max_iters_per_step = 25;
 };
 
+// ===========================================================================
+// Execution model (15a — single group). WHY all ranks must agree on the plan.
+//
+// A MADNESS Function is distributed across ALL ranks of the communicator, so
+// solving one response state is a COLLECTIVE operation: every rank holds a
+// piece and they collaborate on every step (BSH apply, fences, ...). 15a runs
+// single-group — the whole communicator solves ONE state at a time; a "wave"
+// of independent states is simply looped over (all ranks per state), NOT fanned
+// out across ranks. Distributing a wave's states to rank SUBGROUPS sized to fit
+// memory is the 15c design (STATE_PARALLEL / subworlds); the wave structure
+// exists precisely so that later layer can partition it.
+//
+// Consequence — DETERMINISM. Every rank runs schedule() independently, then all
+// ranks collectively solve waves.front()[i] together. If two ranks computed
+// different waves they would issue mismatched collective calls and DEADLOCK.
+// So the schedule must come out byte-identical on every rank: same
+// response_metadata.json in (all ranks read the same file after a fence),
+// deterministic logic out (sorted ramp + std::map perturbation order + pure
+// reconcile). The std::map (not unordered_map) is a correctness requirement,
+// not a style choice.
+//
+// run() in one sentence: forever — re-read what's done from disk, compute the
+// next batch of independent work, solve it (all ranks together, one state at a
+// time), save each; stop when nothing is left, or when a batch repeats
+// unchanged (no progress possible).
+// ===========================================================================
 class CalcManager {
 public:
   using Policy = CalcManagerPolicy;
