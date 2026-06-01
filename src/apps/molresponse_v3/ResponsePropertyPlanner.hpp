@@ -101,6 +101,11 @@ struct DerivedFDRequest {
   Perturbation        pert;
   std::string         es_root_id;   // "es_root_0001" or "*"
   std::vector<double> protocols;
+  /// FD frequency = es_freq_factor * (ES root energy). 0.5 = two-photon
+  /// resonance (2ω = ωₙ), which keeps the FD OFF the linear-response pole at
+  /// ω = ωₙ; a factor of 1.0 would sit on the pole and never converge in the
+  /// undamped solver.
+  double              es_freq_factor = 0.5;
 };
 
 struct ResponsePlan {

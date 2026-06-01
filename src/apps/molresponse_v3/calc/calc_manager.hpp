@@ -104,6 +104,11 @@ struct CalcNode {
   // DerivedFD symbolic reference: "*" (all roots) or "es_root_0003".
   std::string         es_root_id;
 
+  // DerivedFD: FD frequency = es_freq_factor * (ES root energy). 0.5 keeps the
+  // FD off the response pole at ω = ωₙ (two-photon resonance, 2ω = ωₙ). 1.0 for
+  // ordinary nodes (unused there).
+  double              es_freq_factor = 1.0;
+
   // Hard edges (correctness): node ids that must be converged before this
   // node runs. Resolved by prerequisites_converged against the DAG + metadata.
   std::vector<std::string> prerequisites;
@@ -301,9 +306,10 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     CalcNode n;
     n.kind       = CalcKind::DerivedFD;
     n.pert       = r.pert;
-    n.es_root_id = r.es_root_id;
-    n.protocols  = r.protocols;
-    n.id         = derived_fd_node_id(r.pert, r.es_root_id);
+    n.es_root_id     = r.es_root_id;
+    n.es_freq_factor = r.es_freq_factor;
+    n.protocols      = r.protocols;
+    n.id             = derived_fd_node_id(r.pert, r.es_root_id);
     if (!first_es_id.empty()) n.prerequisites.push_back(first_es_id);
     dag.push_back(std::move(n));
   }

@@ -578,12 +578,15 @@ private:
         const double w = b["roots"][i].value(
             "omega", std::numeric_limits<double>::quiet_NaN());
         if (!(w == w)) continue;                         // skip NaN omega
+        const double fd_freq = sym.es_freq_factor * w;   // e.g. ωₙ/2 (off-pole)
         CalcNode c;
-        // A derived FD at ω = root energy is an ordinary FD point -> kind FD,
-        // so the FD executor solves it and skip/restart/seed logic is uniform.
+        // A derived FD at ω = factor·(root energy) is an ordinary FD point ->
+        // kind FD, so the FD executor solves it and skip/restart/seed logic is
+        // uniform. factor=0.5 puts it at the two-photon resonance ωₙ/2, off the
+        // linear-response pole at ω = ωₙ.
         c.kind       = CalcKind::FD;
         c.pert       = sym.pert;
-        c.freq       = w;
+        c.freq       = fd_freq;
         c.protocols  = sym.protocols;
         c.es_root_id = make_es_root_label(static_cast<int>(i));  // provenance
         c.id         = fd_node_id(c.pert, w);
@@ -595,7 +598,7 @@ private:
     if (!additions.empty()) {
       if (world.rank() == 0)
         madness::print("[CALC] expanded", (int)additions.size(),
-                       "derived FD node(s) from converged ES roots (metadata)");
+                       "derived FD node(s) at ω = es_freq_factor·ωₙ from converged ES roots (metadata)");
       for (auto &c : additions) dag_.push_back(std::move(c));
     }
   }
