@@ -136,6 +136,36 @@ extension but is out of scope for now.)
 Policy knob — **seed-selection strategy** (the distance metric / preferences
 restart precedence uses), not the topology. Default: nearest converged.
 
+### Future: cross-type seeding (ES ↔ FD)
+
+`CalcNode::seed_from` is a free node-id string, deliberately *unconstrained* to
+type — it can reference an ES node from an FD node or vice versa. The data
+model already accommodates cross-type seeding; it is **not yet wired** (15a
+`build_dag` sets it only for dynamic-FD ← same-channel-static, and neither
+`schedule` nor the executor consume it). Two physically valuable cases motivate
+finishing it, ideally alongside 15b:
+
+- **FD near a resonance ← converged ES root.** As ω → ωₙ the linear response
+  is dominated by root n's eigenvector (small denominator ωₙ−ω), so the ES
+  vector is the best initial guess — and near-resonant FD is exactly where
+  convergence is hardest. This *is* the DerivedFD path (resonant Raman / 2PA at
+  ω = ωₙ): the natural guess for `DerivedFD(root n)` is root n's converged
+  vector. The storage shapes line up — a TDA root is a `ResponseStateX`, which
+  drops straight into FD Static (x=y=root for FD Full) — so it is mechanically
+  a loader + projection, not a rewrite.
+- **ES targeting a Cartesian direction ← FD response.** Seeding the ES
+  iterative subspace with an x-polarized FD response biases toward bright
+  states with oscillator strength in x. This additionally needs the ES solver's
+  guess interface to accept an external seed (ES-side change, 15b+).
+
+Wiring it requires: (1) the executor honors `seed_from` (load that node's
+converged vector ahead of the same-pert FD fallback); (2) a small cross-type
+seed loader (ES root → FD-shaped guess); (3) `schedule` treats `seed_from` as a
+**soft ordering edge** — run the source first, fall back to fresh if absent, so
+no correctness risk; (4) protocol re-projection (the prepare hook already does
+this). Tracked as a 15b item because DerivedFD already wants ES-root seeding —
+the same piece of work.
+
 ---
 
 ## Reconcile against what's already on disk
