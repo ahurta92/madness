@@ -7,7 +7,7 @@
 //
 // This is an ALLOCATION test (it runs real MRA solves). Usage:
 //   test_calc_manager_run --archive=<moldft restartdata> \
-//       [--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] \
+//       [--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] [--es-roots=N] \
 //       [--maxiter=N] [--dconv=X] [--calc-dir=DIR] [--print-level=0..3]
 // ===========================================================================
 
@@ -137,12 +137,22 @@ int main(int argc, char **argv) {
           parser.key_exists("calc-dir") ? parser.value_raw("calc-dir")
                                         : std::string("calc_manager_run");
 
-      // ---- Plan a polarizability request -> ResponsePlan -----------------
+      // ---- Plan: polarizability, or (--es-roots=N) resonant gradient -----
+      const int es_roots =
+          parser.key_exists("es-roots") ? std::stoi(parser.value("es-roots")) : 0;
       ResponsePropertyRequest req;
-      req.kind = ResponsePropertyKind::Polarizability;
-      req.frequencies = freqs;
       req.axes = axes;
       req.protocol_thresholds = protocol;
+      if (es_roots > 0) {
+        // ES(TDA) bundle + symbolic derived dipole FD; the calc manager solves
+        // the bundle, then expands to FD at the converged excitation energies.
+        req.kind          = ResponsePropertyKind::PolarizabilityGradient;
+        req.gradient_mode = GradientMode::Resonant;
+        req.n_roots       = es_roots;
+      } else {
+        req.kind        = ResponsePropertyKind::Polarizability;
+        req.frequencies = freqs;
+      }
       ResponsePlan plan = plan_one(req);
 
       if (world.rank() == 0) {
@@ -153,7 +163,10 @@ int main(int argc, char **argv) {
         print("  omega      =", freqs);
         print("  protocol   =", protocol);
         print("  calc_dir   =", calc_dir);
-        print("  FD requests=", (int)plan.fd.size());
+        print("  mode       =", (es_roots > 0 ? "resonant-gradient (ES)" : "polarizability"));
+        if (es_roots > 0) print("  es_roots   =", es_roots);
+        print("  FD requests=", (int)plan.fd.size(),
+              "  ES requests=", (int)plan.es.size());
       }
 
       // ---- Drive the calc manager ----------------------------------------
@@ -167,28 +180,50 @@ int main(int argc, char **argv) {
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
 
-      // ---- Validate: every planned FD state converged at the top protocol -
+      // ---- Validate at the top protocol ----------------------------------
       const std::string top_key = protocol_key_at(protocol.back());
-      int expected = 0, converged = 0;
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
             calc_dir + "/response_metadata.json");
         const auto &j = meta.json();
-        for (const auto &r : plan.fd) {
-          ++expected;
-          const std::string pert = r.pert.description();
-          const std::string fk   = ResponseMetadata::freq_key(r.freq);
-          bool ok = j["fd_states"].contains(pert) &&
-                    j["fd_states"][pert].contains(top_key) &&
-                    j["fd_states"][pert][top_key].contains(fk) &&
-                    j["fd_states"][pert][top_key][fk].value("converged", false);
-          if (ok) ++converged;
-          print("  ", ok ? "[PASS]" : "[FAIL]", pert, "@", r.freq,
+        if (es_roots > 0) {
+          // ES bundle converged with n_roots, plus the promoted derived FDs.
+          bool es_ok = j["excited_states"].contains(top_key) &&
+                       j["excited_states"][top_key].value("converged", false);
+          int n_es = (es_ok && j["excited_states"][top_key].contains("roots"))
+                         ? (int)j["excited_states"][top_key]["roots"].size() : 0;
+          int derived = 0;
+          if (j.contains("fd_states"))
+            for (auto &kv : j["fd_states"].items())
+              if (kv.value().contains(top_key))
+                for (auto &fe : kv.value()[top_key].items())
+                  if (fe.value().value("converged", false)) ++derived;
+          const int want_derived = es_roots * (int)axes.size();
+          print("  ES bundle  converged=", es_ok, "  roots=", n_es, "/", es_roots);
+          print("  derived FD converged=", derived, "/", want_derived,
                 " key=", top_key);
+          bool ok = es_ok && n_es == es_roots && derived >= want_derived;
+          print("\n", ok ? "PASSED" : "FAILED",
+                " (ES + ", derived, "/", want_derived, " derived FD)");
+          rc = ok ? 0 : 1;
+        } else {
+          int expected = 0, converged = 0;
+          for (const auto &r : plan.fd) {
+            ++expected;
+            const std::string pert = r.pert.description();
+            const std::string fk   = ResponseMetadata::freq_key(r.freq);
+            bool ok = j["fd_states"].contains(pert) &&
+                      j["fd_states"][pert].contains(top_key) &&
+                      j["fd_states"][pert][top_key].contains(fk) &&
+                      j["fd_states"][pert][top_key][fk].value("converged", false);
+            if (ok) ++converged;
+            print("  ", ok ? "[PASS]" : "[FAIL]", pert, "@", r.freq,
+                  " key=", top_key);
+          }
+          print("\n", (converged == expected) ? "PASSED" : "FAILED", " (",
+                converged, "/", expected, " FD states converged)");
+          rc = (converged == expected) ? 0 : 1;
         }
-        print("\n", (converged == expected) ? "PASSED" : "FAILED", " (",
-              converged, "/", expected, " FD states converged)");
-        rc = (converged == expected) ? 0 : 1;
       }
       world.gop.broadcast(rc, 0);
     }
