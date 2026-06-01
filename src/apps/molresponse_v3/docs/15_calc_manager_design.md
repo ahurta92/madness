@@ -226,6 +226,30 @@ known-good neighbor, not continued.
 This makes the manager idempotent and restart-safe: re-running a plan picks up
 exactly where a killed run left off, at state granularity.
 
+### Reconcile / seeding refinements (review 2026-06-01)
+
+- **Restart from a non-converged coarse seed (the key one).** A coarse-protocol
+  partial — e.g. ~10 iterations at 1e-4 — is a perfectly good seed for the
+  finer rung; it need NOT be converged. Today `reconcile_rung` calls
+  `has_coarser_converged_fd`, so a coarser *partial* (present, not converged)
+  falls through to **Fresh** → the executor skips the load → the partial is
+  discarded. Fix: unify the decision and the load on *"best coarser-or-equal
+  snapshot that is not `diverged`"* (converged or not). `reconcile_rung` returns
+  `Restart` whenever such a snapshot exists; `try_load_fd_state` selects the
+  same one (it currently loads any coarser but must additionally exclude
+  `diverged`). Share one "pick best usable source" helper so the verdict and the
+  load can never disagree.
+- **Resume preserves residual continuity.** `Restart` and `Resume` are
+  behaviorally near-identical (both load + iterate); the intended distinction is
+  that `Resume` (exact-rung partial) carries `last_bsh_residual` forward from
+  metadata so the convergence log spans the restart, whereas a coarser `Restart`
+  starts the residual history fresh. Keep both actions; lean on `Resume`.
+- **`k` is derived only — `override_k` deprecated.** This application always
+  derives `k` from `thresh` via `default_k_for_thresh`. Overriding `k` would
+  desync the reconcile key from the saved key (everything reads as "absent" →
+  silent re-solves), so it is deprecated: drop the `override_k` plumbing from
+  `ExecutorContext` / `solve_fd_rung` / the test `--k` flag.
+
 ---
 
 ## Processor-group allocation (memory-driven, protocol-dependent)
