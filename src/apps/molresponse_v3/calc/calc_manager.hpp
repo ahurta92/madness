@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -409,6 +410,17 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 /// they are expansion templates resolved post-ES. Gated nodes (deps not
 /// ready) are dropped from the wave and picked up on a later re-schedule
 /// (after run() updates the metadata). Empty waves are omitted.
+///
+/// CONTRACT — only `waves.front()` has FINAL actions. Every wave is reconciled
+/// against the SAME metadata snapshot, so a later wave's NodeActions are
+/// provisional: e.g. a Phase-B item may read `Fresh` here because P0 has not
+/// run yet, when it should be `Restart` once P0 lands. Membership is correct;
+/// actions downstream of the front wave are not. This is safe because
+/// `CalcManager::run` consumes ONLY the front wave and then re-schedules
+/// against fresh metadata — so each wave's actions are final by the time it
+/// becomes the front. Do not consume non-front waves' actions directly. (The
+/// full list is returned anyway: it is cheap and makes the schedule legible /
+/// unit-testable.)
 std::vector<std::vector<WorkItem>>
 schedule(const std::vector<CalcNode> &dag,
          const std::vector<double> &global_ramp,
@@ -438,35 +450,28 @@ schedule(const std::vector<CalcNode> &dag,
   // ---- Phase A: anchors then the rest, at ramp.front() --------------------
   const double p0 = ramp.front();
 
-  // Per-channel anchor = the node with freq closest to 0 (static preferred).
-  std::vector<const CalcNode *> channels_seen;
-  auto anchor_of_channel = [&](const std::string &ch) -> const CalcNode * {
-    const CalcNode *best = nullptr;
-    for (const CalcNode *n : nodes) {
-      if (channel_key(*n) != ch) continue;
-      if (!ramp_contains(n->protocols, p0)) continue;
-      if (!best || std::abs(n->freq) < std::abs(best->freq)) best = n;
-    }
-    return best;
-  };
+  // Per-channel anchor = the node with freq closest to 0 (static preferred),
+  // among nodes that participate at p0. Precomputed once (O(n)); std::map keeps
+  // A1 in a deterministic (rank-consistent) channel order.
+  std::map<std::string, const CalcNode *> anchor_by_channel;
+  for (const CalcNode *n : nodes) {
+    if (!ramp_contains(n->protocols, p0)) continue;
+    const std::string ch = channel_key(*n);
+    auto it = anchor_by_channel.find(ch);
+    if (it == anchor_by_channel.end() ||
+        std::abs(n->freq) < std::abs(it->second->freq))
+      anchor_by_channel[ch] = n;
+  }
 
   std::vector<WorkItem> waveA1, waveA2;
-  std::vector<std::string> done_channels;
-  for (const CalcNode *n : nodes) {
-    const std::string ch = channel_key(*n);
-    if (std::find(done_channels.begin(), done_channels.end(), ch) ==
-        done_channels.end()) {
-      done_channels.push_back(ch);
-      if (const CalcNode *anchor = anchor_of_channel(ch)) {
-        WorkItem it;
-        if (make_item(anchor, p0, it)) waveA1.push_back(it);
-      }
-    }
+  for (const auto &[ch, anchor] : anchor_by_channel) {
+    WorkItem it;
+    if (make_item(anchor, p0, it)) waveA1.push_back(it);
   }
-  // A2: every other P0 node that isn't its channel's anchor.
+  // A2: every other p0 node that isn't its channel's anchor.
   for (const CalcNode *n : nodes) {
-    const CalcNode *anchor = anchor_of_channel(channel_key(*n));
-    if (n == anchor) continue;
+    auto a = anchor_by_channel.find(channel_key(*n));
+    if (a != anchor_by_channel.end() && a->second == n) continue;
     WorkItem it;
     if (make_item(n, p0, it)) waveA2.push_back(it);
   }

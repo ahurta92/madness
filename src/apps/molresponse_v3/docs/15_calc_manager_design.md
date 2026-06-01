@@ -566,11 +566,14 @@ private:
 };
 ```
 
-`run()` is the only method that isn't pure, and even it is thin: load metadata
-→ `schedule(...)` → for each wave, for each item, `exec.run_protocol(item)` (15a:
-sequential; 15c: fan a wave across groups) → handle ES expansion → repeat until
-no work remains. The expensive parts — MRA, MPI, archives — are entirely inside
-the executor and the already-landed persistence/`iterate_protocol` layer.
+`run()` is the only method that isn't pure, and even it is thin. Each pass:
+reload the aggregate metadata → `schedule(...)` → run **only `waves.front()`**
+(15a: sequentially; 15c: fan that one wave across processor groups) → handle ES
+expansion → loop. Running just the front wave and re-scheduling each pass is
+what makes every wave's reconcile actions final by the time it runs (the
+front-wave-only contract above), and is also where the protocol-step barrier
+lives. The expensive parts — MRA, MPI, archives — are entirely inside the
+executor and the already-landed persistence/`iterate_protocol` layer.
 
 ### What this buys, mapped to 15a
 
