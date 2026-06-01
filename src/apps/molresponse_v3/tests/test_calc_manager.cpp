@@ -100,7 +100,7 @@ int main() {
            "no static seed hint when no ω=0 in plan");
   }
 
-  // ====== build_dag: SHG seeds dynamics from static of same channel ========
+  // ====== build_dag: SHG seeds dynamics from static of same perturbation ========
   std::printf("=== build_dag: static-seed hint ===\n");
   {
     // Two dipole_x FD: ω=0 and ω=0.1 -> dynamic should hint at the static.
@@ -110,7 +110,7 @@ int main() {
     auto dag = build_dag(plan, 0);
     const CalcNode *dyn = find_id(dag, "fd:dipole_x@f0.10000");
     EXPECT(dyn && dyn->seed_from == "fd:dipole_x@f0.00000",
-           "dynamic seeds from same-channel static");
+           "dynamic seeds from same-perturbation static");
     const CalcNode *stat = find_id(dag, "fd:dipole_x@f0.00000");
     EXPECT(stat && stat->seed_from.empty(), "static has no seed hint");
   }
@@ -228,7 +228,7 @@ int main() {
            "deps converged only at coarser protocol step -> not ready at finer");
   }
 
-  // ====== schedule: two-phase, channel-parallel ===========================
+  // ====== schedule: two-phase, perturbation-parallel ===========================
   std::printf("=== schedule: alpha x/y/z over [1e-4,1e-6] ===\n");
   {
     ResponsePropertyRequest r;
@@ -238,15 +238,15 @@ int main() {
     auto dag = build_dag(plan_one(r), 0);  // 6 FD nodes (3 axes × 2 freqs)
     auto waves = schedule(dag, P, empty_meta());
 
-    // Expect: A1 (3 anchors = the ω=0 of each axis), A2 (3 dynamics @1e-4),
+    // Expect: A1 (3 seed states = the ω=0 of each axis), A2 (3 dynamics @1e-4),
     //         then B (all 6 @1e-6).
     EXPECT(waves.size() == 3, "3 waves: A1, A2, B");
     if (waves.size() == 3) {
-      EXPECT(waves[0].size() == 3, "A1 = 3 channel anchors");
+      EXPECT(waves[0].size() == 3, "A1 = 3 perturbation seed states");
       EXPECT(wave_has(waves[0], "fd:dipole_x@f0.00000") &&
              wave_has(waves[0], "fd:dipole_y@f0.00000") &&
              wave_has(waves[0], "fd:dipole_z@f0.00000"),
-             "A1 holds the static (anchor) of each channel");
+             "A1 holds the static (seed state) of each perturbation");
       EXPECT(waves[1].size() == 3, "A2 = 3 dynamics @ P0");
       EXPECT(wave_has(waves[1], "fd:dipole_x@f0.10000"),
              "A2 holds the dynamic frequencies");

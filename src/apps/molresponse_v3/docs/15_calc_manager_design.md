@@ -107,39 +107,39 @@ parallel region and exploits every restart path we built:
 
 ```
 Phase A — SEED  (at the lowest protocol P0)
-  A1.  per channel, its ANCHOR solve @ P0          one solve per channel
-       (ω = 0 if the channel has a static request, else its lowest |ω|).
-       Anchors of DIFFERENT channels are independent.              [parallel across channels]
-  A2.  all remaining (channel, ω) @ P0,
+  A1.  per perturbation, its SEED STATE solve @ P0          one solve per perturbation
+       (ω = 0 if the perturbation has a static request, else its lowest |ω|).
+       Anchors of DIFFERENT perturbations are independent.              [parallel across perturbations]
+  A2.  all remaining (perturbation, ω) @ P0,
        each seeded from the NEAREST converged state               [parallel across everything]
 
 Phase B — RAMP  (P0 → P1 → … → P_max)
-  every (channel, ω) climbs its own ladder,
+  every (perturbation, ω) climbs its own ladder,
   each step restarting from its own lower-protocol solution    [embarrassingly parallel]
 ```
 
-The unit of parallelism is the **perturbation channel** (dipole_x, dipole_y,
+The unit of parallelism is the **perturbation perturbation** (dipole_x, dipole_y,
 dipole_z, Nuc0_x, …) — these are physically independent solves and run
 concurrently throughout. There is no single global "static" solve that
 everything waits on.
 
 Rationale:
-- Phase A front-loads the cheap work. The only ordering is *within* a channel:
-  one anchor solve before the states that seed from it. Across channels, A1
-  anchors run fully in parallel, and once each channel has an anchor, A2 fans
-  out across every `(channel, ω)`.
-- The anchor doubles as the cheapest **memory probe** for everything downstream
+- Phase A front-loads the cheap work. The only ordering is *within* a perturbation:
+  one seed-state solve before the states that seed from it. Across perturbations, A1
+  seed states run fully in parallel, and once each perturbation has an seed state, A2 fans
+  out across every `(perturbation, ω)`.
+- The seed state doubles as the cheapest **memory probe** for everything downstream
   (see below). Because `mem ≈ n_occ × n_leaves × k³` and `n_occ`/molecule are
-  the same for every channel, a *single* low-protocol anchor already predicts
+  the same for every perturbation, a *single* low-protocol seed state already predicts
   the high-protocol footprint for all of them.
-- Phase B is embarrassingly parallel: once every `(channel, ω)` has a P0
+- Phase B is embarrassingly parallel: once every `(perturbation, ω)` has a P0
   solution, each protocol step of each ladder is independent (restart from its own
   lower protocol). This is where parallelism maxes out — and where the
   expensive high-protocol work lives.
 
-**Seeding = nearest converged, not a fixed topology.** A fresh `(channel, ω)`
+**Seeding = nearest converged, not a fixed topology.** A fresh `(perturbation, ω)`
 seeds from whatever converged state is *closest* in (perturbation, frequency,
-protocol) space — typically the same channel's nearest-frequency or
+protocol) space — typically the same perturbation's nearest-frequency or
 coarser-protocol solution. This is exactly what the restart precedence in
 `try_load_fd_state` already encodes (exact → coarser protocol → nearby
 frequency → fresh); the scheduler's job is only to *order* work so a near
@@ -156,7 +156,7 @@ restart precedence uses), not the topology. Default: nearest converged.
 `CalcNode::seed_from` is a free node-id string, deliberately *unconstrained* to
 type — it can reference an ES node from an FD node or vice versa. The data
 model already accommodates cross-type seeding; it is **not yet wired** (15a
-`build_dag` sets it only for dynamic-FD ← same-channel-static, and neither
+`build_dag` sets it only for dynamic-FD ← same-perturbation-static, and neither
 `schedule` nor the executor consume it). Two physically valuable cases motivate
 finishing it, ideally alongside 15b:
 
@@ -328,9 +328,9 @@ The scheduler is both producer and consumer of the per-state metrics
   scaling by `k³ × leaf-growth(P_low → P_high)` yields a real per-task
   estimate → a clean **pre-flight abort** instead of exit-137.
 
-So a channel's **anchor solve @ P0** does triple duty: cheapest solve, seed for
-the rest of that channel, and — because `mem` is channel-independent — the
-memory probe that sizes every later group across all channels.
+So a perturbation's **seed-state solve @ P0** does triple duty: cheapest solve, seed for
+the rest of that perturbation, and — because `mem` is perturbation-independent — the
+memory probe that sizes every later group across all perturbations.
 
 ---
 
@@ -489,13 +489,13 @@ struct WorkItem {
 /// sequentially). The unit of concurrency is the PERTURBATION CHANNEL:
 /// dipole_x / dipole_y / Nuc0_x etc. are independent and share every wave.
 /// Ordering realizes:
-///   Phase A (protocol step = ramp.front()): each channel's anchor (ω=0 if present,
-///     else lowest |ω|) — anchors of different channels run together — then
-///     all remaining (channel, ω) at P0 in one wave.
-///   Phase B (protocol step in ramp[1..]):   every (channel, ω) climbs; a protocol step-P wave
+///   Phase A (protocol step = ramp.front()): each perturbation's seed state (ω=0 if present,
+///     else lowest |ω|) — seed states of different perturbations run together — then
+///     all remaining (perturbation, ω) at P0 in one wave.
+///   Phase B (protocol step in ramp[1..]):   every (perturbation, ω) climbs; a protocol step-P wave
 ///     per level.
 /// Seeding is nearest-converged (executor side via try_load_fd_state); a
-/// node's seed_from only biases intra-channel ordering. Nodes whose ladder
+/// node's seed_from only biases intra-perturbation ordering. Nodes whose ladder
 /// doesn't include a protocol step are skipped for that protocol step. Gated nodes (deps not yet
 /// ready — e.g. DerivedFD before its ES bundle converges) are held to a later
 /// wave.
@@ -598,7 +598,7 @@ executor and the already-landed persistence/`iterate_protocol` layer.
 (agreed 2026-05-29). The manager drives every ready node at P0, then every
 node at P1, …; one reconcile + one `exec.run_protocol({node, P})` per `(node,
 protocol)`. This buys the all-of-P0-before-any-P1 barrier (so the cheap-level
-memory probe sizes the expensive level), the widest same-level cross-channel
+memory probe sizes the expensive level), the widest same-level cross-perturbation
 parallelism, and the finest restart granularity. `iterate_protocol` is invoked
 once per protocol step (`thresholds = {P}`) rather than running its own full ramp — the
 manager's `for P in ramp` loop replaces the ramp inside `iterate_protocol`.

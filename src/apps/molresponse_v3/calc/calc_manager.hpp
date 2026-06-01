@@ -7,7 +7,7 @@
 // This header is the WORLD-FREE, PURE half of the calc manager: it turns a
 // ResponsePlan (doc 14 Tier A) into a DAG of CalcNodes, reconciles each node
 // against what is already on disk (response_metadata.json), and emits the
-// two-phase, channel-parallel schedule of (node, protocol) WorkItems.
+// two-phase, perturbation-parallel schedule of (node, protocol) WorkItems.
 //
 // Nothing here touches madness::World, MPI, MRA functions, or the archive.
 // Every function takes the aggregate metadata as a const nlohmann::json& so a
@@ -54,6 +54,23 @@
 #include <string>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Vocabulary (scheduler term -> response physics):
+//   CalcNode       a response STATE to compute: x(ω) for a perturbation (FD),
+//                  or an excited-state bundle (ES).
+//   perturbation   the operator defining a unit of work (dipole_a, nuc_iα); the
+//                  unit of parallelism — distinct perturbations are independent.
+//                  (An ES bundle is its own unit, keyed by its id.)
+//   seed_state     per perturbation, the state solved first (static ω=0 if
+//                  requested, else lowest |ω|) that seeds frequency-continuation
+//                  for the rest — solve α(0), continue to α(ω).
+//   protocol step  one (thresh, k) MRA accuracy level on the coarse->fine ramp.
+//   wave           a set of states with no prerequisite between them — safe to
+//                  solve concurrently.
+//   prerequisite   a state that must be CONVERGED before this one (correctness).
+//   seed_from      a soft starting-guess hint (efficiency; falls back to fresh).
+// ---------------------------------------------------------------------------
+
 namespace molresponse_v3 {
 
 // ---------------------------------------------------------------------------
@@ -93,7 +110,7 @@ struct CalcNode {
 
   // Soft edge: a seed HINT (node id), never required for correctness. The
   // executor always picks the nearest converged state via try_load_fd_state's
-  // restart precedence; this only biases intra-channel ordering.
+  // restart precedence; this only biases intra-perturbation ordering.
   std::string         seed_from;
 
   /// A symbolic node is an expansion template, not directly schedulable:
@@ -135,10 +152,11 @@ inline std::string derived_fd_node_id(const Perturbation &pert,
   return "dfd:" + pert.description() + "@" + es_root_id;
 }
 
-/// The channel a node belongs to — the unit of cross-node parallelism. FD /
-/// NuclearFD / DerivedFD share a channel per perturbation; an ES bundle is its
-/// own channel.
-inline std::string channel_key(const CalcNode &n) {
+/// The perturbation a node belongs to — the unit of parallelism (distinct
+/// perturbations are independent and share every wave). FD / NuclearFD /
+/// DerivedFD key on their perturbation operator; an ES bundle is its own unit,
+/// so it keys on its own id.
+inline std::string perturbation_key(const CalcNode &n) {
   if (n.kind == CalcKind::ES) return n.id;
   return n.pert.description();
 }
@@ -247,7 +265,7 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
   std::vector<CalcNode> dag;
 
-  // Pre-index static dipole frequencies per channel for seed hints.
+  // Pre-index static dipole frequencies per perturbation for seed hints.
   auto has_static_fd = [&](const std::string &pdesc) {
     for (const auto &r : plan.fd)
       if (r.pert.description() == pdesc && std::abs(r.freq) < 1e-12)
@@ -394,14 +412,14 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 }
 
 // ---------------------------------------------------------------------------
-// schedule — two-phase, channel-parallel waves of WorkItems. Pure.
+// schedule — two-phase, perturbation-parallel waves of WorkItems. Pure.
 // ---------------------------------------------------------------------------
 
 /// Emit work in waves (a wave = items with no edges between them, safe to run
 /// concurrently). Channels (perturbation / ES bundle) are the unit of
 /// parallelism and share every wave. Ordering:
 ///   Phase A (protocol step = ramp.front()):
-///     wave A1 — each channel's ANCHOR (ω=0 if present, else lowest |ω|),
+///     wave A1 — each perturbation's SEED STATE (ω=0 if present, else lowest |ω|),
 ///     wave A2 — all remaining nodes at this protocol step.
 ///   Phase B (protocol step in ramp[1..]): one wave per protocol step of every participating
 ///     node (embarrassingly parallel).
@@ -447,31 +465,31 @@ schedule(const std::vector<CalcNode> &dag,
     return true;
   };
 
-  // ---- Phase A: anchors then the rest, at ramp.front() --------------------
+  // ---- Phase A: seed states then the rest, at ramp.front() --------------------
   const double p0 = ramp.front();
 
-  // Per-channel anchor = the node with freq closest to 0 (static preferred),
-  // among nodes that participate at p0. Precomputed once (O(n)); std::map keeps
-  // A1 in a deterministic (rank-consistent) channel order.
-  std::map<std::string, const CalcNode *> anchor_by_channel;
+  // Per-perturbation seed state = the node with freq closest to 0 (static
+  // preferred), among nodes that participate at p0. Precomputed once (O(n));
+  // std::map keeps A1 in a deterministic (rank-consistent) perturbation order.
+  std::map<std::string, const CalcNode *> seed_by_perturbation;
   for (const CalcNode *n : nodes) {
     if (!ramp_contains(n->protocols, p0)) continue;
-    const std::string ch = channel_key(*n);
-    auto it = anchor_by_channel.find(ch);
-    if (it == anchor_by_channel.end() ||
+    const std::string ch = perturbation_key(*n);
+    auto it = seed_by_perturbation.find(ch);
+    if (it == seed_by_perturbation.end() ||
         std::abs(n->freq) < std::abs(it->second->freq))
-      anchor_by_channel[ch] = n;
+      seed_by_perturbation[ch] = n;
   }
 
   std::vector<WorkItem> waveA1, waveA2;
-  for (const auto &[ch, anchor] : anchor_by_channel) {
+  for (const auto &[ch, seed] : seed_by_perturbation) {
     WorkItem it;
-    if (make_item(anchor, p0, it)) waveA1.push_back(it);
+    if (make_item(seed, p0, it)) waveA1.push_back(it);
   }
-  // A2: every other p0 node that isn't its channel's anchor.
+  // A2: every other p0 node that isn't its perturbation's seed state.
   for (const CalcNode *n : nodes) {
-    auto a = anchor_by_channel.find(channel_key(*n));
-    if (a != anchor_by_channel.end() && a->second == n) continue;
+    auto a = seed_by_perturbation.find(perturbation_key(*n));
+    if (a != seed_by_perturbation.end() && a->second == n) continue;
     WorkItem it;
     if (make_item(n, p0, it)) waveA2.push_back(it);
   }
