@@ -210,13 +210,24 @@ promoted derived state exactly like any other FD point. Intended pipeline:
   3. FD at the promoted derived frequencies ωₙ — each seeded from the nearest
      already-computed FD frequency *and/or* the converged ES root.
 
-Two gaps to close when this lands (15b):
+Status / gaps:
 
-- 15a's `expand_converged_es` keeps `kind = DerivedFD`, which the FD executor
-  does **not** solve (it stubs ES/DerivedFD). Promoting to `CalcKind::FD` on
-  expansion is the fix — without it, promoted derived states never run.
-- `try_load_fd_state` seeds only from the *same* frequency at a coarser
-  protocol; nearest-*frequency* seeding (step 3) is not yet implemented.
+- **Done:** `expand_converged_es` promotes each expanded node to `CalcKind::FD`
+  (so the FD executor solves it and the normal skip/restart/seed logic applies).
+- **Gap — expansion must be metadata-driven (restart-safety).** Today
+  `expand_converged_es` reads ES roots from an IN-MEMORY map (`es_root_freqs_`)
+  populated only when the ES node converges *in the current process*. On a
+  restart the ES bundle is already converged on disk → `reconcile` Skips it →
+  the ES node never runs → the map stays empty → **expansion never fires**, so
+  a resumed run silently never produces its ES-derived FD states. Fix: drive
+  expansion from `response_metadata.json` (`excited_states/<key>/roots[].omega`)
+  like everything else — then `maybe_record_es_roots` / `es_root_freqs_` go
+  away, and idempotency comes from deduping new nodes against existing `dag_`
+  ids rather than the in-memory `expanded_` set (also not restart-safe). This is
+  the same disk-is-truth rule the rest of the manager already follows.
+- **Gap — nearest-frequency seeding.** `try_load_fd_state` seeds only from the
+  *same* frequency at a coarser protocol; nearest-*frequency* seeding (step 3)
+  is not yet implemented.
 
 ### Resonant β at ES-derived frequencies (15b foresight)
 
@@ -278,11 +289,14 @@ exactly where a killed run left off, at state granularity.
   that `Resume` (exact-protocol step partial) carries `last_bsh_residual` forward from
   metadata so the convergence log spans the restart, whereas a coarser `Restart`
   starts the residual history fresh. Keep both actions; lean on `Resume`.
-- **`k` is derived only — `override_k` deprecated.** This application always
-  derives `k` from `thresh` via `default_k_for_thresh`. Overriding `k` would
-  desync the reconcile key from the saved key (everything reads as "absent" →
-  silent re-solves), so it is deprecated: drop the `override_k` plumbing from
-  `ExecutorContext` / `solve_fd_protocol` / the test `--k` flag.
+- **`k` is derived only — `override_k` removed (done).** `k` is always derived
+  from `thresh` via `default_k_for_thresh`; the `override_k` plumbing was dropped
+  from `ExecutorContext` / `solve_fd_protocol` / the test `--k` flag. (Overriding
+  `k` would desync the reconcile key from the saved key → silent re-solves.)
+- **Convergence is residual-based (done).** `solve_fd_protocol` reports
+  converged only if not diverged AND max BSH/density residual ≤ this protocol's
+  targets — a max-iters stall reads as unconverged (not skipped, not consumed as
+  good). Replaced the earlier `!diverged` proxy.
 
 ---
 
