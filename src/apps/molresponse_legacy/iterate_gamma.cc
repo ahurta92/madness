@@ -366,6 +366,23 @@ X_space TDDFT::compute_gamma_tda(World& world,
   J.truncate_rf();
   W.truncate_rf();
 
+  // [GAMMA-PARTS] LEGACY_PATCH: mirror current diagnostic.
+  if (r_params.print_level() >= 20) {
+    response_space twoJ = J * 2;
+    response_space cK1  = k1_x * xcf.hf_exchange_coefficient();
+    auto v_2j = response_space_inner(Chi_copy.X, twoJ);
+    auto v_k1 = response_space_inner(Chi_copy.X, cK1);
+    auto v_w  = response_space_inner(Chi_copy.X, W);
+    if (world.rank() == 0) {
+      print("[GAMMA-PARTS] <X|2J|X>");
+      print(v_2j);
+      print("[GAMMA-PARTS] <X|c_xc*K1|X>");
+      print(v_k1);
+      print("[GAMMA-PARTS] <X|W|X>");
+      print(v_w);
+    }
+  }
+
   if (r_params.print_level() >= 2) {
     molresponse::start_timer(world);
     // LEGACY_PATCH: gate print on rank 0; PrintResponseVectorNorms handles collective internally
@@ -508,6 +525,25 @@ X_space TDDFT::compute_V0X(World& world,
   if (r_params.print_level() >= 3) {  // LEGACY_PATCH: collective first, print on rank 0
     auto xv0x = inner(Chi_copy, V0);  // all ranks must participate (collective)
     if (world.rank() == 0) { print("inner <X|V0|X>"); print(xv0x); }
+  }
+  // [V0X-SPLIT] LEGACY_PATCH: mirror current ResponseBase.cpp diagnostic so we
+  // can compare the local-potential and exchange contributions to V0X
+  // term-by-term between legacy and current. Gated at print_level >= 20.
+  if (r_params.print_level() >= 20) {
+    X_space V_loc(world, m, n);
+    V_loc.X = v0 * Chi.X;
+    if (compute_Y) V_loc.Y = v0 * Chi.Y;
+    X_space K0X_diag(world, m, n);
+    K0X_diag.X = K0.X.copy();
+    if (compute_Y) K0X_diag.Y = K0.Y.copy();
+    auto xvloc = inner(Chi_copy, V_loc);
+    auto xk0   = inner(Chi_copy, K0X_diag);
+    if (world.rank() == 0) {
+      print("[V0X-SPLIT] xV_localX (v_nuc+2J+(1-c)Vxc, no trunc)");
+      print(xvloc);
+      print("[V0X-SPLIT] xK0X (exchange, pre-scale)");
+      print(xk0);
+    }
   }
   molresponse::end_timer(world, "V0X");
 

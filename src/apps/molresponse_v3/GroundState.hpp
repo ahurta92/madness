@@ -95,8 +95,12 @@ public:
     const tensorT& hamiltonian() const { return focka(); }
     const tensorT& hamiltonian_no_diag() const { return focka_no_diag(); }
 
-    /// Projector onto virtual space: Q = 1 - |phi><phi|
+    /// Alpha projector onto virtual space: Q_alpha = 1 - |phi_alpha><phi_alpha|
     const QProjector<double, 3>& Q() const;
+    const QProjector<double, 3>& Q_alpha() const;
+
+    /// Beta projector (only for unrestricted): Q_beta = 1 - |phi_beta><phi_beta|
+    const QProjector<double, 3>& Q_beta() const;
 
     // -----------------------------------------------------------------
     // Direct SCF access for advanced use
@@ -110,6 +114,7 @@ public:
 private:
     std::shared_ptr<SCF> scf_;
     int original_k_;
+    int current_k_ = 0;  // k that orbitals are currently projected to
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;
@@ -117,11 +122,16 @@ private:
     tensorT fockb_;
     tensorT focka_no_diag_;
     tensorT fockb_no_diag_;
-    QProjector<double, 3> q_projector_;
+    QProjector<double, 3> q_alpha_;
+    QProjector<double, 3> q_beta_;
     bool prepared_ = false;
 
+public:
     /// Read just the archive header to extract L, k, xc, etc.
-    /// Used by from_archive to set up CalculationParameters before load_mos.
+    /// Used by from_archive to set up CalculationParameters before load_mos,
+    /// and by callers that need to set FunctionDefaults<3> via
+    /// `set_response_protocol(...)` *before* the archive is opened so that
+    /// orbitals load directly into the intended (k, thresh) representation.
     struct ArchiveHeader {
         unsigned int version = 0;
         double energy = 0.0;
@@ -136,6 +146,8 @@ private:
 
     static ArchiveHeader read_archive_header(World& world,
                                               const std::string& archive_path);
+
+private:
 
     /// Build V_local (V_nuc + V_coul + V_xc) for the response solver.
     /// This is the multiplicative local potential used in the response

@@ -43,8 +43,19 @@ GroundState GroundState::from_archive(World& world,
         prefix = prefix.substr(0, pos);
     }
     params.set_user_defined_value("prefix", prefix);
+    // Workaround for QCCalculationParametersBase::tostring<std::string>
+    // case-folding: re-set the prefix value directly via the QCParameter
+    // struct so the original path case is preserved (paths like
+    // /home/User/Projects/... would otherwise lowercase, breaking
+    // SCF::load_mos's archive lookup).
+    params.get_parameter("prefix").set_user_defined_value(prefix);
 
     // For open-shell: infer nopen from nmo_alpha and total electrons.
+    if (world.rank() == 0) {
+        print("ARCHIVE_HEADER: spin_restricted=", header.spin_restricted,
+              " nmo_alpha=", header.nmo_alpha, " L=", header.L,
+              " k=", header.k, " xc=", header.xc);
+    }
     if (!header.spin_restricted) {
         int nelec = static_cast<int>(molecule.total_nuclear_charge());
         int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
@@ -61,6 +72,7 @@ GroundState GroundState::from_archive(World& world,
     // Step 5: Build GroundState
     GroundState gs(world, scf);
     gs.original_k_ = header.k;
+    gs.current_k_ = header.k;
     return gs;
 }
 
@@ -99,30 +111,31 @@ GroundState::read_archive_header(World& world,
 void GroundState::prepare(World& world, double vtol,
                            const poperatorT& coulop,
                            const std::string& fock_json_file) {
-    auto current_k = FunctionDefaults<3>::get_k();
+    auto target_k = FunctionDefaults<3>::get_k();
     auto thresh = FunctionDefaults<3>::get_thresh();
 
-    // Re-project orbitals if k or thresh changed
-    if (original_k_ != current_k) {
-        if (original_k_ < current_k) {
-            MADNESS_EXCEPTION(
-                "Cannot project orbitals to higher k than archive", original_k_);
-        }
-        // Reload from archive at original k, then project down
+    // Re-project orbitals if k changed from what they currently are
+    if (current_k_ != target_k) {
+        // Always reload from archive at original k, then project to target
         scf_->load_mos(world);
-        reconstruct(world, scf_->amo);
-        for (auto& orbital : scf_->amo) {
-            orbital = project(orbital, current_k, thresh, true);
+        if (original_k_ != target_k) {
+            reconstruct(world, scf_->amo);
+            for (auto& orbital : scf_->amo) {
+                orbital = project(orbital, target_k, thresh, true);
+            }
+
+            if (!is_spin_restricted()) {
+                reconstruct(world, scf_->bmo);
+                for (auto& orbital : scf_->bmo) {
+                    orbital = project(orbital, target_k, thresh, true);
+                }
+            }
         }
         truncate(world, scf_->amo, thresh);
-
         if (!is_spin_restricted()) {
-            reconstruct(world, scf_->bmo);
-            for (auto& orbital : scf_->bmo) {
-                orbital = project(orbital, current_k, thresh, true);
-            }
             truncate(world, scf_->bmo, thresh);
         }
+        current_k_ = target_k;
     } else {
         truncate(world, scf_->amo, thresh);
         if (!is_spin_restricted()) {
@@ -130,17 +143,18 @@ void GroundState::prepare(World& world, double vtol,
         }
     }
 
-    // Build QProjector from current alpha orbitals
-    q_projector_ = QProjector<double, 3>(scf_->get_amo());
-
-    // Ensure SCF's gradient operators are initialized (needed by
-    // make_fock_matrix -> kinetic_energy_matrix which uses gradop)
-    scf_->gradop = gradient_operator<double, 3>(world);
-    if (scf_->param.deriv() == "bspline") {
-        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_bspline1();
-    } else if (scf_->param.deriv() == "ble") {
-        for (int i = 0; i < 3; ++i) (*scf_->gradop[i]).set_ble1();
+    // Build QProjectors from current orbitals
+    q_alpha_ = QProjector<double, 3>(scf_->get_amo());
+    if (!is_spin_restricted()) {
+        q_beta_ = QProjector<double, 3>(scf_->get_bmo());
     }
+
+    // Initialize SCF's internal state for the current protocol.
+    // set_protocol sets FunctionDefaults (k, thresh, cubic_cell),
+    // vtol (used by apply_potential for mul_sparse), coulop, gradop, mask.
+    // Without this, apply_potential and make_fock_matrix produce wrong results
+    // because vtol is uninitialized and the box boundaries may be wrong.
+    scf_->set_protocol<3>(world, thresh);
 
     // Build V_local for the response solver (multiplicative potential)
     build_v_local(world, vtol, coulop);
@@ -240,10 +254,7 @@ void GroundState::build_fock_matrices(World& world, double vtol,
         auto vnuc = scf_->potentialmanager->vnuclear();
         vnuc.truncate(vtol);
 
-        // SCF needs the coulop set for exchange computation
-        scf_->coulop = poperatorT(CoulombOperatorPtr(
-            world, scf_->param.lo(), 0.001 * thresh));
-
+        // coulop already set by set_protocol in prepare()
         auto vcoul = apply(*scf_->coulop, rho);
         vcoul.truncate(vtol);
         rho.clear();
@@ -316,7 +327,17 @@ const tensorT& GroundState::fockb_no_diag() const {
 
 const QProjector<double, 3>& GroundState::Q() const {
     MADNESS_CHECK(prepared_);
-    return q_projector_;
+    return q_alpha_;
+}
+
+const QProjector<double, 3>& GroundState::Q_alpha() const {
+    MADNESS_CHECK(prepared_);
+    return q_alpha_;
+}
+
+const QProjector<double, 3>& GroundState::Q_beta() const {
+    MADNESS_CHECK(prepared_);
+    return q_beta_;
 }
 
 // ---------------------------------------------------------------------------

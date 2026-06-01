@@ -36,13 +36,22 @@ X_space TDDFT::Compute_Theta_X(World& world,
                                std::string calc_type) {
   bool compute_Y = calc_type.compare("full") == 0;
   X_space Theta_X = X_space(world, Chi.num_states(), Chi.num_orbitals());
+  // [XX-V0X-IN] LEGACY_PATCH: mirror current diagnostic at compute_V0X entry.
+  // <chi|chi> here should be ~ I after GS+normalize upstream.
+  if (r_params.print_level() >= 20) {
+    auto xx = inner(Chi, Chi);
+    if (world.rank() == 0) {
+      print("[XX-V0X-IN] <X|X> at entry of compute_V0X");
+      print(xx);
+    }
+  }
   // compute
   X_space V0X = compute_V0X(world, Chi, xc, compute_Y);
 
   V0X.truncate();
   if (r_params.print_level() >= 20) {  // LEGACY_PATCH: collective first, print on rank 0
     auto xv0x = inner(Chi, V0X);  // all ranks must participate (collective)
-    if (world.rank() == 0) { print("---------------Theta ----------------"); print("<X|V0|X>"); print(xv0x); }
+    if (world.rank() == 0) { print("---------------Theta ----------------"); print("xV0x"); print(xv0x); }
   }
 
   X_space E0X(world, Chi.num_states(), Chi.num_orbitals());
