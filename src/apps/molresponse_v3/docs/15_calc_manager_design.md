@@ -118,7 +118,7 @@ Rationale:
   the same for every channel, a *single* low-protocol anchor already predicts
   the high-protocol footprint for all of them.
 - Phase B is embarrassingly parallel: once every `(channel, ω)` has a P0
-  solution, each rung of each ladder is independent (restart from its own
+  solution, each protocol step of each ladder is independent (restart from its own
   lower protocol). This is where parallelism maxes out — and where the
   expensive high-protocol work lives.
 
@@ -230,25 +230,25 @@ exactly where a killed run left off, at state granularity.
 
 - **Restart from a non-converged coarse seed (the key one).** A coarse-protocol
   partial — e.g. ~10 iterations at 1e-4 — is a perfectly good seed for the
-  finer rung; it need NOT be converged. Today `reconcile_rung` calls
+  finer protocol step; it need NOT be converged. Today `reconcile_protocol` calls
   `has_coarser_converged_fd`, so a coarser *partial* (present, not converged)
   falls through to **Fresh** → the executor skips the load → the partial is
   discarded. Fix: unify the decision and the load on *"best coarser-or-equal
-  snapshot that is not `diverged`"* (converged or not). `reconcile_rung` returns
+  snapshot that is not `diverged`"* (converged or not). `reconcile_protocol` returns
   `Restart` whenever such a snapshot exists; `try_load_fd_state` selects the
   same one (it currently loads any coarser but must additionally exclude
   `diverged`). Share one "pick best usable source" helper so the verdict and the
   load can never disagree.
 - **Resume preserves residual continuity.** `Restart` and `Resume` are
   behaviorally near-identical (both load + iterate); the intended distinction is
-  that `Resume` (exact-rung partial) carries `last_bsh_residual` forward from
+  that `Resume` (exact-protocol step partial) carries `last_bsh_residual` forward from
   metadata so the convergence log spans the restart, whereas a coarser `Restart`
   starts the residual history fresh. Keep both actions; lean on `Resume`.
 - **`k` is derived only — `override_k` deprecated.** This application always
   derives `k` from `thresh` via `default_k_for_thresh`. Overriding `k` would
   desync the reconcile key from the saved key (everything reads as "absent" →
   silent re-solves), so it is deprecated: drop the `override_k` plumbing from
-  `ExecutorContext` / `solve_fd_rung` / the test `--k` flag.
+  `ExecutorContext` / `solve_fd_protocol` / the test `--k` flag.
 
 ---
 
@@ -416,17 +416,17 @@ nothing else in the interface changes.
 ```cpp
 enum class NodeAction { Skip, Restart, Resume, Fresh };
 
-/// Decide one node's action at one protocol rung, by inspecting the aggregate
+/// Decide one node's action at one protocol protocol step, by inspecting the aggregate
 /// metadata json (already loaded — no filesystem here). target_key is
-/// protocol_key(thresh_rung, k_rung). Implements the doc-15 reconcile table,
+/// protocol_key(thresh, k). Implements the doc-15 reconcile table,
 /// including the diverged split: present+not-converged+not-diverged -> Resume,
 /// but present+diverged -> Fresh (discard the blown-up archive, re-seed from a
 /// converged neighbor).
-NodeAction reconcile_rung(const CalcNode &node,
+NodeAction reconcile_protocol(const CalcNode &node,
                           const nlohmann::json &metadata,
                           const std::string &target_key);
 
-/// Readiness gate: are all of node.hard_deps converged at this rung's key?
+/// Readiness gate: are all of node.hard_deps converged at this protocol step's key?
 /// Implicit-by-identity — looks each dep id up in `metadata`. (v3 analog of
 /// v2 DerivedStateGate.)
 bool deps_ready(const CalcNode &node,
@@ -439,14 +439,14 @@ blob; the only filesystem touch is the manager's single `load_or_create`.
 
 ### The two-phase schedule — pure
 
-The unit of execution is a **(node, protocol) rung**, because the two-phase
+The unit of execution is a **(node, protocol) step**, because the two-phase
 schedule interleaves nodes *within* a protocol level (all of P0 before any P1):
 
 ```cpp
 struct WorkItem {
   const CalcNode *node;
-  double          thresh;   // this rung's protocol
-  NodeAction      action;   // decided by reconcile_rung at emit time
+  double          thresh;   // this protocol step's protocol
+  NodeAction      action;   // decided by reconcile_protocol at emit time
 };
 
 /// Emit work in dependency- and seed-respecting waves. A wave is a set of
@@ -455,14 +455,14 @@ struct WorkItem {
 /// sequentially). The unit of concurrency is the PERTURBATION CHANNEL:
 /// dipole_x / dipole_y / Nuc0_x etc. are independent and share every wave.
 /// Ordering realizes:
-///   Phase A (rung = ramp.front()): each channel's anchor (ω=0 if present,
+///   Phase A (protocol step = ramp.front()): each channel's anchor (ω=0 if present,
 ///     else lowest |ω|) — anchors of different channels run together — then
 ///     all remaining (channel, ω) at P0 in one wave.
-///   Phase B (rung in ramp[1..]):   every (channel, ω) climbs; a rung-P wave
+///   Phase B (protocol step in ramp[1..]):   every (channel, ω) climbs; a protocol step-P wave
 ///     per level.
 /// Seeding is nearest-converged (executor side via try_load_fd_state); a
 /// node's seed_from only biases intra-channel ordering. Nodes whose ladder
-/// doesn't include a rung are skipped for that rung. Gated nodes (deps not yet
+/// doesn't include a protocol step are skipped for that protocol step. Gated nodes (deps not yet
 /// ready — e.g. DerivedFD before its ES bundle converges) are held to a later
 /// wave.
 std::vector<std::vector<WorkItem>>
@@ -483,14 +483,14 @@ struct NodeResult {
   std::vector<double> es_root_freqs;  // ES only: drives DerivedFD expansion
 };
 
-/// One rung of one node. The real impl: set_response_protocol(thresh) ->
+/// One protocol step of one node. The real impl: set_response_protocol(thresh) ->
 /// gs.prepare(...) -> try_load_fd_state/try_load_es_bundle for the seed ->
 /// construct FDSolver/ESSolver, set_target -> iterate_protocol({thresh}) with
 /// the save+measure_state post_step -> return convergence. Save+metadata are
 /// the executor's job (via save_fd_state / save_es_roots), so the manager
 /// never writes the aggregate itself.
 struct ICalcExecutor {
-  virtual NodeResult run_rung(const WorkItem &item) = 0;
+  virtual NodeResult run_protocol(const WorkItem &item) = 0;
   virtual ~ICalcExecutor() = default;
 };
 ```
@@ -517,8 +517,8 @@ public:
   void build(const Molecule &mol);
 
   /// Drive every node to its target protocol against `exec`. Idempotent and
-  /// restart-safe: re-loads metadata between waves, reconciles each rung, and
-  /// resumes exactly where a killed run stopped. When an ES node's rung
+  /// restart-safe: re-loads metadata between waves, reconciles each protocol step, and
+  /// resumes exactly where a killed run stopped. When an ES node's protocol step
   /// returns converged + es_root_freqs, expands its "*" DerivedFD node into
   /// concrete per-root nodes (freq = root energy at the final ES protocol),
   /// appends them to the DAG, and re-schedules.
@@ -533,23 +533,23 @@ private:
 ```
 
 `run()` is the only method that isn't pure, and even it is thin: load metadata
-→ `schedule(...)` → for each wave, for each item, `exec.run_rung(item)` (15a:
+→ `schedule(...)` → for each wave, for each item, `exec.run_protocol(item)` (15a:
 sequential; 15c: fan a wave across groups) → handle ES expansion → repeat until
 no work remains. The expensive parts — MRA, MPI, archives — are entirely inside
 the executor and the already-landed persistence/`iterate_protocol` layer.
 
 ### What this buys, mapped to 15a
 
-- **Unit-testable scheduler:** `build_dag`, `reconcile_rung`, `deps_ready`,
+- **Unit-testable scheduler:** `build_dag`, `reconcile_protocol`, `deps_ready`,
   `schedule` are pure functions over `ResponsePlan` / `nlohmann::json`. The
   whole "skip/restart/resume/fresh" table and the two-phase ordering get gtest
   coverage with no `World`.
-- **One World-bound seam:** `ICalcExecutor::run_rung`. The real executor is a
+- **One World-bound seam:** `ICalcExecutor::run_protocol`. The real executor is a
   thin adapter over `iterate_protocol` + `save_fd_state`/`save_es_roots` +
   `try_load_*` — code paths that already exist and are tested.
 - **Restart-safety falls out:** the manager holds no solved state in memory;
   every wave re-reads the aggregate and reconciles, so kill/resume works at
-  rung granularity for free.
+  protocol step granularity for free.
 - **15b/15c slot in without interface churn:** VBC is a new `CalcKind` + a
   `build_dag` edge; group sizing is a `schedule`/`run` policy that turns a
   wave's sequential loop into a subworld fan-out. Neither touches `CalcNode`,
@@ -559,11 +559,11 @@ the executor and the already-landed persistence/`iterate_protocol` layer.
 
 **Rung-level reconcile — the manager owns the protocol-ladder loop**
 (agreed 2026-05-29). The manager drives every ready node at P0, then every
-node at P1, …; one reconcile + one `exec.run_rung({node, P})` per `(node,
+node at P1, …; one reconcile + one `exec.run_protocol({node, P})` per `(node,
 protocol)`. This buys the all-of-P0-before-any-P1 barrier (so the cheap-level
 memory probe sizes the expensive level), the widest same-level cross-channel
 parallelism, and the finest restart granularity. `iterate_protocol` is invoked
-once per rung (`thresholds = {P}`) rather than running its own full ramp — the
+once per protocol step (`thresholds = {P}`) rather than running its own full ramp — the
 manager's `for P in ramp` loop replaces the ramp inside `iterate_protocol`.
 
 The node-level alternative (each node carries its whole ladder; one call per

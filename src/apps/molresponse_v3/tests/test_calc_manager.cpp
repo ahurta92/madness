@@ -1,6 +1,6 @@
 // ===========================================================================
 // CalcManager scheduling-core tests (doc 15, 15a). Pure C++, no MPI / no MRA
-// runtime — exercises build_dag, reconcile_rung, deps_ready, and schedule
+// runtime — exercises build_dag, reconcile_protocol, deps_ready, and schedule
 // against hand-written response_metadata.json blobs.
 // ===========================================================================
 
@@ -63,7 +63,7 @@ void put_protocol(json &m, double thresh) {
 // Write an fd_states entry.
 void put_fd(json &m, const std::string &pert, double thresh, double freq,
             bool converged, bool diverged = false) {
-  const std::string key = rung_key(thresh);
+  const std::string key = protocol_key_at(thresh);
   const std::string fk  = ResponseMetadata::freq_key(freq);
   put_protocol(m, thresh);
   m["fd_states"][pert][key][fk] = {{"freq", freq},
@@ -72,7 +72,7 @@ void put_fd(json &m, const std::string &pert, double thresh, double freq,
 }
 
 void put_es(json &m, double thresh, bool converged, bool diverged = false) {
-  const std::string key = rung_key(thresh);
+  const std::string key = protocol_key_at(thresh);
   put_protocol(m, thresh);
   m["excited_states"][key] = {{"converged", converged},
                               {"diverged", diverged}};
@@ -153,8 +153,8 @@ int main() {
            "derived FD hard-deps the ES bundle");
   }
 
-  // ====== reconcile_rung: the 5-row table =================================
-  std::printf("=== reconcile_rung table ===\n");
+  // ====== reconcile_protocol: the 5-row table =================================
+  std::printf("=== reconcile_protocol table ===\n");
   {
     CalcNode fd;
     fd.kind = CalcKind::FD;
@@ -163,42 +163,42 @@ int main() {
     fd.protocols = P;
     fd.id = fd_node_id(fd.pert, fd.freq);
 
-    EXPECT(reconcile_rung(fd, empty_meta(), 1e-6) == NodeAction::Fresh,
+    EXPECT(reconcile_protocol(fd, empty_meta(), 1e-6) == NodeAction::Fresh,
            "absent -> Fresh");
 
     json m1 = empty_meta();
     put_fd(m1, "dipole_x", 1e-6, 0.057, /*converged=*/true);
-    EXPECT(reconcile_rung(fd, m1, 1e-6) == NodeAction::Skip,
-           "converged at rung -> Skip");
+    EXPECT(reconcile_protocol(fd, m1, 1e-6) == NodeAction::Skip,
+           "converged at protocol step -> Skip");
 
     json m2 = empty_meta();
     put_fd(m2, "dipole_x", 1e-4, 0.057, /*converged=*/true);  // coarser only
-    EXPECT(reconcile_rung(fd, m2, 1e-6) == NodeAction::Restart,
-           "converged at coarser rung -> Restart");
+    EXPECT(reconcile_protocol(fd, m2, 1e-6) == NodeAction::Restart,
+           "converged at coarser protocol step -> Restart");
 
     json m3 = empty_meta();
     put_fd(m3, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false);
-    EXPECT(reconcile_rung(fd, m3, 1e-6) == NodeAction::Resume,
+    EXPECT(reconcile_protocol(fd, m3, 1e-6) == NodeAction::Resume,
            "present, not converged, not diverged -> Resume");
 
     json m4 = empty_meta();
     put_fd(m4, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true);
-    EXPECT(reconcile_rung(fd, m4, 1e-6) == NodeAction::Fresh,
+    EXPECT(reconcile_protocol(fd, m4, 1e-6) == NodeAction::Fresh,
            "present, diverged -> Fresh");
   }
 
-  // ====== reconcile_rung: ES path =========================================
-  std::printf("=== reconcile_rung ES ===\n");
+  // ====== reconcile_protocol: ES path =========================================
+  std::printf("=== reconcile_protocol ES ===\n");
   {
     CalcNode es;
     es.kind = CalcKind::ES; es.tda = true; es.n_roots = 3; es.protocols = P;
     es.id = es_node_id(true, 3);
     json m = empty_meta();
     put_es(m, 1e-6, /*converged=*/true);
-    EXPECT(reconcile_rung(es, m, 1e-6) == NodeAction::Skip, "ES converged -> Skip");
+    EXPECT(reconcile_protocol(es, m, 1e-6) == NodeAction::Skip, "ES converged -> Skip");
     json m2 = empty_meta();
     put_es(m2, 1e-4, /*converged=*/true);
-    EXPECT(reconcile_rung(es, m2, 1e-6) == NodeAction::Restart,
+    EXPECT(reconcile_protocol(es, m2, 1e-6) == NodeAction::Restart,
            "ES coarser converged -> Restart");
   }
 
@@ -220,12 +220,12 @@ int main() {
     EXPECT(!deps_ready(vbc, dag, m, 1e-6), "one dep ready -> still not ready");
     put_fd(m, "dipole_y", 1e-6, 0.07, true);
     EXPECT(deps_ready(vbc, dag, m, 1e-6), "both deps converged -> ready");
-    // Same deps but at a coarser rung must NOT satisfy a finer rung.
+    // Same deps but at a coarser protocol step must NOT satisfy a finer protocol step.
     json m2 = empty_meta();
     put_fd(m2, "dipole_x", 1e-4, 0.05, true);
     put_fd(m2, "dipole_y", 1e-4, 0.07, true);
     EXPECT(!deps_ready(vbc, dag, m2, 1e-6),
-           "deps converged only at coarser rung -> not ready at finer");
+           "deps converged only at coarser protocol step -> not ready at finer");
   }
 
   // ====== schedule: two-phase, channel-parallel ===========================
@@ -277,7 +277,7 @@ int main() {
     for (const auto &w : waves) es_seen |= wave_has(w, "es:tda_n2");
     EXPECT(es_seen, "ES node is scheduled");
 
-    // Now mark the ES bundle converged at both rungs -> everything Skips.
+    // Now mark the ES bundle converged at both protocol steps -> everything Skips.
     json m = empty_meta();
     put_es(m, 1e-4, true);
     put_es(m, 1e-6, true);

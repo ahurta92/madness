@@ -22,11 +22,11 @@
 //     one node per atom; n_atoms is all that requires. CalcManager::build()
 //     (executor side) extracts natom() from the Molecule and forwards it. This
 //     keeps the whole header molecule-independent and trivially testable.
-//   * reconcile_rung / deps_ready / schedule are keyed off the rung THRESHOLD
+//   * reconcile_protocol / deps_ready / schedule are keyed off the protocol step THRESHOLD
 //     (a double), not a pre-built protocol_key string. k is derived once via
 //     default_k_for_thresh, so callers only thread the ramp of thresholds.
 //     (15a assumes the standard thresh->k table; an override_k ramp is a
-//     later concern — see rung_key().)
+//     later concern — see protocol_key_at().)
 //   * deps_ready resolves a node's hard_deps against the DAG (id -> node) so
 //     it can reconstruct each prerequisite's metadata identity. In 15a no
 //     concrete schedulable node carries a hard edge (DerivedFD "*" is a
@@ -102,13 +102,13 @@ struct CalcNode {
   }
 };
 
-/// Reconcile verdict for one (node, rung). See the doc-15 table.
+/// Reconcile verdict for one (node, protocol step). See the doc-15 table.
 enum class NodeAction { Skip, Restart, Resume, Fresh };
 
-/// One (node, protocol) rung of work.
+/// One (node, protocol) step of work.
 struct WorkItem {
   const CalcNode *node = nullptr;
-  double          thresh = 0.0;   // this rung's truncation threshold
+  double          thresh = 0.0;   // this protocol step's truncation threshold
   NodeAction      action = NodeAction::Fresh;
 };
 
@@ -116,9 +116,9 @@ struct WorkItem {
 // Identity helpers (free functions — also used by the executor later).
 // ---------------------------------------------------------------------------
 
-/// Canonical protocol_key for a rung, derived from the threshold alone using
+/// Canonical protocol_key for a protocol step, derived from the threshold alone using
 /// the standard thresh->k table. (15a: override_k ramps unsupported.)
-inline std::string rung_key(double thresh) {
+inline std::string protocol_key_at(double thresh) {
   return protocol_key(thresh, default_k_for_thresh(thresh));
 }
 
@@ -315,16 +315,16 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
 }
 
 // ---------------------------------------------------------------------------
-// reconcile_rung — what to do with one node at one rung. Pure.
+// reconcile_protocol — what to do with one node at one protocol step. Pure.
 // ---------------------------------------------------------------------------
 
 /// Implements the doc-15 reconcile table at threshold `thresh`:
-///   converged at this rung                       -> Skip
-///   else converged at a coarser-or-equal rung    -> Restart
+///   converged at this protocol step                       -> Skip
+///   else converged at a coarser-or-equal protocol step    -> Restart
 ///   else present, not converged, not diverged    -> Resume
 ///   else present, diverged                        -> Fresh
 ///   else absent                                   -> Fresh
-NodeAction reconcile_rung(const CalcNode &node, const nlohmann::json &meta,
+NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
                           double thresh) {
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
@@ -357,9 +357,9 @@ NodeAction reconcile_rung(const CalcNode &node, const nlohmann::json &meta,
 // deps_ready — readiness gate (implicit-by-identity). Pure.
 // ---------------------------------------------------------------------------
 
-/// True iff every hard_dep of `node` is converged at rung `thresh`. Dep ids
+/// True iff every hard_dep of `node` is converged at protocol step `thresh`. Dep ids
 /// are resolved against `dag`; each dep's convergence is checked at the SAME
-/// rung key (the doc-15 "reconstruct prerequisites' identity at the same
+/// protocol step key (the doc-15 "reconstruct prerequisites' identity at the same
 /// protocol_key" contract). A dep id that resolves to no node, or to a node
 /// with no converged entry, gates the node out.
 bool deps_ready(const CalcNode &node, const std::vector<CalcNode> &dag,
@@ -399,13 +399,13 @@ bool deps_ready(const CalcNode &node, const std::vector<CalcNode> &dag,
 /// Emit work in waves (a wave = items with no edges between them, safe to run
 /// concurrently). Channels (perturbation / ES bundle) are the unit of
 /// parallelism and share every wave. Ordering:
-///   Phase A (rung = ramp.front()):
+///   Phase A (protocol step = ramp.front()):
 ///     wave A1 — each channel's ANCHOR (ω=0 if present, else lowest |ω|),
-///     wave A2 — all remaining nodes at this rung.
-///   Phase B (rung in ramp[1..]): one wave per rung of every participating
+///     wave A2 — all remaining nodes at this protocol step.
+///   Phase B (protocol step in ramp[1..]): one wave per protocol step of every participating
 ///     node (embarrassingly parallel).
-/// A node participates in a rung only if the rung is in its protocols ladder
-/// and reconcile_rung != Skip. Symbolic nodes (DerivedFD "*") are excluded —
+/// A node participates in a protocol step only if the protocol step is in its protocols ladder
+/// and reconcile_protocol != Skip. Symbolic nodes (DerivedFD "*") are excluded —
 /// they are expansion templates resolved post-ES. Gated nodes (deps not
 /// ready) are dropped from the wave and picked up on a later re-schedule
 /// (after run() updates the metadata). Empty waves are omitted.
@@ -424,12 +424,12 @@ schedule(const std::vector<CalcNode> &dag,
   for (const auto &n : dag)
     if (!n.is_symbolic()) nodes.push_back(&n);
 
-  // Does node participate at this rung (in ladder, not Skip, deps ready)?
+  // Does node participate at this protocol step (in ladder, not Skip, deps ready)?
   auto make_item = [&](const CalcNode *n, double thresh,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
     if (!deps_ready(*n, dag, meta, thresh))   return false;
-    const NodeAction a = reconcile_rung(*n, meta, thresh);
+    const NodeAction a = reconcile_protocol(*n, meta, thresh);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};
     return true;
@@ -473,7 +473,7 @@ schedule(const std::vector<CalcNode> &dag,
   if (!waveA1.empty()) waves.push_back(std::move(waveA1));
   if (!waveA2.empty()) waves.push_back(std::move(waveA2));
 
-  // ---- Phase B: one wave per finer rung -----------------------------------
+  // ---- Phase B: one wave per finer protocol step -----------------------------------
   for (size_t i = 1; i < ramp.size(); ++i) {
     std::vector<WorkItem> wave;
     for (const CalcNode *n : nodes) {
@@ -498,10 +498,10 @@ struct NodeResult {
   std::vector<double> es_root_freqs;   // ES only: drives DerivedFD expansion
 };
 
-/// Runs one rung of one node: load nearest seed -> iterate at this protocol
+/// Runs one protocol step of one node: load nearest seed -> iterate at this protocol
 /// -> save (+metrics). The only World-bound surface of the calc manager.
 struct ICalcExecutor {
-  virtual NodeResult run_rung(const WorkItem &item) = 0;
+  virtual NodeResult run_protocol(const WorkItem &item) = 0;
   virtual ~ICalcExecutor() = default;
 };
 

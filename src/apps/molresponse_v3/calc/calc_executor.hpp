@@ -7,21 +7,21 @@
 // order; this header actually drives the solves.
 //
 //   FdResponseExecutor : ICalcExecutor
-//       run_rung(WorkItem) -> one (node, protocol) rung of an FD/NuclearFD
+//       run_protocol(WorkItem) -> one protocol step of an FD/NuclearFD
 //       solve. Dispatches Static/Full × Closed/Open at runtime, builds the
 //       perturbation source, honors the reconcile action for seed loading,
-//       runs solvers::iterate_protocol over the single rung threshold (with
+//       runs solvers::iterate_protocol over the single protocol step threshold (with
 //       a reproject-prepare and a save post_step), and reports convergence.
 //
 //   CalcManager
 //       build(n_atoms) -> dag from the plan; run(world, exec) -> the
 //       one-wave-per-pass reschedule loop. Each pass reloads the aggregate
-//       metadata and re-schedules, so every rung's action is computed against
-//       up-to-date disk state (the rung-level barrier the design decided on).
+//       metadata and re-schedules, so every protocol step's action is computed against
+//       up-to-date disk state (the protocol-step-level barrier the design decided on).
 //
 // Scope (15a): FD (dipole + nuclear) closed-shell, dipole open-shell. ES
 // bundles and DerivedFD expansion are recognized but not yet solved here —
-// run_rung returns not-converged with a clear message and run() stops cleanly
+// run_protocol returns not-converged with a clear message and run() stops cleanly
 // once it can make no further progress. The ES executor + derived expansion
 // are the next increment; the expansion hook below is already wired so only
 // the ES solve has to land.
@@ -63,7 +63,7 @@
 
 namespace molresponse_v3 {
 
-/// Everything an FD rung solve needs beyond the node itself. References to
+/// Everything an FD protocol step solve needs beyond the node itself. References to
 /// `world` / `gs` are borrowed — the executor lives within the solve scope.
 struct ExecutorContext {
   madness::World   &world;
@@ -149,7 +149,7 @@ void reproject_state(State &st, int k, double thresh) {
 } // namespace detail_exec
 
 // ---------------------------------------------------------------------------
-// One rung of one FD node.
+// One protocol step of one FD node.
 // ---------------------------------------------------------------------------
 
 /// Solve (pert, freq) at a single protocol `thresh`. `action` is the reconcile
@@ -158,7 +158,7 @@ void reproject_state(State &st, int k, double thresh) {
 /// converged-or-partial seed via try_load_fd_state and re-project it in the
 /// first prepare(). Saves the result (+ metrics) through save_fd_state.
 template <typename Type, typename Shell>
-NodeResult solve_fd_rung(ExecutorContext &ctx, const Perturbation &pert,
+NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                          double freq, double thresh, NodeAction action) {
   using namespace madness;
   using Solver = FDSolver<Type, Shell>;
@@ -223,13 +223,13 @@ NodeResult solve_fd_rung(ExecutorContext &ctx, const Perturbation &pert,
 
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.max_iters;
-  const std::vector<double> one_rung = {thresh};
-  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_rung,
+  const std::vector<double> one_protocol = {thresh};
+  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
 
   NodeResult r;
   r.converged = !sf.diverged;          // skeleton convergence proxy (doc 15a)
-  r.reached_protocol_key = protocol_key();  // active defaults reflect this rung
+  r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
   return r;
 }
 
@@ -241,13 +241,13 @@ class FdResponseExecutor : public ICalcExecutor {
 public:
   explicit FdResponseExecutor(ExecutorContext ctx) : ctx_(ctx) {}
 
-  NodeResult run_rung(const WorkItem &item) override {
+  NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
 
     if (node.kind == CalcKind::ES || node.kind == CalcKind::DerivedFD ||
         node.kind == CalcKind::VBC) {
       if (ctx_.world.rank() == 0) {
-        madness::print("[CALC] run_rung: node", node.id, "kind not handled by "
+        madness::print("[CALC] run_protocol: node", node.id, "kind not handled by "
                        "the 15a FD executor (ES/DerivedFD/VBC) — skipping");
       }
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
@@ -257,7 +257,7 @@ public:
     const bool is_static   = detail_exec::is_static_freq(node.freq);
 
     if (ctx_.world.rank() == 0) {
-      madness::print("[CALC] run_rung: node", node.id,
+      madness::print("[CALC] run_protocol: node", node.id,
                      " pert=", node.pert.description(),
                      " freq=", node.freq, " thresh=", item.thresh,
                      " type=", (is_static ? "static" : "full"),
@@ -266,15 +266,15 @@ public:
     }
 
     if (restricted && is_static)
-      return solve_fd_rung<Static, ClosedShell>(ctx_, node.pert, node.freq,
+      return solve_fd_protocol<Static, ClosedShell>(ctx_, node.pert, node.freq,
                                                  item.thresh, item.action);
     if (restricted && !is_static)
-      return solve_fd_rung<Full, ClosedShell>(ctx_, node.pert, node.freq,
+      return solve_fd_protocol<Full, ClosedShell>(ctx_, node.pert, node.freq,
                                                item.thresh, item.action);
     if (!restricted && is_static)
-      return solve_fd_rung<Static, OpenShell>(ctx_, node.pert, node.freq,
+      return solve_fd_protocol<Static, OpenShell>(ctx_, node.pert, node.freq,
                                                item.thresh, item.action);
-    return solve_fd_rung<Full, OpenShell>(ctx_, node.pert, node.freq,
+    return solve_fd_protocol<Full, OpenShell>(ctx_, node.pert, node.freq,
                                           item.thresh, item.action);
   }
 
@@ -350,9 +350,9 @@ public:
 
       if (world.rank() == 0)
         madness::print("[CALC] run: wave of", (int)waves.front().size(),
-                       "rung(s): {", sig, "}");
+                       "protocol step(s): {", sig, "}");
       for (const auto &item : waves.front()) {
-        NodeResult res = exec.run_rung(item);
+        NodeResult res = exec.run_protocol(item);
         maybe_record_es_roots(item, res);
       }
       world.gop.fence();
@@ -382,7 +382,7 @@ private:
     return s;
   }
 
-  /// Stash ES root frequencies from a converged ES rung for expansion. (ES
+  /// Stash ES root frequencies from a converged ES protocol step for expansion. (ES
   /// solves aren't wired in 15a, so this stays empty; kept so the ES executor
   /// only has to populate NodeResult::es_root_freqs.)
   void maybe_record_es_roots(const WorkItem &item, const NodeResult &res) {

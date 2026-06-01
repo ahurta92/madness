@@ -2,7 +2,7 @@
 // test_calc_manager_run.cpp — end-to-end drive of the calc manager (doc 15,
 // 15a). Sets up a ground state from a moldft archive (same recipe as the FD
 // skeleton test), plans a polarizability request, then lets CalcManager +
-// FdResponseExecutor schedule and solve every FD rung. Validates by reading
+// FdResponseExecutor schedule and solve every FD protocol step. Validates by reading
 // back response_metadata.json and checking the expected FD states converged.
 //
 // This is an ALLOCATION test (it runs real MRA solves). Usage:
@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
       mgr.run(world, exec);
 
       // ---- Validate: every planned FD state converged at the top protocol -
-      const std::string top_key = rung_key(protocol.back());
+      const std::string top_key = protocol_key_at(protocol.back());
       int expected = 0, converged = 0;
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
