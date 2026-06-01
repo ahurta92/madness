@@ -408,11 +408,14 @@ private:
       int root = 0;
       for (double w : it->second) {
         CalcNode c;
-        c.kind      = CalcKind::DerivedFD;
+        // Promote: a derived FD at ω = root energy is an ordinary FD point.
+        // Solving it as CalcKind::FD lets the FD executor run it and the normal
+        // skip / restart / nearest-frequency-seed logic apply uniformly.
+        c.kind      = CalcKind::FD;
         c.pert      = sym.pert;
         c.freq      = w;
         c.protocols = sym.protocols;
-        c.es_root_id = make_es_root_label(root++);
+        c.es_root_id = make_es_root_label(root++);  // provenance: source ES root
         c.id        = fd_node_id(c.pert, w);  // concrete -> fd_states subtree
         additions.push_back(std::move(c));
       }
