@@ -287,7 +287,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
-                               /*converged=*/converged_now(st, solv));
+                               /*converged=*/converged_now(st, solv),
+                               /*seed=*/seed_kind);
   };
 
   solvers::IterateProtocolPolicy pp;

@@ -92,7 +92,8 @@ void save_fd_state(madness::World &world,
                    const std::string &dir,
                    const Perturbation &pert,
                    double freq,
-                   bool converged) {
+                   bool converged,
+                   const std::string &seed = std::string()) {
   MADNESS_CHECK(state.responses.size() == 1);
 
   if (world.rank() == 0) {
@@ -141,6 +142,7 @@ void save_fd_state(madness::World &world,
         {"diverged",     state.diverged},
         {"iter",         state.iter},
         {"bsh_residual", bsh_res},
+        {"seed",         seed},   // initial-guess origin: source/fd_restart/es_root
         {"archive",      archive_basename},
         {"metrics",      metrics.to_json()},
     };
