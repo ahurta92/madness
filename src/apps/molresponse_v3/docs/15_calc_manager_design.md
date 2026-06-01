@@ -166,6 +166,43 @@ no correctness risk; (4) protocol re-projection (the prepare hook already does
 this). Tracked as a 15b item because DerivedFD already wants ES-root seeding —
 the same piece of work.
 
+Related seed edges this unlocks (all node-id references — same mechanism):
+
+- **TDA → full-RPA warmup (ES → ES).** Mixed ES+FD properties (2PA, resonant
+  Raman) need the full-RPA bundle (X *and* Y orbitals), but TDA converges first
+  and is a strong RPA guess. TDA and RPA bundles therefore legitimately
+  coexist, with `ES(RPA).seed_from = ES(TDA)`. Consequence: the DerivedFD → ES
+  hard edge must target the RPA bundle **by identity** (`tda=false, n_roots`),
+  not the "first" bundle — 15a's `first_es_id` is a placeholder to replace, and
+  there is no "≤1 ES bundle" constraint.
+- **Nuclear FD → ES seed.** A nuclear-displacement state can seed an ES solve;
+  nuclear nodes are already individually addressable (`nuc_<atom>_<axis>`), so
+  targetability needs no extra machinery — only the cross-type loader above.
+  (This is why `build_dag` taking `n_atoms` rather than the full `Molecule` is
+  sufficient: the per-atom node id already carries the identity.)
+
+### Derived states are FD states (promotion)
+
+A DerivedFD at ω = ωₙ *is* an ordinary FD solve at that frequency. So when
+`CalcManager::run` expands a symbolic `"*"` node, each concrete per-root node
+should be **promoted to `CalcKind::FD`** (it already gets an `fd_node_id` in the
+`fd_states` subtree). Promotion keeps every downstream check uniform —
+existence/skip, nearest-frequency restart, and seeding all then treat a
+promoted derived state exactly like any other FD point. Intended pipeline:
+
+  1. FD at a range of frequencies (coarse scan);
+  2. ES to obtain the excitation energies ωₙ;
+  3. FD at the promoted derived frequencies ωₙ — each seeded from the nearest
+     already-computed FD frequency *and/or* the converged ES root.
+
+Two gaps to close when this lands (15b):
+
+- 15a's `expand_converged_es` keeps `kind = DerivedFD`, which the FD executor
+  does **not** solve (it stubs ES/DerivedFD). Promoting to `CalcKind::FD` on
+  expansion is the fix — without it, promoted derived states never run.
+- `try_load_fd_state` seeds only from the *same* frequency at a coarser
+  protocol; nearest-*frequency* seeding (step 3) is not yet implemented.
+
 ---
 
 ## Reconcile against what's already on disk
