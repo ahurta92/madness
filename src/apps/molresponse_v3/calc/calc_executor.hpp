@@ -69,7 +69,6 @@ struct ExecutorContext {
   madness::World   &world;
   GroundState      &gs;            // mutable: re-prepared at each protocol
   double            L = 0.0;       // cubic cell half-edge (from archive header)
-  int               override_k = -1;
   std::string       fock_json;     // moldft.fock.json path ("" -> none)
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
@@ -167,7 +166,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 
   // Bring FunctionDefaults<3> + the ground state to this protocol so the
   // source builders and try_load (which keys on protocol_key()) are correct.
-  set_response_protocol(world, ctx.L, thresh, ctx.override_k);
+  set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
   {
     auto coulop = poperatorT(
@@ -210,7 +209,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
         std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
     if (changed) {
-      set_response_protocol(world, ctx.L, th, ctx.override_k);
+      set_response_protocol(world, ctx.L, th);
       const double new_t = FunctionDefaults<3>::get_thresh();
       auto coulop = poperatorT(
           CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
@@ -229,9 +228,21 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                  FunctionDefaults<3>::get_thresh());
   };
 
-  auto post_step = [&](double, Solver & /*solv*/, typename Solver::State &st) {
+  // Real convergence = not diverged AND residuals within this protocol's
+  // targets. A max-iters STALL must read as unconverged so it is neither
+  // skipped on restart nor fed to property assembly as if good.
+  auto converged_now = [](const typename Solver::State &st, const Solver &sv) {
+    if (st.diverged) return false;
+    double mb = 0.0, md = 0.0;
+    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
+    for (double r : st.last_density_residual) md = std::max(md, r);
+    const auto &t = sv.targets();
+    return mb <= t.bsh_residual && md <= t.density_residual;
+  };
+
+  auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
-                               /*converged=*/!st.diverged);
+                               /*converged=*/converged_now(st, solv));
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -241,7 +252,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                       prepare, post_step, pp);
 
   NodeResult r;
-  r.converged = !sf.diverged;          // skeleton convergence proxy (doc 15a)
+  r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
   return r;
 }

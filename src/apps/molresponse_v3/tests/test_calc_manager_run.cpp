@@ -7,7 +7,7 @@
 //
 // This is an ALLOCATION test (it runs real MRA solves). Usage:
 //   test_calc_manager_run --archive=<moldft restartdata> \
-//       [--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] [--k=N] \
+//       [--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] \
 //       [--maxiter=N] [--dconv=X] [--calc-dir=DIR] [--print-level=0..3]
 // ===========================================================================
 
@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
         if (world.rank() == 0)
           print("Usage: test_calc_manager_run --archive=<path> "
                 "[--omega=0.0,0.057] [--axes=xyz] [--protocol=1e-4,1e-6] "
-                "[--k=N] [--maxiter=N] [--dconv=X] [--calc-dir=DIR] "
+                "[--maxiter=N] [--dconv=X] [--calc-dir=DIR] "
                 "[--print-level=0..3]");
         finalize();
         return 1;
@@ -89,15 +89,13 @@ int main(int argc, char **argv) {
           static_cast<PrintLevel>(std::max(0, std::min(3, pl_int)));
 
       auto header = GroundState::read_archive_header(world, archive_path);
-      const int override_k =
-          parser.key_exists("k") ? std::stoi(parser.value("k")) : -1;
 
       std::vector<double> protocol;
       if (parser.key_exists("protocol"))
         protocol = parse_protocol_csv(parser.value("protocol"));
       else
         protocol.push_back(default_thresh_for_k(header.k));
-      set_response_protocol(world, header.L, protocol.front(), override_k);
+      set_response_protocol(world, header.L, protocol.front());
 
       // Molecule (for natom -> nuclear expansion; harmless for pure alpha).
       Molecule molecule;
@@ -164,7 +162,7 @@ int main(int argc, char **argv) {
       CalcManager mgr(plan, calc_dir, mgr_policy);
       mgr.build(molecule.natom());
 
-      ExecutorContext ctx{world, gs, header.L, override_k, fock_json,
+      ExecutorContext ctx{world, gs, header.L, fock_json,
                           policy, print_level, calc_dir, max_iters};
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
