@@ -343,8 +343,21 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
     gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
   }
 
-  auto problem = build_es_problem_tda<ClosedShell>(
-      world, gs, n_roots, gs.hf_exchange_coefficient(), gs.params().lo());
+  const double c_xc = gs.hf_exchange_coefficient();
+  const double lo   = gs.params().lo();
+  auto problem = build_es_problem_tda<ClosedShell>(world, gs, n_roots, c_xc, lo);
+
+  // Warmup policy (KAIN on, kain_maxsub/maxrotn from ctx); the main solve
+  // disables the warmup window — the fresh guess is an oversampled TDA warmup
+  // (>= 2x roots by default), same recipe as the Full path.
+  ConvergencePolicy warm_policy = ctx.policy;
+  warm_policy.kain                     = true;
+  warm_policy.kain_maxsub              = ctx.es_kain_maxsub;
+  warm_policy.maxrotn                  = ctx.es_maxrotn;
+  warm_policy.tda_warmup_iters         = ctx.es_tda_warmup_iters;
+  warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
+  ConvergencePolicy main_policy = warm_policy;
+  main_policy.tda_warmup_iters = 0;
 
   Solver::State s0;
   bool seeded = false;
@@ -352,11 +365,17 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
     auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
     if (loaded) { s0 = std::move(loaded->state); seeded = true; }
   }
-  if (!seeded)
-    s0 = build_initial_guess_tda_closed_shell(world, gs, n_roots,
-                                              ESGuessMode::SolidHarmonics);
+  if (!seeded) {
+    const long n_warm = std::max<long>(
+        n_roots, static_cast<long>(
+                     std::ceil(ctx.es_warmup_oversample *
+                               static_cast<double>(n_roots))));
+    s0 = run_oversampled_tda_warmup<ClosedShell>(
+        world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
+        c_xc, lo, ctx.print_level, ctx.es_guess);
+  }
 
-  Solver solver(world, std::move(problem), ctx.policy, ctx.print_level);
+  Solver solver(world, std::move(problem), main_policy, ctx.print_level);
 
   // Single-step guard (as in solve_fd_protocol): re-prepare the ground state
   // only on an actual protocol change; otherwise just re-project the roots.
