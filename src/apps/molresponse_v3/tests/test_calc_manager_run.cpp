@@ -156,6 +156,9 @@ int main(int argc, char **argv) {
         req.frequencies = freqs;
       }
       ResponsePlan plan = plan_one(req);
+      // --es-full: drive the Full (paired X,Y) closed-shell ES path instead of TDA.
+      if (es_roots > 0 && parser.key_exists("es-full"))
+        for (auto &e : plan.es) e.tda = false;
 
       if (world.rank() == 0) {
         print("\nRUN CONFIG:");

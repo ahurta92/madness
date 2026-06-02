@@ -84,6 +84,13 @@ struct ExecutorContext {
   // make the seed selectable per node, and allow a MIXTURE of roots to target
   // in-between frequencies (not just a single root's vector).
   bool              seed_derived_from_es_root = false;
+  // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
+  // closed-shell path (random guess, 10 warmup iters, 2x oversample, KAIN).
+  ESGuessMode       es_guess              = ESGuessMode::Random;
+  int               es_tda_warmup_iters   = 10;
+  double            es_warmup_oversample  = 2.0;
+  int               es_kain_maxsub        = 8;
+  double            es_maxrotn            = 0.5;
 };
 
 // ---------------------------------------------------------------------------
@@ -406,6 +413,117 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
 }
 
 // ---------------------------------------------------------------------------
+// Excited-state bundle solve — Full (paired X,Y) closed-shell (15b-ii).
+// ---------------------------------------------------------------------------
+
+/// Solve a Full (paired X,Y) closed-shell ES bundle of `n_roots` at one protocol
+/// step via the direct ESSolver<Full, ClosedShell>. Fresh guess: a random-guess
+/// TDA warmup (es_tda_warmup_iters, oversampled by es_warmup_oversample)
+/// promoted to (X, Y=0) — the Full solver couples X and Y from iter 1. Restart:
+/// load the (X,Y) bundle directly (no promote). Saves a proper "full" (X,Y)
+/// bundle. Convergence is residual-based (same fields as TDA).
+inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
+                                             double thresh, NodeAction action) {
+  using namespace madness;
+  using Solver = ESSolver<Full, ClosedShell>;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+
+  const double c_xc = gs.hf_exchange_coefficient();
+  const double lo   = gs.params().lo();
+  auto problem = build_es_problem_full<ClosedShell>(world, gs, n_roots, c_xc, lo);
+
+  // Warmup policy (KAIN on, kain_maxsub / maxrotn from ctx); the main solve
+  // disables the TDA warmup window (it was done explicitly for the fresh guess).
+  ConvergencePolicy warm_policy = ctx.policy;
+  warm_policy.kain                     = true;
+  warm_policy.kain_maxsub              = ctx.es_kain_maxsub;
+  warm_policy.maxrotn                  = ctx.es_maxrotn;
+  warm_policy.tda_warmup_iters         = ctx.es_tda_warmup_iters;
+  warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
+  ConvergencePolicy main_policy = warm_policy;
+  main_policy.tda_warmup_iters = 0;
+
+  Solver::State s0;
+  bool seeded = false;
+  if (action != NodeAction::Fresh) {
+    auto loaded = try_load_es_bundle<Full, ClosedShell>(world, ctx.calc_dir);
+    if (loaded) { s0 = std::move(loaded->state); seeded = true; }
+  }
+  if (!seeded) {
+    const long n_warm = std::max<long>(
+        n_roots, static_cast<long>(
+                     std::ceil(ctx.es_warmup_oversample *
+                               static_cast<double>(n_roots))));
+    auto tda = run_oversampled_tda_warmup<ClosedShell>(
+        world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
+        c_xc, lo, ctx.print_level, ctx.es_guess);
+    s0 = promote_tda_to_full_closed_shell(world, tda);
+  }
+
+  Solver solver(world, std::move(problem), main_policy, ctx.print_level);
+
+  double prepared_t = t0;
+  auto prepare = [&](double th, Solver &solv, Solver::State &st) {
+    const double cur_t = FunctionDefaults<3>::get_thresh();
+    const bool changed =
+        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
+        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
+    if (changed) {
+      set_response_protocol(world, ctx.L, th);
+      const double new_t = FunctionDefaults<3>::get_thresh();
+      auto coulop = poperatorT(
+          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
+      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
+      solv.set_gs(build_response_ground_state_closed_shell(world, gs, c_xc, lo));
+      prepared_t = new_t;
+    }
+    const int    k  = FunctionDefaults<3>::get_k();
+    const double tt = FunctionDefaults<3>::get_thresh();
+    for (auto &root : st.roots)
+      for (auto *blk : root.blocks())
+        for (auto &fn : *blk) fn = madness::project(fn, k, tt);
+    for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
+  };
+
+  auto converged_now = [](const Solver::State &st, const Solver &sv) {
+    if (st.diverged) return false;
+    double mb = 0.0, md = 0.0;
+    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
+    for (double r : st.last_density_residual) md = std::max(md, r);
+    const auto &t = sv.targets();
+    return mb <= t.bsh_residual && md <= t.density_residual;
+  };
+
+  auto post_step = [&](double, Solver &solv, Solver::State &st) {
+    const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
+    save_es_roots<Full, ClosedShell>(world, st, dir,
+                                     /*converged=*/converged_now(st, solv));
+  };
+
+  solvers::IterateProtocolPolicy pp;
+  pp.max_iters_per_step = ctx.max_iters;
+  const std::vector<double> one_protocol = {thresh};
+  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
+                                      prepare, post_step, pp);
+
+  NodeResult r;
+  r.converged = converged_now(sf, solver);
+  r.reached_protocol_key = protocol_key();
+  for (long i = 0; i < sf.omega.size(); ++i)
+    r.es_root_freqs.push_back(sf.omega(i));
+  return r;
+}
+
+// ---------------------------------------------------------------------------
 // FdResponseExecutor — dispatches the runtime (Type × Shell) for FD nodes.
 // ---------------------------------------------------------------------------
 
@@ -418,26 +536,25 @@ public:
 
     if (node.kind == CalcKind::ES) {
       const bool restricted = ctx_.gs.is_spin_restricted();
-      if (node.tda && restricted) {
+      if (restricted) {
         if (ctx_.world.rank() == 0)
           madness::print("[CALC] run_protocol: ES bundle", node.id,
                          " n_roots=", node.n_roots, " thresh=", item.thresh,
-                         " (TDA closed-shell)  action=", action_name(item.action));
-        return solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
-                                         item.action);
+                         (node.tda ? " (TDA closed-shell)"
+                                   : " (Full closed-shell)"),
+                         " action=", action_name(item.action));
+        return node.tda
+                   ? solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
+                                               item.action)
+                   : solve_es_full_closed_shell(ctx_, node.n_roots, item.thresh,
+                                                item.action);
       }
-      if (ctx_.world.rank() == 0) {
-        if (!restricted)
-          madness::print("[CALC] run_protocol: ES bundle", node.id,
-                         "requested on an OPEN-SHELL ground state — open-shell "
-                         "excited states are OUT OF SCOPE (closed-shell only; a "
-                         "future research direction). Skipping.");
-        else  // restricted but !tda
-          madness::print("[CALC] run_protocol: ES bundle", node.id,
-                         "with tda=false (Full/RPA) is not implemented "
-                         "(closed-shell TDA only; direct-Full TBD, FullRPA out "
-                         "of scope). Skipping.");
-      }
+      // Open-shell excited states are out of scope (closed-shell only; future).
+      if (ctx_.world.rank() == 0)
+        madness::print("[CALC] run_protocol: ES bundle", node.id,
+                       "on an OPEN-SHELL ground state — open-shell excited "
+                       "states are OUT OF SCOPE (closed-shell only; future "
+                       "research). Skipping.");
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
     }
     if (node.kind == CalcKind::DerivedFD || node.kind == CalcKind::VBC) {
