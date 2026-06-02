@@ -399,10 +399,12 @@ The active scope is **closed-shell properties and excited states**. Specifically
   scope** — a deliberate future research direction, not a near-term gap. The
   ES dispatch skips an open-shell ES node with a clear out-of-scope message
   rather than attempting it.
-- **Full/RPA excited states** (`tda=false`): the symmetric-reduction FullRPA
-  (`u = X+Y`) solver is a separate R&D track and is **not used here**. If a
-  property ever needs paired (X,Y) ES, the direct `ESSolver<Full, ClosedShell>`
-  is the intended path; until then the ES dispatch skips `tda=false`.
+- **Full excited states** (`tda=false`): the direct paired-(X,Y)
+  `ESSolver<Full, ClosedShell>` **is implemented** (`solve_es_full_closed_shell`):
+  random-guess TDA warmup (default 10 iters, 2× oversample, KAIN kain_maxsub=8,
+  maxrotn=0.5) → `promote_tda_to_full_closed_shell` → Full solve; persists a
+  "full" (X,Y) bundle. The symmetric-reduction **FullRPA (`u = X+Y`) remains out
+  of scope** (separate R&D). ES settings are `ExecutorContext` defaults.
 - **FD (linear response)** retains its open-shell path (e.g. Li polarizability)
   — only the *excited-state* path is closed-shell-only.
 
