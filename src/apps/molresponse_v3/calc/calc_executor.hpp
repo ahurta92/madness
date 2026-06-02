@@ -78,10 +78,12 @@ struct ExecutorContext {
   std::string       calc_dir;      // holds response_metadata.json + archives
   int               max_iters = 25;
   // Cross-type seed toggle (optional): a derived FD starts from its converged
-  // ES-root vector rather than the perturbation source. Off => fresh source
-  // guess. FUTURE: make the seed selectable per node, and allow a MIXTURE of
-  // roots to target in-between frequencies (not just a single root's vector).
-  bool              seed_derived_from_es_root = true;
+  // ES-root vector rather than the perturbation source. Default OFF — measured
+  // neutral-to-slightly-worse at ωₙ/2 (off-resonance, H2); the ES root is the
+  // right guess only for a future AT-resonance (factor 1.0) derived FD. FUTURE:
+  // make the seed selectable per node, and allow a MIXTURE of roots to target
+  // in-between frequencies (not just a single root's vector).
+  bool              seed_derived_from_es_root = false;
 };
 
 // ---------------------------------------------------------------------------

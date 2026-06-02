@@ -159,12 +159,16 @@ promoted derived FD seeds its initial guess from the converged ES-root vector
 into the FD `Full` guess as `x = y = X`. Guess precedence in
 `solve_fd_protocol`: disk FD partial (restart) → ES-root seed (fresh derived
 FD) → perturbation source. Controlled by `ExecutorContext::seed_derived_from_es_root`
-(default on; `--no-es-seed` in the run test turns it off for A/B), and the solve
-logs `seed=<source|fd_restart|es_root> iters=<n>` so the payoff is measurable.
+(**default OFF**; `--es-seed` turns it on, `--no-es-seed` forces off, in the run
+test), and the solve logs `seed=<source|fd_restart|es_root> iters=<n>`; the
+persisted `fd_states[...]["seed"]` records it for after-the-fact A/B.
 
-Caveat: the derived FD is at ωₙ/2 (off-resonance), where the ES root is not the
-dominant response component, so the seed may help only modestly there — it is
-clearly the right guess for a future *at-resonance* (factor 1.0) derived FD.
+Measured (H2, ωₙ/2): the ES-root seed gave **no benefit — marginally worse**
+(coarse-step iters 64 vs 60 for source) and costs an ES-bundle load. Hence the
+default is OFF: the ES root is not the dominant response component at ωₙ/2
+(off-resonance), so the perturbation source is as good or better. It remains the
+right guess for a future *at-resonance* (factor 1.0) derived FD, which is why
+the mechanism + toggle are kept.
 **FUTURE:** the seed should be selectable per node, and could be a *mixture* of
 ES roots to target an in-between frequency (a weighted combination of nearby
 roots' vectors), not just a single root.
