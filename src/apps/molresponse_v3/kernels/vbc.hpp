@@ -23,6 +23,7 @@
 
 #include "tags.hpp"
 #include "tda.hpp"   // ResponseGroundState, common_ops::{dot, apply_exchange}
+#include "../solvers/response_state.hpp"   // ResponseStateXY<ClosedShell>
 
 #include <madness/mra/mra.h>
 
@@ -93,6 +94,88 @@ make_zeta(madness::World &world, const vecfuncT &by, const vecfuncT &cx,
   auto mat = matrix_inner(world, by, cx);
   mat.scale(-1.0);
   return transform(world, phi0, mat, true);
+}
+
+/// One ordered half of the VBC source for the (B,C) pairing — a verbatim port
+/// of v2 SimpleVBCComputer::compute_vbc_i, on v3 compute_g + g0.Qa. `v` is the
+/// raw (one-electron) perturbation operator for B (e.g. the dipole operator for
+/// B's Cartesian direction). Returns (result_x, result_y) for this half; the
+/// caller sums the (B,C) and (C,B) halves.
+inline std::pair<vecfuncT, vecfuncT>
+compute_vbc_i(madness::World &world, const ResponseGroundState &g0,
+              const vecfuncT &bx, const vecfuncT &by,
+              const vecfuncT &cx, const vecfuncT &cy,
+              const vecfuncT &zeta_bc,
+              const madness::real_function_3d &v) {
+  using namespace madness;
+  const vecfuncT &phi0 = g0.amo;
+
+  // gzeta = -Q( g[ bx,cy ; phi0,zeta_bc ](phi0,phi0) )
+  auto gzeta = compute_g(world, g0, bx, cy, phi0, zeta_bc, phi0, phi0);
+  vecfuncT gzeta_x = g0.Qa(gzeta.first);  scale(world, gzeta_x, -1.0);
+  vecfuncT gzeta_y = g0.Qa(gzeta.second); scale(world, gzeta_y, -1.0);
+
+  // g[B,C] response-density two-electron terms, and the phi0-only version.
+  auto gbc     = compute_g(world, g0, bx, phi0, phi0, by, cx, cy);
+  auto gbc_phi = compute_g(world, g0, bx, phi0, phi0, by, phi0, phi0);
+
+  // fb = -Q( g[B,C] + v*c )
+  auto vcx = mul(world, v, cx, true);
+  auto vcy = mul(world, v, cy, true);
+  vecfuncT fbx = gbc.first;  gaxpy(world, 1.0, fbx, 1.0, vcx); fbx = g0.Qa(fbx); scale(world, fbx, -1.0);
+  vecfuncT fby = gbc.second; gaxpy(world, 1.0, fby, 1.0, vcy); fby = g0.Qa(fby); scale(world, fby, -1.0);
+
+  // fphi = transform( c, <phi0 | g[B,C]_phi + v*phi0> )  (Fock-matrix correction)
+  auto vb_phi = mul(world, v, phi0, true);
+  vecfuncT fb_phi_x = gbc_phi.first;  gaxpy(world, 1.0, fb_phi_x, 1.0, vb_phi);
+  vecfuncT fb_phi_y = gbc_phi.second; gaxpy(world, 1.0, fb_phi_y, 1.0, vb_phi);
+  auto m_fbx = matrix_inner(world, phi0, fb_phi_x);
+  auto m_fby = matrix_inner(world, phi0, fb_phi_y);
+  auto fphi_x = transform(world, cx, m_fbx, true);
+  auto fphi_y = transform(world, cy, m_fby, true);
+
+  // result = truncate( gzeta + fb + fphi )
+  vecfuncT result_x = gzeta_x;
+  gaxpy(world, 1.0, result_x, 1.0, fbx);
+  gaxpy(world, 1.0, result_x, 1.0, fphi_x);
+  vecfuncT result_y = gzeta_y;
+  gaxpy(world, 1.0, result_y, 1.0, fby);
+  gaxpy(world, 1.0, result_y, 1.0, fphi_y);
+  truncate(world, result_x);
+  truncate(world, result_y);
+  return {std::move(result_x), std::move(result_y)};
+}
+
+/// The full VBC quadratic source for the (B, C) perturbation pair from two
+/// CONVERGED first-order states B = x(ω_B), C = x(ω_C). Builds both zeta terms
+/// and sums the (B,C) and (C,B) halves (compute_vbc_i). VB_op / VC_op are the
+/// raw one-electron perturbation operators for B and C. Port of v2
+/// SimpleVBCComputer::compute_vbc_response (closed-shell, no x(2) solve).
+inline ResponseStateXY<ClosedShell>
+compute_vbc(madness::World &world, const ResponseGroundState &g0,
+            const ResponseStateXY<ClosedShell> &B,
+            const ResponseStateXY<ClosedShell> &C,
+            const madness::real_function_3d &VB_op,
+            const madness::real_function_3d &VC_op) {
+  using namespace madness;
+  const vecfuncT &phi0 = g0.amo;
+  const vecfuncT &bx = B.x_alpha;
+  const vecfuncT &by = B.y_alpha;
+  const vecfuncT &cx = C.x_alpha;
+  const vecfuncT &cy = C.y_alpha;
+
+  auto zeta_bc = make_zeta(world, by, cx, phi0);   // y_B with x_C
+  auto zeta_cb = make_zeta(world, cy, bx, phi0);   // y_C with x_B
+
+  auto bc = compute_vbc_i(world, g0, bx, by, cx, cy, zeta_bc, VB_op);
+  auto cb = compute_vbc_i(world, g0, cx, cy, bx, by, zeta_cb, VC_op);
+
+  ResponseStateXY<ClosedShell> result;
+  result.x_alpha = bc.first;  gaxpy(world, 1.0, result.x_alpha, 1.0, cb.first);
+  result.y_alpha = bc.second; gaxpy(world, 1.0, result.y_alpha, 1.0, cb.second);
+  truncate(world, result.x_alpha);
+  truncate(world, result.y_alpha);
+  return result;
 }
 
 } // namespace molresponse_v3::vbc
