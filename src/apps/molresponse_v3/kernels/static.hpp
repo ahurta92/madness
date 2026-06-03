@@ -21,6 +21,7 @@
 
 #include "tags.hpp"
 #include "tda.hpp"          // ResponseGroundState, common_ops::*
+#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel}
 #include "../solvers/response_state.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -45,14 +46,40 @@ struct Kernels<Static, ClosedShell> {
   /// by legacy v3 ResponseKernel.hpp::compute_response_density for the
   /// Static case. Self-consistent with Full's density formula at Y=X:
   ///   2·Σφ·(x+y) |_{y=x} = 4·Σφ·x.
+  /// Two-state perturbed density (general form), factor 4 (spin x Y=X doubling):
+  ///   rho = 4 * Sum_p S1.x[p] * S2.x[p].  Linear response is S2 = Phi (ground).
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho1 = dot(world, S1.x_alpha, S2.x_alpha);
+    rho1.scale(4.0);
+    rho1.truncate();
+    return rho1;
+  }
+
+  /// Convenience: density of `state` against the ground state {phi}.
   static madness::real_function_3d
   compute_density(madness::World &world,
                   const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho1 = dot(world, g0.amo, state.x_alpha);
-    rho1.scale(4.0);
-    rho1.truncate();
-    return rho1;
+    State Phi; Phi.x_alpha = g0.amo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply. Static keeps BOTH exchange terms (Y=X limit of
+  /// Full): out.x = Q( J*S3.x - c_xc(K(S2.x,S1.x)+K(S1.x,S2.x))(S3.x) ).
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}, {S1.x_alpha, S2.x_alpha}},
+        g0.Qa, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
   }
 
   /// gamma = Q( J[rho1]*phi0 - c_xc * (K[phi0, x](phi0) + K[x, phi0](phi0)) ).
@@ -67,20 +94,12 @@ struct Kernels<Static, ClosedShell> {
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-    auto gamma = mul(world, J_rho, g0.amo, true);
-    if (g0.c_xc > 0.0) {
-      // K[phi0, x_alpha](phi0)
-      auto Kpx_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma, -g0.c_xc, Kpx_phi);
-
-      // K[x_alpha, phi0](phi0) — the second term that distinguishes
-      // Static from TDA.
-      auto Kxp_phi = common_ops::apply_exchange(world, state.x_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma, -g0.c_xc, Kxp_phi);
-    }
-    gamma = g0.Qa(gamma);
-    truncate(world, gamma);
-    return State{std::move(gamma)};
+    State out;
+    // K[phi0,x](phi0) + K[x,phi0](phi0) -- the second term distinguishes Static from TDA.
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}, {state.x_alpha, g0.amo}},
+        g0.Qa, g0.c_xc, g0.lo);
+    return out;
   }
 
   /// V0·x = V_local * x - c_xc * K[phi0, phi0](x).
@@ -170,16 +189,41 @@ struct Kernels<Static, OpenShell> {
   using vecfuncT = std::vector<madness::real_function_3d>;
   using State    = ResponseStateX<OpenShell>;
 
+  /// Two-state perturbed density (general form), factor 2 (Y=X doubling):
+  ///   rho = 2 * Sum_p ( S1.xa*S2.xa + S1.xb*S2.xb ).  Linear: S2 = Phi.
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho = dot(world, S1.x_alpha, S2.x_alpha);
+    rho += dot(world, S1.x_beta, S2.x_beta);
+    rho.scale(2.0);
+    rho.truncate();
+    return rho;
+  }
+
+  /// Convenience: density of `state` against the ground state {phi_a, phi_b}.
   static madness::real_function_3d
   compute_density(madness::World &world,
                   const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho_a = dot(world, g0.amo, state.x_alpha);
-    auto rho_b = dot(world, g0.bmo,  state.x_beta);
-    auto rho   = rho_a + rho_b;
-    rho.scale(2.0);
-    rho.truncate();
-    return rho;
+    State Phi; Phi.x_alpha = g0.amo; Phi.x_beta = g0.bmo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply (open shell static): both exchange terms per spin.
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}, {S1.x_alpha, S2.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    out.x_beta  = two_electron::apply_channel(world, J, S3.x_beta,
+        {{S2.x_beta,  S1.x_beta }, {S1.x_beta,  S2.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
   }
 
   /// gamma_α = Q_α( J[rho]*φ_α - c_xc(K[φ_α,x_α](φ_α) + K[x_α,φ_α](φ_α)) )
@@ -190,32 +234,12 @@ struct Kernels<Static, OpenShell> {
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-
-    // --- alpha block ---
-    auto gamma_a = mul(world, J_rho, g0.amo, true);
-    if (g0.c_xc > 0.0) {
-      auto Kpx_a_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_a, -g0.c_xc, Kpx_a_phi);
-
-      auto Kxp_a_phi = common_ops::apply_exchange(world, state.x_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_a, -g0.c_xc, Kxp_a_phi);
-    }
-    gamma_a = g0.Qa(gamma_a);
-    truncate(world, gamma_a);
-
-    // --- beta block (same shape, beta orbitals) ---
-    auto gamma_b = mul(world, J_rho, g0.bmo, true);
-    if (g0.c_xc > 0.0) {
-      auto Kpx_b_phi = common_ops::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_b, -g0.c_xc, Kpx_b_phi);
-
-      auto Kxp_b_phi = common_ops::apply_exchange(world, state.x_beta, g0.bmo, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_b, -g0.c_xc, Kxp_b_phi);
-    }
-    gamma_b = g0.Qb(gamma_b);
-    truncate(world, gamma_b);
-
-    return State{std::move(gamma_a), std::move(gamma_b)};
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}, {state.x_alpha, g0.amo}}, g0.Qa, g0.c_xc, g0.lo);
+    out.x_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+        {{g0.bmo, state.x_beta }, {state.x_beta,  g0.bmo}}, g0.Qb, g0.c_xc, g0.lo);
+    return out;
   }
 
   /// V0·x for each spin. V_local is shared; K0 is same-spin.

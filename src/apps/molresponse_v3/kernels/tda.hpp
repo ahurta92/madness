@@ -35,6 +35,7 @@
 #include "common_ops.hpp"   // poperatorT + common_ops::{apply_kinetic,
                             // bsh_shift, make_bsh_operators, apply_exchange}
 #include "tags.hpp"
+#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel}
 
 #include <madness/chem/SCFOperators.h>
 #include <madness/chem/projector.h>
@@ -93,15 +94,39 @@ struct Kernels<TDA, ClosedShell> {
 
   // ---- per-state operator applications (the shared building blocks) ----
 
-  /// rho1 = 2 * sum_p amo[p] * x_alpha[p].
+  /// Two-state perturbed density (general form), factor 2 (spin):
+  ///   rho = 2 * Sum_p S1.x[p] * S2.x[p].  Linear response is S2 = Phi (ground).
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho1 = dot(world, S1.x_alpha, S2.x_alpha);
+    rho1.scale(2.0);
+    rho1.truncate();
+    return rho1;
+  }
+
+  /// Convenience: density of `state` against the ground state {phi}.
   static madness::real_function_3d
   compute_density(madness::World &world,
                   const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho1 = dot(world, g0.amo, state.x_alpha);
-    rho1.scale(2.0);
-    rho1.truncate();
-    return rho1;
+    State Phi; Phi.x_alpha = g0.amo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply. TDA keeps ONE exchange term (drops Y):
+  ///   out.x = Q( J*S3.x - c_xc*K(S2.x, S1.x)(S3.x) ).
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
   }
 
   /// gamma = Q( J[rho1]*amo - c_xc * K[amo, x_alpha](amo) ).
@@ -116,16 +141,10 @@ struct Kernels<TDA, ClosedShell> {
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-    auto gamma = mul(world, J_rho, g0.amo, true);
-
-    if (g0.c_xc > 0.0) {
-      auto Kpx_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha,
-                                                 g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma, -g0.c_xc, Kpx_phi);
-    }
-    gamma = g0.Qa(gamma);
-    truncate(world, gamma);
-    return State{std::move(gamma)};
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    return out;
   }
 
   /// V0·x = V_local * x - c_xc * K[phi0, phi0](x).
@@ -232,16 +251,40 @@ struct Kernels<TDA, OpenShell> {
   using vecfuncT = std::vector<madness::real_function_3d>;
   using State    = ResponseStateX<OpenShell>;
 
-  /// rho = Σ_p φ_α_p · x_α_p + Σ_p φ_β_p · x_β_p.
+  /// Two-state perturbed density (general form), factor 1 (TDA drops Y):
+  ///   rho = Sum_p ( S1.xa*S2.xa + S1.xb*S2.xb ).  Linear response is S2 = Phi.
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho1 = dot(world, S1.x_alpha, S2.x_alpha);
+    rho1 += dot(world, S1.x_beta, S2.x_beta);
+    rho1.truncate();
+    return rho1;
+  }
+
+  /// Convenience: density of `state` against the ground state {phi_a, phi_b}.
   static madness::real_function_3d
   compute_density(madness::World &world,
                   const ResponseGroundState &g0,
                   const State    &state) {
-    auto rho_a = dot(world, g0.amo, state.x_alpha);
-    auto rho_b = dot(world, g0.bmo,  state.x_beta);
-    auto rho1  = rho_a + rho_b;
-    rho1.truncate();
-    return rho1;
+    State Phi; Phi.x_alpha = g0.amo; Phi.x_beta = g0.bmo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply (open shell TDA): one exchange term per spin.
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    out.x_beta  = two_electron::apply_channel(world, J, S3.x_beta,
+        {{S2.x_beta,  S1.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
   }
 
   /// gamma_α = Q_α( J[rho]*φ_α - c_xc K[φ_α, x_α](φ_α) )
@@ -254,26 +297,12 @@ struct Kernels<TDA, OpenShell> {
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-
-    // alpha
-    auto gamma_a = mul(world, J_rho, g0.amo, true);
-    if (g0.c_xc > 0.0) {
-      auto Kpx_a_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_a, -g0.c_xc, Kpx_a_phi);
-    }
-    gamma_a = g0.Qa(gamma_a);
-    truncate(world, gamma_a);
-
-    // beta
-    auto gamma_b = mul(world, J_rho, g0.bmo, true);
-    if (g0.c_xc > 0.0) {
-      auto Kpx_b_phi = common_ops::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_b, -g0.c_xc, Kpx_b_phi);
-    }
-    gamma_b = g0.Qb(gamma_b);
-    truncate(world, gamma_b);
-
-    return State{std::move(gamma_a), std::move(gamma_b)};
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    out.x_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+        {{g0.bmo, state.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
+    return out;
   }
 
   /// V0·x = V_local · x − c_xc · K[φ, φ](x), per spin.

@@ -1,7 +1,7 @@
 // ===========================================================================
 // test_kernel_equivalence.cpp — pins the unified two-electron kernel against
 // the Dalton-validated linear kernel. Asserts, for a closed-shell Full state χ:
-//   two_electron::compute_g(χ, Φ, Φ, rho_factor=2)  ==  Kernels<Full,ClosedShell>
+//   Kernels<Full,ClosedShell>::apply_g(χ, Φ, Φ)  ==  Kernels<Full,ClosedShell>
 //                                                        ::compute_gamma(χ, ρ)
 // where Φ is the ground state dressed as {φ, φ}. Both apply Qa + truncate, so a
 // match to ~thresh proves the unification (exchange pairing + projection +
@@ -96,8 +96,9 @@ int main(int argc, char **argv) {
       auto rho_ref   = KF::compute_density(world, g0, chi);
       auto gamma_ref = KF::compute_gamma(world, g0, chi, rho_ref);
 
-      auto [gamma_new, rho_new] =
-          two_electron::compute_g<ClosedShell>(world, g0, chi, Phi, Phi, /*rho_factor=*/2.0);
+      // Unified path: Kernels<Full,ClosedShell>::apply_g rebuilds rho from
+      // (chi, Phi) via the two-state compute_density and returns it.
+      auto [gamma_new, rho_new] = KF::apply_g(world, g0, chi, Phi, Phi);
 
       const double dr  = (rho_ref - rho_new).norm2();
       double dx = 0.0, dy = 0.0;

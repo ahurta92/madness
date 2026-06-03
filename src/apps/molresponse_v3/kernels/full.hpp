@@ -27,6 +27,7 @@
 #include "assembly.hpp"     // assemble_lambda (used by apply_A±B helpers)
 #include "tags.hpp"
 #include "tda.hpp"          // ResponseGroundState, common_ops::*
+#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel}
 #include "../solvers/response_state.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -53,57 +54,73 @@ struct Kernels<Full, ClosedShell> {
   ///
   /// Self-consistency at Y=X: rho1|Y=X = 2·Σφ·(x+x) = 4·Σφ·x =
   /// `Kernels<Static, ClosedShell>::compute_density`.
+  /// Two-state perturbed density (general form): the SAME operation the VBC
+  /// quadratic source needs.  rho = 2 * Sum_p ( S1.x[p]*S2.x[p] + S1.y[p]*S2.y[p] ).
+  /// Linear response is the case S2 = Phi (ground), giving 2*Sum phi*(x+y).
+  /// Factor 2 (spin sum) matches the Coulomb coefficient 4(pa|qb) on X+Y in the
+  /// singlet (A+B)(X+Y) sub-block.
   static madness::real_function_3d
   compute_density(madness::World &world,
-                  const ResponseGroundState &g0,
-                  const State    &state) {
-    auto sum_xy = madness::copy(world, state.x_alpha);
-    gaxpy(world, 1.0, sum_xy, 1.0, state.y_alpha);
-    auto rho1 = dot(world, g0.amo, sum_xy);
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho1 = dot(world, S1.x_alpha, S2.x_alpha);
+    rho1 += dot(world, S1.y_alpha, S2.y_alpha);
     rho1.scale(2.0);
     rho1.truncate();
     return rho1;
   }
 
+  /// Convenience: perturbed density of `state` against the ground state {phi,phi}.
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &g0,
+                  const State    &state) {
+    State Phi; Phi.x_alpha = g0.amo; Phi.y_alpha = g0.amo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply: out = Q( J[rho]*S3 - c_xc*K(S1,S2)(S3) ), with
+  /// rho built from S1*S2 (returned for the linear iteration's Delta-rho check).
+  /// compute_gamma(chi, rho) is the special case S1=chi, S2=S3=Phi.
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}, {S1.y_alpha, S2.y_alpha}},
+        g0.Qa, g0.c_xc, g0.lo);
+    out.y_alpha = two_electron::apply_channel(world, J, S3.y_alpha,
+        {{S2.y_alpha, S1.y_alpha}, {S1.x_alpha, S2.x_alpha}},
+        g0.Qa, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
+  }
+
   /// gamma_X = Q( J[rho1]*phi0 - c_xc * (K[phi0, x](phi0) + K[y, phi0](phi0)) )
   /// gamma_Y = Q( J[rho1]*phi0 - c_xc * (K[phi0, y](phi0) + K[x, phi0](phi0)) )
   ///
-  /// Cross-channel exchange is what couples X and Y in the RPA equations
-  /// — without it the result reduces to TDA on each side. Mirrors
-  /// legacy ResponseKernel.hpp::compute_gamma Full case.
-  /// The Coulomb piece J[rho1]*phi0 is the SAME on both sides.
+  /// Cross-channel exchange is what couples X and Y in the RPA equations;
+  /// without it the result reduces to TDA on each side. This is apply_g with
+  /// S1=state, S2=S3=Phi (ground) but the CALLER's rho1 (so apply_AplusB/
+  /// apply_AminusB stay bit-for-bit). The Coulomb piece is the SAME on X and Y.
   static State
   compute_gamma(madness::World &world,
                 const ResponseGroundState &g0,
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-
-    // Coulomb piece — same for X and Y.
-    auto gamma_x = mul(world, J_rho, g0.amo, true);
-    auto gamma_y = mul(world, J_rho, g0.amo, true);
-
-    if (g0.c_xc > 0.0) {
-      // --- X-channel exchange: K[phi0, x](phi0) + K[y, phi0](phi0) -------
-      auto Kpx_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_x, -g0.c_xc, Kpx_phi);
-
-      auto Kyp_phi = common_ops::apply_exchange(world, state.y_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_x, -g0.c_xc, Kyp_phi);
-
-      // --- Y-channel exchange: K[phi0, y](phi0) + K[x, phi0](phi0) -------
-      auto Kpy_phi = common_ops::apply_exchange(world, g0.amo, state.y_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_y, -g0.c_xc, Kpy_phi);
-
-      auto Kxp_phi = common_ops::apply_exchange(world, state.x_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_y, -g0.c_xc, Kxp_phi);
-    }
-
-    gamma_x = g0.Qa(gamma_x);
-    gamma_y = g0.Qa(gamma_y);
-    truncate(world, gamma_x);
-    truncate(world, gamma_y);
-    return State{std::move(gamma_x), std::move(gamma_y)};
+    State out;
+    // X: K[phi0, x](phi0) + K[y, phi0](phi0)
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}, {state.y_alpha, g0.amo}},
+        g0.Qa, g0.c_xc, g0.lo);
+    // Y: K[phi0, y](phi0) + K[x, phi0](phi0)
+    out.y_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.y_alpha}, {state.x_alpha, g0.amo}},
+        g0.Qa, g0.c_xc, g0.lo);
+    return out;
   }
 
   /// V0·x and V0·y. V_local and K0 each act on x and y independently.
@@ -320,21 +337,50 @@ struct Kernels<Full, OpenShell> {
   using vecfuncT = std::vector<madness::real_function_3d>;
   using State    = ResponseStateXY<OpenShell>;
 
+  /// Two-state perturbed density (general form): factor 1, all four channels.
+  ///   rho = Sum_p ( xa1*xa2 + ya1*ya2 + xb1*xb2 + yb1*yb2 ).
+  /// Linear response is S2 = Phi (ground), giving Sum_spin phi*(x+y).
+  static madness::real_function_3d
+  compute_density(madness::World &world,
+                  const ResponseGroundState &/*g0*/,
+                  const State    &S1, const State &S2) {
+    auto rho = dot(world, S1.x_alpha, S2.x_alpha);
+    rho += dot(world, S1.y_alpha, S2.y_alpha);
+    rho += dot(world, S1.x_beta,  S2.x_beta);
+    rho += dot(world, S1.y_beta,  S2.y_beta);
+    rho.truncate();
+    return rho;
+  }
+
+  /// Convenience: density of `state` against the ground state {phi_a,phi_a,phi_b,phi_b}.
   static madness::real_function_3d
   compute_density(madness::World &world,
                   const ResponseGroundState &g0,
                   const State    &state) {
-    // alpha (x+y)·phi
-    auto sum_xy_a = madness::copy(world, state.x_alpha);
-    gaxpy(world, 1.0, sum_xy_a, 1.0, state.y_alpha);
-    auto rho_a = dot(world, g0.amo, sum_xy_a);
-    // beta (x+y)·phi
-    auto sum_xy_b = madness::copy(world, state.x_beta);
-    gaxpy(world, 1.0, sum_xy_b, 1.0, state.y_beta);
-    auto rho_b = dot(world, g0.bmo, sum_xy_b);
-    auto rho = rho_a + rho_b;
-    rho.truncate();
-    return rho;
+    State Phi;
+    Phi.x_alpha = g0.amo; Phi.y_alpha = g0.amo;
+    Phi.x_beta  = g0.bmo; Phi.y_beta  = g0.bmo;
+    return compute_density(world, g0, state, Phi);
+  }
+
+  /// Unified two-electron apply (open shell): per-spin Coulomb + cross-channel
+  /// exchange, projected by Qa/Qb. compute_gamma(state, rho) is S1=state, S2=S3=Phi.
+  static std::pair<State, madness::real_function_3d>
+  apply_g(madness::World &world,
+          const ResponseGroundState &g0,
+          const State &S1, const State &S2, const State &S3) {
+    auto rho = compute_density(world, g0, S1, S2);
+    auto J   = apply(*g0.coulop, rho);
+    State out;
+    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+        {{S2.x_alpha, S1.x_alpha}, {S1.y_alpha, S2.y_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    out.y_alpha = two_electron::apply_channel(world, J, S3.y_alpha,
+        {{S2.y_alpha, S1.y_alpha}, {S1.x_alpha, S2.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
+    out.x_beta  = two_electron::apply_channel(world, J, S3.x_beta,
+        {{S2.x_beta,  S1.x_beta }, {S1.y_beta,  S2.y_beta }}, g0.Qb, g0.c_xc, g0.lo);
+    out.y_beta  = two_electron::apply_channel(world, J, S3.y_beta,
+        {{S2.y_beta,  S1.y_beta }, {S1.x_beta,  S2.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
+    return {std::move(out), std::move(rho)};
   }
 
   static State
@@ -343,55 +389,18 @@ struct Kernels<Full, OpenShell> {
                 const State    &state,
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
-
-    // --- alpha block ---
-    auto gamma_ax = mul(world, J_rho, g0.amo, true);
-    auto gamma_ay = mul(world, J_rho, g0.amo, true);
-    if (g0.c_xc > 0.0) {
-      // K[φα, xα](φα)
-      auto Kpx_a_phi = common_ops::apply_exchange(world, g0.amo, state.x_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_ax, -g0.c_xc, Kpx_a_phi);
-
-      // K[yα, φα](φα) — cross-channel for X
-      auto Kyp_a_phi = common_ops::apply_exchange(world, state.y_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_ax, -g0.c_xc, Kyp_a_phi);
-
-      // K[φα, yα](φα)
-      auto Kpy_a_phi = common_ops::apply_exchange(world, g0.amo, state.y_alpha, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_ay, -g0.c_xc, Kpy_a_phi);
-
-      // K[xα, φα](φα) — cross-channel for Y
-      auto Kxp_a_phi = common_ops::apply_exchange(world, state.x_alpha, g0.amo, g0.amo, g0.lo);
-      gaxpy(world, 1.0, gamma_ay, -g0.c_xc, Kxp_a_phi);
-    }
-    gamma_ax = g0.Qa(gamma_ax);
-    gamma_ay = g0.Qa(gamma_ay);
-    truncate(world, gamma_ax);
-    truncate(world, gamma_ay);
-
-    // --- beta block ---
-    auto gamma_bx = mul(world, J_rho, g0.bmo, true);
-    auto gamma_by = mul(world, J_rho, g0.bmo, true);
-    if (g0.c_xc > 0.0) {
-      auto Kpx_b_phi = common_ops::apply_exchange(world, g0.bmo, state.x_beta, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_bx, -g0.c_xc, Kpx_b_phi);
-
-      auto Kyp_b_phi = common_ops::apply_exchange(world, state.y_beta, g0.bmo, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_bx, -g0.c_xc, Kyp_b_phi);
-
-      auto Kpy_b_phi = common_ops::apply_exchange(world, g0.bmo, state.y_beta, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_by, -g0.c_xc, Kpy_b_phi);
-
-      auto Kxp_b_phi = common_ops::apply_exchange(world, state.x_beta, g0.bmo, g0.bmo, g0.lo);
-      gaxpy(world, 1.0, gamma_by, -g0.c_xc, Kxp_b_phi);
-    }
-    gamma_bx = g0.Qb(gamma_bx);
-    gamma_by = g0.Qb(gamma_by);
-    truncate(world, gamma_bx);
-    truncate(world, gamma_by);
-
-    return State{std::move(gamma_ax), std::move(gamma_ay),
-                 std::move(gamma_bx), std::move(gamma_by)};
+    State out;
+    // alpha: K[phi,x](phi) + K[y,phi](phi) ; Y swaps x<->y
+    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.x_alpha}, {state.y_alpha, g0.amo}}, g0.Qa, g0.c_xc, g0.lo);
+    out.y_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+        {{g0.amo, state.y_alpha}, {state.x_alpha, g0.amo}}, g0.Qa, g0.c_xc, g0.lo);
+    // beta: same shape, beta orbitals, Qb
+    out.x_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+        {{g0.bmo, state.x_beta }, {state.y_beta,  g0.bmo}}, g0.Qb, g0.c_xc, g0.lo);
+    out.y_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+        {{g0.bmo, state.y_beta }, {state.x_beta,  g0.bmo}}, g0.Qb, g0.c_xc, g0.lo);
+    return out;
   }
 
   static State

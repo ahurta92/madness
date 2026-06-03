@@ -10,6 +10,7 @@
 //                     using State                       — Storage type
 //                     compute_density(w, g0, s)       → real_function_3d
 //                     compute_gamma  (w, g0, s, rho)  → State
+//                     apply_g(w, g0, S1, S2, S3)      → {State, rho}
 //                     compute_V0x    (w, g0, s)       → State
 //                     compute_E0x    (w, g0, s)       → State   (no-diag)
 //                     bsh_apply      (w, g0, s, theta, omega) → State
@@ -96,6 +97,9 @@ MV3_DEFINE_KERNEL_TRAIT(compute_density,
     K::compute_density(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(compute_gamma,
     K::compute_gamma(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S, MV3_PROBE_R));
+MV3_DEFINE_KERNEL_TRAIT(apply_g,
+    K::apply_g(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S, MV3_PROBE_S,
+               MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(compute_V0x,
     K::compute_V0x(MV3_PROBE_W, MV3_PROBE_G0, MV3_PROBE_S));
 MV3_DEFINE_KERNEL_TRAIT(compute_E0x,
@@ -125,6 +129,7 @@ inline constexpr bool is_fd_kernel_v =
     has_state_v<K>            &&
     has_compute_density_v<K>  &&
     has_compute_gamma_v<K>    &&
+    has_apply_g_v<K>          &&
     has_compute_V0x_v<K>      &&
     has_compute_E0x_v<K>      &&
     has_bsh_apply_v<K>        &&
@@ -162,6 +167,7 @@ concept FDKernel = requires(
   typename K::State;
   { K::compute_density (w, g0, s)            } -> std::convertible_to<madness::real_function_3d>;
   { K::compute_gamma   (w, g0, s, rho)       } -> std::convertible_to<typename K::State>;
+  { K::apply_g         (w, g0, s, s, s)      };   // -> std::pair<State, real_function_3d>
   { K::compute_V0x     (w, g0, s)            } -> std::convertible_to<typename K::State>;
   { K::compute_E0x     (w, g0, s)            } -> std::convertible_to<typename K::State>;
   { K::bsh_apply       (w, g0, s, s, omega)  } -> std::convertible_to<typename K::State>;
@@ -198,6 +204,8 @@ concept ESKernel = FDKernel<K> && requires(
                 #__VA_ARGS__ " is missing `compute_density(w, g0, s)`");                             \
   static_assert(::molresponse_v3::detail_kernel::has_compute_gamma_v<__VA_ARGS__>,                   \
                 #__VA_ARGS__ " is missing `compute_gamma(w, g0, s, rho)`");                          \
+  static_assert(::molresponse_v3::detail_kernel::has_apply_g_v<__VA_ARGS__>,                         \
+                #__VA_ARGS__ " is missing `apply_g(w, g0, S1, S2, S3)`");                            \
   static_assert(::molresponse_v3::detail_kernel::has_compute_V0x_v<__VA_ARGS__>,                     \
                 #__VA_ARGS__ " is missing `compute_V0x(w, g0, s)`");                                 \
   static_assert(::molresponse_v3::detail_kernel::has_compute_E0x_v<__VA_ARGS__>,                     \
