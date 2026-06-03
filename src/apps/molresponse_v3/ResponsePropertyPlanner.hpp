@@ -108,12 +108,23 @@ struct DerivedFDRequest {
   double              es_freq_factor = 0.5;
 };
 
+/// One VBC quadratic source to build: the (B,C) perturbation pair at
+/// (freq_b, freq_c). Calc-manager prerequisites: FD(B,freq_b), FD(C,freq_c).
+struct VBCRequest {
+  Perturbation        pert_b;
+  Perturbation        pert_c;
+  double              freq_b = 0.0;
+  double              freq_c = 0.0;
+  std::vector<double> protocols;
+};
+
 struct ResponsePlan {
   std::vector<FDRequest>        fd;          // concrete dipole FD
   std::vector<ESRequest>        es;          // ES bundles
   std::vector<DerivedFDRequest> derived_fd;  // FD-after-ES (freq from a root)
   std::vector<FDRequest>        nuclear_fd;  // nuclear-displacement FD; pert.atom<0
                                              // = all-atoms sentinel (expand per molecule)
+  std::vector<VBCRequest>       vbc;         // quadratic sources for beta
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +149,21 @@ inline std::vector<double> beta_freqs(BetaProcess proc, double omega) {
     case BetaProcess::EOPE:   uniq.insert(omega); uniq.insert(0.0); break;
   }
   return {uniq.begin(), uniq.end()};
+}
+
+/// (omega_B, omega_C) pairs for the VBC quadratic source per beta process.
+/// SHG: (w,w); Static: (0,0). OR/EOPE involve signed frequencies / x<->y
+/// channel mapping that the beta-iii contraction must resolve, so no VBC is
+/// emitted for them yet (the FD states still are).
+inline std::vector<std::pair<double, double>>
+beta_vbc_pairs(BetaProcess proc, double omega) {
+  switch (proc) {
+    case BetaProcess::Static: return {{0.0, 0.0}};
+    case BetaProcess::SHG:    return {{omega, omega}};
+    case BetaProcess::OR:
+    case BetaProcess::EOPE:   return {};   // TODO(beta-iii): signed-frequency VBC
+  }
+  return {};
 }
 
 /// Sorted (coarse → fine) deduplicated union of two protocol lists.
@@ -171,6 +197,11 @@ inline ResponsePlan merge_plans(const std::vector<ResponsePlan> &plans) {
   };
   auto es_k = [](const ESRequest &r) {
     return std::string(r.tda ? "tda" : "full") + "_" + std::to_string(r.n_roots);
+  };
+  auto vbc_k = [](const VBCRequest &r) {
+    return r.pert_b.description() + "__" + r.pert_c.description() + "@"
+         + detail_planner::fd_freq_key(r.freq_b) + "_"
+         + detail_planner::fd_freq_key(r.freq_c);
   };
   auto dfd_k = [](const DerivedFDRequest &r) {
     return r.pert.description() + "@" + r.es_root_id;
@@ -213,6 +244,17 @@ inline ResponsePlan merge_plans(const std::vector<ResponsePlan> &plans) {
       }
       if (!found) out.derived_fd.push_back(r);
     }
+    for (const auto &r : p.vbc) {
+      const auto k = vbc_k(r);
+      bool found = false;
+      for (auto &e : out.vbc) {
+        if (vbc_k(e) == k) {
+          e.protocols = detail_planner::union_protocols(e.protocols, r.protocols);
+          found = true; break;
+        }
+      }
+      if (!found) out.vbc.push_back(r);
+    }
   }
   return out;
 }
@@ -245,6 +287,21 @@ inline ResponsePlan plan_one(const ResponsePropertyRequest &req) {
       for (double w : req.frequencies)
         for (double bw : beta_freqs(req.beta_process, w))
           add_dipole_fd(bw);
+      // VBC quadratic sources: one per (B,C) axis pair per (omega_B, omega_C).
+      using detail_planner::beta_vbc_pairs;
+      for (double w : req.frequencies)
+        for (auto [fb, fc] : beta_vbc_pairs(req.beta_process, w))
+          for (char ax_b : req.axes) {
+            int ib = axis_index(ax_b);
+            if (ib < 0) continue;
+            for (char ax_c : req.axes) {
+              int ic = axis_index(ax_c);
+              if (ic < 0) continue;
+              plan.vbc.push_back({Perturbation::dipole(ib),
+                                  Perturbation::dipole(ic), fb, fc,
+                                  req.protocol_thresholds});
+            }
+          }
       break;
     }
     case ResponsePropertyKind::PolarizabilityGradient: {

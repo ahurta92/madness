@@ -78,6 +78,13 @@ void put_es(json &m, double thresh, bool converged, bool diverged = false) {
                               {"diverged", diverged}};
 }
 
+void put_vbc(json &m, const std::string &id, double thresh, bool converged,
+             bool diverged = false) {
+  const std::string key = protocol_key_at(thresh);
+  put_protocol(m, thresh);
+  m["vbc_states"][id][key] = {{"converged", converged}, {"diverged", diverged}};
+}
+
 } // namespace
 
 int main() {
@@ -283,6 +290,81 @@ int main() {
     put_es(m, 1e-6, true);
     auto waves2 = schedule(dag, P, m);
     EXPECT(waves2.empty(), "fully-converged plan schedules no work");
+  }
+
+  // ====== build_dag: Hyperpolarizability SHG -> FD + VBC nodes =============
+  std::printf("=== build_dag: beta SHG (VBC nodes + prerequisites) ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::Hyperpolarizability;
+    r.beta_process = BetaProcess::SHG;
+    r.frequencies = {0.05};
+    r.axes = {'x', 'y'};
+    r.protocol_thresholds = P;
+    auto dag = build_dag(plan_one(r), 0);
+    // FD at omega and 2*omega (beta_freqs SHG) for x and y -> 4 FD nodes.
+    EXPECT(find_id(dag, "fd:dipole_x@f0.05000") != nullptr, "FD x @ omega");
+    EXPECT(find_id(dag, "fd:dipole_x@f0.10000") != nullptr, "FD x @ 2omega");
+    // VBC: one per (B,C) axis pair at (omega,omega) -> 4 nodes (xx,xy,yx,yy).
+    int nvbc = 0;
+    for (const auto &n : dag) if (n.kind == CalcKind::VBC) ++nvbc;
+    EXPECT(nvbc == 4, "4 VBC nodes (x,y x x,y)");
+    const CalcNode *vbc_xy =
+        find_id(dag, "vbc:dipole_x__dipole_y@f0.05000_f0.05000");
+    EXPECT(vbc_xy != nullptr, "VBC(x,y) node id");
+    EXPECT(vbc_xy && vbc_xy->prerequisites.size() == 2 &&
+           vbc_xy->prerequisites[0] == "fd:dipole_x@f0.05000" &&
+           vbc_xy->prerequisites[1] == "fd:dipole_y@f0.05000",
+           "VBC(x,y) prerequisites = FD(x,omega), FD(y,omega)");
+  }
+
+  // ====== prerequisites_converged gate for a VBC node =====================
+  std::printf("=== VBC prerequisites_converged gate ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::Hyperpolarizability;
+    r.beta_process = BetaProcess::SHG;
+    r.frequencies = {0.05};
+    r.axes = {'x'};
+    r.protocol_thresholds = {1e-4};
+    auto dag = build_dag(plan_one(r), 0);
+    const CalcNode *vbc =
+        find_id(dag, "vbc:dipole_x__dipole_x@f0.05000_f0.05000");
+    EXPECT(vbc != nullptr, "VBC(x,x) present");
+    json m = empty_meta();
+    EXPECT(vbc && !prerequisites_converged(*vbc, dag, m, 1e-4),
+           "FD prereq absent -> VBC not ready");
+    put_fd(m, "dipole_x", 1e-4, 0.05, /*converged=*/true);
+    EXPECT(vbc && prerequisites_converged(*vbc, dag, m, 1e-4),
+           "FD(x,0.05) converged -> VBC ready");
+  }
+
+  // ====== reconcile_protocol VBC branch + schedule gating =================
+  std::printf("=== reconcile_protocol VBC + schedule gating ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::Hyperpolarizability;
+    r.beta_process = BetaProcess::SHG;
+    r.frequencies = {0.05};
+    r.axes = {'x'};
+    r.protocol_thresholds = {1e-4};
+    auto dag = build_dag(plan_one(r), 0);
+    const CalcNode *vbc =
+        find_id(dag, "vbc:dipole_x__dipole_x@f0.05000_f0.05000");
+    json m = empty_meta();
+    EXPECT(reconcile_protocol(*vbc, m, 1e-4) == NodeAction::Fresh,
+           "VBC absent -> Fresh");
+    put_vbc(m, vbc->id, 1e-4, /*converged=*/true);
+    EXPECT(reconcile_protocol(*vbc, m, 1e-4) == NodeAction::Skip,
+           "VBC converged -> Skip");
+
+    // schedule: VBC excluded until its FD prereqs converge.
+    json m0 = empty_meta();
+    auto w0 = schedule(dag, {1e-4}, m0);
+    bool vbc_scheduled = false;
+    for (const auto &wave : w0)
+      if (wave_has(wave, vbc->id)) vbc_scheduled = true;
+    EXPECT(!vbc_scheduled, "VBC not scheduled while FD prereq unconverged");
   }
 
   std::printf("\n%s  (%d failures)\n", failed ? "FAILED" : "PASSED", failed);

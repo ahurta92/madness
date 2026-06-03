@@ -95,6 +95,10 @@ struct CalcNode {
   Perturbation        pert;
   double              freq = 0.0;   // DerivedFD: 0 until expanded from a root
 
+  // VBC payload: the C-side (B uses pert/freq above).
+  Perturbation        pert_c;
+  double              freq_c = 0.0;
+
   // ES payload
   bool                tda = true;
   int                 n_roots = 0;
@@ -156,13 +160,18 @@ inline std::string derived_fd_node_id(const Perturbation &pert,
                                        const std::string &es_root_id) {
   return "dfd:" + pert.description() + "@" + es_root_id;
 }
+inline std::string vbc_node_id(const Perturbation &pb, const Perturbation &pc,
+                               double fb, double fc) {
+  return "vbc:" + pb.description() + "__" + pc.description() + "@"
+       + ResponseMetadata::freq_key(fb) + "_" + ResponseMetadata::freq_key(fc);
+}
 
 /// The perturbation a node belongs to — the unit of parallelism (distinct
 /// perturbations are independent and share every wave). FD / NuclearFD /
 /// DerivedFD key on their perturbation operator; an ES bundle is its own unit,
 /// so it keys on its own id.
 inline std::string perturbation_key(const CalcNode &n) {
-  if (n.kind == CalcKind::ES) return n.id;
+  if (n.kind == CalcKind::ES || n.kind == CalcKind::VBC) return n.id;
   return n.pert.description();
 }
 
@@ -234,6 +243,33 @@ inline const nlohmann::json *es_entry(const nlohmann::json &meta,
       !meta["excited_states"].contains(key))
     return nullptr;
   return &meta["excited_states"][key];
+}
+
+/// VBC status entry at vbc_states/<id>/<key>, or nullptr.
+inline const nlohmann::json *
+vbc_entry(const nlohmann::json &meta, const std::string &id,
+          const std::string &key) {
+  if (!meta.contains("vbc_states")) return nullptr;
+  const auto &vs = meta["vbc_states"];
+  if (!vs.contains(id) || !vs[id].contains(key)) return nullptr;
+  return &vs[id][key];
+}
+
+inline bool has_coarser_converged_vbc(const nlohmann::json &meta,
+                                      const std::string &id,
+                                      double target_thresh, int target_k) {
+  if (!meta.contains("vbc_states") || !meta["vbc_states"].contains(id))
+    return false;
+  if (!meta.contains("protocols")) return false;
+  const auto &protos = meta["protocols"];
+  for (const auto &[k2, ent] : meta["vbc_states"][id].items()) {
+    if (!entry_converged(ent)) continue;
+    if (!protos.contains(k2)) continue;
+    const double t  = protos[k2].value("thresh", 0.0);
+    const int    kk = protos[k2].value("k", 0);
+    if (t >= target_thresh && kk <= target_k) return true;
+  }
+  return false;
 }
 
 inline bool has_coarser_converged_es(const nlohmann::json &meta,
@@ -336,6 +372,21 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     }
   }
 
+  for (const auto &r : plan.vbc) {
+    CalcNode n;
+    n.kind          = CalcKind::VBC;
+    n.pert          = r.pert_b;     // B side
+    n.freq          = r.freq_b;
+    n.pert_c        = r.pert_c;     // C side
+    n.freq_c        = r.freq_c;
+    n.protocols     = r.protocols;
+    n.id            = vbc_node_id(r.pert_b, r.pert_c, r.freq_b, r.freq_c);
+    // Hard prerequisites: the two converged first-order states (same protocol).
+    n.prerequisites = {fd_node_id(r.pert_b, r.freq_b),
+                       fd_node_id(r.pert_c, r.freq_c)};
+    dag.push_back(std::move(n));
+  }
+
   return dag;
 }
 
@@ -361,6 +412,17 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
                                              : NodeAction::Resume;
     }
     return detail_calc::has_coarser_converged_es(meta, thresh, k)
+               ? NodeAction::Restart
+               : NodeAction::Fresh;
+  }
+
+  if (node.kind == CalcKind::VBC) {
+    if (const auto *e = detail_calc::vbc_entry(meta, node.id, key)) {
+      if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
+      return detail_calc::entry_diverged(*e) ? NodeAction::Fresh
+                                             : NodeAction::Resume;
+    }
+    return detail_calc::has_coarser_converged_vbc(meta, node.id, thresh, k)
                ? NodeAction::Restart
                : NodeAction::Fresh;
   }
