@@ -49,18 +49,18 @@ struct ExPair {
   const vecfuncT &ket;
 };
 
-/// Shared per-output-channel core of every Kernels<Type,Shell>::apply_g and
-/// compute_gamma:
-///     out = Q( J * apply_to  -  c_xc * Sum_pairs K(pair.bra, pair.ket)(apply_to) ).
-/// J is the already-applied Coulomb potential coulop(rho); the caller builds it
-/// once per gamma and passes it to each channel.
+/// Projection-free core:  J * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to).
+/// NO projection, NO truncate -- the raw two-electron action. The linear kernels
+/// wrap this with Q + truncate (apply_channel below); VBC/beta use it directly
+/// because their Fock-matrix correction term contracts the UNprojected g against
+/// phi0 (matrix_inner(phi0, g) would vanish under Q). J is the already-applied
+/// Coulomb potential coulop(rho); the caller builds it once and reuses per channel.
 inline vecfuncT
-apply_channel(madness::World &world,
-              const madness::real_function_3d &J,
-              const vecfuncT &apply_to,
-              std::initializer_list<ExPair> pairs,
-              const madness::QProjector<double, 3> &Q,
-              double c_xc, double lo) {
+apply_channel_raw(madness::World &world,
+                  const madness::real_function_3d &J,
+                  const vecfuncT &apply_to,
+                  std::initializer_list<ExPair> pairs,
+                  double c_xc, double lo) {
   using namespace madness;
   auto out = mul(world, J, apply_to, true);
   if (c_xc > 0.0) {
@@ -69,8 +69,24 @@ apply_channel(madness::World &world,
       gaxpy(world, 1.0, out, -c_xc, k);
     }
   }
+  return out;
+}
+
+/// Shared per-output-channel core of every Kernels<Type,Shell>::apply_g and
+/// compute_gamma:
+///     out = Q( J * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to) ).
+/// Exactly apply_channel_raw followed by projection + truncation (so the linear
+/// path is byte-identical to the original per-type compute_gamma bodies).
+inline vecfuncT
+apply_channel(madness::World &world,
+              const madness::real_function_3d &J,
+              const vecfuncT &apply_to,
+              std::initializer_list<ExPair> pairs,
+              const madness::QProjector<double, 3> &Q,
+              double c_xc, double lo) {
+  auto out = apply_channel_raw(world, J, apply_to, pairs, c_xc, lo);
   out = Q(out);
-  truncate(world, out);
+  madness::truncate(world, out);
   return out;
 }
 

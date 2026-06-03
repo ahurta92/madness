@@ -23,6 +23,7 @@
 
 #include "tags.hpp"
 #include "tda.hpp"   // ResponseGroundState, common_ops::{dot, apply_exchange}
+#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel_raw}
 #include "../solvers/response_state.hpp"   // ResponseStateXY<ClosedShell>
 
 #include <madness/mra/mra.h>
@@ -55,31 +56,18 @@ compute_g(madness::World &world, const ResponseGroundState &g0,
   rho.scale(2.0);
   rho.truncate();
 
-  // Coulomb: J = coulop(rho), applied to each phix / phiy.
+  // Coulomb + exchange via the shared projection-free core. J = coulop(rho)
+  // already carries the factor 2 (in rho); exchange is scaled by c_xc. Same
+  // term order as the linear Kernels<Full,ClosedShell> kernel:
+  //   X uses (Aleft,Aright) + (Bleft,Bright); Y swaps bra/ket (the conjugate),
+  // matching the original v2 compute_g. NOT projected -- the caller (compute_vbc_i)
+  // applies Qa where the response-density terms need it and leaves the Fock-matrix
+  // term unprojected.
   auto J  = apply(*g0.coulop, rho);
-  auto Jx = mul(world, J, phix, false);
-  auto Jy = mul(world, J, phiy, false);
-  world.gop.fence();
-
-  // Exchange (HF/hybrid): K(bra, ket)(apply_to). X channel uses (Aleft,Aright)
-  // and (Bleft,Bright); Y channel swaps bra/ket (conjugate), as in v2.
-  auto Kx = common_ops::apply_exchange(world, Aleft, Aright, phix, g0.lo);
-  {
-    auto k2 = common_ops::apply_exchange(world, Bleft, Bright, phix, g0.lo);
-    gaxpy(world, 1.0, Kx, 1.0, k2);
-  }
-  auto Ky = common_ops::apply_exchange(world, Aright, Aleft, phiy, g0.lo);
-  {
-    auto k2 = common_ops::apply_exchange(world, Bright, Bleft, phiy, g0.lo);
-    gaxpy(world, 1.0, Ky, 1.0, k2);
-  }
-  world.gop.fence();
-
-  // g = J - c_xc*K   (J already carries the factor 2 via rho).
-  vecfuncT gx = Jx;
-  gaxpy(world, 1.0, gx, -g0.c_xc, Kx);
-  vecfuncT gy = Jy;
-  gaxpy(world, 1.0, gy, -g0.c_xc, Ky);
+  auto gx = two_electron::apply_channel_raw(world, J, phix,
+      {{Aleft, Aright}, {Bleft, Bright}}, g0.c_xc, g0.lo);
+  auto gy = two_electron::apply_channel_raw(world, J, phiy,
+      {{Aright, Aleft}, {Bright, Bleft}}, g0.c_xc, g0.lo);
   return {std::move(gx), std::move(gy)};
 }
 
