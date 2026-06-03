@@ -100,6 +100,8 @@ struct ExecutorContext {
   // history). 0 = KAIN from iter 1 (previous behaviour). Distinct from
   // es_tda_warmup_iters, which is the separate oversampled-warmup pre-pass.
   int               es_main_kain_delay    = 0;
+  // Full-deflation locking of converged ES roots (workstream B). Off by default.
+  bool              es_lock_converged     = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -391,6 +393,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
   ConvergencePolicy main_policy = warm_policy;
   main_policy.tda_warmup_iters = ctx.es_main_kain_delay;
+  main_policy.lock_converged   = ctx.es_lock_converged;  // warmup never locks
 
   Solver::State s0;
   bool seeded = false;
@@ -503,6 +506,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
   ConvergencePolicy main_policy = warm_policy;
   main_policy.tda_warmup_iters = ctx.es_main_kain_delay;
+  main_policy.lock_converged   = ctx.es_lock_converged;  // warmup never locks
 
   Solver::State s0;
   bool seeded = false;

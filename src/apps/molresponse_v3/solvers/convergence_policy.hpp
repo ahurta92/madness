@@ -146,6 +146,13 @@ struct ConvergencePolicy {
   enum class StepRestrictMode { PerOrbital, PerState };
   StepRestrictMode step_restrict_mode = StepRestrictMode::PerOrbital;
 
+  // Full-deflation locking of converged ES roots (workstream B). When true, a
+  // root that meets the convergence test is locked: removed from the subspace +
+  // rotation, used only to deflate (orthogonalize) the active roots, and skipped
+  // by KAIN/step-restriction. Stops the per-iter rotation from re-mixing already-
+  // converged roots (the near-degenerate failure mode). Default off. ESSolver only.
+  bool lock_converged = false;
+
   struct Targets {
     double bsh_residual;     // ‖x_old − x_new‖ cap
     double density_residual; // ‖ρ_new − ρ_old‖ cap

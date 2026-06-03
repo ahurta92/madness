@@ -77,6 +77,12 @@ public:
     /// slot as roots[s] before rotation.
     std::vector<madness::real_function_3d>  rho_alpha_prev;
     std::vector<double>                     last_density_residual;
+    /// Per-root sticky "locked" flag (workstream B, full deflation). When
+    /// policy.lock_converged is set, a converged root is locked: excluded from
+    /// the subspace + rotation, used only to deflate the active roots, and
+    /// skipped by KAIN/step restriction. Empty = none (the default path never
+    /// touches it). Cleared at each protocol (wavelet-thresh) change.
+    std::vector<char>                       locked;
     int                                     iter = 0;
     /// Set by step() when the explosion guard trips; iterate<>
     /// terminates on this so we don't burn iters on a runaway state.
@@ -279,6 +285,8 @@ public:
   ///     ~3-4M Storage peak. ~2× the per-iter kernel work but big
   ///     memory savings.
   State step(State in) {
+    if (policy_.lock_converged)            // workstream B: full-deflation locking
+      return step_rotate_pieces_locked(std::move(in));
     return policy_.stream_theta
         ? step_recompute_pieces(std::move(in))
         : step_rotate_pieces(std::move(in));
@@ -550,6 +558,160 @@ public:
     return out;
   }
 
+  /// Full-deflation locking variant (workstream B; policy.lock_converged).
+  /// Converged roots are LOCKED: frozen, removed from the subspace + rotation,
+  /// used only to orthogonalize (deflate) the active roots, and skipped by
+  /// KAIN/step-restriction (passed a locked mask so slot indices stay stable).
+  /// This stops the per-iteration subspace rotation from re-mixing already-
+  /// converged roots — the near-degenerate failure mode. Rotate-pieces layout.
+  /// Locks are per-protocol (cleared when the wavelet thresh changes). The
+  /// deflation overlap uses rs::metric_inner (Euclidean for TDA; the indefinite
+  /// RPA metric for Full).
+  State step_rotate_pieces_locked(State in) {
+    const int M = n_roots_;
+    State out;
+    out.iter         = in.iter + 1;
+    out.roots        = in.roots;
+    out.stable_index = in.stable_index;
+
+    // Per-protocol locks: clear when the wavelet thresh changes.
+    const double cur_thresh = madness::FunctionDefaults<3>::get_thresh();
+    out.locked = in.locked;
+    if (cur_thresh != lock_protocol_thresh_) {
+      out.locked.assign(M, 0);
+      lock_protocol_thresh_ = cur_thresh;
+    }
+    if (static_cast<int>(out.locked.size()) != M) out.locked.assign(M, 0);
+
+    std::vector<int> act;
+    for (int s = 0; s < M; ++s) if (!out.locked[s]) act.push_back(s);
+    const int nA = static_cast<int>(act.size());
+
+    // Output bookkeeping sized to M; locked slots carry their prior values.
+    out.last_bsh_residual.assign(M, 0.0);
+    out.last_density_residual.assign(M, 0.0);
+    out.omega = madness::Tensor<double>(M);
+    out.rho_alpha_prev = in.rho_alpha_prev;
+    if (static_cast<int>(out.rho_alpha_prev.size()) != M)
+      out.rho_alpha_prev.resize(M);
+    for (int s = 0; s < M; ++s) {
+      if (!out.locked[s]) continue;
+      if (s < static_cast<int>(in.last_bsh_residual.size()))
+        out.last_bsh_residual[s] = in.last_bsh_residual[s];
+      if (s < static_cast<int>(in.last_density_residual.size()))
+        out.last_density_residual[s] = in.last_density_residual[s];
+      if (in.omega.dim(0) == M) out.omega(s) = in.omega(s);
+    }
+
+    if (nA == 0) {  // every root converged + locked
+      print_iter_banner(out);
+      append_convergence_log(out);
+      return out;
+    }
+
+    // ---- top-of-iter: project all; deflate active vs locked; orthonormalize.
+    rs::project(out.roots, gs_.Qa, gs_.Qb);
+    std::vector<Storage> L_roots;
+    for (int s = 0; s < M; ++s) if (out.locked[s]) L_roots.push_back(out.roots[s]);
+    std::vector<Storage> A_roots;
+    A_roots.reserve(nA);
+    for (int i : act) A_roots.push_back(out.roots[i]);
+    for (auto &a : A_roots)
+      for (auto &L : L_roots) {
+        const double ov = rs::metric_inner(L, a);   // deflate: a -= <L|a> L
+        a.axpy(world_, -ov, L);
+      }
+    rs::orthonormalize(world_, A_roots);
+    for (int k = 0; k < nA; ++k) out.roots[act[k]] = A_roots[k];
+
+    // ---- per-active-root building blocks ----------------------------------
+    std::vector<Storage> V0x(nA), T0x(nA), E0x_full(nA), E0x(nA), gamma(nA);
+    std::vector<madness::real_function_3d> rho_alpha(nA);
+    for (int k = 0; k < nA; ++k) {
+      const int s = act[k];
+      rho_alpha[k] = K::compute_density(world_, gs_, out.roots[s]);
+      gamma[k]     = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[k]);
+      V0x[k]       = K::compute_V0x(world_, gs_, out.roots[s]);
+      T0x[k]       = K::compute_T0x(world_, gs_, out.roots[s]);
+      E0x_full[k]  = K::compute_E0x_full(world_, gs_, out.roots[s]);
+      E0x[k]       = K::compute_E0x(world_, gs_, out.roots[s]);
+      if (s < static_cast<int>(in.rho_alpha_prev.size()) &&
+          in.rho_alpha_prev[s].is_initialized()) {
+        auto drho = rho_alpha[k] - in.rho_alpha_prev[s];
+        out.last_density_residual[s] = drho.norm2();
+      }
+    }
+
+    // ---- subspace over the ACTIVE block only ------------------------------
+    std::vector<Storage> lambda(nA);
+    for (int k = 0; k < nA; ++k)
+      lambda[k] = assemble_lambda(world_, T0x[k], V0x[k], E0x_full[k], gamma[k]);
+
+    std::vector<Storage> act_roots;
+    act_roots.reserve(nA);
+    for (int i : act) act_roots.push_back(out.roots[i]);
+    auto A     = rs::inner(act_roots, lambda);
+    auto S_mat = rs::metric(act_roots, act_roots);
+    auto dr    = rs::diagonalize(A, S_mat, /*thresh_degenerate=*/-1.0,
+                                 policy_.cluster_unmix_factor);
+    auto &omega_act = dr.omega;
+    auto &U         = dr.U;
+    print_rot_slots(out.iter, dr);
+
+    // ---- rotate active roots + Theta pieces by U --------------------------
+    rs::transform(world_, act_roots, U);
+    rs::transform(world_, V0x,       U);
+    rs::transform(world_, E0x,       U);
+    rs::transform(world_, gamma,     U);
+    for (int k = 0; k < nA; ++k) out.roots[act[k]] = act_roots[k];
+
+    // ---- Theta + BSH + residual (active) ----------------------------------
+    std::vector<Storage> x_pre_bsh = out.roots;  // full M; locked slots frozen
+    for (int k = 0; k < nA; ++k) {
+      const int s = act[k];
+      auto theta = assemble_theta(world_, V0x[k], E0x[k], gamma[k]);
+      auto x_new = K::bsh_apply(world_, gs_, out.roots[s], theta, omega_act(k));
+      out.last_bsh_residual[s] =
+          K::compute_residual_norm(world_, out.roots[s], x_new);
+      out.roots[s]          = std::move(x_new);
+      out.omega(s)          = omega_act(k);
+      out.rho_alpha_prev[s] = std::move(rho_alpha[k]);
+    }
+
+    // ---- KAIN + step restriction on ACTIVE slots only (masked) ------------
+    {
+      const int kain_diag = (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
+      kain_.apply(x_pre_bsh, out.roots, kain_diag, &out.locked);
+    }
+
+    // ---- explosion guard (active) -----------------------------------------
+    for (int i : act)
+      if (out.last_bsh_residual[i] > policy_.explosion_guard) {
+        out.diverged = true;
+        break;
+      }
+
+    // ---- lock newly-converged active roots (sticky within the protocol) ---
+    if (out.iter >= policy_.min_iters_before_conv) {
+      for (int i : act) {
+        const bool conv =
+            out.last_bsh_residual[i] < targets_.bsh_residual &&
+            (out.iter <= 1 ||
+             out.last_density_residual[i] < targets_.density_residual);
+        if (conv) out.locked[i] = 1;
+      }
+    }
+    if (print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
+      int nl = 0;
+      for (char c : out.locked) nl += (c ? 1 : 0);
+      print("  [lock] active =", nA, " newly+previously locked =", nl, "/", M);
+    }
+
+    print_iter_banner(out);
+    append_convergence_log(out);
+    return out;
+  }
+
   /// Converged when:
   ///   iter >= min_iters_before_conv  AND
   ///   max_s BSH-residual[s] < targets_.bsh_residual  AND
@@ -606,6 +768,7 @@ public:
     std::vector<Storage> roots_new(M);
     std::vector<double>  bsh_new(M, 0.0), drho_new(M, 0.0);
     std::vector<madness::real_function_3d> rho_prev_new(s.rho_alpha_prev.size());
+    std::vector<char>    locked_new(s.locked.empty() ? 0 : M, 0);
     for (long i = 0; i < M; ++i) {
       const long src = perm[i];
       omega_new(i)  = s.omega(src);
@@ -616,12 +779,15 @@ public:
         drho_new[i] = s.last_density_residual[src];
       if (src < static_cast<long>(s.rho_alpha_prev.size()))
         rho_prev_new[i] = s.rho_alpha_prev[src];
+      if (!s.locked.empty() && src < static_cast<long>(s.locked.size()))
+        locked_new[i] = s.locked[src];
     }
     s.omega                 = omega_new;
     s.roots                 = std::move(roots_new);
     s.last_bsh_residual     = std::move(bsh_new);
     s.last_density_residual = std::move(drho_new);
     s.rho_alpha_prev        = std::move(rho_prev_new);
+    if (!s.locked.empty()) s.locked = std::move(locked_new);
     // Keep each root's stable identity attached to its data as slots move.
     permute_stable_index(s.stable_index, perm);
 
@@ -680,6 +846,9 @@ private:
   int                        n_roots_ = 0;
   ConvergencePolicy          policy_;
   ConvergencePolicy::Targets targets_{};
+  // Protocol thresh at which the current locks were earned; locks clear when it
+  // changes (a coarse-protocol convergence isn't valid at the finer one).
+  double                     lock_protocol_thresh_ = -1.0;
   ResponseSubspaceKain<Storage>   kain_;
   PrintLevel                 print_level_ = PrintLevel::Normal;
   std::string                log_path_;

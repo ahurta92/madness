@@ -91,13 +91,17 @@ public:
   /// the printf is rank-gated.
   void apply(const std::vector<Storage> &in,
              std::vector<Storage>       &out,
-             int                         diag_level = 0) {
+             int                         diag_level = 0,
+             const std::vector<char>    *locked    = nullptr) {
     if (states_.size() != in.size()) {
       states_.clear();
       states_.resize(in.size());
     }
 
     const bool in_warmup = (calls_consumed_ < policy_.tda_warmup_iters);
+    auto is_locked = [&](std::size_t s) {
+      return locked && s < locked->size() && (*locked)[s];
+    };
 
     if (policy_.kain && !in_warmup) {
       if (first_kain_call_) {
@@ -111,12 +115,13 @@ public:
         }
       } else {
         for (std::size_t s = 0; s < in.size(); ++s) {
+          if (is_locked(s)) continue;   // locked root: freeze, keep history
           apply_one_state(s, in[s], out[s], diag_level);
         }
       }
     }
 
-    apply_step_restriction(in, out, diag_level);
+    apply_step_restriction(in, out, diag_level, locked);
     ++calls_consumed_;
   }
 
@@ -241,7 +246,8 @@ private:
   /// per-state norm and over-restrict the well-behaved ones.
   void apply_step_restriction(const std::vector<Storage> &in,
                               std::vector<Storage>       &out,
-                              int                         diag_level) {
+                              int                         diag_level,
+                              const std::vector<char>    *locked = nullptr) {
     const double maxrotn = policy_.maxrotn;
     if (maxrotn <= 0.0) return;
 
@@ -250,6 +256,7 @@ private:
          ConvergencePolicy::StepRestrictMode::PerState);
 
     for (std::size_t s = 0; s < in.size(); ++s) {
+      if (locked && s < locked->size() && (*locked)[s]) continue;
       auto v_old = in[s].flatten();
       auto v_new = out[s].flatten();
       // Per-orbital diff norms via batched norm2s (collective-safe).

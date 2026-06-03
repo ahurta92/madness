@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
         ctx.es_guess = (parser.value("es-guess") == "solid")
                            ? ESGuessMode::SolidHarmonics
                            : ESGuessMode::Random;
+      if (parser.key_exists("lock-converged")) ctx.es_lock_converged = true;
       if (world.rank() == 0 && es_roots > 0) {
         print("ES/KAIN knobs: guess=", to_string(ctx.es_guess),
               " kain_maxsub=", ctx.es_kain_maxsub,
@@ -221,7 +222,8 @@ int main(int argc, char **argv) {
               " step_restrict=",
               (policy.step_restrict_mode ==
                ConvergencePolicy::StepRestrictMode::PerState ? "state"
-                                                             : "orbital"));
+                                                             : "orbital"),
+              " lock_converged=", (ctx.es_lock_converged ? "on" : "off"));
       }
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
