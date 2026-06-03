@@ -44,6 +44,7 @@
 #include "../solvers/convergence_policy.hpp"
 #include "../solvers/fd_problem.hpp"
 #include "../solvers/fd_save_load.hpp"
+#include "../kernels/beta.hpp"
 #include "../kernels/vbc.hpp"
 #include "../solvers/es_save_load.hpp"
 #include "../solvers/es_solver.hpp"
@@ -888,6 +889,84 @@ private:
   Policy                policy_;
   std::vector<CalcNode> dag_;
 };
+
+// ---------------------------------------------------------------------------
+// beta property assembly (Tier-A). A post-run step: contract the converged A
+// states against each VBC source (+ zeta terms) into the beta tensor, recorded
+// under properties/beta. Runs at one protocol (typically the top of the ramp).
+// ---------------------------------------------------------------------------
+
+inline char beta_axis_name(int a) { return a == 0 ? 'x' : a == 1 ? 'y' : 'z'; }
+
+inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
+                          double thresh) {
+  using namespace madness;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+  if (plan.vbc.empty()) return;
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+  const double c_xc = gs.hf_exchange_coefficient();
+  const double lo   = gs.params().lo();
+  auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
+  const std::string key = protocol_key();
+
+  if (world.rank() == 0)
+    madness::print("\n=== beta assembly  protocol_key=", key, " ===");
+
+  for (const auto &vr : plan.vbc) {
+    const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
+    const std::string vbc_id =
+        vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);
+
+    auto vbc = load_vbc(world, ctx.calc_dir, vbc_id);
+    auto B = detail_exec::load_fd_as_xy(world, ctx.calc_dir, vr.pert_b, vr.freq_b);
+    auto C = detail_exec::load_fd_as_xy(world, ctx.calc_dir, vr.pert_c, vr.freq_c);
+    if (!vbc || !B || !C) {
+      if (world.rank() == 0)
+        madness::print("[BETA] skip", vbc_id, "— missing VBC or FD input");
+      continue;
+    }
+
+    for (int a = 0; a < 3; ++a) {
+      const Perturbation pA = Perturbation::dipole(a);
+      auto xA = detail_exec::load_fd_as_xy(world, ctx.calc_dir, pA, ws);
+      if (!xA) {
+        if (world.rank() == 0)
+          madness::print("[BETA] skip A=", beta_axis_name(a), "— missing FD",
+                         pA.description(), "@", ws);
+        continue;
+      }
+      auto VA_op = dipole_operator(world, a);
+      const double b = beta::beta_abc(world, g0, *xA, *vbc, *B, *C, VA_op);
+
+      if (world.rank() == 0) {
+        madness::print("[BETA]  A=", beta_axis_name(a),
+                       "  B=", vr.pert_b.description(),
+                       "  C=", vr.pert_c.description(),
+                       "  fB=", vr.freq_b, "  fC=", vr.freq_c,
+                       "  beta=", b);
+        auto meta = ResponseMetadata::load_or_create(
+            ctx.calc_dir + "/response_metadata.json");
+        meta.add_property("beta", key,
+                          nlohmann::json{{"A", std::string(1, beta_axis_name(a))},
+                                         {"B", vr.pert_b.description()},
+                                         {"C", vr.pert_c.description()},
+                                         {"freq_b", vr.freq_b},
+                                         {"freq_c", vr.freq_c},
+                                         {"beta", b}});
+        meta.save();
+      }
+      world.gop.fence();
+    }
+  }
+}
 
 } // namespace molresponse_v3
 

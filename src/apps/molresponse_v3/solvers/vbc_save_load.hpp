@@ -21,6 +21,7 @@
 #include <madness/world/MADworld.h>
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace molresponse_v3 {
@@ -70,6 +71,30 @@ inline void save_vbc_state(madness::World &world,
                    "  archive=", base, "  converged=", converged);
   }
   world.gop.fence();
+}
+
+/// Load a VBC source built at the ACTIVE protocol (exact key) for the contraction.
+/// Returns nullopt if no converged vbc_states/<id>/<active-key> entry exists.
+inline std::optional<ResponseStateXY<ClosedShell>>
+load_vbc(madness::World &world, const std::string &dir, const std::string &vbc_id) {
+  const std::string key = protocol_key();
+  std::string archive;
+  if (world.rank() == 0) {
+    const std::string mp = dir + "/response_metadata.json";
+    if (std::filesystem::exists(mp)) {
+      auto meta = ResponseMetadata::load_or_create(mp);
+      const auto &j = meta.json();
+      if (j.contains("vbc_states") && j["vbc_states"].contains(vbc_id) &&
+          j["vbc_states"][vbc_id].contains(key)) {
+        const auto &e = j["vbc_states"][vbc_id][key];
+        if (e.value("converged", false))
+          archive = e.value("archive", std::string{});
+      }
+    }
+  }
+  world.gop.broadcast_serializable(archive, 0);
+  if (archive.empty()) return std::nullopt;
+  return ResponseStateXY<ClosedShell>::load(world, dir + "/" + archive);
 }
 
 } // namespace molresponse_v3

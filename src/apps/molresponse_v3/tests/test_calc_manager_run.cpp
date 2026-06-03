@@ -142,10 +142,17 @@ int main(int argc, char **argv) {
       // ---- Plan: polarizability, or (--es-roots=N) resonant gradient -----
       const int es_roots =
           parser.key_exists("es-roots") ? std::stoi(parser.value("es-roots")) : 0;
+      const bool do_beta = parser.key_exists("beta");
       ResponsePropertyRequest req;
       req.axes = axes;
       req.protocol_thresholds = protocol;
-      if (es_roots > 0) {
+      if (do_beta) {
+        // Hyperpolarizability beta via 2n+1 / VBC contraction (SHG by default).
+        req.kind         = ResponsePropertyKind::Hyperpolarizability;
+        req.beta_process = parser.key_exists("beta-static") ? BetaProcess::Static
+                                                            : BetaProcess::SHG;
+        req.frequencies  = freqs;
+      } else if (es_roots > 0) {
         // ES(TDA) bundle + symbolic derived dipole FD; the calc manager solves
         // the bundle, then expands to FD at the converged excitation energies.
         req.kind          = ResponsePropertyKind::PolarizabilityGradient;
@@ -168,7 +175,7 @@ int main(int argc, char **argv) {
         print("  omega      =", freqs);
         print("  protocol   =", protocol);
         print("  calc_dir   =", calc_dir);
-        print("  mode       =", (es_roots > 0 ? "resonant-gradient (ES)" : "polarizability"));
+        print("  mode       =", (do_beta ? "hyperpolarizability (beta/VBC)" : es_roots > 0 ? "resonant-gradient (ES)" : "polarizability"));
         if (es_roots > 0) print("  es_roots   =", es_roots);
         print("  FD requests=", (int)plan.fd.size(),
               "  ES requests=", (int)plan.es.size());
@@ -187,13 +194,27 @@ int main(int argc, char **argv) {
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
 
+      // beta: Tier-A property assembly (contraction) after the manager run.
+      if (do_beta) assemble_beta(ctx, plan, protocol.back());
+
       // ---- Validate at the top protocol ----------------------------------
       const std::string top_key = protocol_key_at(protocol.back());
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
             calc_dir + "/response_metadata.json");
         const auto &j = meta.json();
-        if (es_roots > 0) {
+        if (do_beta) {
+          int want = 3 * static_cast<int>(plan.vbc.size());  // A axes x VBC pairs
+          int got = 0;
+          if (j.contains("properties") && j["properties"].contains("beta") &&
+              j["properties"]["beta"].contains(top_key))
+            got = static_cast<int>(j["properties"]["beta"][top_key].size());
+          print("  VBC pairs=", (int)plan.vbc.size(),
+                "  beta elements recorded=", got, "/", want);
+          bool ok = (want > 0) && (got == want);
+          print("\n", ok ? "PASSED" : "FAILED", " (beta: ", got, "/", want, ")");
+          rc = ok ? 0 : 1;
+        } else if (es_roots > 0) {
           // ES bundle converged with n_roots, plus the promoted derived FDs.
           bool es_ok = j["excited_states"].contains(top_key) &&
                        j["excited_states"][top_key].value("converged", false);
