@@ -44,12 +44,14 @@
 #include "../solvers/convergence_policy.hpp"
 #include "../solvers/fd_problem.hpp"
 #include "../solvers/fd_save_load.hpp"
+#include "../kernels/vbc.hpp"
 #include "../solvers/es_save_load.hpp"
 #include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
 #include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
+#include "../solvers/vbc_save_load.hpp"
 
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
@@ -59,6 +61,7 @@
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -103,6 +106,25 @@ inline int es_root_index(const std::string &label) {
   const std::string pre = "es_root_";
   if (label.rfind(pre, 0) != 0) return -1;
   try { return std::stoi(label.substr(pre.size())); } catch (...) { return -1; }
+}
+
+/// Load a converged first-order state as an (X,Y) pair for the VBC build.
+/// Dynamic (freq != 0): the Full FD state directly. Static (freq == 0): the
+/// Static FD state with Y = X (the static limit). nullopt if not on disk.
+inline std::optional<ResponseStateXY<ClosedShell>>
+load_fd_as_xy(madness::World &world, const std::string &calc_dir,
+              const Perturbation &pert, double freq) {
+  if (is_static_freq(freq)) {
+    auto r = try_load_fd_state<Static, ClosedShell>(world, calc_dir, pert, freq);
+    if (!r) return std::nullopt;
+    ResponseStateXY<ClosedShell> xy;
+    xy.x_alpha = madness::copy(world, r->state.responses[0].x_alpha);
+    xy.y_alpha = madness::copy(world, r->state.responses[0].x_alpha);
+    return xy;
+  }
+  auto r = try_load_fd_state<Full, ClosedShell>(world, calc_dir, pert, freq);
+  if (!r) return std::nullopt;
+  return r->state.responses[0];
 }
 
 /// Alpha-spin perturbation source vector for one (pert) at the active
@@ -543,6 +565,52 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
 }
 
 // ---------------------------------------------------------------------------
+// VBC quadratic-source build (beta-ii-b, closed-shell). Not iterative: load the
+// two converged first-order states at this protocol, build the source, save.
+// ---------------------------------------------------------------------------
+
+inline NodeResult
+solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh) {
+  using namespace madness;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+
+  // The two converged first-order states (X,Y) at this protocol. The
+  // prerequisites_converged gate guarantees they are converged before we run.
+  auto B = detail_exec::load_fd_as_xy(world, ctx.calc_dir, node.pert,   node.freq);
+  auto C = detail_exec::load_fd_as_xy(world, ctx.calc_dir, node.pert_c, node.freq_c);
+  if (!B || !C) {
+    if (world.rank() == 0)
+      madness::print("[CALC] solve_vbc:", node.id,
+                     "— a converged FD prerequisite is missing; skipping.");
+    return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
+  }
+
+  const double c_xc = gs.hf_exchange_coefficient();
+  const double lo   = gs.params().lo();
+  auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
+
+  // Raw one-electron perturbation operators for B and C (dipole only for now).
+  auto VB_op = dipole_operator(world, node.pert.axis);
+  auto VC_op = dipole_operator(world, node.pert_c.axis);
+
+  auto vbc_src = vbc::compute_vbc(world, g0, *B, *C, VB_op, VC_op);
+  save_vbc_state(world, vbc_src, ctx.calc_dir, node.id, /*converged=*/true);
+
+  if (world.rank() == 0)
+    madness::print("[CALC] solve_vbc: built", node.id, "at", protocol_key());
+  return NodeResult{/*converged=*/true, protocol_key(), {}};
+}
+
+// ---------------------------------------------------------------------------
 // FdResponseExecutor — dispatches the runtime (Type × Shell) for FD nodes.
 // ---------------------------------------------------------------------------
 
@@ -576,12 +644,25 @@ public:
                        "research). Skipping.");
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
     }
-    if (node.kind == CalcKind::DerivedFD || node.kind == CalcKind::VBC) {
-      // DerivedFD should have been promoted to FD on expansion; VBC is 15b+.
+    if (node.kind == CalcKind::VBC) {
+      if (ctx_.gs.is_spin_restricted()) {
+        if (ctx_.world.rank() == 0)
+          madness::print("[CALC] run_protocol: VBC", node.id,
+                         " B=", node.pert.description(), "@", node.freq,
+                         " C=", node.pert_c.description(), "@", node.freq_c,
+                         " thresh=", item.thresh);
+        return solve_vbc_closed_shell(ctx_, node, item.thresh);
+      }
+      if (ctx_.world.rank() == 0)
+        madness::print("[CALC] run_protocol: VBC", node.id,
+                       "on an open-shell ground state is out of scope. Skipping.");
+      return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
+    }
+    if (node.kind == CalcKind::DerivedFD) {
+      // DerivedFD should have been promoted to FD on expansion.
       if (ctx_.world.rank() == 0)
         madness::print("[CALC] run_protocol: node", node.id,
-                       "kind not handled (DerivedFD should be promoted; VBC "
-                       "is 15b+) — skipping");
+                       "kind DerivedFD should be promoted to FD — skipping");
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
     }
 

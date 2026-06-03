@@ -70,7 +70,7 @@ public:
       }
       // Ensure required top-level keys exist for upsert paths below.
       for (const char *k : {"protocols", "fd_states",
-                             "excited_states", "properties"}) {
+                             "excited_states", "properties", "vbc_states"}) {
         if (!m.j_.contains(k)) m.j_[k] = nlohmann::json::object();
       }
     } else {
@@ -80,6 +80,7 @@ public:
           {"fd_states",      nlohmann::json::object()},
           {"excited_states", nlohmann::json::object()},
           {"properties",     nlohmann::json::object()},
+          {"vbc_states",     nlohmann::json::object()},
       };
     }
     return m;
@@ -106,6 +107,13 @@ public:
   void set_es_bundle(const std::string &protocol_key,
                      const nlohmann::json &entry) {
     j_["excited_states"][protocol_key] = entry;
+  }
+
+  /// Upsert one VBC quadratic source: vbc_states/<vbc_id>/<protocol_key> = entry.
+  void set_vbc_state(const std::string &vbc_id,
+                     const std::string &protocol_key,
+                     const nlohmann::json &entry) {
+    j_["vbc_states"][vbc_id][protocol_key] = entry;
   }
 
   /// Append a property record to properties/<name>/<protocol_key>[]. The
