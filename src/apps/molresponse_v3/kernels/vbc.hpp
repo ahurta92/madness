@@ -9,9 +9,10 @@
 // Kernels<Full, ClosedShell>::compute_gamma (doc 15, beta path). beta is pure
 // 2n+1 contraction — no explicit x(2) solve.
 //
-// THIS HEADER (beta-i, foundation): compute_g + make_zeta only. compute_vbc_i /
-// compute_vbc (which build the full quadratic source from two converged
-// first-order states) land on top once these conventions are verified.
+// compute_g now routes through two_electron::apply_channel_raw (shared with the
+// linear kernels). compute_vbc is templated over <Shell>: closed-shell is the
+// v2-ported build (compute_vbc_i, alpha-only); open-shell is guarded (throws)
+// until the per-spin make_zeta / compute_vbc_i kernels are derived (step 6b/7).
 //
 // Convention note (the whole correctness risk): v3 carries the closed-shell
 // factor 2 IN the density (compute_density: rho1 = 2*sum phi0*(x+y)), so the
@@ -28,6 +29,8 @@
 
 #include <madness/mra/mra.h>
 
+#include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -139,31 +142,42 @@ compute_vbc_i(madness::World &world, const ResponseGroundState &g0,
 /// and sums the (B,C) and (C,B) halves (compute_vbc_i). VB_op / VC_op are the
 /// raw one-electron perturbation operators for B and C. Port of v2
 /// SimpleVBCComputer::compute_vbc_response (closed-shell, no x(2) solve).
-inline ResponseStateXY<ClosedShell>
+template <class Shell>
+inline ResponseStateXY<Shell>
 compute_vbc(madness::World &world, const ResponseGroundState &g0,
-            const ResponseStateXY<ClosedShell> &B,
-            const ResponseStateXY<ClosedShell> &C,
+            const ResponseStateXY<Shell> &B,
+            const ResponseStateXY<Shell> &C,
             const madness::real_function_3d &VB_op,
             const madness::real_function_3d &VC_op) {
   using namespace madness;
-  const vecfuncT &phi0 = g0.amo;
-  const vecfuncT &bx = B.x_alpha;
-  const vecfuncT &by = B.y_alpha;
-  const vecfuncT &cx = C.x_alpha;
-  const vecfuncT &cy = C.y_alpha;
+  if constexpr (std::is_same_v<Shell, ClosedShell>) {
+    const vecfuncT &phi0 = g0.amo;
+    const vecfuncT &bx = B.x_alpha;
+    const vecfuncT &by = B.y_alpha;
+    const vecfuncT &cx = C.x_alpha;
+    const vecfuncT &cy = C.y_alpha;
 
-  auto zeta_bc = make_zeta(world, by, cx, phi0);   // y_B with x_C
-  auto zeta_cb = make_zeta(world, cy, bx, phi0);   // y_C with x_B
+    auto zeta_bc = make_zeta(world, by, cx, phi0);   // y_B with x_C
+    auto zeta_cb = make_zeta(world, cy, bx, phi0);   // y_C with x_B
 
-  auto bc = compute_vbc_i(world, g0, bx, by, cx, cy, zeta_bc, VB_op);
-  auto cb = compute_vbc_i(world, g0, cx, cy, bx, by, zeta_cb, VC_op);
+    auto bc = compute_vbc_i(world, g0, bx, by, cx, cy, zeta_bc, VB_op);
+    auto cb = compute_vbc_i(world, g0, cx, cy, bx, by, zeta_cb, VC_op);
 
-  ResponseStateXY<ClosedShell> result;
-  result.x_alpha = bc.first;  gaxpy(world, 1.0, result.x_alpha, 1.0, cb.first);
-  result.y_alpha = bc.second; gaxpy(world, 1.0, result.y_alpha, 1.0, cb.second);
-  truncate(world, result.x_alpha);
-  truncate(world, result.y_alpha);
-  return result;
+    ResponseStateXY<ClosedShell> result;
+    result.x_alpha = bc.first;  gaxpy(world, 1.0, result.x_alpha, 1.0, cb.first);
+    result.y_alpha = bc.second; gaxpy(world, 1.0, result.y_alpha, 1.0, cb.second);
+    truncate(world, result.x_alpha);
+    truncate(world, result.y_alpha);
+    return result;
+  } else {
+    (void)world; (void)g0; (void)B; (void)C; (void)VB_op; (void)VC_op;
+    throw std::runtime_error(
+        "compute_vbc: open-shell VBC quadratic source not yet derived. The "
+        "two-electron action is shell-generic (two_electron::apply_channel_raw "
+        "+ Kernels<Full,OpenShell>::compute_density), so the open-shell build is "
+        "per-spin make_zeta + compute_vbc_i over alpha AND beta blocks -- future "
+        "work (step 6b/7).");
+  }
 }
 
 } // namespace molresponse_v3::vbc

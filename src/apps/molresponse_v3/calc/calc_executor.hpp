@@ -112,18 +112,23 @@ inline int es_root_index(const std::string &label) {
 /// Load a converged first-order state as an (X,Y) pair for the VBC build.
 /// Dynamic (freq != 0): the Full FD state directly. Static (freq == 0): the
 /// Static FD state with Y = X (the static limit). nullopt if not on disk.
-inline std::optional<ResponseStateXY<ClosedShell>>
+template <class Shell>
+inline std::optional<ResponseStateXY<Shell>>
 load_fd_as_xy(madness::World &world, const std::string &calc_dir,
               const Perturbation &pert, double freq) {
   if (is_static_freq(freq)) {
-    auto r = try_load_fd_state<Static, ClosedShell>(world, calc_dir, pert, freq);
+    auto r = try_load_fd_state<Static, Shell>(world, calc_dir, pert, freq);
     if (!r) return std::nullopt;
-    ResponseStateXY<ClosedShell> xy;
+    ResponseStateXY<Shell> xy;
     xy.x_alpha = madness::copy(world, r->state.responses[0].x_alpha);
-    xy.y_alpha = madness::copy(world, r->state.responses[0].x_alpha);
+    xy.y_alpha = madness::copy(world, r->state.responses[0].x_alpha);  // static: Y = X
+    if constexpr (std::is_same_v<Shell, OpenShell>) {
+      xy.x_beta = madness::copy(world, r->state.responses[0].x_beta);
+      xy.y_beta = madness::copy(world, r->state.responses[0].x_beta);
+    }
     return xy;
   }
-  auto r = try_load_fd_state<Full, ClosedShell>(world, calc_dir, pert, freq);
+  auto r = try_load_fd_state<Full, Shell>(world, calc_dir, pert, freq);
   if (!r) return std::nullopt;
   return r->state.responses[0];
 }
@@ -586,8 +591,8 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
 
   // The two converged first-order states (X,Y) at this protocol. The
   // prerequisites_converged gate guarantees they are converged before we run.
-  auto B = detail_exec::load_fd_as_xy(world, ctx.calc_dir, node.pert,   node.freq);
-  auto C = detail_exec::load_fd_as_xy(world, ctx.calc_dir, node.pert_c, node.freq_c);
+  auto B = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, node.pert,   node.freq);
+  auto C = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, node.pert_c, node.freq_c);
   if (!B || !C) {
     if (world.rank() == 0)
       madness::print("[CALC] solve_vbc:", node.id,
@@ -603,8 +608,8 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto VB_op = dipole_operator(world, node.pert.axis);
   auto VC_op = dipole_operator(world, node.pert_c.axis);
 
-  auto vbc_src = vbc::compute_vbc(world, g0, *B, *C, VB_op, VC_op);
-  save_vbc_state(world, vbc_src, ctx.calc_dir, node.id, /*converged=*/true);
+  auto vbc_src = vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op);
+  save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id, /*converged=*/true);
 
   if (world.rank() == 0)
     madness::print("[CALC] solve_vbc: built", node.id, "at", protocol_key());
@@ -925,9 +930,9 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
     const std::string vbc_id =
         vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);
 
-    auto vbc = load_vbc(world, ctx.calc_dir, vbc_id);
-    auto B = detail_exec::load_fd_as_xy(world, ctx.calc_dir, vr.pert_b, vr.freq_b);
-    auto C = detail_exec::load_fd_as_xy(world, ctx.calc_dir, vr.pert_c, vr.freq_c);
+    auto vbc = load_vbc<ClosedShell>(world, ctx.calc_dir, vbc_id);
+    auto B = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_b, vr.freq_b);
+    auto C = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_c, vr.freq_c);
     if (!vbc || !B || !C) {
       if (world.rank() == 0)
         madness::print("[BETA] skip", vbc_id, "— missing VBC or FD input");
@@ -936,7 +941,7 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
 
     for (int a = 0; a < 3; ++a) {
       const Perturbation pA = Perturbation::dipole(a);
-      auto xA = detail_exec::load_fd_as_xy(world, ctx.calc_dir, pA, ws);
+      auto xA = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, pA, ws);
       if (!xA) {
         if (world.rank() == 0)
           madness::print("[BETA] skip A=", beta_axis_name(a), "— missing FD",
@@ -944,7 +949,7 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
         continue;
       }
       auto VA_op = dipole_operator(world, a);
-      const double b = beta::beta_abc(world, g0, *xA, *vbc, *B, *C, VA_op);
+      const double b = beta::beta_abc<ClosedShell>(world, g0, *xA, *vbc, *B, *C, VA_op);
 
       if (world.rank() == 0) {
         madness::print("[BETA]  A=", beta_axis_name(a),

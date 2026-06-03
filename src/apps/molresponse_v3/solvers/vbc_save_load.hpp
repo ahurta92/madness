@@ -38,8 +38,9 @@ inline std::string vbc_archive_basename(const std::string &vbc_id,
 
 /// Save one VBC source: collective archive write + rank-0 metadata upsert.
 /// Assumes the active FunctionDefaults<3> (k, thresh) is the build protocol.
+template <class Shell>
 inline void save_vbc_state(madness::World &world,
-                           const ResponseStateXY<ClosedShell> &vbc,
+                           const ResponseStateXY<Shell> &vbc,
                            const std::string &dir,
                            const std::string &vbc_id,
                            bool converged) {
@@ -75,7 +76,8 @@ inline void save_vbc_state(madness::World &world,
 
 /// Load a VBC source built at the ACTIVE protocol (exact key) for the contraction.
 /// Returns nullopt if no converged vbc_states/<id>/<active-key> entry exists.
-inline std::optional<ResponseStateXY<ClosedShell>>
+template <class Shell>
+inline std::optional<ResponseStateXY<Shell>>
 load_vbc(madness::World &world, const std::string &dir, const std::string &vbc_id) {
   const std::string key = protocol_key();
   std::string archive;
@@ -94,7 +96,7 @@ load_vbc(madness::World &world, const std::string &dir, const std::string &vbc_i
   }
   world.gop.broadcast_serializable(archive, 0);
   if (archive.empty()) return std::nullopt;
-  return ResponseStateXY<ClosedShell>::load(world, dir + "/" + archive);
+  return ResponseStateXY<Shell>::load(world, dir + "/" + archive);
 }
 
 } // namespace molresponse_v3
