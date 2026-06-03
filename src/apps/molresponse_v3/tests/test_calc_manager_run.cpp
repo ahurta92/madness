@@ -196,6 +196,9 @@ int main(int argc, char **argv) {
 
       // beta: Tier-A property assembly (contraction) after the manager run.
       if (do_beta) assemble_beta(ctx, plan, protocol.back());
+      // alpha: contract converged FD states -> polarizability tensor (printed
+      // [ALPHA ...] + recorded under properties/alpha) for the plain FD path.
+      else if (es_roots == 0) assemble_alpha(ctx, plan, protocol.back());
 
       // ---- Validate at the top protocol ----------------------------------
       const std::string top_key = protocol_key_at(protocol.back());

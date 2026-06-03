@@ -973,6 +973,106 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Polarizability assembly (Tier-A, closed-shell). After the FD states converge,
+// contract each converged response against the dipole perturbation vectors:
+//
+//   alpha_ij(omega) = -2 * ( <x_i | v_j> + <y_i | v_j> )
+//
+// where x_i,y_i are the converged FD response (direction i, frequency omega) and
+// v_j = Q(mu_j * phi0) is the dipole perturbation source (direction j). For the
+// static case load_fd_as_xy supplies y = x, so this reduces to -4<x|v> -- the
+// same factors as molresponse_v2 PropertyManager::compute_alpha (-2 dynamic /
+// -4 static). Printed as [ALPHA ...] and recorded under properties/alpha.
+// ---------------------------------------------------------------------------
+inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
+                           double thresh) {
+  using namespace madness;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+
+  // Dipole directions + frequencies present in the plan.
+  std::set<int>    axes;
+  std::set<double> freqs;
+  for (const auto &r : plan.fd)
+    if (r.pert.kind == Perturbation::Kind::Dipole) {
+      axes.insert(r.pert.axis);
+      freqs.insert(r.freq);
+    }
+  if (axes.empty() || freqs.empty()) return;
+  const std::vector<int>    ax(axes.begin(),  axes.end());
+  const std::vector<double> fr(freqs.begin(), freqs.end());
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+  const std::string key = protocol_key();
+
+  // Dipole perturbation source per direction (built once at this protocol).
+  std::map<int, vector_real_function_3d> v;
+  for (int a : ax) v[a] = dipole_perturbation(world, gs, a);
+
+  if (world.rank() == 0)
+    madness::print("=== polarizability (alpha) assembly  protocol_key=", key,
+                   " ===");
+
+  for (double w : fr) {
+    Tensor<double> alpha(static_cast<long>(ax.size()),
+                         static_cast<long>(ax.size()));
+    bool complete = true;
+    for (size_t i = 0; i < ax.size() && complete; ++i) {
+      auto Xi = detail_exec::load_fd_as_xy<ClosedShell>(
+          world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
+      if (!Xi) {
+        if (world.rank() == 0)
+          madness::print("[ALPHA] skip omega=", w, " — missing FD dipole_",
+                         beta_axis_name(ax[i]));
+        complete = false;
+        break;
+      }
+      for (size_t j = 0; j < ax.size(); ++j) {
+        const double aij =
+            -2.0 * (inner(Xi->x_alpha, v[ax[j]]) + inner(Xi->y_alpha, v[ax[j]]));
+        alpha(static_cast<long>(i), static_cast<long>(j)) = aij;
+      }
+    }
+    if (!complete) continue;
+
+    if (world.rank() == 0) {
+      madness::print("[ALPHA] omega=", w, "  directions=",
+                     [&]{ std::string d; for (int a : ax) d += beta_axis_name(a); return d; }());
+      for (size_t i = 0; i < ax.size(); ++i)
+        for (size_t j = 0; j < ax.size(); ++j)
+          madness::print("[ALPHA]  alpha_", beta_axis_name(ax[i]),
+                         beta_axis_name(ax[j]), " (omega=", w, ") =",
+                         alpha(static_cast<long>(i), static_cast<long>(j)));
+      madness::print("[ALPHA] tensor(omega=", w, ") =\n", alpha);
+
+      auto meta = ResponseMetadata::load_or_create(
+          ctx.calc_dir + "/response_metadata.json");
+      nlohmann::json row;
+      row["omega"] = w;
+      std::string dirs; for (int a : ax) dirs += beta_axis_name(a);
+      row["directions"] = dirs;
+      nlohmann::json mat = nlohmann::json::array();
+      for (size_t i = 0; i < ax.size(); ++i) {
+        nlohmann::json r = nlohmann::json::array();
+        for (size_t j = 0; j < ax.size(); ++j)
+          r.push_back(alpha(static_cast<long>(i), static_cast<long>(j)));
+        mat.push_back(r);
+      }
+      row["alpha"] = mat;
+      meta.add_property("alpha", key, row);
+      meta.save();
+    }
+    world.gop.fence();
+  }
+}
+
 } // namespace molresponse_v3
 
 #endif // MOLRESPONSE_V3_CALC_CALC_EXECUTOR_HPP
