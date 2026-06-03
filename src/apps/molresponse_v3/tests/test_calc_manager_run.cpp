@@ -134,6 +134,11 @@ int main(int argc, char **argv) {
 
       ConvergencePolicy policy;
       policy.dconv_user = dconv;
+      // --step-restrict=orbital|state  (default per-orbital).
+      if (parser.key_exists("step-restrict") &&
+          parser.value("step-restrict") == "state")
+        policy.step_restrict_mode =
+            ConvergencePolicy::StepRestrictMode::PerState;
 
       const std::string calc_dir =
           parser.key_exists("calc-dir") ? parser.value_raw("calc-dir")
@@ -191,6 +196,33 @@ int main(int argc, char **argv) {
                           policy, print_level, calc_dir, max_iters};
       if (parser.key_exists("es-seed"))    ctx.seed_derived_from_es_root = true;
       if (parser.key_exists("no-es-seed")) ctx.seed_derived_from_es_root = false;
+      // ES/KAIN experiment knobs (workstreams A + C; sweepable without rebuild).
+      if (parser.key_exists("kain-maxsub"))
+        ctx.es_kain_maxsub = std::stoi(parser.value("kain-maxsub"));
+      if (parser.key_exists("kain-delay"))
+        ctx.es_main_kain_delay = std::stoi(parser.value("kain-delay"));
+      if (parser.key_exists("es-warmup-iters"))
+        ctx.es_tda_warmup_iters = std::stoi(parser.value("es-warmup-iters"));
+      if (parser.key_exists("es-oversample"))
+        ctx.es_warmup_oversample = std::stod(parser.value("es-oversample"));
+      if (parser.key_exists("maxrotn"))
+        ctx.es_maxrotn = std::stod(parser.value("maxrotn"));
+      if (parser.key_exists("es-guess"))
+        ctx.es_guess = (parser.value("es-guess") == "solid")
+                           ? ESGuessMode::SolidHarmonics
+                           : ESGuessMode::Random;
+      if (world.rank() == 0 && es_roots > 0) {
+        print("ES/KAIN knobs: guess=", to_string(ctx.es_guess),
+              " kain_maxsub=", ctx.es_kain_maxsub,
+              " kain_delay=", ctx.es_main_kain_delay,
+              " warmup_iters=", ctx.es_tda_warmup_iters,
+              " oversample=", ctx.es_warmup_oversample,
+              " maxrotn=", ctx.es_maxrotn,
+              " step_restrict=",
+              (policy.step_restrict_mode ==
+               ConvergencePolicy::StepRestrictMode::PerState ? "state"
+                                                             : "orbital"));
+      }
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
 

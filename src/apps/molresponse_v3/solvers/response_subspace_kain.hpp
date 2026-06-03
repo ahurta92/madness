@@ -245,6 +245,10 @@ private:
     const double maxrotn = policy_.maxrotn;
     if (maxrotn <= 0.0) return;
 
+    const bool per_state =
+        (policy_.step_restrict_mode ==
+         ConvergencePolicy::StepRestrictMode::PerState);
+
     for (std::size_t s = 0; s < in.size(); ++s) {
       auto v_old = in[s].flatten();
       auto v_new = out[s].flatten();
@@ -252,6 +256,30 @@ private:
       auto diff  = madness::sub(world_, v_new, v_old);
       auto norms = madness::norm2s(world_, diff);
       bool changed = false;
+
+      if (per_state) {
+        // ---- state-wise: one norm over the whole flattened state, one scale.
+        double total2 = 0.0;
+        for (double n : norms) total2 += n * n;
+        const double total = std::sqrt(total2);
+        if (total > maxrotn) {
+          const double scale = maxrotn / total;
+          for (std::size_t p = 0; p < v_new.size(); ++p)
+            v_new[p].gaxpy(scale, v_old[p], 1.0 - scale, false);
+          changed = true;
+          world_.gop.fence();
+          out[s].from_flat(v_new);
+          if (diag_level >= 1 && world_.rank() == 0) {
+            printf("[STEP-REST] iter=%d state=%zu STATE-WISE  ||Δstate||=%.3e "
+                   "scale=%.3f  cap=%.3e\n",
+                   calls_consumed_, s, total, scale, maxrotn);
+            fflush(stdout);
+          }
+        }
+        continue;
+      }
+
+      // ---- per-orbital (default): clamp each function independently.
       int  n_clamped = 0;
       double max_norm = 0.0;
       for (std::size_t p = 0; p < v_new.size(); ++p) {

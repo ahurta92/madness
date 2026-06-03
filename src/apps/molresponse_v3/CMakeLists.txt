@@ -35,6 +35,9 @@ add_mad_executable(test_calc_manager_run
 add_mad_executable(test_kernel_equivalence
                    "tests/test_kernel_equivalence.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
+add_mad_executable(test_step_restriction
+                   "tests/test_step_restriction.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3
