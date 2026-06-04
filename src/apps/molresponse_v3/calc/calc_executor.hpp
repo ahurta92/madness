@@ -90,7 +90,7 @@ struct ExecutorContext {
   bool              seed_derived_from_es_root = false;
   // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
   // closed-shell path (random guess, 10 warmup iters, 2x oversample, KAIN).
-  ESGuessMode       es_guess              = ESGuessMode::Random;
+  ESGuessMode       es_guess              = ESGuessMode::SolidHarmonics;  // sweep-validated default
   int               es_tda_warmup_iters   = 10;
   double            es_warmup_oversample  = 2.0;
   int               es_kain_maxsub        = 8;
@@ -100,8 +100,9 @@ struct ExecutorContext {
   // history). 0 = KAIN from iter 1 (previous behaviour). Distinct from
   // es_tda_warmup_iters, which is the separate oversampled-warmup pre-pass.
   int               es_main_kain_delay    = 0;
-  // Full-deflation locking of converged ES roots (workstream B). Off by default.
-  bool              es_lock_converged     = false;
+  // Full-deflation locking of converged ES roots (workstream B). ON by default
+  // (sweep-validated: required to converge near-degenerate h2o/c2h4 clusters).
+  bool              es_lock_converged     = true;
 };
 
 // ---------------------------------------------------------------------------

@@ -139,6 +139,10 @@ int main(int argc, char **argv) {
           parser.value("step-restrict") == "state")
         policy.step_restrict_mode =
             ConvergencePolicy::StepRestrictMode::PerState;
+      if (parser.key_exists("omega-factor"))
+        policy.omega_residual_factor = std::stod(parser.value("omega-factor"));
+      if (parser.key_exists("lock-min-pass"))
+        policy.lock_min_pass = std::stoi(parser.value("lock-min-pass"));
 
       const std::string calc_dir =
           parser.key_exists("calc-dir") ? parser.value_raw("calc-dir")
@@ -211,7 +215,8 @@ int main(int argc, char **argv) {
         ctx.es_guess = (parser.value("es-guess") == "solid")
                            ? ESGuessMode::SolidHarmonics
                            : ESGuessMode::Random;
-      if (parser.key_exists("lock-converged")) ctx.es_lock_converged = true;
+      if (parser.key_exists("lock-converged"))    ctx.es_lock_converged = true;
+      if (parser.key_exists("no-lock-converged")) ctx.es_lock_converged = false;
       if (world.rank() == 0 && es_roots > 0) {
         print("ES/KAIN knobs: guess=", to_string(ctx.es_guess),
               " kain_maxsub=", ctx.es_kain_maxsub,

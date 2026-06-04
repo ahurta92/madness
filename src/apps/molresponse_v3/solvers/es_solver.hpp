@@ -77,6 +77,10 @@ public:
     /// slot as roots[s] before rotation.
     std::vector<madness::real_function_3d>  rho_alpha_prev;
     std::vector<double>                     last_density_residual;
+    /// Per-root |ω_new − ω_old| (eigenvalue residual). The ES convergence /
+    /// lock criterion is gated on this + density, NOT the BSH amplitude
+    /// residual (which jitters for near-degenerate roots). Populated each step.
+    std::vector<double>                     last_omega_residual;
     /// Per-root sticky "locked" flag (workstream B, full deflation). When
     /// policy.lock_converged is set, a converged root is locked: excluded from
     /// the subspace + rotation, used only to deflate the active roots, and
@@ -132,6 +136,8 @@ public:
   void set_gs(ResponseGroundState gs) {
     gs_ = std::move(gs);
     kain_.reset();
+    lock_pass_.clear();
+    lock_protocol_thresh_ = -1.0;  // re-earn locks at the new protocol
   }
   const ResponseGroundState& gs()      const { return gs_; }
   int                        n_roots() const { return n_roots_; }
@@ -388,6 +394,7 @@ public:
     auto &omega_new = diag_result.omega;
     auto &U         = diag_result.U;
     out.omega = omega_new;
+    fill_omega_residual(out, in);
     print_debug_iter(A, S_mat, omega_new, U);
     print_rot_slots(out.iter, diag_result);
 
@@ -515,6 +522,7 @@ public:
     auto &omega_new = diag_result.omega;
     auto &U         = diag_result.U;
     out.omega = omega_new;
+    fill_omega_residual(out, in);
     print_debug_iter(A, S_mat, omega_new, U);
     print_rot_slots(out.iter, diag_result);
 
@@ -579,9 +587,11 @@ public:
     out.locked = in.locked;
     if (cur_thresh != lock_protocol_thresh_) {
       out.locked.assign(M, 0);
+      lock_pass_.assign(M, 0);
       lock_protocol_thresh_ = cur_thresh;
     }
     if (static_cast<int>(out.locked.size()) != M) out.locked.assign(M, 0);
+    if (static_cast<int>(lock_pass_.size())  != M) lock_pass_.assign(M, 0);
 
     std::vector<int> act;
     for (int s = 0; s < M; ++s) if (!out.locked[s]) act.push_back(s);
@@ -678,6 +688,8 @@ public:
       out.rho_alpha_prev[s] = std::move(rho_alpha[k]);
     }
 
+    fill_omega_residual(out, in);  // out.omega now fully populated (locked + active)
+
     // ---- KAIN + step restriction on ACTIVE slots only (masked) ------------
     {
       const int kain_diag = (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
@@ -691,14 +703,13 @@ public:
         break;
       }
 
-    // ---- lock newly-converged active roots (sticky within the protocol) ---
-    if (out.iter >= policy_.min_iters_before_conv) {
-      for (int i : act) {
-        const bool conv =
-            out.last_bsh_residual[i] < targets_.bsh_residual &&
-            (out.iter <= 1 ||
-             out.last_density_residual[i] < targets_.density_residual);
-        if (conv) out.locked[i] = 1;
+    // ---- lock active roots that pass the (energy+density) criterion for
+    //      lock_min_pass CONSECUTIVE iters (debounce against premature locking).
+    for (int i : act) {
+      if (es_root_converged(out, i)) {
+        if (++lock_pass_[i] >= policy_.lock_min_pass) out.locked[i] = 1;
+      } else {
+        lock_pass_[i] = 0;
       }
     }
     if (print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
@@ -712,28 +723,39 @@ public:
     return out;
   }
 
-  /// Converged when:
-  ///   iter >= min_iters_before_conv  AND
-  ///   max_s BSH-residual[s] < targets_.bsh_residual  AND
-  ///   max_s density-residual[s] < targets_.density_residual
-  ///                              (skipped on iter 1: rho_prev empty)
-  ///   OR  state.diverged is set (we exit either way).
+  /// Fill out.last_omega_residual[s] = |ω_out(s) − ω_in(s)| (eigenvalue step).
+  /// Requires out.omega fully populated. Sentinel 1e9 when no prior ω exists
+  /// (iter 0 / size mismatch) so a root can't be called converged on it.
+  void fill_omega_residual(State &out, const State &in) const {
+    const long M = out.omega.dim(0);
+    out.last_omega_residual.assign(static_cast<size_t>(M), 1.0e9);
+    if (in.omega.dim(0) != M) return;
+    for (long s = 0; s < M; ++s)
+      out.last_omega_residual[s] = std::abs(out.omega(s) - in.omega(s));
+  }
+
+  /// Per-root ES convergence: energy + density (NOT the BSH amplitude, which
+  /// jitters for near-degenerate roots after ω/ρ are settled). Needs ≥2 iters
+  /// (one to measure Δω). Drives both converged() and the lock trigger so they
+  /// share one definition. explosion_guard still catches runaway amplitudes.
+  bool es_root_converged(const State &out, int s) const {
+    if (out.iter <= std::max(1, policy_.min_iters_before_conv)) return false;
+    if (s >= static_cast<int>(out.last_density_residual.size())) return false;
+    if (s >= static_cast<int>(out.last_omega_residual.size()))   return false;
+    return out.last_density_residual[s] < targets_.density_residual &&
+           out.last_omega_residual[s]   < targets_.omega_residual;
+  }
+
+  /// Converged: diverged, OR every root passes es_root_converged (energy +
+  /// density). With locking on this is equivalent to "all roots locked".
   bool converged(const State &s) const {
     if (s.diverged) return true;  // exit; print_final reports diverged
     if (s.iter < policy_.min_iters_before_conv) return false;
-    if (s.last_bsh_residual.empty()) return false;
-
-    double mx_bsh = 0.0;
-    for (double r : s.last_bsh_residual) mx_bsh = std::max(mx_bsh, r);
-    if (mx_bsh >= targets_.bsh_residual) return false;
-
-    // First iter: rho_prev was empty going in, density residuals stay
-    // zero — accept BSH-only convergence in that one case.
-    if (s.iter <= 1) return true;
-
-    double mx_drho = 0.0;
-    for (double r : s.last_density_residual) mx_drho = std::max(mx_drho, r);
-    return mx_drho < targets_.density_residual;
+    const long M = s.omega.dim(0);
+    if (M == 0) return false;
+    for (long i = 0; i < M; ++i)
+      if (!es_root_converged(s, static_cast<int>(i))) return false;
+    return true;
   }
 
   void save(const State &s, const std::string &path_prefix) const {
@@ -849,6 +871,8 @@ private:
   // Protocol thresh at which the current locks were earned; locks clear when it
   // changes (a coarse-protocol convergence isn't valid at the finer one).
   double                     lock_protocol_thresh_ = -1.0;
+  // Per-slot consecutive-pass counter for the lock debounce (lock_min_pass).
+  std::vector<int>           lock_pass_;
   ResponseSubspaceKain<Storage>   kain_;
   PrintLevel                 print_level_ = PrintLevel::Normal;
   std::string                log_path_;

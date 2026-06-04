@@ -54,6 +54,12 @@ struct ConvergencePolicy {
   // sweep them independently.
   double bsh_residual_factor     = 5.0;
   double density_residual_factor = 5.0;
+  // ES convergence: the eigenvalue (omega) is the physical deliverable. For a
+  // near-degenerate ES root the raw BSH amplitude residual ||Δx|| jitters in the
+  // loosely-constrained degenerate direction long after omega + density are
+  // settled, so ES convergence is gated on density + |Δω| (NOT ||Δx||; see
+  // ESSolver::es_root_converged). omega target = omega_residual_factor * dconv.
+  double omega_residual_factor   = 1.0;
 
   // Cluster-unmix threshold factor in rs::diagonalize. The legacy
   // path uses 100·thresh for TDA (loose) and 10·thresh for Full/RPA
@@ -86,6 +92,12 @@ struct ConvergencePolicy {
 
   // Minimum iters before we even check convergence (lets KAIN warm up).
   int min_iters_before_conv = 0;
+
+  // Lock debounce (ESSolver full-deflation locking): a root must satisfy the
+  // convergence criterion for this many CONSECUTIVE iters before it is locked.
+  // Prevents premature locking of an unsettled root (which poisoned the
+  // deflation -> spurious roots in the 4-root h2o solid_lock sweep). >=2.
+  int lock_min_pass = 2;
 
   // ---- KAIN acceleration + step restriction ----
   // KAIN is enabled by default. The solver allocates an
@@ -154,8 +166,9 @@ struct ConvergencePolicy {
   bool lock_converged = false;
 
   struct Targets {
-    double bsh_residual;     // ‖x_old − x_new‖ cap
+    double bsh_residual;     // ‖x_old − x_new‖ cap (FD gate; ES sanity only)
     double density_residual; // ‖ρ_new − ρ_old‖ cap
+    double omega_residual;   // |ω_new − ω_old| cap (ES eigenvalue gate)
   };
 
   Targets effective_for_thresh(double thresh) const {
@@ -165,6 +178,7 @@ struct ConvergencePolicy {
     Targets t;
     t.density_residual = density_residual_factor * dconv;  // SCF.cc:2382 (da < dconv*max(5,natom))
     t.bsh_residual     = bsh_residual_factor * dconv;      // SCF.cc:2382 (bsh < 5*dconv)
+    t.omega_residual   = omega_residual_factor * dconv;    // ES eigenvalue gate
     return t;
   }
 };
