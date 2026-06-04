@@ -90,7 +90,8 @@ template <typename Type, typename Shell>
 void save_es_roots(madness::World &world,
                    const typename ESSolver<Type, Shell>::State &state,
                    const std::string &dir,
-                   bool converged) {
+                   bool converged,
+                   bool register_aggregate = true) {
   const int n_roots = static_cast<int>(state.roots.size());
   MADNESS_CHECK(n_roots > 0);
 
@@ -173,42 +174,48 @@ void save_es_roots(madness::World &world,
     std::ofstream out(dir + "/roots.json");
     out << j.dump(2) << "\n";
 
-    // 13d: also upsert into the calc-level aggregate response_metadata.json.
-    // Authority split (doc 13): per-bundle roots.json above is the loader's
-    // truth; the aggregate is the queryable index FD/ES/properties share so
-    // property matching is a string compare on protocol_key.
-    namespace fs = std::filesystem;
-    fs::path bundle_path(dir);
-    fs::path calc_dir = bundle_path.parent_path();
-    if (calc_dir.empty()) calc_dir = ".";
-    const std::string aggregate_path =
-        (calc_dir / "response_metadata.json").string();
+    // 13d: upsert into the calc-level aggregate response_metadata.json — UNLESS
+    // this is a side bundle (e.g. a cached warmup guess) that must not appear in
+    // the shared excited_states index (it would collide with / be picked up as
+    // the main es__<key> restart bundle). roots.json above is always written so
+    // load_es_roots(dir) can read the side bundle directly.
+    if (register_aggregate) {
+      namespace fs = std::filesystem;
+      fs::path bundle_path(dir);
+      fs::path calc_dir = bundle_path.parent_path();
+      if (calc_dir.empty()) calc_dir = ".";
+      const std::string aggregate_path =
+          (calc_dir / "response_metadata.json").string();
 
-    auto meta = ResponseMetadata::load_or_create(aggregate_path);
-    const std::string key = protocol_key(thresh, k_now);
-    if (!meta.json()["protocols"].contains(key)) {
-      meta.set_protocol(key, thresh, k_now, /*index=*/-1);
+      auto meta = ResponseMetadata::load_or_create(aggregate_path);
+      const std::string key = protocol_key(thresh, k_now);
+      if (!meta.json()["protocols"].contains(key)) {
+        meta.set_protocol(key, thresh, k_now, /*index=*/-1);
+      }
+
+      nlohmann::json bundle_entry = {
+          {"type",             detail_save_load::type_tag<Type>()},
+          {"shell",            detail_save_load::shell_tag<Shell>()},
+          {"n_roots",          n_roots},
+          {"bundle_dir",       bundle_path.filename().string()},
+          {"converged",        converged},
+          {"diverged",         state.diverged},
+          {"slot_permutation", stable_index},
+          {"roots",            roots_arr},
+          {"iter",             state.iter},
+          {"rss_gb",           bundle_rss_gb},
+      };
+      meta.set_es_bundle(key, bundle_entry);
+      meta.save();
+
+      madness::print("[SAVE] es_bundle: protocol_key=", key,
+                     "  bundle_dir=", bundle_path.filename().string(),
+                     "  n_roots=", n_roots,
+                     "  aggregate=", aggregate_path);
+    } else {
+      madness::print("[SAVE] es side-bundle (no aggregate): dir=", dir,
+                     "  n_roots=", n_roots);
     }
-
-    nlohmann::json bundle_entry = {
-        {"type",             detail_save_load::type_tag<Type>()},
-        {"shell",            detail_save_load::shell_tag<Shell>()},
-        {"n_roots",          n_roots},
-        {"bundle_dir",       bundle_path.filename().string()},
-        {"converged",        converged},
-        {"diverged",         state.diverged},
-        {"slot_permutation", stable_index},
-        {"roots",            roots_arr},
-        {"iter",             state.iter},
-        {"rss_gb",           bundle_rss_gb},
-    };
-    meta.set_es_bundle(key, bundle_entry);
-    meta.save();
-
-    madness::print("[SAVE] es_bundle: protocol_key=", key,
-                   "  bundle_dir=", bundle_path.filename().string(),
-                   "  n_roots=", n_roots,
-                   "  aggregate=", aggregate_path);
   }
   world.gop.fence();
 }

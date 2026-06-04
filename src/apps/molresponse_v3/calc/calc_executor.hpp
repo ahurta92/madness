@@ -103,6 +103,10 @@ struct ExecutorContext {
   // Full-deflation locking of converged ES roots (workstream B). ON by default
   // (sweep-validated: required to converge near-degenerate h2o/c2h4 clusters).
   bool              es_lock_converged     = true;
+  // Cache the (promoted) TDA warmup guess to a side bundle es_warmup__<pkey> and
+  // reuse it on later runs, so iterating on the Full main solve skips the warmup.
+  // Opt-in; the main solve never overwrites the cache (stable fixed start point).
+  bool              es_warmup_cache       = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -439,13 +443,10 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
     for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
   };
 
+  // Report/save convergence with the SAME criterion the iteration stops on
+  // (ESSolver::converged = energy+density, not the jittering BSH amplitude).
   auto converged_now = [](const Solver::State &st, const Solver &sv) {
-    if (st.diverged) return false;
-    double mb = 0.0, md = 0.0;
-    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
-    for (double r : st.last_density_residual) md = std::max(md, r);
-    const auto &t = sv.targets();
-    return mb <= t.bsh_residual && md <= t.density_residual;
+    return !st.diverged && sv.converged(st);
   };
 
   auto post_step = [&](double, Solver &solv, Solver::State &st) {
@@ -516,14 +517,46 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
     if (loaded) { s0 = std::move(loaded->state); seeded = true; }
   }
   if (!seeded) {
-    const long n_warm = std::max<long>(
-        n_roots, static_cast<long>(
-                     std::ceil(ctx.es_warmup_oversample *
-                               static_cast<double>(n_roots))));
-    auto tda = run_oversampled_tda_warmup<ClosedShell>(
-        world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
-        c_xc, lo, ctx.print_level, ctx.es_guess);
-    s0 = promote_tda_to_full_closed_shell(world, tda);
+    const std::string warm_cache =
+        ctx.calc_dir + "/es_warmup__" + protocol_key();
+    bool used_cache = false;
+    if (ctx.es_warmup_cache) {
+      int have = 0;
+      if (world.rank() == 0)
+        have = std::filesystem::exists(warm_cache + "/roots.json") ? 1 : 0;
+      world.gop.broadcast(have, 0);
+      if (have) {
+        try {
+          s0 = load_es_roots<Full, ClosedShell>(world, warm_cache);
+          used_cache = true;
+          if (world.rank() == 0)
+            madness::print("[CALC] solve_es_full: reusing cached TDA warmup guess"
+                           " from", warm_cache, "(skipping warmup)");
+        } catch (const std::exception &e) {
+          if (world.rank() == 0)
+            madness::print("[CALC] solve_es_full: cached warmup unusable (",
+                           e.what(), ") — running a fresh warmup");
+        }
+      }
+    }
+    if (!used_cache) {
+      const long n_warm = std::max<long>(
+          n_roots, static_cast<long>(
+                       std::ceil(ctx.es_warmup_oversample *
+                                 static_cast<double>(n_roots))));
+      auto tda = run_oversampled_tda_warmup<ClosedShell>(
+          world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
+          c_xc, lo, ctx.print_level, ctx.es_guess);
+      s0 = promote_tda_to_full_closed_shell(world, tda);
+      if (ctx.es_warmup_cache) {
+        save_es_roots<Full, ClosedShell>(world, s0, warm_cache,
+                                         /*converged=*/false,
+                                         /*register_aggregate=*/false);
+        if (world.rank() == 0)
+          madness::print("[CALC] solve_es_full: cached TDA warmup guess ->",
+                         warm_cache);
+      }
+    }
   }
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
@@ -551,13 +584,10 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
     for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
   };
 
+  // Report/save convergence with the SAME criterion the iteration stops on
+  // (ESSolver::converged = energy+density, not the jittering BSH amplitude).
   auto converged_now = [](const Solver::State &st, const Solver &sv) {
-    if (st.diverged) return false;
-    double mb = 0.0, md = 0.0;
-    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
-    for (double r : st.last_density_residual) md = std::max(md, r);
-    const auto &t = sv.targets();
-    return mb <= t.bsh_residual && md <= t.density_residual;
+    return !st.diverged && sv.converged(st);
   };
 
   auto post_step = [&](double, Solver &solv, Solver::State &st) {

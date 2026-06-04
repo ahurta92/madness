@@ -217,6 +217,7 @@ int main(int argc, char **argv) {
                            : ESGuessMode::Random;
       if (parser.key_exists("lock-converged"))    ctx.es_lock_converged = true;
       if (parser.key_exists("no-lock-converged")) ctx.es_lock_converged = false;
+      if (parser.key_exists("es-warmup-cache"))   ctx.es_warmup_cache = true;
       if (world.rank() == 0 && es_roots > 0) {
         print("ES/KAIN knobs: guess=", to_string(ctx.es_guess),
               " kain_maxsub=", ctx.es_kain_maxsub,
@@ -228,7 +229,8 @@ int main(int argc, char **argv) {
               (policy.step_restrict_mode ==
                ConvergencePolicy::StepRestrictMode::PerState ? "state"
                                                              : "orbital"),
-              " lock_converged=", (ctx.es_lock_converged ? "on" : "off"));
+              " lock_converged=", (ctx.es_lock_converged ? "on" : "off"),
+              " warmup_cache=", (ctx.es_warmup_cache ? "on" : "off"));
       }
       FdResponseExecutor exec(ctx);
       mgr.run(world, exec);
