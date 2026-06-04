@@ -107,6 +107,10 @@ struct ExecutorContext {
   // reuse it on later runs, so iterating on the Full main solve skips the warmup.
   // Opt-in; the main solve never overwrites the cache (stable fixed start point).
   bool              es_warmup_cache       = false;
+  // Persistent location for the warmup cache (empty = ctx.calc_dir). Set this to
+  // a fixed per-fixture path so the cached guess survives across fresh calc dirs
+  // (cm_es makes a new timestamped calc dir each run). Setting it implies caching.
+  std::string       es_warmup_cache_dir;
 };
 
 // ---------------------------------------------------------------------------
@@ -517,8 +521,9 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
     if (loaded) { s0 = std::move(loaded->state); seeded = true; }
   }
   if (!seeded) {
-    const std::string warm_cache =
-        ctx.calc_dir + "/es_warmup__" + protocol_key();
+    const std::string cache_base =
+        ctx.es_warmup_cache_dir.empty() ? ctx.calc_dir : ctx.es_warmup_cache_dir;
+    const std::string warm_cache = cache_base + "/es_warmup__" + protocol_key();
     bool used_cache = false;
     if (ctx.es_warmup_cache) {
       int have = 0;

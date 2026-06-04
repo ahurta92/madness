@@ -218,6 +218,10 @@ int main(int argc, char **argv) {
       if (parser.key_exists("lock-converged"))    ctx.es_lock_converged = true;
       if (parser.key_exists("no-lock-converged")) ctx.es_lock_converged = false;
       if (parser.key_exists("es-warmup-cache"))   ctx.es_warmup_cache = true;
+      if (parser.key_exists("es-warmup-cache-dir")) {
+        ctx.es_warmup_cache_dir = parser.value_raw("es-warmup-cache-dir");
+        ctx.es_warmup_cache = true;   // a cache dir implies caching
+      }
       if (world.rank() == 0 && es_roots > 0) {
         print("ES/KAIN knobs: guess=", to_string(ctx.es_guess),
               " kain_maxsub=", ctx.es_kain_maxsub,
