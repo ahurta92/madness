@@ -111,8 +111,22 @@ dipole_perturbation_beta(World& world, const GroundState& gs, int axis) {
 /// @return       Q-projected perturbation vector
 inline vector_real_function_3d
 nuclear_perturbation(World& world, const GroundState& gs, int atom, int axis) {
-    DNuclear<double, 3> dV(world, &gs.scf(), atom, axis);
-    auto rhs = dV(gs.orbitals_alpha());
+    MADNESS_CHECK(axis >= 0 && axis <= 2);
+    // FD source from the SAME operator the VBC/beta contraction uses:
+    // madchem::MolecularDerivativeFunctor (the molecule's smoothed nuclear-
+    // attraction derivative, with special_points AT the nucleus so the MRA
+    // refines the sharp feature). Matches molresponse_v2 perturbation_vector
+    // (nuclear). The old DNuclear(SCF/NCF) path was a DIFFERENT, under-resolved
+    // operator -> source/operator mismatch (wrong Raman) + a peaked source that
+    // blew the FD past the explosion guard.
+    real_function_3d dV =
+        real_factory_3d(world)
+            .functor(real_functor_3d(
+                new madchem::MolecularDerivativeFunctor(gs.molecule(), atom, axis)))
+            .truncate_on_project()
+            .truncate_mode(0);
+    dV.get_impl()->set_truncate_mode(1);
+    auto rhs = mul(world, dV, gs.orbitals_alpha());
     rhs = gs.Q()(rhs);
     truncate(world, rhs, FunctionDefaults<3>::get_thresh());
     return rhs;
