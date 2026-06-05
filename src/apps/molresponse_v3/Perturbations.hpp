@@ -153,6 +153,41 @@ dipole_operators(World& world) {
             dipole_operator(world, 2)};
 }
 
+/// Raw nuclear-displacement operator dV_nuc/dQ(atom, axis) as a real_function_3d,
+/// for the VBC/beta contraction (the nuclear analog of dipole_operator; used as
+/// VC_op in Raman beta(dipole; dipole, nuclear)). Matches molresponse_v2
+/// make_perturbation_operator(NuclearDisplacement): MolecularDerivativeFunctor on
+/// gs.molecule(), truncate-on-project then truncate_mode 1.
+inline real_function_3d
+nuclear_operator(World& world, const GroundState& gs, int atom, int axis) {
+    MADNESS_CHECK(axis >= 0 && axis <= 2);
+    real_function_3d dvdx =
+        real_factory_3d(world)
+            .functor(real_functor_3d(
+                new madchem::MolecularDerivativeFunctor(gs.molecule(), atom, axis)))
+            .truncate_on_project()
+            .truncate_mode(0);
+    dvdx.get_impl()->set_truncate_mode(1);
+    return dvdx;
+}
+
+/// Dispatch the raw perturbation operator for the VBC/beta contraction by kind:
+/// dipole -> r (dipole_operator); nuclear -> dV_nuc/dQ (nuclear_operator). This
+/// is what lets a VBC pair mix perturbation types (e.g. Raman = dipole x nuclear).
+inline real_function_3d
+perturbation_operator(World& world, const GroundState& gs, const Perturbation& p) {
+    switch (p.kind) {
+        case Perturbation::Kind::Dipole:
+            return dipole_operator(world, p.axis);
+        case Perturbation::Kind::NuclearDisplacement:
+            return nuclear_operator(world, gs, p.atom, p.axis);
+        case Perturbation::Kind::Magnetic:
+            throw std::runtime_error(
+                "perturbation_operator: magnetic operator not implemented");
+    }
+    throw std::runtime_error("perturbation_operator: unknown perturbation kind");
+}
+
 } // namespace molresponse_v3
 
 #endif // MOLRESPONSE_V3_PERTURBATIONS_HPP
