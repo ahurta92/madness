@@ -134,6 +134,13 @@ int main(int argc, char **argv) {
 
       ConvergencePolicy policy;
       policy.dconv_user = dconv;
+      // --explosion-guard=VAL caps the diverging-residual bail-out; --no-explosion-
+      // guard disables it (test whether the guard just fires early for stiff
+      // nuclear-displacement FD states).
+      if (parser.key_exists("explosion-guard"))
+        policy.explosion_guard = std::stod(parser.value("explosion-guard"));
+      if (parser.key_exists("no-explosion-guard"))
+        policy.explosion_guard = 1.0e30;
       // --step-restrict=orbital|state  (default per-orbital).
       if (parser.key_exists("step-restrict") &&
           parser.value("step-restrict") == "state")
