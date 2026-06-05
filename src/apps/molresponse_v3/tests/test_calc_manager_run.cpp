@@ -161,6 +161,16 @@ int main(int argc, char **argv) {
         req.beta_process = parser.key_exists("beta-static") ? BetaProcess::Static
                                                             : BetaProcess::SHG;
         req.frequencies  = freqs;
+      } else if (parser.key_exists("raman")) {
+        // Vibrational Raman: β(A=dipole; B=dipole@ω, C=nuclear@0). SINGLE
+        // component for now (--nuc-atom/--nuc-axis; default atom 0, axis z).
+        req.kind          = ResponsePropertyKind::PolarizabilityGradient;
+        req.gradient_mode = GradientMode::Nuclear;
+        req.frequencies   = freqs;
+        req.raman_nuc_atom = parser.key_exists("nuc-atom")
+                                 ? std::stoi(parser.value("nuc-atom")) : 0;
+        req.raman_nuc_axis = parser.key_exists("nuc-axis")
+                                 ? std::stoi(parser.value("nuc-axis")) : 2;
       } else if (es_roots > 0) {
         // ES(TDA) bundle + symbolic derived dipole FD; the calc manager solves
         // the bundle, then expands to FD at the converged excitation energies.
@@ -240,9 +250,9 @@ int main(int argc, char **argv) {
       mgr.run(world, exec);
 
       // beta: Tier-A property assembly (contraction) after the manager run.
-      if (do_beta) assemble_beta(ctx, plan, protocol.back());
-      // alpha: contract converged FD states -> polarizability tensor (printed
-      // [ALPHA ...] + recorded under properties/alpha) for the plain FD path.
+      // beta OR raman both fill plan.vbc + share assemble_beta (it tags raman
+      // vs beta per pair). alpha only for the plain-FD path.
+      if (!plan.vbc.empty()) assemble_beta(ctx, plan, protocol.back());
       else if (es_roots == 0) assemble_alpha(ctx, plan, protocol.back());
 
       // ---- Validate at the top protocol ----------------------------------

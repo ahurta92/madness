@@ -75,6 +75,12 @@ struct ResponsePropertyRequest {
   std::vector<double>  frequencies;
   /// Cartesian directions for the OPTICAL (dipole) tensor indices.
   std::vector<char>    axes         = {'x','y','z'};
+  /// Raman (PolarizabilityGradient/Nuclear): restrict to a SINGLE nuclear
+  /// component (atom index, axis 0=x/1=y/2=z) for a cheap one-component test.
+  /// -1 (default) = full per-atom xyz set (full-tensor VBC emission + sentinel
+  /// expansion is deferred until the state-parallel design lands).
+  int                  raman_nuc_atom = -1;
+  int                  raman_nuc_axis = -1;
   BetaProcess          beta_process = BetaProcess::SHG;       // Hyperpolarizability
   GradientMode         gradient_mode = GradientMode::Nuclear;  // PolarizabilityGradient
   int                  n_roots      = 0;                       // Resonant gradient
@@ -312,9 +318,27 @@ inline ResponsePlan plan_one(const ResponsePropertyRequest &req) {
         // ...plus nuclear-displacement states at ω=0 for ALL atoms. Normal-
         // mode analysis needs the full 3N Cartesian set, so emit all three
         // displacement axes regardless of the optical `axes` subset.
-        for (int dax = 0; dax < 3; ++dax) {
-          plan.nuclear_fd.push_back(
-              {Perturbation::nuclear_all(dax), 0.0, req.protocol_thresholds});
+        if (req.raman_nuc_atom >= 0 && req.raman_nuc_axis >= 0) {
+          // SINGLE component (cheap test): concrete nuclear pert (no sentinel)
+          // + its FD + the dipole x nuclear VBC pairs that feed the contraction.
+          const Perturbation nuc =
+              Perturbation::nuclear(req.raman_nuc_atom, req.raman_nuc_axis);
+          plan.nuclear_fd.push_back({nuc, 0.0, req.protocol_thresholds});
+          for (double w : req.frequencies)
+            for (char ax_b : req.axes) {
+              int ib = axis_index(ax_b);
+              if (ib < 0) continue;
+              plan.vbc.push_back({Perturbation::dipole(ib), nuc, w, 0.0,
+                                  req.protocol_thresholds});
+            }
+        } else {
+          // FULL set: all atoms x xyz nuclear FD. The dipole x nuclear VBC
+          // emission + per-atom sentinel expansion in build_dag is DEFERRED
+          // until state-parallel lands (use raman_nuc_atom/axis for now).
+          for (int dax = 0; dax < 3; ++dax) {
+            plan.nuclear_fd.push_back(
+                {Perturbation::nuclear_all(dax), 0.0, req.protocol_thresholds});
+          }
         }
       } else {
         // Resonance Raman: transition polarizability via excited states.

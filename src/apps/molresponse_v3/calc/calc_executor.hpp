@@ -650,8 +650,10 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
 
   // Raw one-electron perturbation operators for B and C (dipole only for now).
-  auto VB_op = dipole_operator(world, node.pert.axis);
-  auto VC_op = dipole_operator(world, node.pert_c.axis);
+  // Generic per-kind operator (dipole -> r, nuclear -> dV/dQ) so a VBC pair can
+  // mix types (Raman = dipole x nuclear).
+  auto VB_op = perturbation_operator(world, gs, node.pert);
+  auto VC_op = perturbation_operator(world, gs, node.pert_c);
 
   auto vbc_src = vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op);
   save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id, /*converged=*/true);
@@ -975,6 +977,10 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
     const std::string vbc_id =
         vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);
 
+    const bool is_raman =
+        (vr.pert_c.kind == Perturbation::Kind::NuclearDisplacement);
+    const char *pkey = is_raman ? "raman" : "beta";
+    const char *ptag = is_raman ? "[RAMAN]" : "[BETA]";
     auto vbc = load_vbc<ClosedShell>(world, ctx.calc_dir, vbc_id);
     auto B = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_b, vr.freq_b);
     auto C = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_c, vr.freq_c);
@@ -997,14 +1003,14 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
       const double b = beta::beta_abc<ClosedShell>(world, g0, *xA, *vbc, *B, *C, VA_op);
 
       if (world.rank() == 0) {
-        madness::print("[BETA]  A=", beta_axis_name(a),
+        madness::print(ptag, " A=", beta_axis_name(a),
                        "  B=", vr.pert_b.description(),
                        "  C=", vr.pert_c.description(),
                        "  fB=", vr.freq_b, "  fC=", vr.freq_c,
-                       "  beta=", b);
+                       "  value=", b);
         auto meta = ResponseMetadata::load_or_create(
             ctx.calc_dir + "/response_metadata.json");
-        meta.add_property("beta", key,
+        meta.add_property(pkey, key,
                           nlohmann::json{{"A", std::string(1, beta_axis_name(a))},
                                          {"B", vr.pert_b.description()},
                                          {"C", vr.pert_c.description()},
