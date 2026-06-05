@@ -258,8 +258,24 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   //   3. else the perturbation source.
   typename Solver::State s0;
   s0.responses.resize(1);
-  s0.responses[0] = tgt.responses[0].source;
-  const char *seed_kind = "source";
+  // Fresh guess x0 = 0 (matches molresponse_v2, which zero-allocates the response):
+  // the first BSH step then gives G(-2*V_p*phi), the bounded uncoupled first-order
+  // response. Seeding x0 = the source directly blows up iter-1 for a large/peaked
+  // source (nuclear displacement) — V0*x0 and the BSH shift*x0 are O(||source||),
+  // which for nuclear exceeds the explosion guard. Same converged fixed point
+  // either way (linear response is unique), so alpha/beta values are unchanged;
+  // this only fixes the transient / divergence.
+  // DEEP-copy the source's shape then zero it. A shallow copy (operator=) shares
+  // the Function handles, so scaling it would also zero the perturbation source
+  // itself -> no driving term -> x stays 0 (the "converged in 1 iter, res=0,
+  // value=0" bug). madness::copy gives an independent buffer.
+  s0.responses[0] = tgt.responses[0].source;    // shape (shallow)
+  {
+    auto zflat = madness::copy(world, s0.responses[0].flatten());
+    madness::scale(world, zflat, 0.0);
+    s0.responses[0].from_flat(zflat);           // independent zeros
+  }
+  const char *seed_kind = "zero";
 
   bool seeded = false;
   if (action != NodeAction::Fresh) {
@@ -368,10 +384,11 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 /// step. Mirrors solve_fd_protocol: set protocol -> prepare GS -> build problem
 /// -> guess (Fresh = fresh solid-harmonics trial; else nearest on-disk bundle
 /// via the restart precedence) -> iterate_protocol over the single step (guarded
-/// set_gs/reproject prepare + save_es_roots post-step) -> return the converged
-/// excitation energies in NodeResult::es_root_freqs (which drive DerivedFD
-/// expansion). The bundle saves to a per-protocol subdir `es__<key>` under
-/// calc_dir so lower-protocol restart works.
+/// set_gs/reproject prepare + save_es_roots post-step). The bundle saves to a
+/// per-protocol subdir `es__<key>` under calc_dir so lower-protocol restart
+/// works; the converged excitation energies are persisted to
+/// response_metadata.json (excited_states/<key>/roots[].omega), which is what
+/// DerivedFD expansion (expand_converged_es) reads — making expansion restart-safe.
 inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
                                             double thresh, NodeAction action) {
   using namespace madness;
@@ -468,8 +485,9 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
-  for (long i = 0; i < sf.omega.size(); ++i)
-    r.es_root_freqs.push_back(sf.omega(i));
+  // NB: ES roots are persisted to response_metadata.json via save_es_roots;
+  // DerivedFD expansion reads them from there (expand_converged_es), NOT from
+  // this return value (run()'s loop discards it). So no in-memory copy here.
   return r;
 }
 
@@ -610,8 +628,9 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
-  for (long i = 0; i < sf.omega.size(); ++i)
-    r.es_root_freqs.push_back(sf.omega(i));
+  // NB: ES roots are persisted to response_metadata.json via save_es_roots;
+  // DerivedFD expansion reads them from there (expand_converged_es), NOT from
+  // this return value (run()'s loop discards it). So no in-memory copy here.
   return r;
 }
 
@@ -916,7 +935,7 @@ private:
         c.freq       = fd_freq;
         c.protocols  = sym.protocols;
         c.es_root_id = make_es_root_label(static_cast<int>(i));  // provenance
-        c.id         = fd_node_id(c.pert, w);
+        c.id         = fd_node_id(c.pert, fd_freq);  // id keys on the node's TRUE freq (ωₙ/2), not ωₙ
         if (have.count(c.id)) continue;                  // dedup -> idempotent
         have.insert(c.id);
         additions.push_back(std::move(c));
