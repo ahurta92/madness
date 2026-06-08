@@ -99,6 +99,24 @@ inline std::string fock_json_from_archive_dir(const std::string &archive_file) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage timing (R1a, doc 16 L3). Rank-0 wall/cpu deltas — the "shape of the
+// run" (is time in solving or assembly? which stage dominates?). wall_time() /
+// cpu_time() are LOCAL (not collective); stage boundaries are bracketed by the
+// collectives inside each stage, so rank-0's wall is representative. Per-rank-max
+// reduction is a later refinement.
+// ---------------------------------------------------------------------------
+namespace detail_workflow {
+struct StageTimer {
+  double w0 = madness::wall_time();
+  double c0 = madness::cpu_time();
+  nlohmann::json lap() const {
+    return nlohmann::json{{"wall_s", madness::wall_time() - w0},
+                          {"cpu_s", madness::cpu_time() - c0}};
+  }
+};
+} // namespace detail_workflow
+
+// ---------------------------------------------------------------------------
 // run_response — load ground -> plan -> CalcManager -> assemble -> Output.
 // ---------------------------------------------------------------------------
 
@@ -106,6 +124,9 @@ inline ResponseWorkflowOutput
 run_response(madness::World &world, const ResponseWorkflowInput &in) {
   ResponseWorkflowOutput out;
   MADNESS_CHECK(!in.protocols.empty());
+  const detail_workflow::StageTimer t_total;
+  nlohmann::json timing;
+  detail_workflow::StageTimer t_load;
 
   // 1. Protocol + ground state. set_response_protocol to the coarsest rung up
   //    front (the executor re-prepares per protocol during the solve).
@@ -122,24 +143,33 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
   auto coulop = madness::poperatorT(
       madness::CoulombOperatorPtr(world, gs.params().lo(), 0.001 * cur_thresh));
   gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
+  timing["load"] = t_load.lap();
 
-  // 2. Drive the calc manager.
+  // 2a. Build the DAG.
+  detail_workflow::StageTimer t_build;
   CalcManager::Policy mgr_policy;
   mgr_policy.max_iters_per_step = in.settings.max_iters;
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
   mgr.build(molecule.natom());
+  timing["plan_build"] = t_build.lap();
 
+  // 2b. Drive the calc manager (the solve).
+  detail_workflow::StageTimer t_solve;
   ExecutorContext ctx(world, gs, header.L, fock_json, in.settings);
   FdResponseExecutor exec(ctx);
   mgr.run(world, exec);
+  timing["solve"] = t_solve.lap();
 
   // 3. Tier-A property assembly (off the solve path). beta OR raman fill
   //    plan.vbc and share assemble_beta; alpha only for the plain-FD path.
   //    es-only runs (plan.es non-empty, no vbc) assemble no scalar here.
+  detail_workflow::StageTimer t_assemble;
   if (!in.plan.vbc.empty())
     assemble_beta(ctx, in.plan, in.protocols.back());
   else if (in.plan.es.empty())
     assemble_alpha(ctx, in.plan, in.protocols.back());
+  timing["assemble"] = t_assemble.lap();
+  timing["total"] = t_total.lap();
 
   // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).
   if (world.rank() == 0) {
@@ -148,6 +178,12 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
     out.metadata = meta.json();
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];
+    out.timing = std::move(timing);
+    if (in.settings.print_level >= PrintLevel::Normal)
+      madness::print("[TIMING] load_wall_s=", out.timing["load"]["wall_s"],
+                     "  solve_wall_s=", out.timing["solve"]["wall_s"],
+                     "  assemble_wall_s=", out.timing["assemble"]["wall_s"],
+                     "  total_wall_s=", out.timing["total"]["wall_s"]);
   }
   return out;
 }
