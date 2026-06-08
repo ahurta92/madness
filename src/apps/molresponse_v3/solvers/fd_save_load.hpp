@@ -286,41 +286,18 @@ try_load_fd_state(madness::World &world,
   const std::string fkey       = ResponseMetadata::freq_key(freq);
   const std::string pdesc      = pert.description();
 
-  // Rank-0 picks the source_key. Empty string ↔ no compatible match.
+  // Rank-0 picks the source_key. Empty string ↔ no compatible match. Selection
+  // goes through the shared best_usable_fd_source_key helper — the SAME one
+  // reconcile_protocol uses — so the load can never pick a source the reconcile
+  // verdict didn't sanction. It also excludes `diverged` snapshots (never seed a
+  // blown-up state) and accepts coarser PARTIALS, not just converged ones.
   std::string source_key;
   if (world.rank() == 0) {
     const std::string meta_path = dir + "/response_metadata.json";
     if (std::filesystem::exists(meta_path)) {
       auto meta = ResponseMetadata::load_or_create(meta_path);
-      const auto &j = meta.json();
-      if (j["fd_states"].contains(pdesc) &&
-          j.contains("protocols") && j["protocols"].is_object()) {
-        struct Cand { std::string key; double thresh; int k; };
-        std::vector<Cand> cands;
-        for (const auto &[key, ent] : j["fd_states"][pdesc].items()) {
-          if (!ent.contains(fkey))             continue;
-          if (!j["protocols"].contains(key))   continue;
-          const double t  = j["protocols"][key].value("thresh", 0.0);
-          const int    kk = j["protocols"][key].value("k", 0);
-          if (t >= active_thresh && kk <= active_k) {
-            cands.push_back({key, t, kk});
-          }
-        }
-        // Exact match wins.
-        for (const auto &c : cands) {
-          if (c.key == active_key) { source_key = c.key; break; }
-        }
-        // Else closest-to-active: max k, then min thresh.
-        if (source_key.empty() && !cands.empty()) {
-          auto best = std::max_element(
-              cands.begin(), cands.end(),
-              [](const Cand &a, const Cand &b) {
-                if (a.k != b.k)      return a.k < b.k;       // higher k wins
-                return a.thresh > b.thresh;                  // smaller thresh wins
-              });
-          source_key = best->key;
-        }
-      }
+      source_key = best_usable_fd_source_key(meta.json(), pdesc, fkey,
+                                             active_thresh, active_k, active_key);
     }
   }
   world.gop.broadcast_serializable(source_key, 0);

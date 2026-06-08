@@ -38,11 +38,13 @@
 
 #include <madness/external/nlohmann_json/json.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace molresponse_v3 {
 
@@ -157,6 +159,51 @@ private:
   nlohmann::json j_;
   std::string    path_;
 };
+
+/// Pick the best usable FD restart/seed source for (pert, freq_key) at target
+/// protocol (target_thresh, target_k), from the aggregate metadata json.
+/// "Usable" = present in fd_states, listed in the protocols registry,
+/// COARSER-OR-EQUAL to the target (saved_thresh >= target_thresh AND
+/// saved_k <= target_k), and NOT `diverged`. Convergence is NOT required:
+/// a coarse partial is a perfectly good seed for the finer step. Preference:
+/// exact target_key first, else closest-to-target (max k, then min thresh).
+/// Returns "" if no usable source exists.
+///
+/// SINGLE SOURCE OF TRUTH for both the reconcile verdict (calc_manager's
+/// reconcile_protocol) and the archive load (fd_save_load's try_load_fd_state),
+/// so the two can never disagree — the doc-15 "share one pick-best-usable-source
+/// helper" contract. Pure: reads only the json, no World / filesystem.
+inline std::string
+best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
+                          const std::string &freq_key, double target_thresh,
+                          int target_k, const std::string &target_key) {
+  if (!meta.contains("fd_states") || !meta["fd_states"].contains(pert))
+    return {};
+  if (!meta.contains("protocols") || !meta["protocols"].is_object()) return {};
+  const auto &protos = meta["protocols"];
+
+  struct Cand { std::string key; double thresh; int k; };
+  std::vector<Cand> cands;
+  for (const auto &[key, ent] : meta["fd_states"][pert].items()) {
+    if (!ent.contains(freq_key))                continue;
+    if (ent[freq_key].value("diverged", false)) continue;  // never seed a blown-up state
+    if (!protos.contains(key))                  continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
+  }
+  if (cands.empty()) return {};
+
+  for (const auto &c : cands)                    // exact wins
+    if (c.key == target_key) return c.key;
+  return std::max_element(                        // else closest-to-target
+             cands.begin(), cands.end(),
+             [](const Cand &a, const Cand &b) {
+               if (a.k != b.k) return a.k < b.k;       // higher k wins
+               return a.thresh > b.thresh;             // smaller thresh wins
+             })
+      ->key;
+}
 
 } // namespace molresponse_v3
 

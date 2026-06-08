@@ -192,6 +192,20 @@ int main() {
     put_fd(m4, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true);
     EXPECT(reconcile_protocol(fd, m4, 1e-6) == NodeAction::Fresh,
            "present, diverged -> Fresh");
+
+    // refinement #5: a coarser-or-equal PARTIAL (not converged, not diverged) is
+    // a usable restart seed — must be Restart, not Fresh (else the good partial
+    // is discarded and the finer step re-seeds from zero).
+    json m5 = empty_meta();
+    put_fd(m5, "dipole_x", 1e-4, 0.057, /*converged=*/false, /*diverged=*/false);
+    EXPECT(reconcile_protocol(fd, m5, 1e-6) == NodeAction::Restart,
+           "coarser PARTIAL (not converged, not diverged) -> Restart");
+
+    // but a coarser DIVERGED-only snapshot is never a seed -> Fresh.
+    json m6 = empty_meta();
+    put_fd(m6, "dipole_x", 1e-4, 0.057, /*converged=*/false, /*diverged=*/true);
+    EXPECT(reconcile_protocol(fd, m6, 1e-6) == NodeAction::Fresh,
+           "coarser DIVERGED only -> Fresh (never seed a blown-up state)");
   }
 
   // ====== reconcile_protocol: ES path =========================================

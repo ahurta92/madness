@@ -214,27 +214,11 @@ fd_entry(const nlohmann::json &meta, const std::string &pert,
   return &fs[pert][key][fkey];
 }
 
-/// Is there a COARSER-OR-EQUAL converged FD source for (pert, freq) — i.e. a
-/// stored key whose (thresh,k) is coarser-or-equal to the target and whose
-/// freq entry is converged? Mirrors try_load_fd_state's precedence filter.
-inline bool has_coarser_converged_fd(const nlohmann::json &meta,
-                                     const std::string &pert,
-                                     const std::string &fkey,
-                                     double target_thresh, int target_k) {
-  if (!meta.contains("fd_states") || !meta["fd_states"].contains(pert))
-    return false;
-  if (!meta.contains("protocols")) return false;
-  const auto &protos = meta["protocols"];
-  for (const auto &[key, ent] : meta["fd_states"][pert].items()) {
-    if (!ent.contains(fkey)) continue;
-    if (!entry_converged(ent[fkey])) continue;
-    if (!protos.contains(key)) continue;
-    const double t  = protos[key].value("thresh", 0.0);
-    const int    kk = protos[key].value("k", 0);
-    if (t >= target_thresh && kk <= target_k) return true;
-  }
-  return false;
-}
+// FD coarser-source selection now lives in one shared helper —
+// best_usable_fd_source_key (response_metadata.hpp) — used by both the
+// reconcile verdict here and the archive load in try_load_fd_state, so the two
+// can never disagree. (Replaced the old converged-only has_coarser_converged_fd,
+// which missed coarser PARTIALS and didn't exclude diverged seeds.)
 
 /// ES bundle entry at a key, or nullptr.
 inline const nlohmann::json *es_entry(const nlohmann::json &meta,
@@ -435,7 +419,11 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
     return detail_calc::entry_diverged(*e) ? NodeAction::Fresh
                                            : NodeAction::Resume;
   }
-  return detail_calc::has_coarser_converged_fd(meta, pert, fkey, thresh, k)
+  // No exact entry: a coarser-or-equal NON-diverged snapshot (converged OR a
+  // partial) is a usable restart seed — a coarse partial need not be converged
+  // to seed the finer step. Same helper try_load_fd_state uses, so the verdict
+  // and the load can never disagree (doc-15 reconcile refinement #5).
+  return !best_usable_fd_source_key(meta, pert, fkey, thresh, k, key).empty()
              ? NodeAction::Restart
              : NodeAction::Fresh;
 }
