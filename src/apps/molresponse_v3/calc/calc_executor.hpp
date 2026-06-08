@@ -46,6 +46,7 @@
 #include "../solvers/fd_save_load.hpp"
 #include "../kernels/beta.hpp"
 #include "../kernels/vbc.hpp"
+#include "../solvers/es_analysis.hpp"
 #include "../solvers/es_save_load.hpp"
 #include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
@@ -111,6 +112,16 @@ struct ExecutorContext {
   // a fixed per-fixture path so the cached guess survives across fresh calc dirs
   // (cm_es makes a new timestamped calc dir each run). Setting it implies caching.
   std::string       es_warmup_cache_dir;
+  // Best-effort acceptance at maxiter (FD nodes). When true, a non-diverged FD
+  // solve that exhausts max_iters WITHOUT meeting the strict target is recorded
+  // converged (with an `accepted` marker + its real residual) instead of stalling.
+  // This lets a stiff channel (e.g. the cusped nuclear-displacement Raman FD)
+  // CLIMB the protocol ladder — a not-converged rung otherwise stays `Resume`,
+  // the wave signature repeats, and run() halts on "no progress" before reaching
+  // the finest protocol — and unblocks the downstream VBC/property prerequisite
+  // gate. Off by default (strict convergence). The finest protocol in --protocol
+  // is the de-facto "final" rung; its recorded bsh_residual is the verdict.
+  bool              accept_at_maxiter = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -354,10 +365,21 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     return mb <= t.bsh_residual && md <= t.density_residual;
   };
 
+  // Best-effort acceptance (--accept-at-maxiter): a non-diverged solve that
+  // exhausts max_iters without meeting the strict target is accepted so the
+  // node climbs the ladder / unblocks VBC instead of stalling. The `accepted`
+  // flag + recorded residual keep the verdict honest.
+  auto accepted_now = [&](const typename Solver::State &st, const Solver &sv) {
+    return ctx.accept_at_maxiter && !st.diverged &&
+           st.iter >= ctx.max_iters && !converged_now(st, sv);
+  };
+
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
+    const bool strict   = converged_now(st, solv);
+    const bool accepted = accepted_now(st, solv);
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
-                               /*converged=*/converged_now(st, solv),
-                               /*seed=*/seed_kind);
+                               /*converged=*/strict || accepted,
+                               /*seed=*/seed_kind, /*accepted=*/accepted);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -367,12 +389,16 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                       prepare, post_step, pp);
 
   NodeResult r;
-  r.converged = converged_now(sf, solver);
+  const bool strict   = converged_now(sf, solver);
+  const bool accepted = accepted_now(sf, solver);
+  r.converged = strict || accepted;
   r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
   if (world.rank() == 0)
     madness::print("[CALC] fd solve: pert=", pert.description(), " freq=", freq,
                    " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
-                   " converged=", r.converged);
+                   " converged=", r.converged,
+                   (accepted ? " (ACCEPTED best-effort @ maxiter — strict target "
+                               "NOT met; see bsh_residual)" : ""));
   return r;
 }
 
@@ -485,6 +511,16 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
+  // Post-convergence transition-property report (legacy TDDFT::analysis +
+  // analyze_vectors). DISABLED pending the heap-OOB fix in the ES bundle
+  // load/persistence path (see es_analysis.hpp / es_save_load.hpp): a stray
+  // write in that path corrupts the heap and aborts at teardown. The report
+  // logic itself was bisected and exonerated; re-enable once the load path is
+  // fixed. Tracked for the molresponse_v3 final-architecture pass.
+  if (false && r.converged && ctx.print_level >= PrintLevel::Normal)
+    report_es_analysis<TDA, ClosedShell>(
+        world, gs, sf, ctx.print_level,
+        ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
   // NB: ES roots are persisted to response_metadata.json via save_es_roots;
   // DerivedFD expansion reads them from there (expand_converged_es), NOT from
   // this return value (run()'s loop discards it). So no in-memory copy here.
@@ -628,6 +664,14 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
+  // Post-convergence transition-property report (legacy TDDFT::analysis +
+  // analyze_vectors). DISABLED pending the heap-OOB fix in the ES bundle
+  // load/persistence path (see TDA path above for the full note). Re-enable
+  // once the load path is fixed.
+  if (false && r.converged && ctx.print_level >= PrintLevel::Normal)
+    report_es_analysis<Full, ClosedShell>(
+        world, gs, sf, ctx.print_level,
+        ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
   // NB: ES roots are persisted to response_metadata.json via save_es_roots;
   // DerivedFD expansion reads them from there (expand_converged_es), NOT from
   // this return value (run()'s loop discards it). So no in-memory copy here.

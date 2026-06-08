@@ -93,7 +93,8 @@ void save_fd_state(madness::World &world,
                    const Perturbation &pert,
                    double freq,
                    bool converged,
-                   const std::string &seed = std::string()) {
+                   const std::string &seed = std::string(),
+                   bool accepted = false) {
   MADNESS_CHECK(state.responses.size() == 1);
 
   if (world.rank() == 0) {
@@ -139,6 +140,11 @@ void save_fd_state(madness::World &world,
         {"type",         detail_fd_save_load::type_tag<Type>()},
         {"shell",        detail_fd_save_load::shell_tag<Shell>()},
         {"converged",    converged},
+        // `accepted` = converged was forced true by best-effort acceptance at
+        // maxiter (--accept-at-maxiter), NOT a real target hit. The gates
+        // (reconcile/prerequisites) read `converged`; this field preserves the
+        // honest verdict — inspect bsh_residual to judge the deliverable quality.
+        {"accepted",     accepted},
         {"diverged",     state.diverged},
         {"iter",         state.iter},
         {"bsh_residual", bsh_res},
@@ -154,7 +160,8 @@ void save_fd_state(madness::World &world,
                    "  freq=", freq,
                    "  archive=", archive_basename,
                    "  bsh_res=", bsh_res,
-                   "  converged=", converged);
+                   "  converged=", converged,
+                   (accepted ? "  (ACCEPTED best-effort @ maxiter)" : ""));
   }
   world.gop.fence();
 }

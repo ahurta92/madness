@@ -104,7 +104,7 @@ struct ConvergencePolicy {
   // XNonlinearSolver over the flat state vector; size of the KAIN
   // subspace history is kain_maxsub. Disable by setting kain=false.
   bool kain = true;
-  int  kain_maxsub = 10;
+  int  kain_maxsub = 5;
   // Blowup safeguard threshold for KAIN coefficient max-abs. When the
   // KAIN solve returns coefficients with |c|max exceeding this value
   // (after rcond escalation has been exhausted), the per-state history
@@ -156,7 +156,7 @@ struct ConvergencePolicy {
   //                whole state (useful when a near-degenerate root rotates as a
   //                block rather than one orbital running away).
   enum class StepRestrictMode { PerOrbital, PerState };
-  StepRestrictMode step_restrict_mode = StepRestrictMode::PerOrbital;
+  StepRestrictMode step_restrict_mode = StepRestrictMode::PerState;
 
   // Full-deflation locking of converged ES roots (workstream B). When true, a
   // root that meets the convergence test is locked: removed from the subspace +

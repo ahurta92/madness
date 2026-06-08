@@ -586,7 +586,11 @@ schedule(const std::vector<CalcNode> &dag,
 struct NodeResult {
   bool                converged = false;
   std::string         reached_protocol_key;
-  std::vector<double> es_root_freqs;   // ES only: drives DerivedFD expansion
+  std::vector<double> es_root_freqs;   // vestigial: DerivedFD expansion is now
+                                       // metadata-driven (expand_converged_es
+                                       // reads roots from response_metadata.json).
+                                       // run()'s loop discards NodeResult, so this
+                                       // is no longer populated or read.
 };
 
 /// Runs one protocol step of one node: load nearest seed -> iterate at this protocol
