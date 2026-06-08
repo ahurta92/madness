@@ -30,7 +30,7 @@ S_αβ tensor per state is the primary computed object.
   Raman / off-pole seeding). ω_f/2 IS the two-photon resonance frequency — exactly
   what S_αβ needs. So the linear responses are already produced by the resonant
   pipeline.
-- **Contraction core**: `apply_channel_raw` (shared two-electron action) + the
+- **Contraction core**: `apply_gamma_raw` (shared two-electron action) + the
   `beta_abc` term structure. TPA is the same contraction with the C-FD response
   swapped for `X_f` and the A/B dipole responses taken at ω_f/2.
 
@@ -51,7 +51,7 @@ S_αβ tensor per state is the primary computed object.
    ```
    The body is the β residue: contract `Xf` against the dipole-dressed linear
    responses (and the ground-orbital transition-dipole terms), symmetrized in α↔β.
-   It reuses `apply_channel_raw` for any two-electron pieces and `common_ops`
+   It reuses `apply_gamma_raw` for any two-electron pieces and `common_ops`
    inner products — NOT a fresh electronic solve.
 3. **Executor + assembly**: after the ES bundle + ω_f/2 FD converge, a Tier-B
    `assemble_tpa(ctx, plan)` loads `X_f` + the FD responses, calls `tpa_moment`

@@ -236,17 +236,19 @@ Status / gaps:
 
 - **Done:** `expand_converged_es` promotes each expanded node to `CalcKind::FD`
   (so the FD executor solves it and the normal skip/restart/seed logic applies).
-- **Gap — expansion must be metadata-driven (restart-safety).** Today
-  `expand_converged_es` reads ES roots from an IN-MEMORY map (`es_root_freqs_`)
-  populated only when the ES node converges *in the current process*. On a
-  restart the ES bundle is already converged on disk → `reconcile` Skips it →
-  the ES node never runs → the map stays empty → **expansion never fires**, so
-  a resumed run silently never produces its ES-derived FD states. Fix: drive
-  expansion from `response_metadata.json` (`excited_states/<key>/roots[].omega`)
-  like everything else — then `maybe_record_es_roots` / `es_root_freqs_` go
-  away, and idempotency comes from deduping new nodes against existing `dag_`
-  ids rather than the in-memory `expanded_` set (also not restart-safe). This is
-  the same disk-is-truth rule the rest of the manager already follows.
+- **Done — expansion is metadata-driven (restart-safe).** `expand_converged_es`
+  reads ES roots straight from `response_metadata.json`
+  (`excited_states/<key>/roots[].omega`), so it fires on a resumed run where the
+  ES bundle converged in a *previous* process (the bundle is Skipped on restart,
+  but its roots are on disk). Idempotency comes from deduping new nodes against
+  the current `dag_` ids (a local `have` set rebuilt each pass); there is no
+  in-memory `es_root_freqs_` driver and no persistent `expanded_` set. The
+  `NodeResult::es_root_freqs` field is now vestigial (run()'s loop discards the
+  return value). Promoted nodes are `CalcKind::FD` so the normal skip/restart/seed
+  logic applies. **Fix landed (2026-06-05):** the promoted node's DAG `id` now
+  keys on its TRUE frequency `es_freq_factor·ωₙ` (= ωₙ/2 for two-photon), not the
+  unscaled ωₙ — previously the id and `freq` disagreed for `es_freq_factor ≠ 1.0`,
+  which would mis-dedup the node and break id-based VBC prerequisite gating.
 - **Gap — nearest-frequency seeding.** `try_load_fd_state` seeds only from the
   *same* frequency at a coarser protocol; nearest-*frequency* seeding (step 3)
   is not yet implemented.
