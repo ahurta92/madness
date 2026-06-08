@@ -2,16 +2,19 @@
 #define MOLRESPONSE_V3_KERNELS_TWO_ELECTRON_HPP
 
 // ===========================================================================
-// Shared two-electron apply core (doc 15 / kernel unification).
+// Shared gamma contraction -- the two-electron part of the perturbed Fock
+// operator (doc 15 / kernel unification).
 //
-// Every Kernels<Type,Shell> implements the SAME operation per output channel:
+// Every Kernels<Type,Shell> assembles the SAME quantity for each response
+// component (the X and Y blocks of the response vector, and alpha/beta for
+// open shell):
 //
-//     out_channel = Q( J[rho]*apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to) )
+//     gamma = Q( J[rho]*apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to) )
 //
 // The ONLY things that differ between (Type, Shell) are (a) the density factor
-// + which response channels build rho (handled by each kernel's two-state
-// `compute_density(S1, S2)`), and (b) the list of exchange (bra, ket) pairs per
-// output channel (the per-type pairing). This header factors out the common
+// + which response components build rho (handled by each kernel's two-state
+// `compute_density(S1, S2)`), and (b) the list of exchange (bra, ket) pairs for
+// each component (the per-type pairing). This header factors out the common
 // boilerplate -- the Coulomb multiply, the c_xc*K accumulation, projection and
 // truncation -- so each kernel's `apply_g` / `compute_gamma` is just "build J,
 // then name the exchange pairs."
@@ -39,27 +42,32 @@ namespace molresponse_v3::two_electron {
 
 using vecfuncT = std::vector<madness::real_function_3d>;
 
-/// One exchange pairing K(bra, ket) to be applied to a gamma channel. `bra` and
-/// `ket` form the density-like pair; the kernel applies the resulting exchange
-/// operator to the third state's channel (`apply_to` in apply_channel). The
-/// references must outlive the apply_channel call (they always do -- callers
-/// pass kernel-local lvalues inside a braced-init-list argument).
-struct ExPair {
+/// One exchange operator K(bra, ket) entering the gamma contraction. `bra` and
+/// `ket` are the occupied/response orbital pair that builds the exchange kernel;
+/// apply_gamma then acts that operator on `apply_to` (the orbitals of the
+/// response component being assembled). The references must outlive the
+/// apply_gamma call (they always do -- callers pass kernel-local lvalues inside
+/// a braced-init-list argument).
+struct ExchangePair {
   const vecfuncT &bra;
   const vecfuncT &ket;
 };
 
-/// Projection-free core:  J * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to).
-/// NO projection, NO truncate -- the raw two-electron action. The linear kernels
-/// wrap this with Q + truncate (apply_channel below); VBC/beta use it directly
-/// because their Fock-matrix correction term contracts the UNprojected g against
-/// phi0 (matrix_inner(phi0, g) would vanish under Q). J is the already-applied
-/// Coulomb potential coulop(rho); the caller builds it once and reuses per channel.
+/// gamma contraction, projection-free:
+///     gamma = J[rho] * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to).
+/// This is the two-electron part of the perturbed Fock operator (Coulomb minus
+/// scaled exchange) acting on one response component's orbitals -- NO projection,
+/// NO truncate. The linear kernels wrap this with Q + truncate (apply_gamma
+/// below); VBC/beta use the raw form directly because their Fock-matrix
+/// correction term contracts the UNprojected gamma against phi0 (matrix_inner(
+/// phi0, gamma) would vanish under Q). `J` is the already-applied Coulomb
+/// potential coulop(rho); the caller builds it once and reuses it across the
+/// X/Y (and spin) components.
 inline vecfuncT
-apply_channel_raw(madness::World &world,
+apply_gamma_raw(madness::World &world,
                   const madness::real_function_3d &J,
                   const vecfuncT &apply_to,
-                  std::initializer_list<ExPair> pairs,
+                  std::initializer_list<ExchangePair> pairs,
                   double c_xc, double lo) {
   using namespace madness;
   auto out = mul(world, J, apply_to, true);
@@ -72,19 +80,20 @@ apply_channel_raw(madness::World &world,
   return out;
 }
 
-/// Shared per-output-channel core of every Kernels<Type,Shell>::apply_g and
-/// compute_gamma:
-///     out = Q( J * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to) ).
-/// Exactly apply_channel_raw followed by projection + truncation (so the linear
-/// path is byte-identical to the original per-type compute_gamma bodies).
+/// Shared gamma contraction for every Kernels<Type,Shell>::apply_g and
+/// compute_gamma. Call once per response component (X, Y; alpha, beta):
+///     out = Q( J[rho] * apply_to  -  c_xc * Sum_pairs K(bra, ket)(apply_to) ).
+/// Exactly apply_gamma_raw followed by projection onto the virtual space +
+/// truncation (so the linear path is byte-identical to the original per-type
+/// compute_gamma bodies).
 inline vecfuncT
-apply_channel(madness::World &world,
+apply_gamma(madness::World &world,
               const madness::real_function_3d &J,
               const vecfuncT &apply_to,
-              std::initializer_list<ExPair> pairs,
+              std::initializer_list<ExchangePair> pairs,
               const madness::QProjector<double, 3> &Q,
               double c_xc, double lo) {
-  auto out = apply_channel_raw(world, J, apply_to, pairs, c_xc, lo);
+  auto out = apply_gamma_raw(world, J, apply_to, pairs, c_xc, lo);
   out = Q(out);
   madness::truncate(world, out);
   return out;

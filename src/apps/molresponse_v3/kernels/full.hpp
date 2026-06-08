@@ -27,7 +27,7 @@
 #include "assembly.hpp"     // assemble_lambda (used by apply_A±B helpers)
 #include "tags.hpp"
 #include "tda.hpp"          // ResponseGroundState, common_ops::*
-#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel}
+#include "two_electron.hpp"  // two_electron::{ExchangePair, apply_gamma}
 #include "../solvers/response_state.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -89,10 +89,10 @@ struct Kernels<Full, ClosedShell> {
     auto rho = compute_density(world, g0, S1, S2);
     auto J   = apply(*g0.coulop, rho);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+    out.x_alpha = two_electron::apply_gamma(world, J, S3.x_alpha,
         {{S2.x_alpha, S1.x_alpha}, {S1.y_alpha, S2.y_alpha}},
         g0.Qa, g0.c_xc, g0.lo);
-    out.y_alpha = two_electron::apply_channel(world, J, S3.y_alpha,
+    out.y_alpha = two_electron::apply_gamma(world, J, S3.y_alpha,
         {{S2.y_alpha, S1.y_alpha}, {S1.x_alpha, S2.x_alpha}},
         g0.Qa, g0.c_xc, g0.lo);
     return {std::move(out), std::move(rho)};
@@ -113,11 +113,11 @@ struct Kernels<Full, ClosedShell> {
     auto J_rho = apply(*g0.coulop, rho1);
     State out;
     // X: K[phi0, x](phi0) + K[y, phi0](phi0)
-    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.x_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.x_alpha}, {state.y_alpha, g0.amo}},
         g0.Qa, g0.c_xc, g0.lo);
     // Y: K[phi0, y](phi0) + K[x, phi0](phi0)
-    out.y_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.y_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.y_alpha}, {state.x_alpha, g0.amo}},
         g0.Qa, g0.c_xc, g0.lo);
     return out;
@@ -372,13 +372,13 @@ struct Kernels<Full, OpenShell> {
     auto rho = compute_density(world, g0, S1, S2);
     auto J   = apply(*g0.coulop, rho);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+    out.x_alpha = two_electron::apply_gamma(world, J, S3.x_alpha,
         {{S2.x_alpha, S1.x_alpha}, {S1.y_alpha, S2.y_alpha}}, g0.Qa, g0.c_xc, g0.lo);
-    out.y_alpha = two_electron::apply_channel(world, J, S3.y_alpha,
+    out.y_alpha = two_electron::apply_gamma(world, J, S3.y_alpha,
         {{S2.y_alpha, S1.y_alpha}, {S1.x_alpha, S2.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
-    out.x_beta  = two_electron::apply_channel(world, J, S3.x_beta,
+    out.x_beta  = two_electron::apply_gamma(world, J, S3.x_beta,
         {{S2.x_beta,  S1.x_beta }, {S1.y_beta,  S2.y_beta }}, g0.Qb, g0.c_xc, g0.lo);
-    out.y_beta  = two_electron::apply_channel(world, J, S3.y_beta,
+    out.y_beta  = two_electron::apply_gamma(world, J, S3.y_beta,
         {{S2.y_beta,  S1.y_beta }, {S1.x_beta,  S2.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
     return {std::move(out), std::move(rho)};
   }
@@ -391,14 +391,14 @@ struct Kernels<Full, OpenShell> {
     auto J_rho = apply(*g0.coulop, rho1);
     State out;
     // alpha: K[phi,x](phi) + K[y,phi](phi) ; Y swaps x<->y
-    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.x_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.x_alpha}, {state.y_alpha, g0.amo}}, g0.Qa, g0.c_xc, g0.lo);
-    out.y_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.y_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.y_alpha}, {state.x_alpha, g0.amo}}, g0.Qa, g0.c_xc, g0.lo);
     // beta: same shape, beta orbitals, Qb
-    out.x_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+    out.x_beta  = two_electron::apply_gamma(world, J_rho, g0.bmo,
         {{g0.bmo, state.x_beta }, {state.y_beta,  g0.bmo}}, g0.Qb, g0.c_xc, g0.lo);
-    out.y_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+    out.y_beta  = two_electron::apply_gamma(world, J_rho, g0.bmo,
         {{g0.bmo, state.y_beta }, {state.x_beta,  g0.bmo}}, g0.Qb, g0.c_xc, g0.lo);
     return out;
   }

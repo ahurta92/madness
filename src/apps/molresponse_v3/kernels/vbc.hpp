@@ -9,7 +9,7 @@
 // Kernels<Full, ClosedShell>::compute_gamma (doc 15, beta path). beta is pure
 // 2n+1 contraction — no explicit x(2) solve.
 //
-// compute_g now routes through two_electron::apply_channel_raw (shared with the
+// compute_g now routes through two_electron::apply_gamma_raw (shared with the
 // linear kernels). compute_vbc is templated over <Shell>: closed-shell is the
 // v2-ported build (compute_vbc_i, alpha-only); open-shell is guarded (throws)
 // until the per-spin make_zeta / compute_vbc_i kernels are derived (step 6b/7).
@@ -24,7 +24,7 @@
 
 #include "tags.hpp"
 #include "tda.hpp"   // ResponseGroundState, common_ops::{dot, apply_exchange}
-#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel_raw}
+#include "two_electron.hpp"  // two_electron::{ExchangePair, apply_gamma_raw}
 #include "../solvers/response_state.hpp"   // ResponseStateXY<ClosedShell>
 
 #include <madness/mra/mra.h>
@@ -67,9 +67,9 @@ compute_g(madness::World &world, const ResponseGroundState &g0,
   // applies Qa where the response-density terms need it and leaves the Fock-matrix
   // term unprojected.
   auto J  = apply(*g0.coulop, rho);
-  auto gx = two_electron::apply_channel_raw(world, J, phix,
+  auto gx = two_electron::apply_gamma_raw(world, J, phix,
       {{Aleft, Aright}, {Bleft, Bright}}, g0.c_xc, g0.lo);
-  auto gy = two_electron::apply_channel_raw(world, J, phiy,
+  auto gy = two_electron::apply_gamma_raw(world, J, phiy,
       {{Aright, Aleft}, {Bright, Bleft}}, g0.c_xc, g0.lo);
   return {std::move(gx), std::move(gy)};
 }
@@ -173,7 +173,7 @@ compute_vbc(madness::World &world, const ResponseGroundState &g0,
     (void)world; (void)g0; (void)B; (void)C; (void)VB_op; (void)VC_op;
     throw std::runtime_error(
         "compute_vbc: open-shell VBC quadratic source not yet derived. The "
-        "two-electron action is shell-generic (two_electron::apply_channel_raw "
+        "two-electron action is shell-generic (two_electron::apply_gamma_raw "
         "+ Kernels<Full,OpenShell>::compute_density), so the open-shell build is "
         "per-spin make_zeta + compute_vbc_i over alpha AND beta blocks -- future "
         "work (step 6b/7).");

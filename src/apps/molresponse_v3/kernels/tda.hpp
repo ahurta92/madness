@@ -35,7 +35,7 @@
 #include "common_ops.hpp"   // poperatorT + common_ops::{apply_kinetic,
                             // bsh_shift, make_bsh_operators, apply_exchange}
 #include "tags.hpp"
-#include "two_electron.hpp"  // two_electron::{ExPair, apply_channel}
+#include "two_electron.hpp"  // two_electron::{ExchangePair, apply_gamma}
 
 #include <madness/chem/SCFOperators.h>
 #include <madness/chem/projector.h>
@@ -124,7 +124,7 @@ struct Kernels<TDA, ClosedShell> {
     auto rho = compute_density(world, g0, S1, S2);
     auto J   = apply(*g0.coulop, rho);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+    out.x_alpha = two_electron::apply_gamma(world, J, S3.x_alpha,
         {{S2.x_alpha, S1.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
     return {std::move(out), std::move(rho)};
   }
@@ -142,7 +142,7 @@ struct Kernels<TDA, ClosedShell> {
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.x_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
     return out;
   }
@@ -280,9 +280,9 @@ struct Kernels<TDA, OpenShell> {
     auto rho = compute_density(world, g0, S1, S2);
     auto J   = apply(*g0.coulop, rho);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J, S3.x_alpha,
+    out.x_alpha = two_electron::apply_gamma(world, J, S3.x_alpha,
         {{S2.x_alpha, S1.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
-    out.x_beta  = two_electron::apply_channel(world, J, S3.x_beta,
+    out.x_beta  = two_electron::apply_gamma(world, J, S3.x_beta,
         {{S2.x_beta,  S1.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
     return {std::move(out), std::move(rho)};
   }
@@ -298,9 +298,9 @@ struct Kernels<TDA, OpenShell> {
                 const madness::real_function_3d &rho1) {
     auto J_rho = apply(*g0.coulop, rho1);
     State out;
-    out.x_alpha = two_electron::apply_channel(world, J_rho, g0.amo,
+    out.x_alpha = two_electron::apply_gamma(world, J_rho, g0.amo,
         {{g0.amo, state.x_alpha}}, g0.Qa, g0.c_xc, g0.lo);
-    out.x_beta  = two_electron::apply_channel(world, J_rho, g0.bmo,
+    out.x_beta  = two_electron::apply_gamma(world, J_rho, g0.bmo,
         {{g0.bmo, state.x_beta }}, g0.Qb, g0.c_xc, g0.lo);
     return out;
   }
