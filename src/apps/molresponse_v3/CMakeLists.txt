@@ -32,6 +32,9 @@ add_mad_executable(test_calc_manager
 add_mad_executable(test_calc_manager_run
                    "tests/test_calc_manager_run.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
+add_mad_executable(test_run_response
+                   "tests/test_run_response.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
 add_mad_executable(test_kernel_equivalence
                    "tests/test_kernel_equivalence.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")

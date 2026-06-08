@@ -5,10 +5,14 @@ context. It says what is in flight, which files are hot (= conflict risk), how t
 test each thing, and the standing contracts. Keep it short and current — update
 the affected row in the same change that lands the work.
 
-Last updated: 2026-06-08 (branch `molresponse-feature-next`) — WS2 stabilized:
-policy defaults + `--accept-at-maxiter` committed (`ca2c21dfc`); FD reconcile +
-load unified on one coarser-source helper, fixing the coarser-partial-discard /
-diverged-seed bug (`3a7a1dfee`, doc-15 refinement #5). cm_unit green.
+Last updated: 2026-06-08 (branch `molresponse-feature-next`) — WS2 stabilized
+(`ca2c21dfc` + `3a7a1dfee`, doc-15 #5). **Ground-up rebuild started:** master
+architecture is `docs/16_architecture.md` (L0→L5 layer cake, R0..R5 sequence,
+state-parallel LAST). **R0a done:** `run_response` seam
+(`orchestrator/response_workflow.hpp`) + `ExecutorContext`/`ExecutorSettings`
+split + new `test_run_response` driver — h2o α bit-identical to baseline. cm_unit
+green. Next: R0b (main.cpp + test-runner onto the seam, header consolidation),
+then R1 observability.
 
 Workflow + build/run/validate harness: `cm.sh` in
 `/gpfs/scratch/ahurtado/madness_es_bench/` (its `README.md` is the command

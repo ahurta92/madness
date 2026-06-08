@@ -71,13 +71,12 @@
 
 namespace molresponse_v3 {
 
-/// Everything an FD protocol step solve needs beyond the node itself. References to
-/// `world` / `gs` are borrowed — the executor lives within the solve scope.
-struct ExecutorContext {
-  madness::World   &world;
-  GroundState      &gs;            // mutable: re-prepared at each protocol
-  double            L = 0.0;       // cubic cell half-edge (from archive header)
-  std::string       fock_json;     // moldft.fock.json path ("" -> none)
+/// Plain, World-free executor settings — everything the *caller* specifies
+/// (convergence policy, ES/seed/accept knobs). Carried by value in
+/// `ResponseWorkflowInput` (R0a) so the public contract holds no World-bound
+/// state. `ExecutorContext` inherits these, so every `ctx.<knob>` access in this
+/// file resolves to an inherited member and is unchanged by the split.
+struct ExecutorSettings {
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
   std::string       calc_dir;      // holds response_metadata.json + archives
@@ -122,6 +121,22 @@ struct ExecutorContext {
   // gate. Off by default (strict convergence). The finest protocol in --protocol
   // is the de-facto "final" rung; its recorded bsh_residual is the verdict.
   bool              accept_at_maxiter = false;
+};
+
+/// Everything an FD protocol step solve needs beyond the node itself. The
+/// World-bound part (`world` / `gs` borrowed — the executor lives within the
+/// solve scope) plus the plain `ExecutorSettings` (inherited). The orchestrator
+/// builds this from a loaded GroundState + the Input's settings.
+struct ExecutorContext : ExecutorSettings {
+  madness::World   &world;
+  GroundState      &gs;            // mutable: re-prepared at each protocol
+  double            L = 0.0;       // cubic cell half-edge (from archive header)
+  std::string       fock_json;     // moldft.fock.json path ("" -> none)
+
+  ExecutorContext(madness::World &w, GroundState &g, double L_,
+                  std::string fock, ExecutorSettings s = {})
+      : ExecutorSettings(std::move(s)), world(w), gs(g), L(L_),
+        fock_json(std::move(fock)) {}
 };
 
 // ---------------------------------------------------------------------------

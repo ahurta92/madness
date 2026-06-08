@@ -352,8 +352,12 @@ int main(int argc, char **argv) {
         CalcManager mgr(plan, calc_dir, mgr_policy);
         mgr.build(molecule.natom());
 
-        ExecutorContext ctx{world,  gs,          header.L, fock_json,
-                            policy, print_level, calc_dir, max_iters};
+        // ExecutorContext now = {world, gs, L, fock_json} + inherited
+        // ExecutorSettings (R0a split). The ctx.<knob> setters below still work
+        // (inherited members). FUTURE (R0b): build the Input + call run_response.
+        ExecutorContext ctx(world, gs, header.L, fock_json,
+                            ExecutorSettings{policy, print_level, calc_dir,
+                                             max_iters});
         if (parser.key_exists("es-seed"))
           ctx.seed_derived_from_es_root = true;
         if (parser.key_exists("no-es-seed"))

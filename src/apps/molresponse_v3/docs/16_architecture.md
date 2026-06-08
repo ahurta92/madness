@@ -237,11 +237,23 @@ last** — built on a serial pipeline that is already validated, instrumented (L
 and driven through madqc, with a real per-state memory model from the diagnostic
 study (R4) to size subworlds against.
 
-- **R0 — Contract + thin orchestrator + L0 consolidation.** Define Input/Output;
-  implement `run_response` wrapping the existing CalcManager path; make
-  `main.cpp`/test-runner Input builders; de-duplicate the stray top-level solver
-  headers. *No behavior change* — establishes the spine. (Test: existing
-  `cm_es`/`cm_run` produce identical numbers through the new entry.)
+- **R0a — Contract + thin orchestrator. ✅ DONE (2026-06-08).**
+  `orchestrator/response_workflow.hpp`: `ResponseWorkflowInput` /
+  `ResponseWorkflowOutput` + `run_response()` wrapping today's flow (ground load →
+  CalcManager → assemble → Output); `ExecutorContext` split into plain
+  `ExecutorSettings` + `ExecutorContext : ExecutorSettings` (World-bound). New
+  clean driver `tests/test_run_response.cpp`. **Validated:** h2o α bit-identical
+  to the cm_resume baseline (7.903656 / 9.191244 / 8.532639). Two scoped
+  deviations from the sketch above: (1) `Input` carries a pre-built `ResponsePlan`
+  (not `requests`) — requests-lowering moves inside `run_response` in R0b/R3 once
+  the TDA/Full choice is a request field; (2) a *new* driver exercises the seam
+  rather than rewriting the entangled `test_calc_manager_run` (which has dead
+  analyze branches + double gs-loads) — that migration is R0b.
+- **R0b — main.cpp + test-runner onto the seam, then L0 consolidation.** Route
+  `main.cpp` and `test_calc_manager_run` through `run_response`; then untangle the
+  top-level solver-header duplicates (`PrintLevel` has two homes; `ESSolverGuess`
+  is a *live* dependency, not dead) and retire the old `test_solver`/`test_es_solver`
+  binaries. (Not a delete — a careful untangle.)
 - **R1 — Observability.** Stage + point(`wall_s`) timing → `Output.timing`;
   diagnostics record (convergence/divergence/mem-HWM/schedule) → `Output.diagnostics`;
   formalize `PROTOCOL_START/DONE`. Makes everything below measurable.
