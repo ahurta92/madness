@@ -24,6 +24,11 @@ ESSolver.hpp (kept the live ESSolverGuess/ResponseFunctions/ResponseKernel chain
 **L1 (contract+orchestrator) COMPLETE.** Next per sequence: R2 (export/viz/ML),
 then R3 madqc. Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
 resonant-Raman + R2 ES-density export); β incomplete when dynamic VBC don't all climb.
+**ES-guess work (active, doc 17):** **A) `ESGuessMode::VirtualAO` DONE** (`18f853182`):
+virtual-orbital "NWChem" CIS-diagonal guess — h2o recovers all four roots in order
+(incl. the 0.378 root SolidHarmonics missed). B) Dalton restart via
+`Dalton_Interface : ES_Interface` / Molden adapter; C) seed from Dalton excitation
+vectors — both still on the roadmap.
 Known follow-ups surfaced by the R1b run (NOT R1b bugs): ES stalls unconverged at
 1e-4 (doesn't climb); β incomplete when dynamic VBC pairs don't all reach the top
 protocol.

@@ -79,9 +79,13 @@ Dalton ω-ordering/symmetries can (i) be the correctness reference, and (ii) set
 `n_roots` / select-by-symmetry / order the roots. Path C is the strongest version.
 
 ## Recommended sequencing
-1. **Path A** — port the virtual-AO / CIS-diagonal guess to v3 (`ESGuessMode::VirtualAO`),
-   self-contained, biggest convergence win. Validate on the h2o d-aug-cc-pVQZ ES
-   regression target (`dalton_tdhf.json`).
+1. **Path A — DONE (`18f853182`, 2026-06-09).** `ESGuessMode::VirtualAO` in
+   `ESSolverGuess.hpp` (aug-cc-pvdz, energy-ordered singles). Validated: h2o
+   recovers all four roots in order at the coarse rung (0.3196/0.3807/0.4101/0.4212
+   vs target 0.317/0.378/0.399/0.409) — **incl. the 0.378 root SolidHarmonics
+   missed** (it found a spurious 0.46). Upper two tighten at 1e-6/k8 (solver, not
+   guess). Basis defaulted; `--es-guess-basis` knob = follow-up. Open-shell falls
+   back to solid harmonics.
 2. **Targeting** — feed Dalton ω's (gecko) as reference + to set/select roots.
 3. **Path B/C (Dalton)** — `Dalton_Interface : ES_Interface` (or Molden adapter) →
    external virtuals (B), then extend gecko to extract the excitation vectors for a
