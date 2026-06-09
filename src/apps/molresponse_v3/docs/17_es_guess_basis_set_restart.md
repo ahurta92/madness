@@ -91,6 +91,13 @@ Dalton ω-ordering/symmetries can (i) be the correctness reference, and (ii) set
    external virtuals (B), then extend gecko to extract the excitation vectors for a
    direct state seed (C).
 
+## Status (2026-06-09): Path A landed; B + C → FUTURE FEATURES
+Path A (`ESGuessMode::VirtualAO`) is the active, validated win. **Paths B (Dalton
+`ES_Interface`/Molden reader) and C (seed from Dalton excitation vectors) are
+DEFERRED to future features** — the seam (`ES_Interface` + AO→MRA projection)
+exists, so they can be picked up when external-restart / state-targeting from a
+basis-set job is needed. Not on the near-term path.
+
 ## Gaps to fill
 - v3 has no virtual-orbital guess (Path A) — the legacy code is the template.
 - No Molden reader / Dalton `ES_Interface` in MADNESS (Path B).
