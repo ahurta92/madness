@@ -906,9 +906,17 @@ public:
   /// expands any newly-converged ES bundle into concrete DerivedFD nodes.
   /// Terminates when the schedule is empty (all Skip) or the same wave repeats
   /// with no progress (a node that cannot converge does not spin the loop).
-  void run(madness::World &world, ICalcExecutor &exec) {
+  /// Returns the R1c scheduler trace (doc 16 L3) -> Output.diagnostics: the
+  /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
+  /// and pass count. Built identically on every rank (schedule() is
+  /// deterministic), so the value is rank-consistent.
+  nlohmann::json run(madness::World &world, ICalcExecutor &exec) {
     const std::vector<double> ramp = global_ramp();
     const std::string meta_path = calc_dir_ + "/response_metadata.json";
+
+    nlohmann::json diag;                       // R1c scheduler trace
+    diag["schedule"] = nlohmann::json::array();
+    int pass = 0;
 
     std::string last_sig;
     for (;;) {
@@ -921,6 +929,7 @@ public:
       if (waves.empty()) {
         if (world.rank() == 0)
           madness::print("[CALC] run: nothing left to schedule — done");
+        diag["stop_reason"] = "complete";
         break;
       }
 
@@ -929,17 +938,48 @@ public:
         if (world.rank() == 0)
           madness::print("[CALC] run: no progress on wave {", sig,
                          "} — stopping (unconverged or unhandled nodes)");
+        diag["stop_reason"] = "no_progress";
         break;
       }
       last_sig = sig;
 
-      if (world.rank() == 0)
-        madness::print("[CALC] run: wave of", (int)waves.front().size(),
+      // R1c: record this wave (id/thresh/action per item) + protocol markers.
+      // A wave is one protocol level, so wthresh = the front item's threshold.
+      const auto &wave = waves.front();
+      const double wthresh = wave.front().thresh;
+      const int    wk      = default_k_for_thresh(wthresh);
+      int pidx = 0;
+      for (size_t i = 0; i < ramp.size(); ++i)
+        if (std::abs(ramp[i] - wthresh) <= 1e-12 * std::max(ramp[i], wthresh)) {
+          pidx = static_cast<int>(i);
+          break;
+        }
+      nlohmann::json wrec = {{"pass", pass}, {"protocol_index", pidx},
+                             {"thresh", wthresh}, {"k", wk},
+                             {"items", nlohmann::json::array()}};
+      for (const auto &it : wave)
+        wrec["items"].push_back({{"id", it.node->id},
+                                 {"thresh", it.thresh},
+                                 {"action", node_action_name(it.action)}});
+      diag["schedule"].push_back(std::move(wrec));
+
+      if (world.rank() == 0) {
+        madness::print("[CALC] run: wave of", (int)wave.size(),
                        "protocol step(s): {", sig, "}");
-      for (const auto &item : waves.front())
+        madness::print("PROTOCOL_START  pass=", pass, "  protocol_index=", pidx,
+                       "  thresh=", wthresh, "  k=", wk,
+                       "  items=", (int)wave.size());
+      }
+      for (const auto &item : wave)
         exec.run_protocol(item);
       world.gop.fence();
+      if (world.rank() == 0)
+        madness::print("PROTOCOL_DONE  pass=", pass, "  protocol_index=", pidx,
+                       "  thresh=", wthresh, "  items=", (int)wave.size());
+      ++pass;
     }
+    diag["passes"] = pass;
+    return diag;
   }
 
 private:

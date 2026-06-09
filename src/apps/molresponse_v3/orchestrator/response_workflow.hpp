@@ -157,7 +157,7 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
   detail_workflow::StageTimer t_solve;
   ExecutorContext ctx(world, gs, header.L, fock_json, in.settings);
   FdResponseExecutor exec(ctx);
-  mgr.run(world, exec);
+  nlohmann::json sched_diag = mgr.run(world, exec);   // R1c scheduler trace
   timing["solve"] = t_solve.lap();
 
   // 3. Tier-A property assembly (off the solve path). beta OR raman fill
@@ -179,6 +179,7 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];
     out.timing = std::move(timing);
+    out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
     if (in.settings.print_level >= PrintLevel::Normal)
       madness::print("[TIMING] load_wall_s=", out.timing["load"]["wall_s"],
                      "  solve_wall_s=", out.timing["solve"]["wall_s"],

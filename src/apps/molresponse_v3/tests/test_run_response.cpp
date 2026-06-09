@@ -122,6 +122,12 @@ int main(int argc, char **argv) {
 
       // ---- Validate (rank 0) ---------------------------------------------
       if (world.rank() == 0) {
+        // R1c: confirm the scheduler-trace diagnostics block populated.
+        if (out.diagnostics.contains("schedule"))
+          print("diagnostics: passes=", out.diagnostics.value("passes", -1),
+                "  stop_reason=",
+                out.diagnostics.value("stop_reason", std::string("?")),
+                "  waves=", (int)out.diagnostics["schedule"].size());
         const std::string top_key = protocol_key_at(in.protocols.back());
         const auto &j = out.metadata;
         if (do_beta) {

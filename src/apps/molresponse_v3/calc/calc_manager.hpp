@@ -132,6 +132,17 @@ struct CalcNode {
 /// Reconcile verdict for one (node, protocol step). See the doc-15 table.
 enum class NodeAction { Skip, Restart, Resume, Fresh };
 
+/// Stringify a NodeAction for logs / the R1c scheduler trace (Output.diagnostics).
+inline const char *node_action_name(NodeAction a) {
+  switch (a) {
+    case NodeAction::Skip:    return "skip";
+    case NodeAction::Restart: return "restart";
+    case NodeAction::Resume:  return "resume";
+    case NodeAction::Fresh:   return "fresh";
+  }
+  return "?";
+}
+
 /// One (node, protocol) step of work.
 struct WorkItem {
   const CalcNode *node = nullptr;
