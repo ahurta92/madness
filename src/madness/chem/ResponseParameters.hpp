@@ -35,6 +35,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<std::vector<std::string>>("requested_properties", {"polarizability"},
                                              "properties to calculate (polarizability,hessian, hyperpolarizability, "
                                              "Raman.)");
+        initialize<std::string>("engine", "v2",
+                                "response engine backend: v2 (MolresponseLib) | "
+                                "v3 (molresponse_v3, alpha only so far)",
+                                {"v2", "v3"});
         initialize<bool>("beta.shg", true,
                          "compute only SHG beta triplets (omegaB=omegaC, "
                          "omegaA=-(omegaB+omegaC))");
@@ -107,6 +111,9 @@ public:
     }
     [[nodiscard]] int print_level() const {
         return get<int>("print_level");
+    }
+    [[nodiscard]] std::string engine() const {
+        return get<std::string>("engine");
     }
     [[nodiscard]] bool step_restrict() const {
         return get<bool>("step_restrict");

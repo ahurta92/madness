@@ -19,7 +19,12 @@ using namespace madness;
 
 GroundState::GroundState(World& world, std::shared_ptr<SCF> scf)
     : scf_(std::move(scf)),
-      original_k_(FunctionDefaults<3>::get_k()) {
+      original_k_(FunctionDefaults<3>::get_k()),
+      current_k_(FunctionDefaults<3>::get_k()),
+      from_memory_(true) {
+    // Built from an SCF whose MOs are already in memory at the active k (the
+    // madqc path). Record that k as current/original so prepare() projects the
+    // in-memory orbitals to the response protocol instead of reloading an archive.
 }
 
 GroundState GroundState::from_archive(World& world,
@@ -116,8 +121,12 @@ void GroundState::prepare(World& world, double vtol,
 
     // Re-project orbitals if k changed from what they currently are
     if (current_k_ != target_k) {
-        // Always reload from archive at original k, then project to target
-        scf_->load_mos(world);
+        // Reload from the archive at original k (archive/CLI path only), then
+        // project to target. For an in-memory SCF (madqc), the MOs are already
+        // loaded — projecting them below is enough; a reload would look for a
+        // nonexistent archive in the cwd ("<prefix>.restartdata").
+        if (!from_memory_)
+            scf_->load_mos(world);
         if (original_k_ != target_k) {
             reconstruct(world, scf_->amo);
             for (auto& orbital : scf_->amo) {

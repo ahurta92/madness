@@ -120,42 +120,31 @@ struct StageTimer {
 // run_response — load ground -> plan -> CalcManager -> assemble -> Output.
 // ---------------------------------------------------------------------------
 
+/// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
+/// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the
+/// cubic-cell half-edge and `fock_json` the moldft Fock path ("" = compute).
+/// Fills `Output.timing` for plan_build/solve/assemble (the caller owns load +
+/// total). Shared by the CLI entry (run_response) and the madqc adapter, which
+/// supplies a `gs` built from an in-memory SCF rather than an archive (R3).
 inline ResponseWorkflowOutput
-run_response(madness::World &world, const ResponseWorkflowInput &in) {
+run_response_with_ground(madness::World &world, GroundState &gs, double L,
+                         const std::string &fock_json,
+                         const ResponseWorkflowInput &in) {
   ResponseWorkflowOutput out;
   MADNESS_CHECK(!in.protocols.empty());
-  const detail_workflow::StageTimer t_total;
   nlohmann::json timing;
-  detail_workflow::StageTimer t_load;
-
-  // 1. Protocol + ground state. set_response_protocol to the coarsest rung up
-  //    front (the executor re-prepares per protocol during the solve).
-  const auto header = GroundState::read_archive_header(world, in.archive_file);
-  set_response_protocol(world, header.L, in.protocols.front());
-
-  const madness::Molecule molecule =
-      in.molecule ? *in.molecule : molecule_from_archive_dir(in.archive_file);
-  auto gs = GroundState::from_archive(world, in.archive_file, molecule);
-  if (world.rank() == 0) gs.print_info();
-
-  const std::string fock_json = fock_json_from_archive_dir(in.archive_file);
-  const double cur_thresh = madness::FunctionDefaults<3>::get_thresh();
-  auto coulop = madness::poperatorT(
-      madness::CoulombOperatorPtr(world, gs.params().lo(), 0.001 * cur_thresh));
-  gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
-  timing["load"] = t_load.lap();
 
   // 2a. Build the DAG.
   detail_workflow::StageTimer t_build;
   CalcManager::Policy mgr_policy;
   mgr_policy.max_iters_per_step = in.settings.max_iters;
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
-  mgr.build(molecule.natom());
+  mgr.build(gs.molecule().natom());
   timing["plan_build"] = t_build.lap();
 
   // 2b. Drive the calc manager (the solve).
   detail_workflow::StageTimer t_solve;
-  ExecutorContext ctx(world, gs, header.L, fock_json, in.settings);
+  ExecutorContext ctx(world, gs, L, fock_json, in.settings);
   FdResponseExecutor exec(ctx);
   nlohmann::json sched_diag = mgr.run(world, exec);   // R1c scheduler trace
   timing["solve"] = t_solve.lap();
@@ -169,7 +158,6 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
   else if (in.plan.es.empty())
     assemble_alpha(ctx, in.plan, in.protocols.back());
   timing["assemble"] = t_assemble.lap();
-  timing["total"] = t_total.lap();
 
   // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).
   if (world.rank() == 0) {
@@ -180,6 +168,40 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
       out.properties = out.metadata["properties"];
     out.timing = std::move(timing);
     out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
+  }
+  return out;
+}
+
+inline ResponseWorkflowOutput
+run_response(madness::World &world, const ResponseWorkflowInput &in) {
+  MADNESS_CHECK(!in.protocols.empty());
+  const detail_workflow::StageTimer t_total;
+  detail_workflow::StageTimer t_load;
+
+  // 1. Protocol + ground state from the ARCHIVE (CLI/standalone path).
+  //    set_response_protocol to the coarsest rung; the executor re-prepares per
+  //    protocol during the solve.
+  const auto header = GroundState::read_archive_header(world, in.archive_file);
+  set_response_protocol(world, header.L, in.protocols.front());
+
+  const madness::Molecule molecule =
+      in.molecule ? *in.molecule : molecule_from_archive_dir(in.archive_file);
+  auto gs = GroundState::from_archive(world, in.archive_file, molecule);
+  if (world.rank() == 0) gs.print_info();
+
+  const std::string fock_json = fock_json_from_archive_dir(in.archive_file);
+  const double cur_thresh = madness::FunctionDefaults<3>::get_thresh();
+  auto coulop = madness::poperatorT(
+      madness::CoulombOperatorPtr(world, gs.params().lo(), 0.001 * cur_thresh));
+  gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
+  nlohmann::json load_timing = t_load.lap();   // capture before the core
+
+  ResponseWorkflowOutput out =
+      run_response_with_ground(world, gs, header.L, fock_json, in);
+
+  if (world.rank() == 0) {
+    out.timing["load"]  = std::move(load_timing);
+    out.timing["total"] = t_total.lap();
     if (in.settings.print_level >= PrintLevel::Normal)
       madness::print("[TIMING] load_wall_s=", out.timing["load"]["wall_s"],
                      "  solve_wall_s=", out.timing["solve"]["wall_s"],

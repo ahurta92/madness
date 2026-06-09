@@ -50,6 +50,7 @@
 #include <Drivers.hpp>
 #include <ParameterManager.hpp>
 #include <WorkflowBuilders.hpp>
+#include <apps/molresponse_v3/madqc_adapter.hpp>  // molresponse_v3_lib (R3 engine)
 #include <madness_exception.h>
 
 using namespace madness;
@@ -176,7 +177,25 @@ int main(int argc, char **argv) {
       // read in all parameters from the input file and the command line
       // logic and interdependent parameter follow later
       Params pm(world, parser);
-      workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf);
+      // R3: select the v3 response engine here in the app — MADchem's
+      // WorkflowBuilders cannot reference v3 (circular lib dependency), so the
+      // response.engine=v3 knob (default v2) is consumed in madqc.cpp, mirroring
+      // add_response_workflow_drivers with ResponseApplication<molresponse_v3_lib>.
+      if (workflow_builders::workflow_kind_from_name(user_workflow) ==
+              workflow_builders::WorkflowKind::Response &&
+          pm.get<ResponseParameters>().engine() == "v3") {
+        if (world.rank() == 0)
+          print("response engine : molresponse_v3 (R3)");
+        pm.get<CalculationParameters>().set_derived_value("save", true);
+        auto reference =
+            std::make_shared<SCFApplication<moldft_lib>>(world, pm);
+        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
+        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
+            std::make_unique<ResponseApplication<molresponse_v3_lib>>(
+                world, pm, reference->calc())));
+      } else {
+        workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf);
+      }
 
       std::string prefix = pm.prefix();
       wf.run(prefix);
