@@ -27,9 +27,14 @@ drives v3 via `ResponseApplication<molresponse_v3_lib>` (GroundState from the
 in-memory SCF; run_response split into run_response_with_ground). Validated by
 single-node madqc smoke: h2o α_zz=8.5346 in calc_info. Fixed 2 bugs (GroundState
 reloading a nonexistent archive on the in-memory path → `from_memory_` flag;
-doubled calc_dir). R2 export/viz is a parallel agent (dump_mra_trees etc.). Next:
-R3b (map beta/raman/es + route cm.sh through madqc), then R4 diagnostic study,
-R5 state-parallel. Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
+doubled calc_dir). **R3b done** (`ff475c5bd`): multi-property mapping
+(requested_properties → polarizability + hyperpolarizability + single-component
+raman + resonant/excited via merge_plans) + assembly now does alpha AND beta (not
+XOR). Validated: h2o through madqc engine=v3 yields α_zz=8.5346 AND β_zzz=7.760.
+R2 export/viz is a parallel agent (dump_mra_trees etc.). Next: route cm.sh through
+madqc (R3 tail), then R4 diagnostic study, R5 state-parallel. (raman maps
+single-component only — full tensor deferred; ES uses default SolidHarmonics guess
+— VirtualAO/es-guess madqc knob = follow-up.) Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
 resonant-Raman + R2 ES-density export); β incomplete when dynamic VBC don't all climb.
 **ES-guess work (active, doc 17):** **A) `ESGuessMode::VirtualAO` DONE** (`18f853182`):
 virtual-orbital "NWChem" CIS-diagonal guess — h2o recovers all four roots in order
