@@ -6,8 +6,9 @@ if(NOT TARGET MADchem)
 endif()
 
 add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADresponse2;MADchem")
-add_mad_executable(test_v3_solver "test_solver.cpp;GroundState.cpp" "MADresponse2;MADchem")
-add_mad_executable(test_es_solver "test_es_solver.cpp;GroundState.cpp" "MADresponse2;MADchem")
+# Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
+# along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
+# core is covered by test_calc_manager_run / test_run_response / test_v3_*_skeleton.
 add_mad_executable(test_v3_es_skeleton
                    "tests/test_v3_es_skeleton.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
