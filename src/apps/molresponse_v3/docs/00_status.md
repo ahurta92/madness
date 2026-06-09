@@ -10,9 +10,15 @@ Last updated: 2026-06-08 (branch `molresponse-feature-next`) — WS2 stabilized
 architecture is `docs/16_architecture.md` (L0→L5 layer cake, R0..R5 sequence,
 state-parallel LAST). **R0a done:** `run_response` seam
 (`orchestrator/response_workflow.hpp`) + `ExecutorContext`/`ExecutorSettings`
-split + new `test_run_response` driver — h2o α bit-identical to baseline. cm_unit
-green. Next: R0b (main.cpp + test-runner onto the seam, header consolidation),
-then R1 observability.
+split + new `test_run_response` driver — h2o α bit-identical to baseline.
+**R1a done** (`145383592`): stage timing → `Output.timing`. **R1b done**
+(`ceed4716d`): uniform per-state `wall_s` + `MEMORY_HWM` across FD/ES/VBC
+(`StateMetrics.wall_s`; worst-task `rss_gb_max`); validated PASS on a shared-dir
+h2o run (all states `wall_s>0`, 84 `MEMORY_HWM` lines). Next: R1c (scheduler
+trace + `PROTOCOL_START/DONE` → `Output.diagnostics`), then R0b, then R3 madqc.
+Known follow-ups surfaced by the R1b run (NOT R1b bugs): ES stalls unconverged at
+1e-4 (doesn't climb); β incomplete when dynamic VBC pairs don't all reach the top
+protocol.
 
 Workflow + build/run/validate harness: `cm.sh` in
 `/gpfs/scratch/ahurtado/madness_es_bench/` (its `README.md` is the command
