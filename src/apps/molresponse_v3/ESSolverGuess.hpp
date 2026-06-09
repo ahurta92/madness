@@ -3,11 +3,15 @@
 
 #include "GroundState.hpp"
 #include "ResponseFunctions.hpp"
-#include "ResponseKernel.hpp" // for orthonormalize_bundle, ResponseType
+#include "ResponseKernel.hpp"          // for orthonormalize_bundle, ResponseType
+#include "kernels/common_ops.hpp"      // apply_exchange (K for the virtual-AO Fock)
 
+#include <madness/chem/molecularbasis.h>     // AtomicBasisSet (VirtualAO guess)
+#include <madness/chem/molecular_functors.h> // madchem::AtomicBasisFunctor
 #include <madness/mra/mra.h>
 #include <madness/mra/operator.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -420,6 +424,115 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
   return X;
 }
 
+/// Initial guess for **TDA closed-shell (RHF)** excited states from VIRTUAL
+/// ORBITALS built off a Gaussian AO basis — the "NWChem guess" (doc 17, Path A;
+/// port of `molresponse/ExcitedResponse::create_virtual_ao_guess`, energy-ordered).
+///
+/// Why: Random/SolidHarmonics are "cold" — they don't span the low-energy
+/// excitation space in energy order, so the iterative solver misses/scrambles
+/// roots. This builds approximate virtual orbitals and seeds the lowest
+/// (ε_a − ε_i) single excitations (= NWChem's CIS-diagonal Davidson guess).
+///
+/// Algorithm:
+///   1. Project a Gaussian AO basis (`basis_name`) onto the MRA grid.
+///   2. Q-project to the virtual space.
+///   3. SVD the overlap; drop near-linear-dependent directions (σ < 0.05).
+///   4. Build the ground Fock `F = T + V_local − c_xc·K` (same pieces as the
+///      kernels' compute_V0x, plus kinetic T).
+///   5. Diagonalize ⟨φ|F|φ⟩ → approximate virtuals {φ_a, ε_a}; re-Q-project.
+///   6. Keep virtuals with ε_a > ε_HOMO.
+///   7. Emit single excitations i→a, ordered by (ε_a − ε_i), lowest `num_roots`:
+///      trial = φ_a in occupied slot i (the v3 x_alpha[n_occ] shape).
+///   8. Q-project + Gram-Schmidt across roots.
+/// May return fewer than `num_roots` if the basis is too small (caller tops up).
+inline std::vector<RealResponseState>
+create_virtual_ao_guess(World &world, GroundState &gs, long num_roots,
+                        const std::string &basis_name = "aug-cc-pvdz") {
+  MADNESS_CHECK(gs.is_spin_restricted());
+  const long   n_occ  = gs.num_alpha();
+  MADNESS_CHECK(n_occ >= 1);
+  const auto  &phi0   = gs.orbitals_alpha();
+  const auto  &eps0   = gs.energies_alpha();
+  const auto  &Q      = gs.Q_alpha();
+  const double c_xc   = gs.hf_exchange_coefficient();
+  const double lo     = gs.params().lo();
+  const double thresh = FunctionDefaults<3>::get_thresh();
+
+  // 1. Project the AO basis to MRA functions.
+  AtomicBasisSet aobasis(basis_name);
+  const int nbf = aobasis.nbf(gs.molecule());
+  vector_real_function_3d ao(nbf);
+  for (int i = 0; i < nbf; ++i)
+    ao[i] = real_factory_3d(world).functor(real_functor_3d(
+        new madchem::AtomicBasisFunctor(
+            aobasis.get_atomic_basis_function(gs.molecule(), i))));
+  world.gop.fence();
+
+  // 2. Q-project into the virtual space.
+  ao = Q(ao);
+
+  // 3. SVD the overlap; keep directions with σ >= 0.05 (drop Q-induced lindeps).
+  Tensor<double> S = matrix_inner(world, ao, ao), U, sigma, VT;
+  svd(S, U, sigma, VT);
+  long keep = 0;
+  while (keep < sigma.size() && sigma(keep) >= 0.05) ++keep;
+  vector_real_function_3d xao = transform(world, ao, U);
+  if (keep < static_cast<long>(xao.size()))
+    xao.erase(xao.begin() + keep, xao.end());
+  if (xao.empty()) return {};   // degenerate basis → caller falls back
+
+  // 4. Ground Fock F·x = T·x + V_local·x − c_xc·K[φ0,φ0](x)  (= compute_V0x + T).
+  auto F = [&](const vector_real_function_3d &x) {
+    real_derivative_3d Dx(world, 0), Dy(world, 1), Dz(world, 2);
+    auto Tx = (apply(world, Dx, apply(world, Dx, x)) +
+               apply(world, Dy, apply(world, Dy, x)) +
+               apply(world, Dz, apply(world, Dz, x))) * (-0.5);
+    auto Vx = mul_sparse(world, gs.V_local(), x, thresh * 0.1);
+    if (c_xc > 0.0) {
+      auto Kx = common_ops::apply_exchange(world, phi0, phi0, x, lo);
+      gaxpy(world, 1.0, Vx, -c_xc, Kx);
+    }
+    return Tx + Vx;
+  };
+
+  // 5. Diagonalize ⟨xao|F|xao⟩ → virtual orbitals + energies; re-Q-project.
+  Tensor<double> FF = matrix_inner(world, xao, F(xao)), C, e_a;
+  syev(FF, C, e_a);
+  vector_real_function_3d phi_a = Q(transform(world, xao, C));
+
+  // 6. Keep virtuals above the HOMO; 7. order single excitations by ε_a − ε_i.
+  const double e_homo = eps0(n_occ - 1);
+  struct Exc { long i; long a; double de; };
+  std::vector<Exc> exc;
+  for (long a = 0; a < e_a.size(); ++a) {
+    if (e_a(a) <= e_homo) continue;
+    for (long i = 0; i < n_occ; ++i)
+      exc.push_back({i, a, e_a(a) - eps0(i)});
+  }
+  std::sort(exc.begin(), exc.end(),
+            [](const Exc &p, const Exc &q) { return p.de < q.de; });
+  const long n_take = std::min<long>(num_roots, static_cast<long>(exc.size()));
+
+  std::vector<RealResponseState> X;
+  X.reserve(n_take);
+  for (long t = 0; t < n_take; ++t) {
+    RealResponseState s =
+        RealResponseState::allocate(world, n_occ, /*n_beta=*/0, /*include_y=*/false);
+    s.x_alpha[exc[t].i] = copy(phi_a[exc[t].a]);
+    X.push_back(std::move(s));
+  }
+
+  // 8. Q-project + Gram-Schmidt across roots.
+  for (auto &s : X) s.x_alpha = Q(s.x_alpha);
+  orthonormalize_bundle(world, ResponseType::TDA, X);
+
+  if (world.rank() == 0)
+    print("ES guess (VirtualAO): basis=", basis_name, " nbf=", nbf,
+          " virtuals>HOMO=", (long)exc.size() / std::max<long>(1, n_occ),
+          " trials=", (long)X.size(), " of", num_roots);
+  return X;
+}
+
 /// Initial-guess generation mode for ESSolver<TDA, *>. Selected via the
 /// test/binary's `--guess=` CLI knob.
 ///
@@ -435,21 +548,29 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
 ///                    this is just {x, y, z}·φ_occ — pure dipole, which
 ///                    is essentially the answer for dipole-allowed
 ///                    transitions.
-enum class ESGuessMode { Random, SolidHarmonics };
+///
+///   VirtualAO      — virtual orbitals built off a Gaussian AO basis,
+///                    Fock-diagonalized, seeded as the lowest (ε_a−ε_i) single
+///                    excitations (NWChem CIS-diagonal guess; closed-shell only).
+///                    See create_virtual_ao_guess (doc 17, Path A).
+enum class ESGuessMode { Random, SolidHarmonics, VirtualAO };
 
 inline const char *to_string(ESGuessMode m) {
   switch (m) {
     case ESGuessMode::Random:         return "random";
     case ESGuessMode::SolidHarmonics: return "solid_harmonics";
+    case ESGuessMode::VirtualAO:      return "virtual_ao";
   }
   return "unknown";
 }
 
 inline ESGuessMode parse_es_guess_mode(const std::string &s) {
-  if (s == "random")          return ESGuessMode::Random;
-  if (s == "solid_harmonics") return ESGuessMode::SolidHarmonics;
-  throw std::runtime_error("parse_es_guess_mode: unknown guess mode '" +
-                           s + "' (expected: random | solid_harmonics)");
+  if (s == "random")                            return ESGuessMode::Random;
+  if (s == "solid" || s == "solid_harmonics")   return ESGuessMode::SolidHarmonics;
+  if (s == "virtual" || s == "virtual_ao")      return ESGuessMode::VirtualAO;
+  throw std::runtime_error(
+      "parse_es_guess_mode: unknown guess mode '" + s +
+      "' (expected: random | solid_harmonics | virtual_ao)");
 }
 
 } // namespace molresponse_v3

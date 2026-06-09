@@ -383,9 +383,8 @@ int main(int argc, char **argv) {
         if (parser.key_exists("maxrotn"))
           ctx.es_maxrotn = std::stod(parser.value("maxrotn"));
         if (parser.key_exists("es-guess"))
-          ctx.es_guess = (parser.value("es-guess") == "solid")
-                             ? ESGuessMode::SolidHarmonics
-                             : ESGuessMode::Random;
+          ctx.es_guess = parse_es_guess_mode(parser.value("es-guess"));
+          // accepts: random | solid[_harmonics] | virtual[_ao]
         if (parser.key_exists("lock-converged"))
           ctx.es_lock_converged = true;
         if (parser.key_exists("no-lock-converged"))

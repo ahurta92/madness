@@ -138,7 +138,19 @@ build_initial_guess_tda_closed_shell(
     case ESGuessMode::SolidHarmonics:
       guess = create_solid_harmonics_guess(world, gs, n_roots);
       break;
+    case ESGuessMode::VirtualAO:
+      guess = create_virtual_ao_guess(world, gs, n_roots);
+      break;
   }
+  // Top-up: a guess may produce fewer than n_roots trials (e.g. VirtualAO with
+  // a small basis returns empty/short). Pad with solid-harmonic trials so the
+  // bundle is full; the warmup/solver sorts the mixed set out.
+  if (static_cast<long>(guess.size()) < n_roots) {
+    auto extra = create_solid_harmonics_guess(
+        world, gs, n_roots - static_cast<long>(guess.size()));
+    for (auto &e : extra) guess.push_back(std::move(e));
+  }
+  MADNESS_CHECK(static_cast<long>(guess.size()) >= n_roots);
 
   ESSolver<TDA, ClosedShell>::State s;
   s.roots.resize(n_roots);
@@ -160,6 +172,13 @@ build_initial_guess_tda_open_shell(
       guess = make_initial_guess_tda_uhf(world, gs, n_roots);
       break;
     case ESGuessMode::SolidHarmonics:
+      guess = create_solid_harmonics_guess_uhf(world, gs, n_roots);
+      break;
+    case ESGuessMode::VirtualAO:
+      // VirtualAO is closed-shell only (doc 17); fall back to solid harmonics.
+      if (world.rank() == 0)
+        madness::print("[ES guess] VirtualAO is closed-shell only — "
+                       "falling back to solid_harmonics for open shell");
       guess = create_solid_harmonics_guess_uhf(world, gs, n_roots);
       break;
   }
