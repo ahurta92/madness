@@ -149,14 +149,15 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   nlohmann::json sched_diag = mgr.run(world, exec);   // R1c scheduler trace
   timing["solve"] = t_solve.lap();
 
-  // 3. Tier-A property assembly (off the solve path). beta OR raman fill
-  //    plan.vbc and share assemble_beta; alpha only for the plain-FD path.
-  //    es-only runs (plan.es non-empty, no vbc) assemble no scalar here.
+  // 3. Tier-A property assembly (off the solve path). A mixed request may want
+  //    several properties at once (e.g. alpha + beta), so assemble each that the
+  //    plan supports — not one-XOR-the-other. assemble_alpha self-guards (returns
+  //    if no dipole FD; it ignores nuclear FD) so it is safe to always attempt;
+  //    beta/raman come from VBC. (ES-derived scalar properties are a later step.)
   detail_workflow::StageTimer t_assemble;
+  assemble_alpha(ctx, in.plan, in.protocols.back());
   if (!in.plan.vbc.empty())
     assemble_beta(ctx, in.plan, in.protocols.back());
-  else if (in.plan.es.empty())
-    assemble_alpha(ctx, in.plan, in.protocols.back());
   timing["assemble"] = t_assemble.lap();
 
   // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).

@@ -71,22 +71,73 @@ struct molresponse_v3_lib {
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
     gs.prepare(world, 0.001 * thresh, coulop, /*fock_json=*/"");
 
-    // 2. Map the input deck → a Tier-A plan. R3a: polarizability only.
-    ResponsePropertyRequest req;
-    req.kind = ResponsePropertyKind::Polarizability;
-    req.frequencies = rp.dipole_frequencies();
-    req.protocol_thresholds = protocol;
-    req.axes.clear();
+    // 2. Map the input deck → a Tier-A plan (R3b). requested_properties +
+    //    beta.*/excited.* knobs select which ResponsePropertyRequests to build;
+    //    merge_plans dedupes shared FD states across them.
+    std::vector<char> axes;
     for (char c : rp.dipole_directions()) {
       const char l = static_cast<char>(std::tolower(c));
-      if (l == 'x' || l == 'y' || l == 'z') req.axes.push_back(l);
+      if (l == 'x' || l == 'y' || l == 'z') axes.push_back(l);
     }
-    if (req.axes.empty()) req.axes = {'x', 'y', 'z'};
+    if (axes.empty()) axes = {'x', 'y', 'z'};
+    const std::vector<double> freqs = rp.dipole_frequencies();
+    const auto props = rp.requested_properties();
+    auto wants = [&](const char *p) {
+      return std::find(props.begin(), props.end(), std::string(p)) != props.end();
+    };
+
+    std::vector<ResponsePlan> plans;
+    auto add = [&](ResponsePropertyRequest r) {
+      r.axes = axes;
+      r.protocol_thresholds = protocol;
+      plans.push_back(plan_one(r));
+    };
+    if (wants("polarizability")) {
+      ResponsePropertyRequest r;
+      r.kind = ResponsePropertyKind::Polarizability;
+      r.frequencies = freqs;
+      add(r);
+    }
+    if (wants("hyperpolarizability")) {
+      ResponsePropertyRequest r;
+      r.kind = ResponsePropertyKind::Hyperpolarizability;
+      r.beta_process = rp.beta_or() ? BetaProcess::OR : BetaProcess::SHG;
+      r.frequencies = freqs;
+      add(r);
+    }
+    if (wants("raman")) {
+      // SINGLE-COMPONENT vibrational Raman (atom 0, z) — v3's full per-atom
+      // tensor is deferred (post-state-parallel), so this won't match v2's full
+      // Raman; it exercises the β(dipole;dipole,nuclear) path.
+      ResponsePropertyRequest r;
+      r.kind = ResponsePropertyKind::PolarizabilityGradient;
+      r.gradient_mode = GradientMode::Nuclear;
+      r.frequencies = freqs;
+      r.raman_nuc_atom = 0;
+      r.raman_nuc_axis = 2;
+      add(r);
+    }
+    if (rp.excited_enable()) {
+      ResponsePropertyRequest r;
+      r.kind = ResponsePropertyKind::PolarizabilityGradient;
+      r.gradient_mode = GradientMode::Resonant;
+      r.n_roots = static_cast<int>(rp.excited_num_states());
+      add(r);
+    }
+    if (plans.empty()) {  // default: polarizability
+      ResponsePropertyRequest r;
+      r.kind = ResponsePropertyKind::Polarizability;
+      r.frequencies = freqs;
+      add(r);
+    }
 
     // 3. Build the workflow input + settings; run the archive-free core.
     ResponseWorkflowInput in;
     in.protocols = protocol;
-    in.plan = plan_one(req);
+    in.plan = merge_plans(plans);
+    // excited.tda=false → Full (X,Y) ES bundle (default TDA).
+    if (rp.excited_enable() && !rp.excited_tda())
+      for (auto &e : in.plan.es) e.tda = false;
     // ResponseApplication::run has already chdir'd (ScopedCWD) into `outdir`, and
     // `outdir` is RELATIVE — so the calc dir is the cwd ("."). Using outdir here
     // would double the path (outdir/outdir) and the metadata would be written/read
