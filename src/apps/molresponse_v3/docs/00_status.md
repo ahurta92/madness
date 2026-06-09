@@ -21,8 +21,15 @@ h2o run (all states `wall_s>0`, 84 `MEMORY_HWM` lines). **R1c done**
 rewritten as a thin run_response app (installed binary drives the seam; `--archive`
 CLI); retired legacy test_v3_solver/test_es_solver + dead top-level FDSolver.hpp/
 ESSolver.hpp (kept the live ESSolverGuess/ResponseFunctions/ResponseKernel chain).
-**L1 (contract+orchestrator) COMPLETE.** Next per sequence: R2 (export/viz/ML),
-then R3 madqc. Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
+**L1 (contract+orchestrator) COMPLETE.** **R3a done** (`6463f21d9`): madqc v3
+response engine behind `response.engine=v3` (alpha only) — `madqc --wf=response`
+drives v3 via `ResponseApplication<molresponse_v3_lib>` (GroundState from the
+in-memory SCF; run_response split into run_response_with_ground). Validated by
+single-node madqc smoke: h2o α_zz=8.5346 in calc_info. Fixed 2 bugs (GroundState
+reloading a nonexistent archive on the in-memory path → `from_memory_` flag;
+doubled calc_dir). R2 export/viz is a parallel agent (dump_mra_trees etc.). Next:
+R3b (map beta/raman/es + route cm.sh through madqc), then R4 diagnostic study,
+R5 state-parallel. Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
 resonant-Raman + R2 ES-density export); β incomplete when dynamic VBC don't all climb.
 **ES-guess work (active, doc 17):** **A) `ESGuessMode::VirtualAO` DONE** (`18f853182`):
 virtual-orbital "NWChem" CIS-diagonal guess — h2o recovers all four roots in order
