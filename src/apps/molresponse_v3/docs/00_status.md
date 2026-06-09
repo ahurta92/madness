@@ -17,8 +17,13 @@ split + new `test_run_response` driver — h2o α bit-identical to baseline.
 h2o run (all states `wall_s>0`, 84 `MEMORY_HWM` lines). **R1c done**
 (`ba509aa53`): scheduler trace (per-wave reconcile actions, stop_reason, passes) →
 `Output.diagnostics` + `PROTOCOL_START/DONE` lines. **R1 (observability) COMPLETE**
-(R1a+R1b+R1c; R1d operation-timing optional). Next per sequence: R2 (export/viz/ML)
-or R0b (main.cpp + runner onto the seam + header consolidation), then R3 madqc.
+(R1a+R1b+R1c; R1d operation-timing optional). **R0b done** (`db32d7038`): main.cpp
+rewritten as a thin run_response app (installed binary drives the seam; `--archive`
+CLI); retired legacy test_v3_solver/test_es_solver + dead top-level FDSolver.hpp/
+ESSolver.hpp (kept the live ESSolverGuess/ResponseFunctions/ResponseKernel chain).
+**L1 (contract+orchestrator) COMPLETE.** Next per sequence: R2 (export/viz/ML),
+then R3 madqc. Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
+resonant-Raman + R2 ES-density export); β incomplete when dynamic VBC don't all climb.
 Known follow-ups surfaced by the R1b run (NOT R1b bugs): ES stalls unconverged at
 1e-4 (doesn't climb); β incomplete when dynamic VBC pairs don't all reach the top
 protocol.

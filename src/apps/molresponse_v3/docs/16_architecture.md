@@ -249,11 +249,17 @@ study (R4) to size subworlds against.
   the TDA/Full choice is a request field; (2) a *new* driver exercises the seam
   rather than rewriting the entangled `test_calc_manager_run` (which has dead
   analyze branches + double gs-loads) — that migration is R0b.
-- **R0b — main.cpp + test-runner onto the seam, then L0 consolidation.** Route
-  `main.cpp` and `test_calc_manager_run` through `run_response`; then untangle the
-  top-level solver-header duplicates (`PrintLevel` has two homes; `ESSolverGuess`
-  is a *live* dependency, not dead) and retire the old `test_solver`/`test_es_solver`
-  binaries. (Not a delete — a careful untangle.)
+- **R0b — main.cpp onto the seam + L0 consolidation. ✅ DONE (2026-06-09).**
+  `main.cpp` rewritten as a thin `run_response` app (the installed `molresponse_v3`
+  binary now drives the seam; `--archive` CLI, legacy input-file/`fd_solve` path
+  dropped — nothing invoked it). Retired the legacy `test_v3_solver`/`test_es_solver`
+  binaries and removed the now-dead top-level `FDSolver.hpp`/`ESSolver.hpp`. Kept the
+  **live** ES-guess chain (`ESSolverGuess.hpp` → `ResponseFunctions`/`ResponseKernel`,
+  used by `build_response_ground_state` + the skeletons). Correction: `PrintLevel`
+  was already single-homed in `kernels/tags.hpp` (no duplication). **Not migrated:**
+  `test_calc_manager_run` stays as the low-level CalcManager test (seam already
+  proven by `test_run_response`); migrating the entangled driver wasn't worth the
+  risk. Validated: full v3 build + h2 app smoke (α_zz=6.449).
 - **R1 — Observability.** Stage + point(`wall_s`) timing → `Output.timing`;
   diagnostics record (convergence/divergence/mem-HWM/schedule) → `Output.diagnostics`;
   formalize `PROTOCOL_START/DONE`. Makes everything below measurable.
