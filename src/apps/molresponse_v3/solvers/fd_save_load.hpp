@@ -94,7 +94,8 @@ void save_fd_state(madness::World &world,
                    double freq,
                    bool converged,
                    const std::string &seed = std::string(),
-                   bool accepted = false) {
+                   bool accepted = false,
+                   double wall_s = 0.0) {   // R1b: point-solve wall time
   MADNESS_CHECK(state.responses.size() == 1);
 
   if (world.rank() == 0) {
@@ -113,9 +114,10 @@ void save_fd_state(madness::World &world,
   // (1) Collective binary save — same per-state primitive ES uses per-root.
   state.responses[0].save(world, archive_path);
 
-  // (1b) Collective per-state metrics (coeffs/bytes/rss/iters) — every rank.
-  const StateMetrics metrics =
+  // (1b) Collective per-state metrics (coeffs/bytes/rss/iters/wall) — every rank.
+  StateMetrics metrics =
       measure_state(world, state.responses[0], state.iter);
+  metrics.wall_s = wall_s;   // R1b (measure_state is collective; this is local)
 
   // (2) Rank-0 metadata upsert.
   if (world.rank() == 0) {
@@ -162,6 +164,12 @@ void save_fd_state(madness::World &world,
                    "  bsh_res=", bsh_res,
                    "  converged=", converged,
                    (accepted ? "  (ACCEPTED best-effort @ maxiter)" : ""));
+    // R1b: machine-readable per-state memory high-water mark (worst task, via
+    // gop.max in measure_state) at this protocol boundary — feeds the R4
+    // memory-scaling model / pre-flight abort (L2). Greppable: ^MEMORY_HWM.
+    madness::print("MEMORY_HWM  kind=fd  protocol=", key,
+                   "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                   "  wall_s=", wall_s, "  id=", pdesc, "@", fkey);
   }
   world.gop.fence();
 }

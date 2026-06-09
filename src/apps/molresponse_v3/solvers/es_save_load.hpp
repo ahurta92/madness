@@ -91,6 +91,7 @@ void save_es_roots(madness::World &world,
                    const typename ESSolver<Type, Shell>::State &state,
                    const std::string &dir,
                    bool converged,
+                   double wall_s = 0.0,            // R1b: bundle-solve wall time
                    bool register_aggregate = true) {
   const int n_roots = static_cast<int>(state.roots.size());
   MADNESS_CHECK(n_roots > 0);
@@ -127,6 +128,17 @@ void save_es_roots(madness::World &world,
     assign_initial_stable_index(stable_index, n_roots);
     const std::vector<std::string> display_names =
         assign_display_names(state.omega, 10.0 * thresh);
+
+    // R1b: uniform bundle metrics — sum the per-root coeffs, worst-task RSS,
+    // iters, wall. The same StateMetrics block FD/VBC write, so every state
+    // type reports the same shape (feeds the R4 memory-scaling model / L2).
+    StateMetrics bundle_metrics;
+    for (int s = 0; s < n_roots; ++s)
+      bundle_metrics.coeffs += root_coeffs[static_cast<size_t>(s)];
+    bundle_metrics.bytes  = bundle_metrics.coeffs * sizeof(double);
+    bundle_metrics.rss_gb = bundle_rss_gb;
+    bundle_metrics.iters  = state.iter;
+    bundle_metrics.wall_s = wall_s;
 
     nlohmann::json j;
     j["type"]      = detail_save_load::type_tag<Type>();
@@ -169,7 +181,8 @@ void save_es_roots(madness::World &world,
       roots_arr.push_back(entry);
     }
     j["roots"]  = roots_arr;
-    j["rss_gb"] = bundle_rss_gb;  // worst-task RSS at this protocol
+    j["rss_gb"] = bundle_rss_gb;  // worst-task RSS at this protocol (kept for compat)
+    j["metrics"] = bundle_metrics.to_json();  // R1b: uniform metrics block
 
     std::ofstream out(dir + "/roots.json");
     out << j.dump(2) << "\n";
@@ -204,6 +217,7 @@ void save_es_roots(madness::World &world,
           {"roots",            roots_arr},
           {"iter",             state.iter},
           {"rss_gb",           bundle_rss_gb},
+          {"metrics",          bundle_metrics.to_json()},  // R1b: uniform block
       };
       meta.set_es_bundle(key, bundle_entry);
       meta.save();
@@ -212,6 +226,11 @@ void save_es_roots(madness::World &world,
                      "  bundle_dir=", bundle_path.filename().string(),
                      "  n_roots=", n_roots,
                      "  aggregate=", aggregate_path);
+      // R1b: uniform memory high-water mark (see fd_save_load).
+      madness::print("MEMORY_HWM  kind=es  protocol=", key,
+                     "  rss_gb_max=", bundle_metrics.rss_gb,
+                     "  coeffs=", bundle_metrics.coeffs, "  wall_s=", wall_s,
+                     "  id=", detail_save_load::type_tag<Type>(), "_n", n_roots);
     } else {
       madness::print("[SAVE] es side-bundle (no aggregate): dir=", dir,
                      "  n_roots=", n_roots);

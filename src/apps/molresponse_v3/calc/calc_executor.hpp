@@ -258,6 +258,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   using Solver = FDSolver<Type, Shell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
+  const double step_w0 = madness::wall_time();   // R1b: point-solve wall timer
 
   // Bring FunctionDefaults<3> + the ground state to this protocol so the
   // source builders and try_load (which keys on protocol_key()) are correct.
@@ -392,9 +393,11 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
     const bool strict   = converged_now(st, solv);
     const bool accepted = accepted_now(st, solv);
+    const double wall_s = madness::wall_time() - step_w0;   // R1b
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
                                /*converged=*/strict || accepted,
-                               /*seed=*/seed_kind, /*accepted=*/accepted);
+                               /*seed=*/seed_kind, /*accepted=*/accepted,
+                               /*wall_s=*/wall_s);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -436,6 +439,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   using Solver = ESSolver<TDA, ClosedShell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
+  const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
 
   set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
@@ -513,8 +517,10 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
 
   auto post_step = [&](double, Solver &solv, Solver::State &st) {
     const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
+    const double wall_s = madness::wall_time() - step_w0;   // R1b
     save_es_roots<TDA, ClosedShell>(world, st, dir,
-                                    /*converged=*/converged_now(st, solv));
+                                    /*converged=*/converged_now(st, solv),
+                                    /*wall_s=*/wall_s);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -558,6 +564,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   using Solver = ESSolver<Full, ClosedShell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
+  const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
 
   set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
@@ -624,7 +631,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
       s0 = promote_tda_to_full_closed_shell(world, tda);
       if (ctx.es_warmup_cache) {
         save_es_roots<Full, ClosedShell>(world, s0, warm_cache,
-                                         /*converged=*/false,
+                                         /*converged=*/false, /*wall_s=*/0.0,
                                          /*register_aggregate=*/false);
         if (world.rank() == 0)
           madness::print("[CALC] solve_es_full: cached TDA warmup guess ->",
@@ -666,8 +673,10 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
 
   auto post_step = [&](double, Solver &solv, Solver::State &st) {
     const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
+    const double wall_s = madness::wall_time() - step_w0;   // R1b
     save_es_roots<Full, ClosedShell>(world, st, dir,
-                                     /*converged=*/converged_now(st, solv));
+                                     /*converged=*/converged_now(st, solv),
+                                     /*wall_s=*/wall_s);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -723,6 +732,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
     return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
   }
 
+  const double step_w0 = madness::wall_time();   // R1b: VBC build wall timer
   const double c_xc = gs.hf_exchange_coefficient();
   const double lo   = gs.params().lo();
   auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
@@ -734,7 +744,9 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto VC_op = perturbation_operator(world, gs, node.pert_c);
 
   auto vbc_src = vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op);
-  save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id, /*converged=*/true);
+  const double wall_s = madness::wall_time() - step_w0;   // R1b
+  save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id,
+                              /*converged=*/true, /*wall_s=*/wall_s);
 
   if (world.rank() == 0)
     madness::print("[CALC] solve_vbc: built", node.id, "at", protocol_key());

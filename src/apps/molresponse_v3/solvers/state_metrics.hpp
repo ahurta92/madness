@@ -54,13 +54,18 @@ struct StateMetrics {
   std::size_t bytes  = 0;   // coeffs × sizeof(double)
   double      rss_gb = 0.0; // worst-task RSS (gop.max), GiB
   int         iters  = 0;   // convergence iterations for this protocol
+  double      wall_s = 0.0; // wall time for this (state,protocol) solve (R1b);
+                            // 0.0 = not timed. Set by the caller, NOT by
+                            // measure_state (which has no timer); uniform across
+                            // FD / ES / VBC saves.
 
   nlohmann::json to_json() const {
     return nlohmann::json{
         {"coeffs", coeffs},
         {"bytes",  bytes},
         {"rss_gb", rss_gb},
-        {"iters",  iters}};
+        {"iters",  iters},
+        {"wall_s", wall_s}};
   }
 };
 

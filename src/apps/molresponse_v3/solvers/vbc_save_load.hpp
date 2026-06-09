@@ -43,7 +43,8 @@ inline void save_vbc_state(madness::World &world,
                            const ResponseStateXY<Shell> &vbc,
                            const std::string &dir,
                            const std::string &vbc_id,
-                           bool converged) {
+                           bool converged,
+                           double wall_s = 0.0) {   // R1b: build wall time
   if (world.rank() == 0) std::filesystem::create_directories(dir);
   world.gop.fence();
 
@@ -54,7 +55,8 @@ inline void save_vbc_state(madness::World &world,
   const std::string archive_path = dir + "/" + base;
 
   vbc.save(world, archive_path);  // collective
-  const StateMetrics metrics = measure_state(world, vbc, /*iter=*/0);
+  StateMetrics metrics = measure_state(world, vbc, /*iter=*/0);
+  metrics.wall_s = wall_s;   // R1b (uniform with FD/ES)
 
   if (world.rank() == 0) {
     auto meta = ResponseMetadata::load_or_create(dir + "/response_metadata.json");
@@ -70,6 +72,10 @@ inline void save_vbc_state(madness::World &world,
     meta.save();
     madness::print("[SAVE] vbc_state: id=", vbc_id, "  protocol_key=", key,
                    "  archive=", base, "  converged=", converged);
+    // R1b: uniform memory high-water mark (see fd_save_load).
+    madness::print("MEMORY_HWM  kind=vbc  protocol=", key,
+                   "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                   "  wall_s=", wall_s, "  id=", vbc_id);
   }
   world.gop.fence();
 }
