@@ -133,8 +133,8 @@ struct Kernels<Full, ClosedShell> {
     auto Vy = mul_sparse(world, g0.V_local_alpha, state.y_alpha, vtol);
 
     if (g0.c_xc > 0.0) {
-      auto k0x = common_ops::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
-      auto k0y = common_ops::apply_exchange(world, g0.amo, g0.amo, state.y_alpha, g0.lo);
+      auto k0x = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo, state.x_alpha, g0.lo);
+      auto k0y = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo, state.y_alpha, g0.lo);
       gaxpy(world, 1.0, Vx, -g0.c_xc, k0x);
       gaxpy(world, 1.0, Vy, -g0.c_xc, k0y);
     }
@@ -413,13 +413,13 @@ struct Kernels<Full, OpenShell> {
     auto Vxb = mul_sparse(world, g0.V_local_beta,  state.x_beta,  vtol);
     auto Vyb = mul_sparse(world, g0.V_local_beta,  state.y_beta,  vtol);
     if (g0.c_xc > 0.0) {
-      auto k0_ax = common_ops::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
-      auto k0_ay = common_ops::apply_exchange(world, g0.amo, g0.amo, state.y_alpha, g0.lo);
+      auto k0_ax = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo, state.x_alpha, g0.lo);
+      auto k0_ay = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo, state.y_alpha, g0.lo);
       gaxpy(world, 1.0, Vxa, -g0.c_xc, k0_ax);
       gaxpy(world, 1.0, Vya, -g0.c_xc, k0_ay);
 
-      auto k0_bx = common_ops::apply_exchange(world, g0.bmo, g0.bmo, state.x_beta, g0.lo);
-      auto k0_by = common_ops::apply_exchange(world, g0.bmo, g0.bmo, state.y_beta, g0.lo);
+      auto k0_bx = common_ops::apply_ground_exchange(world, g0.K0_beta, g0.bmo, state.x_beta, g0.lo);
+      auto k0_by = common_ops::apply_ground_exchange(world, g0.K0_beta, g0.bmo, state.y_beta, g0.lo);
       gaxpy(world, 1.0, Vxb, -g0.c_xc, k0_bx);
       gaxpy(world, 1.0, Vyb, -g0.c_xc, k0_by);
     }

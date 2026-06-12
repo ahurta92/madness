@@ -80,6 +80,15 @@ struct ResponseGroundState {
   double                                  lo   = 1.0e-10;
 
   int                                     n_roots = 0;
+
+  // Cached ground-state HF exchange operators K0 = K[phi_occ, phi_occ], built
+  // ONCE per protocol (build_response_ground_state_*). compute_V0x applies these
+  // to the response orbitals every iteration; rebuilding the operator each call
+  // deep-copies all occupied orbitals (Exchange::set_bra_and_ket → copy(world,
+  // bra/ket)) — O(n_occ) churn per apply. K0_beta stays null for closed shell.
+  // Built/applied at the protocol's k/thresh; rebuilt when the GS is re-prepared.
+  std::shared_ptr<madness::Exchange<double, 3>> K0_alpha;
+  std::shared_ptr<madness::Exchange<double, 3>> K0_beta;
 };
 
 
@@ -155,8 +164,8 @@ struct Kernels<TDA, ClosedShell> {
     const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
     auto Vx = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0x = common_ops::apply_exchange(world, g0.amo, g0.amo,
-                                             state.x_alpha, g0.lo);
+      auto k0x = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo,
+                                                   state.x_alpha, g0.lo);
       gaxpy(world, 1.0, Vx, -g0.c_xc, k0x);
     }
     return State{std::move(Vx)};
@@ -314,12 +323,12 @@ struct Kernels<TDA, OpenShell> {
 
     auto Vx_a = mul_sparse(world, g0.V_local_alpha, state.x_alpha, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0_ax = common_ops::apply_exchange(world, g0.amo, g0.amo, state.x_alpha, g0.lo);
+      auto k0_ax = common_ops::apply_ground_exchange(world, g0.K0_alpha, g0.amo, state.x_alpha, g0.lo);
       gaxpy(world, 1.0, Vx_a, -g0.c_xc, k0_ax);
     }
     auto Vx_b = mul_sparse(world, g0.V_local_beta, state.x_beta, vtol);
     if (g0.c_xc > 0.0) {
-      auto k0_bx = common_ops::apply_exchange(world, g0.bmo, g0.bmo, state.x_beta, g0.lo);
+      auto k0_bx = common_ops::apply_ground_exchange(world, g0.K0_beta, g0.bmo, state.x_beta, g0.lo);
       gaxpy(world, 1.0, Vx_b, -g0.c_xc, k0_bx);
     }
     return State{std::move(Vx_a), std::move(Vx_b)};

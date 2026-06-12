@@ -25,6 +25,7 @@
 
 #include "../ESSolverGuess.hpp"  // make_initial_guess_tda_rhf / _uhf
 #include "../GroundState.hpp"
+#include "../kernels/common_ops.hpp" // common_ops::make_ground_exchange (K0 cache)
 #include "es_solver.hpp"          // ESSolver + ESProblem
 #include "es_solver_full_rpa.hpp" // ESSolverFullRPA + ESProblemFullRPA
 #include "response_state.hpp"
@@ -62,6 +63,10 @@ build_response_ground_state_open_shell(madness::World &world, GroundState &gs,
 
   t.c_xc = c_xc;
   t.lo   = lo;
+  // Cache K0 per spin once (avoids re-copying the occupied orbitals on every
+  // compute_V0x exchange apply — see ResponseGroundState::K0_alpha).
+  t.K0_alpha = common_ops::make_ground_exchange(world, t.amo, lo);
+  t.K0_beta  = common_ops::make_ground_exchange(world, t.bmo, lo);
   return t;
 }
 
@@ -84,6 +89,9 @@ build_response_ground_state_closed_shell(madness::World &world, GroundState &gs,
 
   t.c_xc = c_xc;
   t.lo   = lo;
+  // Cache K0 once (avoids re-copying the occupied orbitals on every compute_V0x
+  // exchange apply — see ResponseGroundState::K0_alpha). K0_beta stays null (CS).
+  t.K0_alpha = common_ops::make_ground_exchange(world, t.amo, lo);
   return t;
 }
 

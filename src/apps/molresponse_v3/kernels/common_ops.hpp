@@ -123,6 +123,37 @@ apply_exchange(madness::World &world,
   return K(apply_to);
 }
 
+/// Build a ground-state exchange operator K = K[mos, mos] once, so callers can
+/// reuse it across iterations instead of reconstructing it (which deep-copies
+/// `mos` in Exchange::set_bra_and_ket on every call). Returns nullptr for an
+/// empty mos (e.g. the beta block of a closed-shell run). Built at the active
+/// k/thresh — rebuild when the ground state is re-prepared to a new protocol.
+inline std::shared_ptr<madness::Exchange<double, 3>>
+make_ground_exchange(madness::World &world,
+                     const std::vector<madness::real_function_3d> &mos,
+                     double lo) {
+  if (mos.empty()) return nullptr;
+  auto K = std::make_shared<madness::Exchange<double, 3>>(world, lo);
+  K->set_bra_and_ket(mos, mos);
+  K->set_algorithm(madness::Exchange<double, 3>::
+                       ExchangeAlgorithm::multiworld_efficient_row);
+  return K;
+}
+
+/// Apply a prebuilt ground exchange operator (from make_ground_exchange) to
+/// `apply_to`. Falls back to building a fresh K[mos, mos] if the cached operator
+/// is null — identical numerics to the old per-call path, so a ground state
+/// built without the cache still works (defensive; the build helpers set it).
+inline std::vector<madness::real_function_3d>
+apply_ground_exchange(madness::World &world,
+                      const std::shared_ptr<madness::Exchange<double, 3>> &K,
+                      const std::vector<madness::real_function_3d> &mos,
+                      const std::vector<madness::real_function_3d> &apply_to,
+                      double lo) {
+  if (K) return (*K)(apply_to);
+  return apply_exchange(world, mos, mos, apply_to, lo);
+}
+
 } // namespace common_ops
 } // namespace molresponse_v3
 
