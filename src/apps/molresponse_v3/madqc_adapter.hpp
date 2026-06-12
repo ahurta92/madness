@@ -62,14 +62,25 @@ struct molresponse_v3_lib {
     const std::vector<double> protocol = cp.protocol();
     MADNESS_CHECK(!protocol.empty());
 
-    // 1. v3 GroundState from the live SCF; set the coarsest protocol + prepare.
-    GroundState gs(world, scf_calc);
+    // 1. Ground state from the moldft ARCHIVE (not the in-memory SCF). On a
+    //    restart-in-place run madqc validates the SCF as "Ok" and never loads the
+    //    MOs into memory (lib_.calc() just constructs the SCF), so scf_calc->amo is
+    //    empty — building from the live SCF then segfaults in build_fock_matrices.
+    //    Loading from the archive (exactly like v2's make_ground_context) avoids
+    //    that AND lets prepare() reproject pristine MOs on each protocol climb. The
+    //    archive lives in the moldft work dir (scf_calc->work_dir).
+    namespace fs = std::filesystem;
     const double L = cp.L();
     set_response_protocol(world, L, protocol.front());
+    const std::string prefix     = cp.prefix();
+    const fs::path    moldft_dir = scf_calc->work_dir;
+    const std::string archive    = (moldft_dir / (prefix + ".restartdata")).string();
+    const std::string fock_json  = (moldft_dir / (prefix + ".fock.json")).string();
+    GroundState gs = GroundState::from_archive(world, archive, scf_calc->molecule);
     const double thresh = FunctionDefaults<3>::get_thresh();
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
-    gs.prepare(world, 0.001 * thresh, coulop, /*fock_json=*/"");
+    gs.prepare(world, 0.001 * thresh, coulop, fock_json);
 
     // 2. Map the input deck → a Tier-A plan (R3b). requested_properties +
     //    beta.*/excited.* knobs select which ResponsePropertyRequests to build;

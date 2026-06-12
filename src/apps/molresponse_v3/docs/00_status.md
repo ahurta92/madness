@@ -31,10 +31,43 @@ doubled calc_dir). **R3b done** (`ff475c5bd`): multi-property mapping
 (requested_properties → polarizability + hyperpolarizability + single-component
 raman + resonant/excited via merge_plans) + assembly now does alpha AND beta (not
 XOR). Validated: h2o through madqc engine=v3 yields α_zz=8.5346 AND β_zzz=7.760.
-R2 export/viz is a parallel agent (dump_mra_trees etc.). Next: route cm.sh through
-madqc (R3 tail), then R4 diagnostic study, R5 state-parallel. (raman maps
-single-component only — full tensor deferred; ES uses default SolidHarmonics guess
-— VirtualAO/es-guess madqc knob = follow-up.) Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
+R2 export/viz is a parallel agent (dump_mra_trees etc.). **cm routed through madqc**
+(`cm_mq`/`cm_mq_beta`/`cm_mq_es`). **R4 diagnostic-study harness set up** (scratch
+`cm_study` + repo `madness_studies/refs/study_analyze.py`): sweeps the production
+path over a molecule set at a COARSE probe protocol (single static α, 1 FD state —
+the 15d "measure low-k" trick keeps c6h6/naphthalene safe), appends per-state
+metrics (coeffs/rss_gb/wall_s/iters) to `refs/r4_study_runs.tsv`, and prints the
+empirical `mem_per_task(n_occ,k)` model (rss/coeffs ~ n_occ fit + k6→k8 growth
+factor) feeding L2 (15d pre-flight abort / 15c subworld sizing). Fixtures added:
+`c6h6` (12 atoms, 21 occ), `naphthalene` (18 atoms, 34 occ) — geometry-only;
+cm_mq re-runs SCF. **R4 study ran (SLURM job 2005092, 4 nodes):** Sweep 1 (n_occ
+scaling at k6) PASS — clean linear `mem_per_task`: `rss_GB ~ 0.93 + 0.031*n_occ`,
+`coeffs/state ~ 3.51e5*n_occ` (2.81 MB/occ-orbital) across h2o(5)/c2h4(8)/c6h6(21)/
+naphthalene(34). **Sweep 2 (k-growth k6->k8) surfaced a real bug:** the multi-protocol
+climb on the **madqc / in-memory GroundState path crashes** ("tensors do not conform").
+Root cause: `GroundState::prepare` reproject is guarded by `original_k_ != target_k`,
+valid only because the archive path reloads pristine MOs each call; the from_memory
+path skips that reload but mutates `scf_->amo` in place, so climbing back to
+`original_k_` skips reprojection and leaves stale coarse-k orbitals. **R3 smokes were
+all single-rung — first time the madqc climb ran.** A SECOND bug then surfaced on the
+restart-in-place path (rerun madqc in an existing dir): **segfault in
+`GroundState::build_fock_matrices`** because madqc validates a valid SCF archive as
+`Ok` and `lib_.calc()` constructs the SCF WITHOUT loading MOs (`Applications.hpp`
+~179-184/634) → the in-memory `scf_calc->amo` is **empty** → the v3 adapter (which
+built `GroundState` from the live SCF) dereferences nothing. **Both bugs share one root:
+R3a's in-memory `GroundState` shortcut.** v2 is immune — it loads the ground state from
+the moldft archive (`scf_calc->work_dir`+`prefix+.restartdata`, `MolresponseLib.hpp`
+~1149). **Real fix (applied, NOT committed):** (1) madqc adapter now builds via
+`GroundState::from_archive` exactly like v2 (resolve archive from `scf_calc->work_dir`);
+(2) `from_archive` resets `from_memory_=false` so `prepare()` reloads pristine MOs from
+disk on each climb (restores pre-R3a behavior); (3) reverted the in-memory pristine-
+snapshot band-aid. One mechanism (archive load) fixes climb + restart segfault; compiles
+clean. **Validation pending** (SLURM job 2015778: FRESH h2o climb via from_archive +
+restart-in-place c2h4/c6h6 maxiter=80). Caveat from Sweep 1: c2h4/c6h6/naphthalene
+hit the 25-iter cap at k6 (static α unconverged — memory robust, wall is to-cap). Then
+R5 state-parallel. (raman maps single-component only — full tensor
+deferred; ES uses default SolidHarmonics guess — VirtualAO/es-guess madqc knob =
+follow-up.) Open follow-ups: ES stalls unconverged at 1e-4 (blocks ES/2PA/
 resonant-Raman + R2 ES-density export); β incomplete when dynamic VBC don't all climb.
 **ES-guess work (active, doc 17):** **A) `ESGuessMode::VirtualAO` DONE** (`18f853182`):
 virtual-orbital "NWChem" CIS-diagonal guess — h2o recovers all four roots in order

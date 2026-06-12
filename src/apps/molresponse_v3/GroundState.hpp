@@ -115,9 +115,11 @@ private:
     std::shared_ptr<SCF> scf_;
     int original_k_;
     int current_k_ = 0;  // k that orbitals are currently projected to
-    bool from_memory_ = false;  // built from an in-memory SCF (madqc path): MOs are
-                                // already loaded, so prepare() must NOT reload from an
-                                // archive — it projects the in-memory MOs instead.
+    bool from_memory_ = false;  // built from an in-memory SCF with no archive; the
+                                // shared (world, scf) ctor defaults this true, but
+                                // from_archive resets it false so prepare() reloads
+                                // pristine MOs from disk on each protocol climb (the
+                                // restart-safe path that both madqc and the CLI use).
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;

@@ -78,6 +78,9 @@ GroundState GroundState::from_archive(World& world,
     GroundState gs(world, scf);
     gs.original_k_ = header.k;
     gs.current_k_ = header.k;
+    // Built from an archive: prepare() must reload MOs from disk on each protocol
+    // climb (the shared ctor defaults from_memory_=true; reset it here).
+    gs.from_memory_ = false;
     return gs;
 }
 
@@ -121,10 +124,13 @@ void GroundState::prepare(World& world, double vtol,
 
     // Re-project orbitals if k changed from what they currently are
     if (current_k_ != target_k) {
-        // Reload from the archive at original k (archive/CLI path only), then
-        // project to target. For an in-memory SCF (madqc), the MOs are already
-        // loaded — projecting them below is enough; a reload would look for a
-        // nonexistent archive in the cwd ("<prefix>.restartdata").
+        // Reload pristine MOs at original_k_ from the archive, then project to
+        // target. from_archive sets from_memory_=false so this reload runs on
+        // every protocol climb, restoring the invariant that scf_->amo is at
+        // original_k_ before the reproject below (the prior in-place projection
+        // leaves it at a coarser k). The in-memory ctor (from_memory_=true) has no
+        // archive to reload and is not used by the restart-safe madqc/CLI paths,
+        // which build via from_archive.
         if (!from_memory_)
             scf_->load_mos(world);
         if (original_k_ != target_k) {
