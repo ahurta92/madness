@@ -42,6 +42,11 @@ add_mad_executable(test_kernel_equivalence
 add_mad_executable(test_step_restriction
                    "tests/test_step_restriction.cpp"
                    "MADresponse2;MADchem")
+# Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
+# Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
+add_mad_executable(dump_mra_trees
+                   "tools/dump_mra_trees.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3

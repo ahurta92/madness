@@ -87,6 +87,10 @@ src/apps/molresponse_v3/tests/fixtures/systems/*/moldft.std*
 src/apps/molresponse_v3/tests/fixtures/systems/*/MacroTaskExchangeRow_task.*
 src/apps/molresponse_v3/tests/fixtures/systems/*/*.log
 
+# MacroTaskQ exchange scratch (transient runtime output, regenerable; can land in
+# the repo root or any cwd a solve runs from, not just the fixture dirs above)
+MacroTaskExchangeRow_task.*
+
 # Benchmark job outputs (stay in scratch, not the source tree)
 src/apps/molresponse_v3/tests/fixtures/benchmarks/**/*.err
 src/apps/molresponse_v3/tests/fixtures/benchmarks/**/*.out
