@@ -234,7 +234,7 @@ to the calc-manager waves and follows after the ES pattern is proven.
    flip the usual memory/compute trade — measure in Inc 1.
 3. **Full vs TDA** — TDA roots are `n_occ`; Full carries x+y (`2·n_occ`). The
    grain doubles but the design is identical (the partitioner dimension is the
-   per-root block size). Full RPA (`es_solver_full_rpa.hpp`) is unverified
-   (sign), so prototype on TDA first.
+   per-root block size). Prototype on TDA first. (The symmetric-reduction
+   Full-RPA solver was removed 2026-06 — only TDA and direct-Full remain.)
 4. **Reuse for FD** — the same two functors generalize to FD states (no subspace
    coupling — even simpler). Keep the functor signatures FD-friendly.

@@ -103,8 +103,8 @@ struct Kernels<Full, ClosedShell> {
   ///
   /// Cross-channel exchange is what couples X and Y in the RPA equations;
   /// without it the result reduces to TDA on each side. This is apply_g with
-  /// S1=state, S2=S3=Phi (ground) but the CALLER's rho1 (so apply_AplusB/
-  /// apply_AminusB stay bit-for-bit). The Coulomb piece is the SAME on X and Y.
+  /// S1=state, S2=S3=Phi (ground) but the CALLER's rho1 (callers pass the
+  /// folded ρ = 2·Σφ·(x+y)). The Coulomb piece is the SAME on X and Y.
   static State
   compute_gamma(madness::World &world,
                 const ResponseGroundState &g0,
@@ -180,90 +180,6 @@ struct Kernels<Full, ClosedShell> {
   }
 
   // θ / Λ assembly is shell-agnostic: see kernels/assembly.hpp.
-
-  // ---- Symmetric (A+B)(A−B) reduction operators ------------------------
-  //
-  // For closed-shell RPA the Casida non-Hermitian eigenproblem
-  //
-  //   [ A  B ] [X]       [ I  0 ] [X]
-  //   [ B  A ] [Y]  = ω  [ 0 −I ] [Y]
-  //
-  // reduces (via u = X+Y, v = X−Y) to the real symmetric, positive-
-  // definite eigenproblem
-  //
-  //   (A−B)(A+B) u  =  ω²  u
-  //
-  // which the dedicated `ESSolverFullRPA<ClosedShell>` iterates. The two
-  // operators below provide the (A+B)·u and (A−B)·v actions needed for
-  // that solver.
-  //
-  // Implementation trick — no new operator code, by construction:
-  //   The existing per-iter pipeline (compute_density → compute_gamma →
-  //   compute_V0x / T0x / E0x_full → assemble_lambda) ALREADY implements
-  //   the action of the full [A B; B A] block on a (X,Y) pair, because
-  //   compute_gamma's Coulomb piece uses ρ = 2·Σφ·(x+y) (folds X and Y
-  //   together) and its exchange piece carries explicit X↔Y cross-
-  //   channel terms.
-  //
-  //   Plug in (x = u, y = +u): X-block of the result equals (A+B)·u.
-  //   Plug in (x = v, y = −v): X-block of the result equals (A−B)·v.
-  //
-  //   So apply_A{plus,minus}B build a doubled ResponseStateXY, run the
-  //   existing pipeline, and pluck the x_alpha block.
-  //
-  // INVARIANCE THIS RELIES ON: compute_density must compute ρ = 2·Σφ·(x+y)
-  // and compute_gamma must carry the cross-channel exchange terms
-  // (K[y,φ]·φ in γ_X, K[x,φ]·φ in γ_Y). If those terms are ever moved or
-  // dropped, these two methods silently start computing A·u instead of
-  // (A±B)·u and the RPA solver will collapse to TDA. Keep them honest.
-
-  /// (A+B)·u where u ∈ ResponseStateX<ClosedShell>.
-  static ResponseStateX<ClosedShell>
-  apply_AplusB(madness::World &world,
-               const ResponseGroundState &g0,
-               const ResponseStateX<ClosedShell> &u_state) {
-    State doubled;
-    doubled.x_alpha = madness::copy(world, u_state.x_alpha);
-    doubled.y_alpha = madness::copy(world, u_state.x_alpha);   // y = +u
-
-    auto rho   = compute_density   (world, g0, doubled);
-    auto gamma = compute_gamma     (world, g0, doubled, rho);
-    auto V0    = compute_V0x       (world, g0, doubled);
-    auto T0    = compute_T0x       (world, g0, doubled);
-    auto E0f   = compute_E0x_full  (world, g0, doubled);
-
-    // Lift each X-block to ResponseStateX<ClosedShell> and reuse the
-    // state-generic Λ assembly. Y-block is discarded; for x=y=u the
-    // two blocks are equal by construction, so it costs nothing extra.
-    ResponseStateX<ClosedShell> T0_x  {std::move(T0.x_alpha)};
-    ResponseStateX<ClosedShell> V0_x  {std::move(V0.x_alpha)};
-    ResponseStateX<ClosedShell> E0_x  {std::move(E0f.x_alpha)};
-    ResponseStateX<ClosedShell> gam_x {std::move(gamma.x_alpha)};
-    return assemble_lambda(world, T0_x, V0_x, E0_x, gam_x);
-  }
-
-  /// (A−B)·v where v ∈ ResponseStateX<ClosedShell>.
-  static ResponseStateX<ClosedShell>
-  apply_AminusB(madness::World &world,
-                const ResponseGroundState &g0,
-                const ResponseStateX<ClosedShell> &v_state) {
-    State doubled;
-    doubled.x_alpha = madness::copy(world, v_state.x_alpha);
-    doubled.y_alpha = madness::copy(world, v_state.x_alpha);
-    madness::scale(world, doubled.y_alpha, -1.0);              // y = −v
-
-    auto rho   = compute_density   (world, g0, doubled);
-    auto gamma = compute_gamma     (world, g0, doubled, rho);
-    auto V0    = compute_V0x       (world, g0, doubled);
-    auto T0    = compute_T0x       (world, g0, doubled);
-    auto E0f   = compute_E0x_full  (world, g0, doubled);
-
-    ResponseStateX<ClosedShell> T0_x  {std::move(T0.x_alpha)};
-    ResponseStateX<ClosedShell> V0_x  {std::move(V0.x_alpha)};
-    ResponseStateX<ClosedShell> E0_x  {std::move(E0f.x_alpha)};
-    ResponseStateX<ClosedShell> gam_x {std::move(gamma.x_alpha)};
-    return assemble_lambda(world, T0_x, V0_x, E0_x, gam_x);
-  }
 
   /// Paired BSH apply.
   ///   new_x = Q( BSH(+omega) * (-2 * (theta_x + shift_+ * x_alpha)) )

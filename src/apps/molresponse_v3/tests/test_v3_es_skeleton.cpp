@@ -137,9 +137,9 @@ int main(int argc, char **argv) {
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
-              "[--load-roots-tda=DIR] [--load-roots-full=DIR] "
+              "[--load-roots-tda=DIR] "
               "[--load-best=CALC_DIR] "
-              "[--type=tda|full|full-rpa] "
+              "[--type=tda|full] "
               "[--guess=random|solid_harmonics] "
               "[--no-kain] [--kain-maxsub=N] [--maxrotn=X] "
               "[--kain-cmax=X]");
@@ -201,20 +201,15 @@ int main(int argc, char **argv) {
     const std::string load_roots_tda_dir =
         parser.key_exists("load-roots-tda")
             ? parser.value_raw("load-roots-tda") : std::string();
-    // Seed full-rpa from a converged direct-Full (X,Y) archive: u = X+Y.
-    // The ideal full-rpa seed and a direct/symmetric consistency check.
-    const std::string load_roots_full_dir =
-        parser.key_exists("load-roots-full")
-            ? parser.value_raw("load-roots-full") : std::string();
     // ES iteration variant: "tda" (default) or "full" (RPA paired X,Y).
     // Full is ClosedShell-only today; open-shell + full is rejected
     // below before the dispatch.
     const std::string es_type = parser.key_exists("type")
                                     ? parser.value("type")
                                     : std::string("tda");
-    if (es_type != "tda" && es_type != "full" && es_type != "full-rpa") {
+    if (es_type != "tda" && es_type != "full") {
       if (world.rank() == 0)
-        print("ERROR: --type must be 'tda', 'full', or 'full-rpa', got '",
+        print("ERROR: --type must be 'tda' or 'full', got '",
               es_type, "'");
       finalize();
       return 1;
@@ -285,7 +280,7 @@ int main(int argc, char **argv) {
     gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
 
     const bool restricted = gs.is_spin_restricted();
-    if ((es_type == "full" || es_type == "full-rpa") && !restricted) {
+    if (es_type == "full" && !restricted) {
       if (world.rank() == 0)
         print("ERROR: --type=", es_type, " requires a closed-shell "
               "(restricted) ground state. Open-shell Full ES is not yet "
@@ -374,87 +369,7 @@ int main(int argc, char **argv) {
     solvers::IterateProtocolPolicy proto_policy;
     proto_policy.max_iters_per_step = max_iters;
 
-    if (restricted && es_type == "full-rpa") {
-      // --- Symmetric-reduction RPA solver (Davidson on u = X+Y) ---
-      using Solver = ESSolverFullRPA<ClosedShell>;
-      auto problem = build_es_problem_full_rpa<ClosedShell>(
-          world, gs, num_roots, /*c_xc=*/1.0, gs.params().lo());
-
-      // Initial u-bundle. Precedence:
-      //   (a) load Full-RPA archive directly (same-type reuse),
-      //   (b) load direct-Full (X,Y) archive → u = X+Y (ideal seed),
-      //   (c) load TDA archive and promote (u = X, Y=0 limit),
-      //   (d) fresh TDA warmup → promote.
-      Solver::State state0;
-      if (!load_roots_dir.empty()) {
-        // Same shape as TDA on disk (ResponseStateX<ClosedShell>), so
-        // we reuse load_es_roots<TDA,ClosedShell> for the u-bundle.
-        // Treating u as if it were X here is fine — the on-disk
-        // contents are vecfuncT<ClosedShell> regardless of label.
-        auto tmp = load_es_roots<TDA, ClosedShell>(world, load_roots_dir);
-        state0 = promote_tda_to_full_rpa_closed_shell(world, tmp);
-      } else if (!load_roots_full_dir.empty()) {
-        // Seed from a converged direct-Full (X,Y): u = X + Y.
-        auto full_state =
-            load_es_roots<Full, ClosedShell>(world, load_roots_full_dir);
-        state0 = promote_full_to_full_rpa_closed_shell(world, full_state);
-      } else if (!load_roots_tda_dir.empty()) {
-        auto tda_state =
-            load_es_roots<TDA, ClosedShell>(world, load_roots_tda_dir);
-        state0 = promote_tda_to_full_rpa_closed_shell(world, tda_state);
-      } else {
-        auto tda_state = run_oversampled_tda_warmup<ClosedShell>(
-            world, gs, num_roots, n_roots_warmup, tda_warmup_iters,
-            policy, /*c_xc=*/1.0, gs.params().lo(), print_level,
-            guess_mode);
-        state0 = promote_tda_to_full_rpa_closed_shell(world, tda_state);
-      }
-      Solver solver(world, std::move(problem), main_policy, print_level);
-      if (!log_path.empty()) solver.set_log_path(log_path);
-
-      auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
-        set_response_protocol(world, header.L, thresh, override_k);
-        const int    new_k = FunctionDefaults<3>::get_k();
-        const double new_t = FunctionDefaults<3>::get_thresh();
-        if (world.rank() == 0)
-          print("\n--- protocol step: thresh =", new_t,
-                "  k =", new_k, " ---");
-        auto coulop_new = poperatorT(
-            CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-        gs.prepare(world, 0.001 * new_t, coulop_new, fock_json);
-        solv.set_gs(build_response_ground_state_closed_shell(
-            world, gs, /*c_xc=*/1.0, gs.params().lo()));
-        for (auto &root : st.roots)
-          for (auto &fn : root.x_alpha)
-            fn = madness::project(fn, new_k, new_t);
-      };
-      auto sf = solvers::iterate_protocol(
-          solver, state0, protocol_thresholds, prepare, proto_policy);
-      final_omega     = sf.omega;
-      final_residuals = sf.last_residual;
-      final_diverged        = sf.diverged;
-      final_residual_target = solver.targets().bsh_residual;
-
-      // Recover (X, Y) for downstream diagnostics / save (skipped at
-      // smoke-test stage to keep the dispatch lean — the u-bundle is
-      // saved as-is when --save-roots is set).
-      if (!save_roots_dir.empty()) {
-        // Save the u-bundle in the same on-disk shape as TDA roots
-        // (it's ResponseStateX<ClosedShell> either way). Recovery to
-        // (X, Y) is done in-process at load time on subsequent runs.
-        ESSolver<TDA, ClosedShell>::State as_tda;
-        as_tda.roots.resize(sf.roots.size());
-        for (size_t r = 0; r < sf.roots.size(); ++r)
-          as_tda.roots[r].x_alpha =
-              madness::copy(world, sf.roots[r].x_alpha);
-        as_tda.omega = madness::copy(sf.omega);
-        save_es_roots<TDA, ClosedShell>(world, as_tda, save_roots_dir,
-                                         /*converged=*/!sf.diverged);
-        if (world.rank() == 0)
-          print("[SAVE] full-rpa u-bundle: wrote", num_roots,
-                "root(s) +/", save_roots_dir, "/roots.json");
-      }
-    } else if (restricted && es_type == "full") {
+    if (restricted && es_type == "full") {
       // --- Full (paired X,Y) RPA path, ClosedShell only ---
       using Solver = ESSolver<Full, ClosedShell>;
       auto problem = build_es_problem_full<ClosedShell>(

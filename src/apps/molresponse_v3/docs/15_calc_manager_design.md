@@ -405,8 +405,9 @@ The active scope is **closed-shell properties and excited states**. Specifically
   `ESSolver<Full, ClosedShell>` **is implemented** (`solve_es_full_closed_shell`):
   random-guess TDA warmup (default 10 iters, 2× oversample, KAIN kain_maxsub=8,
   maxrotn=0.5) → `promote_tda_to_full_closed_shell` → Full solve; persists a
-  "full" (X,Y) bundle. The symmetric-reduction **FullRPA (`u = X+Y`) remains out
-  of scope** (separate R&D). ES settings are `ExecutorContext` defaults.
+  "full" (X,Y) bundle. The symmetric-reduction **FullRPA (`u = X+Y`) was
+  removed** (2026-06, dropped direction). ES settings are `ExecutorContext`
+  defaults.
 - **FD (linear response)** retains its open-shell path (e.g. Li polarizability)
   — only the *excited-state* path is closed-shell-only.
 

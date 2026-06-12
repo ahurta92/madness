@@ -90,19 +90,12 @@ Density factor convention: `spin_factor × y_factor`. Restricted Static =
 
 ---
 
-## RPA symmetric reduction (`ESSolverFullRPA`)
+## RPA symmetric reduction — REMOVED (2026-06)
 
-| Operation | Formula | Ground truth | v3 location |
-|---|---|---|---|
-| reduction | `(A−B)(A+B) u = ω² u`, `u = X+Y` | Casida / Furche | `es_solver_full_rpa.hpp` |
-| `(A+B)·u` | full `[A B; B A]` action with `y = +u`, take X-block | construction identity | `Kernels<Full,ClosedShell>::apply_AplusB` |
-| `(A−B)·v` | full `[A B; B A]` action with `y = −v`, take X-block | construction identity | `apply_AminusB` |
-| (X,Y) recovery | `v = (A+B)u/ω`, `X = ½(u+v)`, `Y = ½(u−v)` | — | `recover_xy` |
-
-`apply_A±B` rely on `compute_density` using `ρ = 2Σφ(x+y)` and
-`compute_gamma` carrying the cross-channel exchange — if either changes,
-those helpers silently compute `A·u` instead of `(A±B)·u`. See the
-INVARIANCE note in full.hpp.
+The `ESSolverFullRPA` symmetric-reduction solver (`(A−B)(A+B)u = ω²u`,
+`u = X+Y`) and its `apply_AplusB` / `apply_AminusB` operators were
+removed — not a direction we are pursuing. Full ES is the direct
+paired-(X,Y) `ESSolver<Full, ClosedShell>` only.
 
 ---
 
@@ -132,9 +125,8 @@ A contract table is a human aid; the gate is the test. See
 2. **Legacy ω comparison** — converged ω must match the tabulated legacy
    value within `tol`. Legacy is an independent implementation, so a
    match is real signal.
-3. **Two-solver cross-check** — `ESSolver<Full>` (direct) vs
-   `ESSolverFullRPA` (symmetric reduction) must agree on ω
-   (`run_rpa_smoke.sh`). Disagreement means at least one is wrong.
+3. **Two-solver cross-check** — retired with `ESSolverFullRPA` (removed
+   2026-06). The remaining independent check is item 2 (legacy ω).
 
 When adding an operation, add its row above **and** a check that ties it
 to legacy — the table alone did not prevent the metric bug; the missing

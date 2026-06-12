@@ -27,7 +27,6 @@
 #include "../GroundState.hpp"
 #include "../kernels/common_ops.hpp" // common_ops::make_ground_exchange (K0 cache)
 #include "es_solver.hpp"          // ESSolver + ESProblem
-#include "es_solver_full_rpa.hpp" // ESSolverFullRPA + ESProblemFullRPA
 #include "response_state.hpp"
 
 #include <madness/chem/SCFOperators.h>
@@ -235,63 +234,6 @@ slice_state_lowest(const typename ESSolver<TDA, Shell>::State &in,
 
   out.iter     = 0;     // fresh count for the main solver
   out.diverged = false;
-  return out;
-}
-
-/// Build an ES problem for the symmetric-reduction Full RPA solver
-/// (ESSolverFullRPA<ClosedShell>). Ground state is identical to TDA;
-/// distinct ESProblem type keeps ctor calls type-safe.
-template <typename Shell>
-inline ESProblemFullRPA<Shell>
-build_es_problem_full_rpa(madness::World &world, GroundState &gs,
-                          int n_roots,
-                          double c_xc = 1.0, double lo = 1.0e-10) {
-  static_assert(std::is_same_v<Shell, ClosedShell>,
-                "build_es_problem_full_rpa is ClosedShell only.");
-  ESProblemFullRPA<Shell> p;
-  p.gs = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
-  p.n_roots = n_roots;
-  return p;
-}
-
-/// Promote a TDA-ClosedShell ES state into a Full-RPA u-bundle:
-///   u = X + Y, seeded with Y = 0 ⇒ u = X.
-/// The Davidson iteration grows the Y contribution into u as needed
-/// through the chained-BSH preconditioned residual updates.
-inline ESSolverFullRPA<ClosedShell>::State
-promote_tda_to_full_rpa_closed_shell(
-    madness::World &world,
-    const ESSolver<TDA, ClosedShell>::State &in) {
-  ESSolverFullRPA<ClosedShell>::State out;
-  const long M = static_cast<long>(in.roots.size());
-  out.roots.resize(M);
-  for (long s = 0; s < M; ++s)
-    out.roots[s].x_alpha = madness::copy(world, in.roots[s].x_alpha);
-  out.omega = madness::copy(in.omega);
-  out.iter  = 0;
-  return out;
-}
-
-/// Promote a converged direct-Full ES state (X,Y) into a Full-RPA
-/// u-bundle: u = X + Y per root. This is the *ideal* full-rpa seed — a
-/// converged direct-Full fixed point gives u exactly, so the symmetric
-/// (A−B)(A+B) iteration should confirm convergence in ~1 step (Davidson
-/// residual ‖(A−B)(A+B)u − ω²u‖ ≈ 0). Doubles as a consistency check
-/// between the direct and symmetric-reduction solvers.
-inline ESSolverFullRPA<ClosedShell>::State
-promote_full_to_full_rpa_closed_shell(
-    madness::World &world,
-    const ESSolver<Full, ClosedShell>::State &in) {
-  ESSolverFullRPA<ClosedShell>::State out;
-  const long M = static_cast<long>(in.roots.size());
-  out.roots.resize(M);
-  for (long s = 0; s < M; ++s) {
-    out.roots[s].x_alpha = madness::copy(world, in.roots[s].x_alpha);
-    gaxpy(world, 1.0, out.roots[s].x_alpha,
-                 1.0, in.roots[s].y_alpha);   // u = X + Y
-  }
-  out.omega = madness::copy(in.omega);
-  out.iter  = 0;
   return out;
 }
 

@@ -289,16 +289,14 @@ Valid combinations and their use cases:
 | FD     | Static | Polarizability at omega=0, static Raman|
 | FD     | Full   | Dynamic polarizability, hyperpolarizability|
 | ES     | Full   | Full TDDFT/TDHF excited states (direct (X,Y) iteration, `ESSolver<Full>`)|
-| ES     | Full   | Same, via symmetric reduction (A−B)(A+B)u=ω²u (`ESSolverFullRPA`)|
 | ES     | TDA    | Tamm-Dancoff excited states            |
 | FD     | TDA    | (not standard, but type system allows) |
 
-Full ES is realized two ways that must agree on ω: the generic
-`ESSolver<Full, ClosedShell>` (direct paired-(X,Y) iteration with the
-indefinite-metric subspace step) and the dedicated `ESSolverFullRPA`
-(Davidson on u = X+Y via the symmetric (A−B)(A+B) reduction). They
-cross-validate each other — see `operator_contracts.md` and
-`run_rpa_smoke.sh`.
+Full ES is the generic `ESSolver<Full, ClosedShell>` — direct
+paired-(X,Y) iteration with the indefinite-metric subspace step.
+(A symmetric-reduction `ESSolverFullRPA` (Davidson on u = X+Y via
+(A−B)(A+B)u = ω²u) existed as a cross-check but was removed 2026-06 —
+not a direction we are pursuing.)
 
 ---
 
