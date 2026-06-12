@@ -533,12 +533,11 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
   // Post-convergence transition-property report (legacy TDDFT::analysis +
-  // analyze_vectors). DISABLED pending the heap-OOB fix in the ES bundle
-  // load/persistence path (see es_analysis.hpp / es_save_load.hpp): a stray
-  // write in that path corrupts the heap and aborts at teardown. The report
-  // logic itself was bisected and exonerated; re-enable once the load path is
-  // fixed. Tracked for the molresponse_v3 final-architecture pass.
-  if (false && r.converged && ctx.print_level >= PrintLevel::Normal)
+  // analyze_vectors). Runs on the IN-MEMORY converged state `sf` at the solve's
+  // own process count and writes only a rank-0 JSON — it does NOT reload the
+  // bundle, so it never hits the cross-np load path that caused the parked ES
+  // heap-OOB (now guarded in load_es_roots). Re-enabled with that guard in place.
+  if (r.converged && ctx.print_level >= PrintLevel::Normal)
     report_es_analysis<TDA, ClosedShell>(
         world, gs, sf, ctx.print_level,
         ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
@@ -689,10 +688,10 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
   // Post-convergence transition-property report (legacy TDDFT::analysis +
-  // analyze_vectors). DISABLED pending the heap-OOB fix in the ES bundle
-  // load/persistence path (see TDA path above for the full note). Re-enable
-  // once the load path is fixed.
-  if (false && r.converged && ctx.print_level >= PrintLevel::Normal)
+  // analyze_vectors). Runs on the in-memory `sf` (no bundle reload), so it never
+  // hits the cross-np load path that caused the parked ES heap-OOB (now guarded
+  // in load_es_roots). See the TDA path above for the full note. Re-enabled.
+  if (r.converged && ctx.print_level >= PrintLevel::Normal)
     report_es_analysis<Full, ClosedShell>(
         world, gs, sf, ctx.print_level,
         ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
@@ -772,7 +771,7 @@ public:
                          " n_roots=", node.n_roots, " thresh=", item.thresh,
                          (node.tda ? " (TDA closed-shell)"
                                    : " (Full closed-shell)"),
-                         " action=", action_name(item.action));
+                         " action=", node_action_name(item.action));
         return node.tda
                    ? solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
                                                item.action)
@@ -818,7 +817,7 @@ public:
                      " freq=", node.freq, " thresh=", item.thresh,
                      " type=", (is_static ? "static" : "full"),
                      " shell=", (restricted ? "closed" : "open"),
-                     " action=", action_name(item.action));
+                     " action=", node_action_name(item.action));
     }
 
     if (restricted && is_static)
@@ -835,15 +834,6 @@ public:
   }
 
 private:
-  static const char *action_name(NodeAction a) {
-    switch (a) {
-      case NodeAction::Skip:    return "skip";
-      case NodeAction::Restart: return "restart";
-      case NodeAction::Resume:  return "resume";
-      case NodeAction::Fresh:   return "fresh";
-    }
-    return "?";
-  }
   ExecutorContext ctx_;
 };
 
@@ -1102,6 +1092,11 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   if (world.rank() == 0)
     madness::print("\n=== beta assembly  protocol_key=", key, " ===");
 
+  // Accumulate property rows and write them to response_metadata.json in ONE
+  // load/add-all/save after the loops (rank 0), instead of reloading + rewriting
+  // the whole file per (vbc, axis). `key` is constant across all rows.
+  std::vector<std::pair<std::string, nlohmann::json>> rows;  // (property key, row)
+
   for (const auto &vr : plan.vbc) {
     const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
     const std::string vbc_id =
@@ -1138,19 +1133,23 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
                        "  C=", vr.pert_c.description(),
                        "  fB=", vr.freq_b, "  fC=", vr.freq_c,
                        "  value=", b);
-        auto meta = ResponseMetadata::load_or_create(
-            ctx.calc_dir + "/response_metadata.json");
-        meta.add_property(pkey, key,
-                          nlohmann::json{{"A", std::string(1, beta_axis_name(a))},
-                                         {"B", vr.pert_b.description()},
-                                         {"C", vr.pert_c.description()},
-                                         {"freq_b", vr.freq_b},
-                                         {"freq_c", vr.freq_c},
-                                         {"beta", b}});
-        meta.save();
+        rows.emplace_back(
+            pkey, nlohmann::json{{"A", std::string(1, beta_axis_name(a))},
+                                 {"B", vr.pert_b.description()},
+                                 {"C", vr.pert_c.description()},
+                                 {"freq_b", vr.freq_b},
+                                 {"freq_c", vr.freq_c},
+                                 {"beta", b}});
       }
       world.gop.fence();
     }
+  }
+
+  if (world.rank() == 0 && !rows.empty()) {
+    auto meta = ResponseMetadata::load_or_create(
+        ctx.calc_dir + "/response_metadata.json");
+    for (const auto &[pk, row] : rows) meta.add_property(pk, key, row);
+    meta.save();
   }
 }
 

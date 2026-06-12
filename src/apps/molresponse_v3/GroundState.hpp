@@ -23,10 +23,6 @@ using namespace madness;
 /// directly — no reimplementation of the Fock construction pipeline.
 class GroundState {
 public:
-    /// Construct from an existing SCF calculation (shared ownership).
-    /// Used by the madqc workflow where SCF is already available.
-    explicit GroundState(World& world, std::shared_ptr<SCF> scf);
-
     /// Factory: load from a moldft restart archive.
     /// Reads the archive header to extract L, xc, etc., constructs an SCF
     /// with matching parameters, then delegates to SCF::load_mos().
@@ -112,14 +108,15 @@ public:
     void print_info() const;
 
 private:
+    /// Construct a shell around an SCF (shared ownership). Private: GroundState
+    /// is only built via from_archive, so prepare() can always reload pristine
+    /// MOs from the checkpoint on each protocol climb — the restart-safe
+    /// invariant the madqc and CLI paths both rely on.
+    explicit GroundState(World& world, std::shared_ptr<SCF> scf);
+
     std::shared_ptr<SCF> scf_;
     int original_k_;
     int current_k_ = 0;  // k that orbitals are currently projected to
-    bool from_memory_ = false;  // built from an in-memory SCF with no archive; the
-                                // shared (world, scf) ctor defaults this true, but
-                                // from_archive resets it false so prepare() reloads
-                                // pristine MOs from disk on each protocol climb (the
-                                // restart-safe path that both madqc and the CLI use).
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;

@@ -20,11 +20,9 @@ using namespace madness;
 GroundState::GroundState(World& world, std::shared_ptr<SCF> scf)
     : scf_(std::move(scf)),
       original_k_(FunctionDefaults<3>::get_k()),
-      current_k_(FunctionDefaults<3>::get_k()),
-      from_memory_(true) {
-    // Built from an SCF whose MOs are already in memory at the active k (the
-    // madqc path). Record that k as current/original so prepare() projects the
-    // in-memory orbitals to the response protocol instead of reloading an archive.
+      current_k_(FunctionDefaults<3>::get_k()) {
+    // from_archive overwrites original_k_/current_k_ with the archive's k right
+    // after this; the FunctionDefaults reads here are just safe initializers.
 }
 
 GroundState GroundState::from_archive(World& world,
@@ -78,9 +76,6 @@ GroundState GroundState::from_archive(World& world,
     GroundState gs(world, scf);
     gs.original_k_ = header.k;
     gs.current_k_ = header.k;
-    // Built from an archive: prepare() must reload MOs from disk on each protocol
-    // climb (the shared ctor defaults from_memory_=true; reset it here).
-    gs.from_memory_ = false;
     return gs;
 }
 
@@ -125,14 +120,12 @@ void GroundState::prepare(World& world, double vtol,
     // Re-project orbitals if k changed from what they currently are
     if (current_k_ != target_k) {
         // Reload pristine MOs at original_k_ from the archive, then project to
-        // target. from_archive sets from_memory_=false so this reload runs on
-        // every protocol climb, restoring the invariant that scf_->amo is at
-        // original_k_ before the reproject below (the prior in-place projection
-        // leaves it at a coarser k). The in-memory ctor (from_memory_=true) has no
-        // archive to reload and is not used by the restart-safe madqc/CLI paths,
-        // which build via from_archive.
-        if (!from_memory_)
-            scf_->load_mos(world);
+        // target. The reload runs on every protocol climb, restoring the
+        // invariant that scf_->amo is at original_k_ before the reproject below
+        // (an in-place projection would otherwise leave it at a coarser k and a
+        // later climb back up would not conform). GroundState is only built via
+        // from_archive, so the checkpoint to reload from always exists.
+        scf_->load_mos(world);
         if (original_k_ != target_k) {
             reconstruct(world, scf_->amo);
             for (auto& orbital : scf_->amo) {

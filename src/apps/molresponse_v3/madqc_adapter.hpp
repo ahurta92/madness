@@ -11,12 +11,14 @@
 // pipeline through the same madqc workflow path as v2's molresponse_lib —
 // enabling a SAME-INPUT calc_info.json parity check (engine = v2 vs v3).
 //
-// It builds a v3 GroundState from madqc's IN-MEMORY SCF reference (the
-// GroundState(world, shared_ptr<SCF>) ctor exists for exactly this), maps the
+// It builds a v3 GroundState from the moldft restart ARCHIVE (resolved from
+// scf_calc->work_dir, like v2's make_ground_context — NOT from the in-memory
+// SCF, whose MOs may be unloaded on a restart-in-place run), maps the
 // ResponseParameters input deck to a v3 ResponsePlan, and calls
-// run_response_with_ground (the archive-free core).
+// run_response_with_ground.
 //
-// R3a SCOPE: polarizability (alpha) only. beta / raman / excited mapping is R3b.
+// SCOPE: multi-property mapping (R3b) — polarizability + hyperpolarizability +
+// single-component raman + resonant/excited, deduped via merge_plans.
 // This header lives in the v3 app and is included by madqc.cpp (the app links
 // both MADchem and v3's GroundState.cpp); MADchem/WorkflowBuilders must NOT
 // include it (that would be a circular library dependency — the engine is

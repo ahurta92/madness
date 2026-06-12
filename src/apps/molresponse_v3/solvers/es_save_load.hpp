@@ -144,6 +144,13 @@ void save_es_roots(madness::World &world,
     j["type"]      = detail_save_load::type_tag<Type>();
     j["shell"]     = detail_save_load::shell_tag<Shell>();
     j["n_roots"]   = n_roots;
+    // The per-root archives are nio=1 parallel archives; MADNESS can only reload
+    // them with the same #processes that wrote them (it assumes #writers ==
+    // #readers — a mismatch silently loads the wrong coefficient sets into a
+    // wrong-pmap WorldContainer and corrupts the heap). Record the writer count
+    // so load_es_roots can verify it (see the np-guard there). world.size() is a
+    // local query, safe on rank 0.
+    j["writer_nproc"] = world.size();
     const int k_now = madness::FunctionDefaults<3>::get_k();
     j["k"]            = k_now;
     j["thresh"]       = thresh;
@@ -184,8 +191,13 @@ void save_es_roots(madness::World &world,
     j["rss_gb"] = bundle_rss_gb;  // worst-task RSS at this protocol (kept for compat)
     j["metrics"] = bundle_metrics.to_json();  // R1b: uniform metrics block
 
-    std::ofstream out(dir + "/roots.json");
-    out << j.dump(2) << "\n";
+    // Atomic write (tmp + rename) so a crash mid-write can't leave a half-written
+    // index that load_es_roots would mis-parse. The per-root archives above
+    // already exist, so the index becoming visible last is the safe order.
+    const std::string roots_json = dir + "/roots.json";
+    const std::string roots_tmp  = roots_json + ".tmp";
+    { std::ofstream out(roots_tmp); out << j.dump(2) << "\n"; }
+    std::filesystem::rename(roots_tmp, roots_json);
 
     // 13d: upsert into the calc-level aggregate response_metadata.json — UNLESS
     // this is a side bundle (e.g. a cached warmup guess) that must not appear in
@@ -256,6 +268,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   // only need rank 0 to assert them — no broadcast needed for those.
   int n_roots = 0;
   int iter_at_save = 0;
+  int writer_nproc = 0;   // #processes that wrote the per-root archives (0 = legacy)
   madness::Tensor<double> omega_recorded;
   std::vector<double> bsh_residual_recorded;
   std::vector<double> drho_residual_recorded;
@@ -282,6 +295,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
 
     n_roots      = j.value("n_roots", 0);
     iter_at_save = j.value("iter", 0);
+    writer_nproc = j.value("writer_nproc", 0);   // 0 = legacy bundle (no count)
     MADNESS_CHECK(n_roots > 0);
     if (!j.contains("roots") || !j["roots"].is_array() ||
         static_cast<int>(j["roots"].size()) != n_roots) {
@@ -310,6 +324,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   // Broadcast the metadata to every rank.
   world.gop.broadcast(n_roots, 0);
   world.gop.broadcast(iter_at_save, 0);
+  world.gop.broadcast(writer_nproc, 0);
   if (world.rank() != 0) {
     omega_recorded         = madness::Tensor<double>(n_roots);
     bsh_residual_recorded  .assign(n_roots, 0.0);
@@ -320,6 +335,29 @@ load_es_roots(madness::World &world, const std::string &dir) {
   world.gop.broadcast(bsh_residual_recorded.data(),  n_roots, 0);
   world.gop.broadcast(drho_residual_recorded.data(), n_roots, 0);
   world.gop.broadcast(stable_index_recorded.data(),  n_roots, 0);
+
+  // np-guard (all ranks — writer_nproc/world.size() are rank-uniform here, so the
+  // throw is collective and cannot deadlock). The nio=1 per-root archives can
+  // only be reloaded by the same #processes that wrote them; a mismatch silently
+  // corrupts the WorldContainer and aborts at teardown (this is the parked ES
+  // heap-OOB, reproduced by --es-analyze-only --es-load-only at a different np).
+  // Fail cleanly instead. writer_nproc==0 is a legacy bundle with no recorded
+  // count — proceed with a warning (same-np is the common case).
+  if (writer_nproc != 0 && writer_nproc != world.size()) {
+    throw std::runtime_error(
+        "load_es_roots: ES bundle in " + dir + " was written with " +
+        std::to_string(writer_nproc) + " process(es) but is being loaded with " +
+        std::to_string(world.size()) +
+        " — cross-process-count ES restart is unsupported. Re-run with " +
+        std::to_string(writer_nproc) +
+        " rank(s), or delete the bundle to recompute it.");
+  }
+  if (writer_nproc == 0 && world.rank() == 0) {
+    madness::print("[LOAD] WARNING: ES bundle in", dir,
+                   "has no recorded writer_nproc (legacy); assuming it was "
+                   "written with the current", world.size(),
+                   "process(es) — a mismatch may still crash.");
+  }
 
   // Per-root binary archives — collective.
   State s;
