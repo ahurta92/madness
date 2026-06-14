@@ -166,8 +166,9 @@ the "shared node-local orbital replica" improvement called out in the root
 The kernels themselves **do not change** — they still call collective ops on
 `world_`. The behavior changes only because the *operands' pmaps* changed:
 replicated φ is local everywhere, localized `x_i` is local to `Gᵢ`, so each
-root's products are computed on `Gᵢ`. (One exception — the `Exchange` operator,
-§5.3.)
+root's products are computed on `Gᵢ`. (Two big caveats — the `Exchange`
+operator, §5.3, and **intermediate output pmaps, §5.4, which turns out to be
+the dominant difficulty**.)
 
 ### 4.3 Build/gamma/BSH: no code change, just placement
 
@@ -224,12 +225,34 @@ under group placement is delicate. Localizing the exchange is both the biggest
 prize (it's the dominant per-root cost) and the riskiest piece — likely its own
 increment, possibly needing an exchange variant that honors a target pmap.
 
-### 5.4 Output pmap discipline
-An op's *output* function may land on the default pmap rather than inheriting
-the input's group pmap. Each kernel output that must stay group-local may need
-an explicit `copy(out, group_pmap)` or a `set_pmap`. This is fiddly and is the
-main source of "silently wrong because misaligned" bugs — the `--es-batch`
-bit-identity gate (verify_es_batch.sh) is our guard against it.
+### 5.4 Output pmap discipline — the dominant difficulty (verified)
+This is worse than "fiddly"; it's the crux. An op does **not** put its output on
+"the per-root operand's" pmap — it inherits from a *specific* operand:
+- `mul_sparse(world, a, v)` builds each result via `set_impl(left=a)`
+  (`mra.h:1661` → `new implT(*a.get_impl(), a.get_pmap())`, `mra.h:set_impl`).
+  So `V0x = mul_sparse(V_local, x_i)` lands on **V_local's** pmap, NOT `x_i`'s
+  group. T0x (kinetic on `x_i`) lands on `x_i`'s group. So `V0x` and `T0x` end
+  up on **different pmaps**.
+- `assemble_lambda` then gaxpy-adds T0x + V0x − E0x_full + γ. Compressed gaxpy
+  goes through `merge_trees`, which **asserts `get_pmap()==other.get_pmap()`**
+  (`funcimpl.h:1233`). Mismatched pmaps → assert/crash, not a silent wrong
+  number.
+
+**Consequence:** you cannot just localize the roots — every per-root
+intermediate (V0x, T0x, E0x, γ, θ) must be forced onto the *same* group pmap,
+or assembly fails. MADNESS exposes no uniform "output on pmap P" knob, so this
+means an explicit `copy(out, group_pmap)` after (or a pmap-aware variant of)
+**every** kernel op. That is pervasive and fragile.
+
+**This materially favors subworlds for *full* per-root locality** (§6 update):
+inside a subworld, `FunctionDefaults::get_pmap()` *is* the subworld pmap, so
+every intermediate is automatically subworld-local and mutually aligned —
+locality is free, no per-op pmap fighting. The single-World pmap design gets
+in-place global collectives + NodeReplicated φ (less memory), but pays by
+fighting output-pmap conventions at every kernel step. The subworld design gets
+locality for free, but pays with per-subworld φ replication (the `CLAUDE.md`
+OOM driver) + Cloud coupling. **This trade-off is the real Stage-2 decision; it
+must be settled before implementing.**
 
 ---
 
