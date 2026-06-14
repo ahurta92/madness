@@ -52,6 +52,12 @@ add_mad_executable(test_node_subworlds
 add_mad_executable(test_node_phi
                    "tests/test_node_phi.cpp"
                    "MADresponse2;MADchem")
+# Keystone of the persistent-subworld recompute design (docs/22 §8): assemble the
+# subspace matrix from per-node partial columns + universe allreduce (no function
+# movement), == direct universe matrix.
+add_mad_executable(test_subspace_allreduce
+                   "tests/test_subspace_allreduce.cpp"
+                   "MADresponse2;MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees
