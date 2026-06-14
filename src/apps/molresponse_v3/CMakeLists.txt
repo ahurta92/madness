@@ -47,6 +47,11 @@ add_mad_executable(test_step_restriction
 add_mad_executable(test_node_subworlds
                    "tests/test_node_subworlds.cpp"
                    "MADresponse2;MADchem")
+# Inc 2 (docs/21): prove ground state shipped into node-aligned subworlds is
+# ONE distributed copy per node (not per-rank replicated); de-risk cross-world copy.
+add_mad_executable(test_node_phi
+                   "tests/test_node_phi.cpp"
+                   "MADresponse2;MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees
