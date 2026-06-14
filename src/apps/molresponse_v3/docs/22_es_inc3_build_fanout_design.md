@@ -172,4 +172,64 @@ untouched**. `if (es_subworlds_ == 0)` keeps the exact inline build (reference).
   multi-node bet — measure, don't assume).
 - `MacroTask` lifecycle inside an iterative solver (created/destroyed each
   iter): confirm no leak / no residual fence state across iterations.
+
+---
+
+## 8. DESIGN UPDATE — persistent subworlds + recompute (per user, 2026-06-14)
+
+The §1–§7 MacroTask approach is **stateless**: it recreates subworlds and
+re-ships X (and φ) on every `task(...)` call. That fights two goals the user
+raised:
+- **Persist the subworld across build→rotate→BSH** (not just the build), so the
+  response state never leaves its home.
+- **Recompute, not store:** the ONLY persistent per-root data is the response
+  state X (+ the iteration counter/KAIN history). Λ, V0x, E0x, γ are built,
+  consumed, and dropped — exactly `step_recompute_pieces` (stream_theta), which
+  ALREADY exists in the v3 solver.
+
+### 8.1 The target loop (persistent subworlds, replicated X)
+Create the node-subworld pool + replicate φ **once** (Inc 1/2). Each subworld
+owns a slice of roots; **X is replicated across subworlds** (cheap for ES: M
+roots is small, X = M·n_occ ≈ M·φ). Then per iteration, with NO function moved
+to the universe:
 ```
+local  (subworld g, its roots):  X_j -> build Λ_j   (recompute; Λ transient, local)
+local  (subworld g):  A[:, S_g] = ⟨X_i | Λ_j⟩  for j∈S_g, all i   (X replicated => local inners)
+                      S[:, S_g] = ⟨X_i | X_j⟩  likewise
+collective (universe): allreduce the partial A, S  (M×M SCALARS — tiny; Λ never crosses)
+local  (replicated):  diagonalize (A,S) -> ω, U
+local  (subworld g):  rotate its roots  X_j_new = Σ_i U_ij X_i  (X replicated => local)
+local  (subworld g):  recompute θ on rotated X -> BSH -> KAIN     (all local)
+sync:                 re-broadcast each updated root to the X replicas
+```
+Per-iter cross-world traffic = the M×M scalar allreduce + re-broadcasting the
+updated X (M·n_occ functions). **Λ and the whole 78% build never cross.** That
+is the win your recompute insight captures.
+
+### 8.2 The one hard constraint (why X must be replicated or gathered)
+Both the subspace matrix `A_ij=⟨X_i|Λ_j⟩` AND the dense rotation
+`X_i←Σ_j U_ji X_j` couple ALL roots through co-located-function ops (alignment
+rule, doc 20 §3). With roots partitioned across subworlds, the cross terms need
+the partner function present. Two ways:
+- **Replicate X** across subworlds → matrix-columns + rotation are LOCAL; pay
+  G× X memory + re-broadcast updated X each iter. (Your "rotate local x" — works
+  only because X is everywhere.) Good for ES (small M).
+- **Gather X** to the universe for matrix+rotation → X stored once/node, moved
+  each iter (the shuffle). Lower memory, more movement.
+There is no reduction-only path: A's elements and the rotation are
+function-level, not coefficient-vector-level. The expensive Λ/build stays local
+either way — that is the part that matters.
+
+### 8.3 What this means for the plan
+- The MacroTask build-fan-out (§1–§7) is **demoted to an optional measurement**:
+  cheap to stand up (reuses MacroTaskQ), it puts a hard number on the per-iter
+  coupling cost and proves the subworld build is bit-identical — which *justifies*
+  (or kills) the bigger persistent redesign. It is throwaway-ish.
+- The **persistent + recompute design (§8.1)** is the real target. It's a larger
+  restructure: the ES iteration runs in subworld context (world_ = subworld),
+  roots partitioned + X replicated, a universe handle for the A/S allreduce. It
+  reuses `step_recompute_pieces` (the recompute machinery already exists) and the
+  Inc 1/2 subworld+φ machinery.
+- Decision pending: do the MacroTask measurement first (quantify the coupling we
+  aim to remove), or commit straight to the persistent design.
+
