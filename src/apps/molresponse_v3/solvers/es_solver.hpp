@@ -24,6 +24,7 @@
 #include "../kernels/response_space_ops.hpp"
 #include "../kernels/tags.hpp"
 #include "../kernels/tda.hpp"   // Kernels<TDA, *>
+#include "../kernels/tda_batch.hpp"  // tda_batch:: bundle-batched V0x/T0x/BSH
 #include "convergence_policy.hpp"
 #include "es_root_identity.hpp"
 #include "iterate.hpp"
@@ -141,6 +142,14 @@ public:
   }
   const ResponseGroundState& gs()      const { return gs_; }
   int                        n_roots() const { return n_roots_; }
+
+  /// Stage-1 bundle batching (closed-shell TDA only): compute V0x/T0x and
+  /// the BSH apply over the flattened M·n_occ bundle in one pass instead of
+  /// M per-root passes. Pure per-function maps ⇒ numerically identical to
+  /// the per-root path (see kernels/tda_batch.hpp). Default OFF; --es-batch
+  /// flips it. Has effect only for TDA/ClosedShell with M>1.
+  void set_batched(bool b) { batched_ = b; }
+  bool batched() const     { return batched_; }
 
   /// Enable per-iter convergence logging to a CSV file. One row per
   /// (iter, state) appended at the end of each step(). Header is
@@ -347,12 +356,32 @@ public:
     std::vector<Storage> V0x(M), T0x(M), E0x_full(M), E0x(M), gamma(M);
     std::vector<madness::real_function_3d> rho_alpha(M);
     out.last_density_residual.assign(M, 0.0);
+
+    // Stage-1 batching: build V0x and T0x for ALL roots in one bundle pass
+    // (pure per-function maps — identical to the per-root calls). gamma /
+    // E0x / density stay per-root (see kernels/tda_batch.hpp for why).
+    bool did_batch_v0t0 = false;
+    if constexpr (std::is_same_v<Type, TDA> &&
+                  std::is_same_v<Shell, ClosedShell>) {
+      if (batched_ && M > 1) {
+        const std::size_t n = out.roots[0].x_alpha.size();
+        auto Xf  = tda_batch::flatten(out.roots);
+        auto V0f = tda_batch::compute_V0x_flat(world_, gs_, Xf);
+        auto T0f = tda_batch::compute_T0x_flat(world_, Xf);
+        tda_batch::unflatten_into(V0f, n, V0x);
+        tda_batch::unflatten_into(T0f, n, T0x);
+        did_batch_v0t0 = true;
+      }
+    }
+
     for (int s = 0; s < M; ++s) {
       rho_alpha[s]  = K::compute_density(world_, gs_, out.roots[s]);
       gamma[s]      = K::compute_gamma(world_, gs_, out.roots[s],
                                        rho_alpha[s]);
-      V0x[s]        = K::compute_V0x(world_, gs_, out.roots[s]);
-      T0x[s]        = K::compute_T0x(world_, gs_, out.roots[s]);
+      if (!did_batch_v0t0) {
+        V0x[s]      = K::compute_V0x(world_, gs_, out.roots[s]);
+        T0x[s]      = K::compute_T0x(world_, gs_, out.roots[s]);
+      }
       E0x_full[s]   = K::compute_E0x_full(world_, gs_, out.roots[s]);
       E0x[s]        = K::compute_E0x(world_, gs_, out.roots[s]);
 
@@ -422,14 +451,45 @@ public:
     // and produce garbage iterates.
     std::vector<Storage> x_pre_bsh = out.roots;
     out.last_bsh_residual.assign(M, 0.0);
-    for (int s = 0; s < M; ++s) {
-      auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
-                                theta[s], omega_new(s));
-      out.last_bsh_residual[s] =
-          K::compute_residual_norm(world_, out.roots[s], x_new);
-      print_debug_norms(s, in, V0x[s].x_alpha, T0x[s].x_alpha,
-                        gamma[s].x_alpha, theta[s].x_alpha);
-      out.roots[s] = std::move(x_new);
+
+    // Stage-1 batching: one BSH apply over the flattened M·n_occ bundle
+    // (per-root ω ⇒ per-root op set, concatenated). Residual per slot from
+    // a single norm2s over the rotated-minus-new difference.
+    bool did_batch_bsh = false;
+    if constexpr (std::is_same_v<Type, TDA> &&
+                  std::is_same_v<Shell, ClosedShell>) {
+      if (batched_ && M > 1) {
+        const std::size_t n = out.roots[0].x_alpha.size();
+        auto Xf  = tda_batch::flatten(out.roots);   // rotated, pre-BSH
+        auto Thf = tda_batch::flatten(theta);
+        auto NXf = tda_batch::bsh_apply_flat(world_, gs_, Xf, Thf,
+                                             omega_new, n);
+        auto diff = madness::sub(world_, Xf, NXf);
+        auto dn   = madness::norm2s(world_, diff);  // per-function, M·n
+        for (int s = 0; s < M; ++s) {
+          double acc = 0.0;
+          for (std::size_t p = 0; p < n; ++p)
+            acc += dn[s * n + p] * dn[s * n + p];
+          out.last_bsh_residual[s] = std::sqrt(acc);
+        }
+        tda_batch::unflatten_into(NXf, n, out.roots);
+        for (int s = 0; s < M; ++s)
+          print_debug_norms(s, in, V0x[s].x_alpha, T0x[s].x_alpha,
+                            gamma[s].x_alpha, theta[s].x_alpha);
+        did_batch_bsh = true;
+      }
+    }
+
+    if (!did_batch_bsh) {
+      for (int s = 0; s < M; ++s) {
+        auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
+                                  theta[s], omega_new(s));
+        out.last_bsh_residual[s] =
+            K::compute_residual_norm(world_, out.roots[s], x_new);
+        print_debug_norms(s, in, V0x[s].x_alpha, T0x[s].x_alpha,
+                          gamma[s].x_alpha, theta[s].x_alpha);
+        out.roots[s] = std::move(x_new);
+      }
     }
 
     // ---- 7. KAIN acceleration + step restriction --------------------------
@@ -877,6 +937,8 @@ private:
   PrintLevel                 print_level_ = PrintLevel::Normal;
   std::string                log_path_;
   bool                       log_header_written_ = false;
+  // Stage-1 bundle batching toggle (see set_batched). Closed-shell TDA only.
+  bool                       batched_ = false;
 };
 
 // Build helpers (ResponseGroundState + initial guess) live in

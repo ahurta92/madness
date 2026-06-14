@@ -207,6 +207,31 @@ in addition to `cm_equiv` / the ES regression.
 
 ## 7. Prototype increments (phased, each independently validated)
 
+> **Staged plan (decided 2026-06-14).** A design discussion (do we *move* root
+> data each iteration, or localize once and apply in place?) split the work into
+> two stages with the MacroTaskQ fan-out below as the comparison track:
+>
+> - **Stage 1 — bundle batching (LANDED, gated `--es-batch`).** No layout
+>   change. Collapse the M sequential per-root passes for the *pure
+>   per-function* ops (V0x, T0x, BSH) into ONE collective pass over the
+>   flattened `M·n_occ` bundle (`kernels/tda_batch.hpp`). Bit-identical to the
+>   per-root path (verified h2: 3/3 roots bit-for-bit across 4 ranks; h2o:
+>   converged root bit-identical, ~7% wall). gamma-exchange (`K[φ,xₛ](φ)`, a
+>   distinct operator per root) and the focka transforms stay per-root — those
+>   are the Stage-2 targets. Cuts fence count ~6M → ~3+3M and fills the task
+>   queue with M× more work per fence; the win grows with root/rank count.
+> - **Stage 2 — locality pmaps (next).** The two-pmap idea: pin each root's tree
+>   to a rank subset (per-function `WorldDCPmapInterface`) while keeping one
+>   global World so collectives still engage all ranks. The irreducible coupling
+>   motion is re-mapping X+Λ to a shared pmap once per iter for the M×M subspace
+>   step + rotation (`step_recompute_pieces` becomes the natural variant); `amo`
+>   goes `NodeReplicated`. Cuts intra-op communication + the ground-orbital
+>   replica (§4).
+>
+> The MacroTaskQ subworld fan-out (Inc 0–4 below) is retained as the
+> alternative/comparison track — it ships root copies via the Cloud every
+> iteration (per-iter motion), which Stage 2 avoids.
+
 - **Inc 0 — parity harness.** Add a `--es-groups=G` knob (default 1) + a serial
   baseline capture. No behavior change at G=1. Establishes the parity gate.
 - **Inc 1 — fan the per-root BUILD only.** Replace the serial build loop

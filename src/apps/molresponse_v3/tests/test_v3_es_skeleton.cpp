@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
               "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
               "[--tol=X] [--print-level=0..3] "
               "[--log-convergence=PATH] "
-              "[--stream-theta] "
+              "[--stream-theta] [--es-batch] "
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
@@ -169,6 +169,9 @@ int main(int argc, char **argv) {
                                      ? parser.value_raw("log-convergence")
                                      : std::string();
     const bool stream_theta = parser.key_exists("stream-theta");
+    // Stage-1 bundle batching (closed-shell TDA): V0x/T0x/BSH over the
+    // flattened M·n_occ bundle in one pass. Default off → per-root reference.
+    const bool es_batch = parser.key_exists("es-batch");
     const int tda_warmup_iters = parser.key_exists("tda-warmup-iters")
                                      ? std::stoi(parser.value("tda-warmup-iters"))
                                      : 3;
@@ -458,6 +461,7 @@ int main(int argc, char **argv) {
             guess_mode);
       }
       Solver solver(world, std::move(problem), main_policy, print_level);
+      solver.set_batched(es_batch);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
       auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {
