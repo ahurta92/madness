@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
               "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
               "[--tol=X] [--print-level=0..3] "
               "[--log-convergence=PATH] "
-              "[--stream-theta] [--es-batch] "
+              "[--stream-theta] [--es-batch] [--es-time] "
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
@@ -172,6 +172,8 @@ int main(int argc, char **argv) {
     // Stage-1 bundle batching (closed-shell TDA): V0x/T0x/BSH over the
     // flattened M·n_occ bundle in one pass. Default off → per-root reference.
     const bool es_batch = parser.key_exists("es-batch");
+    // Per-phase wall-time instrumentation: one ES_TIMING line per step.
+    const bool es_time = parser.key_exists("es-time");
     const int tda_warmup_iters = parser.key_exists("tda-warmup-iters")
                                      ? std::stoi(parser.value("tda-warmup-iters"))
                                      : 3;
@@ -462,6 +464,7 @@ int main(int argc, char **argv) {
       }
       Solver solver(world, std::move(problem), main_policy, print_level);
       solver.set_batched(es_batch);
+      solver.set_time_phases(es_time);
       if (!log_path.empty()) solver.set_log_path(log_path);
 
       auto prepare = [&](double thresh, Solver &solv, Solver::State &st) {

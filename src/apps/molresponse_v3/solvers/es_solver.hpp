@@ -151,6 +151,14 @@ public:
   void set_batched(bool b) { batched_ = b; }
   bool batched() const     { return batched_; }
 
+  /// Per-phase wall-time instrumentation (diagnostic). When on, step_rotate_
+  /// pieces fences at phase boundaries and prints one rank-0 line per step:
+  ///   ES_TIMING iter=N gamma=.. build=.. subspace=.. rotate=.. bsh=.. total=..
+  /// The boundary fences are EXTRA syncs (perturb timing slightly) added only
+  /// under this flag — normal runs are untouched. Default OFF; --es-time flips.
+  void set_time_phases(bool b) { time_phases_ = b; }
+  bool time_phases() const     { return time_phases_; }
+
   /// Enable per-iter convergence logging to a CSV file. One row per
   /// (iter, state) appended at the end of each step(). Header is
   /// written on the first row of a fresh file. Pass empty string to
@@ -340,6 +348,22 @@ public:
     out.roots = in.roots;
     const int M = n_roots_;
 
+    // ---- per-phase wall timing (diagnostic, --es-time) --------------------
+    // MADNESS ops are async (queued, run at the next fence), so attributing
+    // time needs a fence at each phase boundary. `lap(acc)` fences, adds the
+    // elapsed since the last mark to `acc`, and advances the mark. The fences
+    // are added ONLY when time_phases_ is on; otherwise lap() is a no-op.
+    double t_gamma = 0, t_build = 0, t_subspace = 0, t_rotate = 0, t_bsh = 0;
+    double tmark = 0.0;
+    auto lap = [&](double &acc) {
+      if (!time_phases_) return;
+      world_.gop.fence();
+      double now = madness::wall_time();
+      acc += now - tmark;
+      tmark = now;
+    };
+    if (time_phases_) { world_.gop.fence(); tmark = madness::wall_time(); }
+
     // ---- 0. top-of-iter discipline ----------------------------------------
     // Strip ground-orbital contamination that accumulated during the
     // previous iter's BSH + KAIN steps (else BSH amplifies it into the
@@ -373,18 +397,14 @@ public:
         did_batch_v0t0 = true;
       }
     }
+    lap(t_build);  // top-of-iter project/ortho + batched V0x/T0x
 
+    // gamma pass (density + Coulomb-exchange γ) — the suspected hot phase, so
+    // timed on its own. Split from the ops pass below ONLY for attribution;
+    // the per-root kernel calls are independent, so results are unchanged.
     for (int s = 0; s < M; ++s) {
-      rho_alpha[s]  = K::compute_density(world_, gs_, out.roots[s]);
-      gamma[s]      = K::compute_gamma(world_, gs_, out.roots[s],
-                                       rho_alpha[s]);
-      if (!did_batch_v0t0) {
-        V0x[s]      = K::compute_V0x(world_, gs_, out.roots[s]);
-        T0x[s]      = K::compute_T0x(world_, gs_, out.roots[s]);
-      }
-      E0x_full[s]   = K::compute_E0x_full(world_, gs_, out.roots[s]);
-      E0x[s]        = K::compute_E0x(world_, gs_, out.roots[s]);
-
+      rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
+      gamma[s]     = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[s]);
       // Δρ vs previous iter (per slot — see note in State).
       if (!in.rho_alpha_prev.empty()) {
         auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
@@ -392,6 +412,17 @@ public:
       }
     }
     out.rho_alpha_prev = std::move(rho_alpha);
+    lap(t_gamma);
+
+    // ops pass (per-root V0x/T0x if not batched, + E0x_full, E0x).
+    for (int s = 0; s < M; ++s) {
+      if (!did_batch_v0t0) {
+        V0x[s]    = K::compute_V0x(world_, gs_, out.roots[s]);
+        T0x[s]    = K::compute_T0x(world_, gs_, out.roots[s]);
+      }
+      E0x_full[s] = K::compute_E0x_full(world_, gs_, out.roots[s]);
+      E0x[s]      = K::compute_E0x(world_, gs_, out.roots[s]);
+    }
 
     // ---- 2. assemble Lambda per root --------------------------------------
     std::vector<Storage> lambda(M);
@@ -399,6 +430,7 @@ public:
       lambda[s] = assemble_lambda(world_, T0x[s], V0x[s],
                                   E0x_full[s], gamma[s]);
     }
+    lap(t_build);  // ops pass + Lambda assembly
 
     // ---- 3. subspace A, S, diagonalize ------------------------------------
     // rs::inner / rs::metric / rs::transform take std::vector<State>
@@ -426,6 +458,7 @@ public:
     fill_omega_residual(out, in);
     print_debug_iter(A, S_mat, omega_new, U);
     print_rot_slots(out.iter, diag_result);
+    lap(t_subspace);
 
     // ---- 4. rotate the response pieces needed for Theta -------------------
     rs::transform(world_, out.roots, U);
@@ -438,6 +471,7 @@ public:
     for (int s = 0; s < M; ++s) {
       theta[s] = assemble_theta(world_, V0x[s], E0x[s], gamma[s]);
     }
+    lap(t_rotate);  // rotation transforms + Theta assembly
 
     // ---- 6. BSH apply + residual ------------------------------------------
     // out.roots[s] currently holds the rotated state (pre-BSH). BSH
@@ -500,12 +534,21 @@ public:
           (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
       kain_.apply(x_pre_bsh, out.roots, kain_diag);
     }
+    lap(t_bsh);  // BSH apply + residual + KAIN
 
     // Explosion guard — if any per-root BSH residual blows up past
     // policy_.explosion_guard, mark the state diverged and let iterate<>
     // stop. Legacy iterate_excited.cc:164 uses the same heuristic.
     for (double r : out.last_bsh_residual) {
       if (r > policy_.explosion_guard) { out.diverged = true; break; }
+    }
+
+    if (time_phases_ && world_.rank() == 0) {
+      const double tot = t_gamma + t_build + t_subspace + t_rotate + t_bsh;
+      madness::print("ES_TIMING iter=", out.iter,
+                     " gamma=", t_gamma, " build=", t_build,
+                     " subspace=", t_subspace, " rotate=", t_rotate,
+                     " bsh=", t_bsh, " total=", tot, " (s, rank0)");
     }
 
     print_iter_banner(out);
@@ -939,6 +982,8 @@ private:
   bool                       log_header_written_ = false;
   // Stage-1 bundle batching toggle (see set_batched). Closed-shell TDA only.
   bool                       batched_ = false;
+  // Per-phase wall-time instrumentation toggle (see set_time_phases).
+  bool                       time_phases_ = false;
 };
 
 // Build helpers (ResponseGroundState + initial guess) live in
