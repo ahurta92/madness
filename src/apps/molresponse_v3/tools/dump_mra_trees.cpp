@@ -31,7 +31,10 @@
 //                  [--maxlevel=N] [--k=N] [--thresh=X] [--max-orbitals=N]
 
 #include "../GroundState.hpp"
+#include "../Perturbations.hpp"        // Perturbation (FD identity)
 #include "../ResponseProtocol.hpp"
+#include "../kernels/tags.hpp"         // Static / Full / TDA, ClosedShell
+#include "../solvers/fd_save_load.hpp" // try_load_fd_state<Type,Shell>
 
 #include <madness/chem/atomutil.h>
 #include <madness/external/nlohmann_json/json.hpp>
@@ -46,6 +49,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace madness;
@@ -202,6 +206,135 @@ void dump_function_trees(World& world, Function<double, 3> f,
   write_tree_json(world, f, stem + "_comp.json");
 }
 
+// Inverse of Perturbation::description() (Perturbations.hpp): turn a
+// response_metadata.json <pert> key back into a Perturbation so we can drive
+// try_load_fd_state. Mirrors the only formats description() emits:
+//   dipole_<a>   magnetic_<a>   nuc_<atom>_<a>   (atom "*" = all-atoms, -1).
+Perturbation parse_perturbation(const std::string& desc) {
+  auto axis_of = [](char c) -> int {
+    return c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1;
+  };
+  if (desc.rfind("dipole_", 0) == 0)
+    return Perturbation::dipole(axis_of(desc.back()));
+  if (desc.rfind("magnetic_", 0) == 0)
+    return Perturbation::magnetic(axis_of(desc.back()));
+  if (desc.rfind("nuc_", 0) == 0) {
+    const auto last = desc.rfind('_');                  // before the axis char
+    const std::string mid = desc.substr(4, last - 4);   // atom tag between _ _
+    return Perturbation::nuclear(mid == "*" ? -1 : std::stoi(mid),
+                                 axis_of(desc.back()));
+  }
+  throw std::runtime_error("parse_perturbation: unrecognized '" + desc + "'");
+}
+
+// Load one converged FD response point at the ACTIVE protocol (caller sets
+// FunctionDefaults via set_response_protocol) using the SAME collective
+// try_load_fd_state the solver's restart path uses, then dump each response
+// orbital's octree (recon + compressed) exactly like a ground MO. Static
+// (static α) carries x only; Full (dynamic α) carries x and y. Collective.
+template <typename Type, typename Shell>
+int dump_fd_point(World& world, const std::string& calc_dir,
+                  const Perturbation& pert, double freq,
+                  const std::string& out_dir, const std::string& label,
+                  int max_orbitals) {
+  auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
+  if (!loaded) {
+    if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
+    return 0;
+  }
+  const auto& store = loaded->state.responses.at(0);
+
+  auto dump_block = [&](const std::vector<real_function_3d>& blk,
+                        const char* tag) {
+    const std::size_t n =
+        (max_orbitals >= 0)
+            ? std::min<std::size_t>(blk.size(),
+                                    static_cast<std::size_t>(max_orbitals))
+            : blk.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      dump_function_trees(world, blk[i],
+                          out_dir + "/" + label + "_" + tag + std::to_string(i));
+      const double nrm = blk[i].norm2();  // collective -- all ranks
+      if (world.rank() == 0)
+        print("  dumped", label, tag, i, " norm2=", nrm);
+    }
+  };
+
+  dump_block(store.x_alpha, "x");
+  if constexpr (std::is_same_v<Type, Full>) dump_block(store.y_alpha, "y");
+  return 1;
+}
+
+// Walk response_metadata.json and dump every saved CLOSED-SHELL FD response
+// point's trees into `out_dir`, alongside the ground orbitals, so a single
+// mra_tree.py run yields a combined ground + response product-overlap matrix.
+//
+// The metadata file is small and local: every rank reads it to build the
+// IDENTICAL job list (nlohmann objects are key-ordered), so the downstream
+// collective loads + dumps stay in lockstep. `L` (box length, from the
+// ground-state archive header) sets each point's protocol before loading.
+void dump_fd_states(World& world, double L, const std::string& calc_dir,
+                    const std::string& out_dir, int max_orbitals) {
+  const std::string meta_path = calc_dir + "/response_metadata.json";
+  if (!std::filesystem::exists(meta_path)) {
+    if (world.rank() == 0)
+      print("  [FD] no response_metadata.json in", calc_dir, "-- nothing to dump");
+    return;
+  }
+  nlohmann::json j;
+  {
+    std::ifstream ifs(meta_path);
+    ifs >> j;
+  }
+  if (!j.contains("fd_states")) {
+    if (world.rank() == 0) print("  [FD] no fd_states in", meta_path);
+    return;
+  }
+  const auto protocols = j.value("protocols", nlohmann::json::object());
+
+  int npoints = 0;
+  for (auto& [pert, by_key] : j["fd_states"].items()) {
+    Perturbation p;
+    try {
+      p = parse_perturbation(pert);
+    } catch (const std::exception& e) {
+      if (world.rank() == 0) print("  [FD] skip:", e.what());
+      continue;
+    }
+    for (auto& [key, by_fkey] : by_key.items()) {
+      // (thresh, k) recorded by save_fd_state -> set the protocol; no key parse.
+      if (!protocols.contains(key)) continue;
+      const double thresh = protocols[key].value("thresh", 0.0);
+      const int    k      = protocols[key].value("k", 0);
+      if (thresh <= 0.0 || k <= 0) continue;
+      set_response_protocol(world, L, thresh, k);
+
+      for (auto& [fkey, entry] : by_fkey.items()) {
+        if (entry.value("shell", "") != "closed_shell") {
+          if (world.rank() == 0)
+            print("  [FD] skip non-closed-shell:", pert, key, fkey);
+          continue;
+        }
+        const double freq      = entry.value("freq", 0.0);
+        const std::string type = entry.value("type", "");
+        const std::string label = "fd_" + pert + "__" + key + "__" + fkey;
+        // FD points are static (α(0)) or full (dynamic α(ω)); TDA is an ES-bundle
+        // type and never appears in fd_states (FDPerturbationOf<TDA> is undefined).
+        if (type == "static")
+          npoints += dump_fd_point<Static, ClosedShell>(
+              world, calc_dir, p, freq, out_dir, label, max_orbitals);
+        else if (type == "full")
+          npoints += dump_fd_point<Full, ClosedShell>(
+              world, calc_dir, p, freq, out_dir, label, max_orbitals);
+        else if (world.rank() == 0)
+          print("  [FD] skip unknown type:", type, "for", label);
+      }
+    }
+  }
+  if (world.rank() == 0)
+    print("DUMP_MRA_FD  calc_dir=", calc_dir, "  points_dumped=", npoints);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -215,10 +348,14 @@ int main(int argc, char** argv) {
       if (world.rank() == 0) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
-              "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X]");
+              "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
+              "[--fd] [--fd-calc-dir=DIR]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
+        print("  With --fd, also dumps the converged closed-shell FD response");
+        print("  orbitals from --fd-calc-dir (default: the archive's directory)");
+        print("  into the same out dir -> one combined ground+response analysis.");
       }
       finalize();
       return 1;
@@ -240,6 +377,14 @@ int main(int argc, char** argv) {
                                    ? std::stoi(parser.value("cube-npoints")) : 80;
       const double cube_pad = parser.key_exists("cube-pad")
                                   ? std::stod(parser.value("cube-pad")) : 6.0;
+      // FD response orbitals: dump the converged closed-shell FD response states
+      // from a calc dir (response_metadata.json) into the same out dir, so one
+      // mra_tree.py run yields a combined ground + response overlap matrix.
+      const bool dump_fd = parser.key_exists("fd");
+      const std::string fd_calc_dir =
+          parser.key_exists("fd-calc-dir")
+              ? parser.value_raw("fd-calc-dir")
+              : std::filesystem::path(archive_path).parent_path().string();
 
       auto header = GroundState::read_archive_header(world, archive_path);
 
@@ -289,6 +434,14 @@ int main(int argc, char** argv) {
         if (world.rank() == 0) print("  dumped mo_", i, "  norm2=", nrm);
       }
       world.gop.fence();
+
+      // Combined ground + response analysis: dump the FD response orbitals into
+      // the same out dir. Runs after the GS dump (it mutates FunctionDefaults to
+      // each FD point's protocol). header.L is the box length from the GS header.
+      if (dump_fd) {
+        dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals);
+        world.gop.fence();
+      }
     }
 
     finalize();
