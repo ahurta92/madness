@@ -47,9 +47,14 @@
 #include <madness/misc/info.h>
 #include <madness/world/worldmem.h>
 
+#include <fstream>
+#include <iostream>
+
 #include <Drivers.hpp>
 #include <ParameterManager.hpp>
 #include <WorkflowBuilders.hpp>
+#include <madness/chem/ResultsSummary.hpp>
+#include <madness/chem/VizManifest.hpp>
 #include <apps/molresponse_v3/madqc_adapter.hpp>  // molresponse_v3_lib (R3 engine)
 #include <madness_exception.h>
 
@@ -68,7 +73,8 @@ void help(const std::string &wf) {
   print("  --workflow=<name>           : specify the workflow to run (default: "
         "scf)");
   print("\nAvailable workflows: " + workflow_builders::runnable_workflow_list());
-  print("Available groups: dft, nemo, response, cc2, cis, oep, geometry");
+  print("Parameter groups (for --print_parameters): dft, nemo, response, cc2, "
+        "cis, oep, geometry");
   print("");
   if (wf == "scf") {
     print("madqc --wf=scf");
@@ -85,7 +91,10 @@ void help(const std::string &wf) {
   } else if (wf == "response") {
     print("madqc --wf=response");
     print("Response theory for DFT and Hartree-Fock");
+    print("(runs the ground-state SCF first, then linear/quadratic response)");
     print("\nexamples: ");
+    print("madqc --wf=response h2o_response.in");
+    print("see  madqc --print_parameters=response  for all response knobs");
   } else if (wf == "mp2" or wf == "cc2") {
     print("madqc --wf=cc2");
     print("MP2/CC2 code for correlated wave functions");
@@ -98,6 +107,8 @@ void help(const std::string &wf) {
   } else if (wf == "oep") {
     print("madqc --wf=oep");
     print("Optimized effective potential code for DFT");
+    print("\nexamples: ");
+    print("madqc --wf=oep --geometry=h2o");
   }
 }
 
@@ -107,9 +118,9 @@ void print_parameters(World &world, const commandlineparser &parser,
   if (group.empty()) {
     print("please specify a data group to print parameters for");
     print("\n  --print_parameters=<group>  : print all parameters and exit");
-    print("\nAvailable data groups: scf, nemo, response, cc2, cis, oep, "
+    print("\nAvailable data groups: dft, nemo, response, cc2, cis, oep, "
           "geometry");
-  } else if (group == "dft") {
+  } else if (group == "dft" || group == "scf") {
     print("Available parameters for data group: dft");
     pm.get<CalculationParameters>().print();
   } else if (group == "nemo") {
@@ -199,6 +210,19 @@ int main(int argc, char **argv) {
 
       std::string prefix = pm.prefix();
       wf.run(prefix);
+
+      // Human-readable chemistry report: to stdout and <prefix>.out. The
+      // machine-readable <prefix>.calc_info.json remains the source of truth.
+      if (world.rank() == 0) {
+        qcapp::write_results_summary(std::cout, wf.results());
+        std::ofstream report(prefix + ".out");
+        qcapp::write_results_summary(report, wf.results());
+        print("Wrote results summary :", prefix + ".out");
+
+        // Index any visualization artifacts (cube/dx/line plots) the run
+        // produced into <prefix>.viz_manifest.json for gecko/ParaView/VMD.
+        qcapp::write_viz_manifest(prefix, wf.results());
+      }
     } catch (const MadnessException &e) {
       if (world.rank() == 0) {
         print_header2("caught a MADNESS exception in the main loop");

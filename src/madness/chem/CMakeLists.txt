@@ -56,6 +56,8 @@ set(MADCHEM_HEADERS
     MolresponseLib.hpp
     Applications.hpp
     Drivers.hpp
+    ResultsSummary.hpp
+    VizManifest.hpp
     SCFTargetAdapter.hpp
     InputWriter.hpp
     CCLib.hpp

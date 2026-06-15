@@ -144,6 +144,16 @@ public:
         scf_results = empty_results;
         action = madness::NextAction::Redo;
       }
+
+      // Guard against reusing a checkpoint computed for a DIFFERENT molecule.
+      if (action != madness::NextAction::Redo &&
+          !checkpoint_geometry_matches(j)) {
+        if (world_.rank() == 0)
+          print("WARNING: checkpoint geometry does not match the requested "
+                "molecule; ignoring checkpoint and recomputing.");
+        scf_results = empty_results;
+        action = madness::NextAction::Redo;
+      }
       world_.gop.fence();
       set_calc_workdir(pm.dir());
       auto params_copy = params_;
@@ -216,6 +226,34 @@ public:
   nlohmann::json results() const override { return results_; }
 
 private:
+  // Returns true iff the checkpoint's stored geometry matches the requested
+  // molecule's nuclear framework. Compares only atoms (element + position via
+  // Atom::operator==), NOT derived quantities (rcut/field/pointgroup/
+  // parameters), which can differ on a JSON round-trip and would otherwise
+  // force spurious recomputes.
+  bool checkpoint_geometry_matches(const nlohmann::json &j) const {
+    const nlohmann::json *molj = nullptr;
+    if (j.contains("molecule"))
+      molj = &j.at("molecule");
+    else if (j.contains("scf") && j["scf"].contains("molecule"))
+      molj = &j["scf"].at("molecule");
+    if (!molj)
+      return true; // nothing to compare against -> don't block reuse
+    Molecule ckpt_mol;
+    try {
+      ckpt_mol.from_json(*molj);
+    } catch (...) {
+      return true; // can't parse -> let other validation decide
+    }
+    const Molecule &want = params_.get<Molecule>();
+    if (ckpt_mol.natom() != want.natom())
+      return false;
+    for (unsigned int i = 0; i < want.natom(); ++i)
+      if (!(want.get_atom(i) == ckpt_mol.get_atom(i)))
+        return false;
+    return true;
+  }
+
   World &world_;
   Library lib_; // owns shared_ptr<Engine>
   SCFResultsTuple scf_results;
@@ -402,7 +440,16 @@ public:
         CISResults results(j);
         results_ = results.to_json();
       } catch (std::exception &e) {
-        print("Caught exception: ", e.what());
+        // Do not silently swallow: record the failure so the emitted
+        // calc_info.json reflects it instead of looking like a clean run.
+        if (world_.rank() == 0) {
+          print("==================================================");
+          print("CIS calculation FAILED with an exception:");
+          print(e.what());
+          print("==================================================");
+        }
+        results_["status"] = "failed";
+        results_["error"] = e.what();
       }
     }
   }
@@ -473,11 +520,19 @@ public:
                     << time_scf_end - time_scf_start << "\n";
           std::cout << "--------------------------------------------------\n";
         }
+        results_ = this->analyze();
       } catch (std::exception &e) {
-        print("Caught exception: ", e.what());
+        // Do not silently swallow: record the failure so the emitted
+        // calc_info.json reflects it instead of looking like a clean run.
+        if (world_.rank() == 0) {
+          print("==================================================");
+          print("OEP calculation FAILED with an exception:");
+          print(e.what());
+          print("==================================================");
+        }
+        results_["status"] = "failed";
+        results_["error"] = e.what();
       }
-      // nlohmann::json results;
-      results_ = this->analyze();
     }
   }
 
@@ -586,11 +641,11 @@ NextAction valid(World &world, const SCFResultsTuple &results,
     try {
 
       double gtol = params.gtol();
-      bool gconv = optr.max_gradient < gtol;
-      // check gradient convergence
-      if (!gconv) {
-        gopt_ok = true;
-      }
+      // A geometry optimization is only valid if the max gradient has
+      // dropped below gtol; otherwise it must be restarted/redone.
+      // (Previously this set gopt_ok=true on non-convergence, which made an
+      //  unconverged optimization look valid and suppressed the redo.)
+      gopt_ok = (optr.max_gradient < gtol);
     } catch (...) {
       gopt_ok = false;
     }

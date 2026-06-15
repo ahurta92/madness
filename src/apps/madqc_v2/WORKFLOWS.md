@@ -1,5 +1,9 @@
 # MADQC Workflow Builder Guide
 
+> This is the **developer** guide for extending madqc. For the **user** guide
+> (running calculations, input format, output/schema, visualization), see
+> [`README.md`](README.md).
+
 `madqc` builds execution pipelines through `src/madness/chem/WorkflowBuilders.hpp`.
 
 For personal Seawulf interactive build/test commands, see `src/apps/madqc_v2/SEAWULF_INTERACTIVE_WORKFLOW.md`.

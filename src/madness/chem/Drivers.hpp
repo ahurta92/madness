@@ -97,8 +97,8 @@ public:
   void run(const std::string prefix) {
     std::filesystem::path topDir = prefix;
     std::filesystem::create_directories(topDir);
-    nlohmann::json all;
-    all["tasks"] = nlohmann::json::array();
+    all_ = nlohmann::json::object();
+    all_["tasks"] = nlohmann::json::array();
 
     for (size_t i = 0; i < drivers_.size(); ++i) {
       auto taskDir = topDir / ("task_" + std::to_string(i));
@@ -108,24 +108,28 @@ public:
       /// append current output to all
       if (current_output.is_array()) {
         for (const auto &item : current_output) {
-          all["tasks"].push_back(item);
+          all_["tasks"].push_back(item);
         }
       } else {
-        all["tasks"].push_back(current_output);
+        all_["tasks"].push_back(current_output);
       }
 
       // Write out aggregate results
       {
         std::string outputfile = prefix + ".calc_info.json";
         std::ofstream ofs(outputfile);
-        ofs << std::setw(4) << all;
+        ofs << std::setw(4) << all_;
         ofs.close();
       }
     }
   }
 
+  /// Aggregated results of all drivers (the calc_info JSON); valid after run().
+  const nlohmann::json &results() const { return all_; }
+
 private:
   std::vector<std::unique_ptr<Driver>> drivers_;
+  nlohmann::json all_;
 };
 
 } // namespace qcapp
