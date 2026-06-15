@@ -58,6 +58,12 @@ add_mad_executable(test_node_phi
 add_mad_executable(test_subspace_allreduce
                    "tests/test_subspace_allreduce.cpp"
                    "MADresponse2;MADchem")
+# S1 of the persistent-subworld ES design (docs/23): prove the GS-dependent build
+# kernels (V0x/γ/E0x/T0x → Λ) reproduce bit-for-bit in a node-aligned subworld,
+# the one piece the φ-count + A/S-scalar proofs did not cover.
+add_mad_executable(test_es_build_subworld
+                   "tests/test_es_build_subworld.cpp"
+                   "MADresponse2;MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -56,11 +57,14 @@ int main(int argc, char **argv) {
   World &universe = initialize(argc, argv);
   startup(universe, argc, argv, true);
 
-  FunctionDefaults<3>::set_k(6);
-  FunctionDefaults<3>::set_thresh(1e-5);
-  FunctionDefaults<3>::set_cubic_cell(-20.0, 20.0);
+  // CLI:  ./test_subspace_allreduce [M] [k] [thresh]   (defaults preserve old run)
+  const int    M      = (argc > 1) ? std::atoi(argv[1]) : 6;   // # roots
+  const int    k      = (argc > 2) ? std::atoi(argv[2]) : 6;
+  const double thresh = (argc > 3) ? std::atof(argv[3]) : 1e-5;
 
-  const int M = (argc > 1) ? std::atoi(argv[1]) : 6;   // # roots
+  FunctionDefaults<3>::set_k(k);
+  FunctionDefaults<3>::set_thresh(thresh);
+  FunctionDefaults<3>::set_cubic_cell(-20.0, 20.0);
 
   // X: M root-functions in the universe (distributed over all ranks).
   std::vector<real_function_3d> X(M);
@@ -85,6 +89,12 @@ int main(int argc, char **argv) {
   std::vector<real_function_3d> Xs(M);
   for (int j = 0; j < M; ++j) Xs[j] = copy(*sub, X[j]);
   sub->gop.fence();
+
+  // Per-rank X-replication footprint = the design's extra cost (X replicated as one
+  // distributed copy per node across G subworlds). size() is collective in the
+  // subworld -> compute on ALL ranks, gate only the print below.
+  std::size_t x_total = 0;
+  for (auto &f : Xs) x_total += f.size();
 
   // Per-node: full S over the node's replicated X (subworld-collective), then
   // keep only the columns this node OWNS (j % G == nid).
@@ -114,6 +124,15 @@ int main(int argc, char **argv) {
     print("  built per-node partial columns, universe-summed the M×M scalars;");
     print("  Λ/functions NEVER crossed worlds.");
     print("  max|S_dist - S_direct| =", maxdiff, " (tol 1e-9)");
+
+    const double per_rank_X_GiB = double(x_total) /
+        (info.subworld_size > 0 ? info.subworld_size : 1) *
+        8.0 / (1024.0 * 1024.0 * 1024.0);
+    std::ostringstream os;
+    os << "SUBSPACE_MEM M=" << M << " k=" << k << " thresh=" << thresh
+       << " nodes=" << G << " per_rank_X_GiB=" << per_rank_X_GiB;
+    print(os.str());
+
     print("\nSUBSPACE_ALLREDUCE_TEST:", ok ? "PASS" : "FAIL");
   }
 

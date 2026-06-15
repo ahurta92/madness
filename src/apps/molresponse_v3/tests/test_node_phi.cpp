@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 #include <vector>
 
 using namespace madness;
@@ -48,11 +49,15 @@ int main(int argc, char **argv) {
   World &universe = initialize(argc, argv);
   startup(universe, argc, argv, true);
 
-  FunctionDefaults<3>::set_k(6);
-  FunctionDefaults<3>::set_thresh(1e-4);
-  FunctionDefaults<3>::set_cubic_cell(-20.0, 20.0);
+  // CLI:  ./test_node_phi [N] [k] [thresh] [budget_GiB]   (defaults preserve old run)
+  const int    N          = (argc > 1) ? std::atoi(argv[1]) : 12;   // ~ occupied count
+  const int    k          = (argc > 2) ? std::atoi(argv[2]) : 6;
+  const double thresh     = (argc > 3) ? std::atof(argv[3]) : 1e-4;
+  const double budget_GiB = (argc > 4) ? std::atof(argv[4]) : 72.0; // per-task budget
 
-  const int N = (argc > 1) ? std::atoi(argv[1]) : 12;   // ~ occupied count
+  FunctionDefaults<3>::set_k(k);
+  FunctionDefaults<3>::set_thresh(thresh);
+  FunctionDefaults<3>::set_cubic_cell(-20.0, 20.0);
 
   // --- build φ in the UNIVERSE (distributed over all ranks) ---
   std::vector<real_function_3d> phi(N);
@@ -114,6 +119,24 @@ int main(int argc, char **argv) {
     print("  Σ(local)/size ratio per node =", ratio,
           " (≈1 distributed=1 copy/node ; ≈R replicated)");
     print("  node-φ = ONE distributed copy per node:", all_ok ? "PASS" : "FAIL");
+
+    // Absolute per-rank φ memory at this (k, thresh) — ground-state contribution
+    // only (the dominant OOM term; real RSS adds response-vector overhead). The
+    // R× reduction (per_rank_node == if_replicated / R) is an EXACT structural fact,
+    // independent of how realistic the synthetic gaussians are. Emit as one
+    // preformatted string so key=value tokens stay space-free for grep/parsing.
+    const double B = 8.0 / (1024.0 * 1024.0 * 1024.0);  // 1 coeff = 1 double -> GiB
+    const double per_rank_node_GiB = double(sub_total) / (R > 0 ? R : 1) * B;
+    const double if_replicated_GiB = double(sub_total) * B;
+    const bool   fits = per_rank_node_GiB <= budget_GiB;
+    std::ostringstream os;
+    os << "NODE_PHI_MEM N=" << N << " k=" << k << " thresh=" << thresh
+       << " nodes=" << info.n_nodes << " R=" << R
+       << " per_rank_node_GiB=" << per_rank_node_GiB
+       << " if_replicated_GiB=" << if_replicated_GiB
+       << " budget_GiB=" << budget_GiB << " fits=" << (fits ? "YES" : "NO");
+    print(os.str());
+
     print("\nNODE_PHI_TEST:", all_ok ? "PASS" : "FAIL");
   }
 
