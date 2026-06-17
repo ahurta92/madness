@@ -9,6 +9,11 @@ All file:line references point into `src/madness/world/` (the runtime) and
 `src/madness/mra/` (the multiresolution layer) of this repository. Line numbers
 are accurate as of the time of writing; treat them as anchors, not contracts.
 
+> **Companion:** for the narrative, diagram-driven walkthrough of each subsystem
+> and a per-operation parameter-tuning playbook, see the
+> [Parallel Runtime Developer Guide](parallel_runtime_guide/README.md). This
+> document is the quantitative companion to that guide.
+
 > Scaling note: This document is written with the project scaling goal in mind
 > (extend the response solver beyond 20 occupied orbitals). The memory model in
 > §11 derives the `n_occupied × n_leaves × k³ × 8 bytes` per-task figure that
