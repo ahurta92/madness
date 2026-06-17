@@ -232,13 +232,17 @@ Perturbation parse_perturbation(const std::string& desc) {
 // Load one converged FD response point at the ACTIVE protocol (caller sets
 // FunctionDefaults via set_response_protocol) using the SAME collective
 // try_load_fd_state the solver's restart path uses, then dump each response
-// orbital's octree (recon + compressed) exactly like a ground MO. Static
-// (static α) carries x only; Full (dynamic α) carries x and y. Collective.
+// orbital's octree (recon + compressed) exactly like a ground MO -- and, with
+// `cube`, the signed .cube isosurfaces too, so the response orbitals and rho^(1)
+// render as lobes just like the ground MOs. Static (static α) carries x only;
+// Full (dynamic α) carries x and y. Collective.
 template <typename Type, typename Shell>
 int dump_fd_point(World& world, const std::string& calc_dir,
                   const Perturbation& pert, double freq,
                   const std::string& out_dir, const std::string& label,
-                  int max_orbitals, const vecfuncT& gs_amo) {
+                  int max_orbitals, const vecfuncT& gs_amo,
+                  const Molecule& mol, bool cube, int cube_npoints,
+                  double cube_pad) {
   auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
   if (!loaded) {
     if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
@@ -254,8 +258,14 @@ int dump_fd_point(World& world, const std::string& calc_dir,
                                     static_cast<std::size_t>(max_orbitals))
             : blk.size();
     for (std::size_t i = 0; i < n; ++i) {
-      dump_function_trees(world, blk[i],
-                          out_dir + "/" + label + "_" + tag + std::to_string(i));
+      const std::string stem =
+          out_dir + "/" + label + "_" + tag + std::to_string(i);
+      dump_function_trees(world, blk[i], stem);
+      // Same in-memory Function -> .cube as the ground MOs (write_cube_file),
+      // same stem as the _boxes.vtk so the local tools pick it up automatically.
+      if (cube)
+        write_cube_file(world, blk[i], mol, stem + ".cube", cube_npoints,
+                        cube_pad);
       const double nrm = blk[i].norm2();  // collective -- all ranks
       if (world.rank() == 0)
         print("  dumped", label, tag, i, " norm2=", nrm);
@@ -282,7 +292,11 @@ int dump_fd_point(World& world, const std::string& calc_dir,
   ResponseGroundState rgs;
   rgs.amo = amo_k;
   real_function_3d rho1 = Kernels<Type, Shell>::compute_density(world, rgs, store);
-  dump_function_trees(world, rho1, out_dir + "/" + label + "_rho1");
+  const std::string rho1_stem = out_dir + "/" + label + "_rho1";
+  dump_function_trees(world, rho1, rho1_stem);
+  if (cube)
+    write_cube_file(world, rho1, mol, rho1_stem + ".cube", cube_npoints,
+                    cube_pad);
   const double rnorm = rho1.norm2();  // collective -- all ranks
   if (world.rank() == 0) print("  dumped", label, "rho1  norm2=", rnorm);
   return 1;
@@ -298,7 +312,8 @@ int dump_fd_point(World& world, const std::string& calc_dir,
 // ground-state archive header) sets each point's protocol before loading.
 void dump_fd_states(World& world, double L, const std::string& calc_dir,
                     const std::string& out_dir, int max_orbitals,
-                    const vecfuncT& gs_amo) {
+                    const vecfuncT& gs_amo, const Molecule& mol, bool cube,
+                    int cube_npoints, double cube_pad) {
   const std::string meta_path = calc_dir + "/response_metadata.json";
   if (!std::filesystem::exists(meta_path)) {
     if (world.rank() == 0)
@@ -346,10 +361,12 @@ void dump_fd_states(World& world, double L, const std::string& calc_dir,
         // type and never appears in fd_states (FDPerturbationOf<TDA> is undefined).
         if (type == "static")
           npoints += dump_fd_point<Static, ClosedShell>(
-              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo);
+              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
+              mol, cube, cube_npoints, cube_pad);
         else if (type == "full")
           npoints += dump_fd_point<Full, ClosedShell>(
-              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo);
+              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
+              mol, cube, cube_npoints, cube_pad);
         else if (world.rank() == 0)
           print("  [FD] skip unknown type:", type, "for", label);
       }
@@ -463,7 +480,8 @@ int main(int argc, char** argv) {
       // the same out dir. Runs after the GS dump (it mutates FunctionDefaults to
       // each FD point's protocol). header.L is the box length from the GS header.
       if (dump_fd) {
-        dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos);
+        dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
+                       gs.molecule(), cube, cube_npoints, cube_pad);
         world.gop.fence();
       }
     }
