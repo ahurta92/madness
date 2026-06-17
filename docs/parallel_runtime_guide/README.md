@@ -64,6 +64,7 @@ flowchart TB
 | 7 | [Function representation & tree distribution](07-function-and-tree.md) | `Function`/`FunctionImpl`, `Key`, nodes, pmaps, load balancing |
 | 8 | [Operations, piece by piece](08-operations.md) | compress, reconstruct, gaxpy, multiply, inner, apply, truncate |
 | 9 | [Parameter tuning per operation](09-parameter-tuning.md) | What each knob does and how to set it per op |
+| 10 | [Parallel function I/O & an HDF5 path](10-io-and-hdf5.md) | Archive system, parallel I/O bottlenecks, HDF5/MPI-IO analysis |
 | — | [Performance models](../parallel_runtime_and_performance_models.md) | Quantitative time/comm/memory models (companion) |
 
 ---
