@@ -158,6 +158,9 @@ int main(int argc, char **argv) {
 
       ConvergencePolicy policy;
       policy.dconv_user = dconv;
+      // --fd-tensor: gate the FD theta build onto the tensor-exchange layer
+      // (exch::; ClosedShell Static/Full only). Default off = per-op reference.
+      if (parser.key_exists("fd-tensor")) policy.exchange_tensor = true;
       // --explosion-guard=VAL caps the diverging-residual bail-out;
       // --no-explosion- guard disables it (test whether the guard just fires
       // early for stiff nuclear-displacement FD states).

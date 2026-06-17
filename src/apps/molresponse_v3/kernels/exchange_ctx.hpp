@@ -27,6 +27,7 @@
 
 #include "tda.hpp"     // ResponseGroundState, poperatorT, Kernels<> primary template
 #include "static.hpp"  // Kernels<Static, ClosedShell> specialization (compute_E0x reuse)
+#include "full.hpp"    // Kernels<Full, ClosedShell> (compute_E0x reuse; Y block)
 
 #include <madness/mra/mra.h>
 #include <madness/mra/vmra.h>
@@ -140,6 +141,99 @@ assemble_theta_static_cs(madness::World &world, const ResponseGroundState &gs,
   madness::gaxpy(world, 1.0, theta, 1.0, g);                 // θ = V0x − E0x + γ
   madness::truncate(world, theta, thr);
   return ResponseStateX<ClosedShell>{std::move(theta)};
+}
+
+/// build_ctx for Full ClosedShell: J + Tx + Ty (Ty = Poisson(phi_i*y_k)).
+/// `rho` = the caller's folded response density (2*sum phi*(x+y)); J = Poisson(rho).
+inline ResponseExchangeCtx
+build_ctx_full_cs(madness::World &world, const ResponseGroundState &gs,
+                  const ResponseStateXY<ClosedShell> &state,
+                  const madness::real_function_3d &rho, double vtol) {
+  ResponseExchangeCtx ctx;
+  ctx.J  = madness::apply(*gs.coulop, rho);
+  ctx.Tx = build_pair_tensor(world, gs.coulop, gs.amo, state.x_alpha, vtol);
+  ctx.Ty = build_pair_tensor(world, gs.coulop, gs.amo, state.y_alpha, vtol);
+  return ctx;
+}
+
+/// theta = V0x - E0x + gamma for Full ClosedShell, assembled from {g0, ctx}.
+/// Mirrors Kernels<Full,ClosedShell>: Q applies to EACH gamma block (X,Y) ONLY;
+/// V0x and E0x are NOT Q-projected. Tensor map (cf. full.hpp compute_gamma):
+///   groundK(x) = K[phi,phi](x) = contract_col(phi, Tx, n)   (V0x, X)
+///   groundK(y) = K[phi,phi](y) = contract_col(phi, Ty, n)   (V0x, Y)
+///   X gamma-exch = K[phi,x](phi)+K[y,phi](phi)
+///                = contract_row(phi,Tx,n) + contract_col(y,g0,n)
+///   Y gamma-exch = K[phi,y](phi)+K[x,phi](phi)
+///                = contract_row(phi,Ty,n) + contract_col(x,g0,n)
+inline ResponseStateXY<ClosedShell>
+assemble_theta_full_cs(madness::World &world, const ResponseGroundState &gs,
+                       const ResponseStateXY<ClosedShell> &state,
+                       const vecfuncT &g0, const ResponseExchangeCtx &ctx) {
+  const double thr  = madness::FunctionDefaults<3>::get_thresh();
+  const double vtol = thr * 0.1;
+  const std::size_t n = gs.amo.size();
+
+  // --- V0x (NO Q): V_local*{x,y} - c_xc*groundK{x,y} ---
+  auto theta_x = mul_sparse(world, gs.V_local_alpha, state.x_alpha, vtol);
+  auto theta_y = mul_sparse(world, gs.V_local_alpha, state.y_alpha, vtol);
+  if (gs.c_xc > 0.0) {
+    auto gKx = contract_col(world, gs.amo, ctx.Tx, n);   // K[phi,phi](x)
+    auto gKy = contract_col(world, gs.amo, ctx.Ty, n);   // K[phi,phi](y)
+    madness::gaxpy(world, 1.0, theta_x, -gs.c_xc, gKx);
+    madness::gaxpy(world, 1.0, theta_y, -gs.c_xc, gKy);
+  }
+  // --- - E0x (NO Q): off-diagonal Fock transform of both blocks (reuse kernel) ---
+  {
+    auto E0 = Kernels<Full, ClosedShell>::compute_E0x(world, gs, state);
+    madness::gaxpy(world, 1.0, theta_x, -1.0, E0.x_alpha);
+    madness::gaxpy(world, 1.0, theta_y, -1.0, E0.y_alpha);
+  }
+  // --- + gamma (WITH Q per block): same J*phi Coulomb on X and Y ---
+  auto gx = mul(world, ctx.J, gs.amo, true);
+  auto gy = mul(world, ctx.J, gs.amo, true);
+  if (gs.c_xc > 0.0) {
+    auto x_phix = contract_row(world, gs.amo,        ctx.Tx, n);  // K[phi,x](phi)
+    auto x_yphi = contract_col(world, state.y_alpha, g0,     n);  // K[y,phi](phi)
+    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_phix);
+    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_yphi);
+    auto y_phiy = contract_row(world, gs.amo,        ctx.Ty, n);  // K[phi,y](phi)
+    auto y_xphi = contract_col(world, state.x_alpha, g0,     n);  // K[x,phi](phi)
+    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_phiy);
+    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_xphi);
+  }
+  gx = gs.Qa(gx);
+  gy = gs.Qa(gy);
+  madness::truncate(world, gx, vtol);
+  madness::truncate(world, gy, vtol);
+  madness::gaxpy(world, 1.0, theta_x, 1.0, gx);  // theta_x = V0x - E0x + gamma_x
+  madness::gaxpy(world, 1.0, theta_y, 1.0, gy);  // theta_y = V0y - E0y + gamma_y
+  madness::truncate(world, theta_x, thr);
+  madness::truncate(world, theta_y, thr);
+  return ResponseStateXY<ClosedShell>{std::move(theta_x), std::move(theta_y)};
+}
+
+// One-call gate-1 entry points, overloaded on the response type: build g0 + ctx
+// (Inc 1: g0 built per call, not yet cached -- Inc 2 caches it on the ground
+// state) then assemble theta. fd_solver's --fd-tensor branch calls this; only
+// ClosedShell Static/Full are defined, so the caller guards non-ClosedShell
+// instantiations with an `if constexpr` on the State type.
+inline ResponseStateX<ClosedShell>
+assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
+                      const ResponseStateX<ClosedShell> &state,
+                      const madness::real_function_3d &rho) {
+  const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
+  auto g0  = build_g0(world, gs, vtol);
+  auto ctx = build_ctx_static_cs(world, gs, state, rho, vtol);
+  return assemble_theta_static_cs(world, gs, state, g0, ctx);
+}
+inline ResponseStateXY<ClosedShell>
+assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
+                      const ResponseStateXY<ClosedShell> &state,
+                      const madness::real_function_3d &rho) {
+  const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
+  auto g0  = build_g0(world, gs, vtol);
+  auto ctx = build_ctx_full_cs(world, gs, state, rho, vtol);
+  return assemble_theta_full_cs(world, gs, state, g0, ctx);
 }
 
 } // namespace exch

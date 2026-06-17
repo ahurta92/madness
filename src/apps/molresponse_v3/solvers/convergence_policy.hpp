@@ -81,6 +81,13 @@ struct ConvergencePolicy {
   // from rotated pieces" layout.
   bool stream_theta = false;
 
+  // Gate the FD theta assembly onto the tensor-exchange layer
+  // (kernels/exchange_ctx.hpp): false (default) = the per-op REFERENCE path
+  // (compute_V0x − compute_E0x + compute_gamma, untouched); true = build_ctx +
+  // assemble_theta (ClosedShell Static/Full only; A/B-to-thresh vs reference).
+  // CLI: --fd-tensor (doc 28 §4 Inc 1).
+  bool exchange_tensor = false;
+
   // Diverging-residual bail-out. Triggers only on a runaway residual
   // (BSH residual > guard). The legacy ES guard was 2.0 in normalised
   // units, but FD's iter-1 residual from a "x = perturbation" guess is

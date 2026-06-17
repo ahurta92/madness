@@ -41,6 +41,7 @@
 // the storage. Plan the Kernels API so this plugs in cleanly.
 // =========================================================================
 
+#include "../kernels/exchange_ctx.hpp"  // exch::assemble_theta_tensor (--fd-tensor gate)
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
 #include "../kernels/static.hpp"   // Kernels<Static, ClosedShell>
 #include "../kernels/tags.hpp"
@@ -241,16 +242,31 @@ public:
         out.last_density_residual[r] = drho.norm2();
       }
 
-      // θ = V0x − E0x + γ, streamed via Storage::axpy
-      auto theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
-      {
-        auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
-        theta.axpy(world_, -1.0, E0x);                          // theta -= E0x
+      // θ = V0x − E0x + γ. Gate 1 (policy_.exchange_tensor, --fd-tensor): the
+      // fused tensor-exchange assembly (exch::, ClosedShell Static/Full only);
+      // gate 0 (default) = the per-op reference path, streamed via Storage::axpy,
+      // UNTOUCHED. doc 28 §4 Inc 1; A/B-to-thresh between the two gates.
+      typename K::State theta;
+      bool tensor_done = false;
+      if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                    std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+        if (policy_.exchange_tensor) {
+          theta = exch::assemble_theta_tensor(world_, target_.gs,
+                                              in.responses[r], rho);
+          tensor_done = true;
+        }
       }
-      {
-        auto gamma = K::compute_gamma(world_, target_.gs,
-                                      in.responses[r], rho);
-        theta.axpy(world_, +1.0, gamma);                        // theta += γ
+      if (!tensor_done) {
+        theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
+        {
+          auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
+          theta.axpy(world_, -1.0, E0x);                        // theta -= E0x
+        }
+        {
+          auto gamma = K::compute_gamma(world_, target_.gs,
+                                        in.responses[r], rho);
+          theta.axpy(world_, +1.0, gamma);                      // theta += γ
+        }
       }
       add_perturbation_source(world_, theta, target_.responses[r]); // theta += V_p
       theta.truncate_all(world_, thr);
