@@ -45,12 +45,28 @@
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
 
+// Native HyperTreeGrid (.htg) export is OPTIONAL, behind MADNESS_ENABLE_VTK
+// (CMake -> defines MADNESS_HAS_VTK). A no-VTK build compiles unchanged and
+// --htg becomes a no-op with a one-line notice; the JSON/.vtk path is untouched.
+#ifdef MADNESS_HAS_VTK
+#include <vtkCellData.h>
+#include <vtkDoubleArray.h>
+#include <vtkHyperTreeGrid.h>
+#include <vtkHyperTreeGridNonOrientedGeometryCursor.h>
+#include <vtkNew.h>
+#include <vtkXMLHyperTreeGridWriter.h>
+#endif
+
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -198,14 +214,157 @@ void write_cube_file(World& world, Function<double, 3> f, const Molecule& mol,
   std::fclose(file);
 }
 
+// ---- native HyperTreeGrid (.htg) export -----------------------------------
+//
+// Build a vtkHyperTreeGrid from the LIVE octree (a single root tree over the
+// whole simulation cell, branch factor 2) instead of the legacy one-hexahedron-
+// per-leaf VTK. Geometry is implicit in the tree path, so the file is ~20-30x
+// smaller and ParaView gets a native Maximum-Level depth control + per-level
+// opacity. Mirrors the validated reference write_htg() in
+// madness_studies/scripts/view_boxes.py (child order, rms formula, the cursor
+// SetGlobalIndexStart gotcha, the bohr frame, the array names) -- but builds
+// from the live tree rather than the dumped _boxes.vtk.
+#ifdef MADNESS_HAS_VTK
+struct HtgNode {
+  double norm = 0.0;
+  double dnorm = -1.0;
+  int owner = 0;
+  bool has_children = false;
+};
+// Keyed by (level, lx, ly, lz) so std::map ordering needs no Vector operator<.
+using HtgKey = std::tuple<int, Translation, Translation, Translation>;
+using HtgMap = std::map<HtgKey, HtgNode>;
+
+// rank-0-only recursion mirroring FunctionImpl::do_print_tree_json (mraimpl.h):
+// coeffs.find(key).get() pulls remote nodes while the OTHER ranks service the
+// request inside the trailing gop.fence() in collect_live_tree(). The norm
+// matches FunctionNode::print_json (funcimpl.h); owner = coeffs.owner(key), the
+// live-container pmap owner -- the same source do_print_tree_json writes and the
+// legacy _boxes.vtk uses (the recon-JSON owner can be unreliable; this is not).
+template <typename ImplT>
+void collect_live_tree_r(const ImplT& impl, const Key<3>& key, HtgMap& out) {
+  const auto& coeffs = impl.get_coeffs();
+  auto it = coeffs.find(key).get();
+  if (it == coeffs.end()) return;  // absent child of a has_children node: skip
+  const auto& node = it->second;
+  HtgNode rec;
+  rec.norm = node.has_coeff() ? node.coeff().normf() : 0.0;
+  if (rec.norm < 1e-12) rec.norm = 0.0;
+  rec.dnorm = node.get_dnorm();
+  rec.owner = coeffs.owner(key);
+  rec.has_children = node.has_children();
+  const auto& l = key.translation();
+  out[{int(key.level()), l[0], l[1], l[2]}] = rec;
+  if (node.has_children())
+    for (KeyChildIterator<3> kit(key); kit; ++kit)
+      collect_live_tree_r(impl, kit.key(), out);
+}
+
+// Collective: rank 0 walks the tree; the fence lets its remote finds complete.
+void collect_live_tree(World& world, const Function<double, 3>& f, HtgMap& out) {
+  const auto impl = f.get_impl();
+  if (world.rank() == 0)
+    collect_live_tree_r(*impl, impl->get_cdata().key0, out);
+  world.gop.fence();
+}
+
+// Build the single-root HTG from the node map and write it (rank 0 only). DFS
+// tracks (level, translation) explicitly; child order c -> (c&1,(c>>1)&1,(c>>2)&1)
+// with l_child = 2*l + (i,j,k); rms = norm / sqrt(box_volume),
+// box_volume = cell_volume / 2^(3*level). Cell arrays match the legacy .vtk
+// names so existing ParaView coloring (level/norm/rms/owner) works unchanged.
+void write_htg(World& world, const HtgMap& nodes, const std::string& path) {
+  if (world.rank() != 0 || nodes.empty()) return;
+  const Tensor<double> cell = FunctionDefaults<3>::get_cell();
+  double cell_volume = 1.0;
+  for (int d = 0; d < 3; ++d) cell_volume *= (cell(d, 1) - cell(d, 0));
+
+  vtkNew<vtkHyperTreeGrid> htg;
+  htg->Initialize();
+  htg->SetDimensions(2, 2, 2);  // 1x1x1 cells -> a single root tree
+  htg->SetBranchFactor(2);
+  for (int d = 0; d < 3; ++d) {
+    vtkNew<vtkDoubleArray> coord;
+    coord->SetNumberOfValues(2);
+    coord->SetValue(0, cell(d, 0));
+    coord->SetValue(1, cell(d, 1));
+    if (d == 0) htg->SetXCoordinates(coord.Get());
+    else if (d == 1) htg->SetYCoordinates(coord.Get());
+    else htg->SetZCoordinates(coord.Get());
+  }
+
+  vtkNew<vtkDoubleArray> a_level, a_norm, a_rms, a_dnorm, a_owner;
+  a_level->SetName("level");
+  a_norm->SetName("norm");
+  a_rms->SetName("rms");
+  a_dnorm->SetName("dnorm");
+  a_owner->SetName("owner");
+
+  vtkNew<vtkHyperTreeGridNonOrientedGeometryCursor> cur;
+  htg->InitializeNonOrientedGeometryCursor(cur.Get(), 0, /*create=*/true);
+  cur->SetGlobalIndexStart(0);  // without this GetGlobalNodeIndex() == -1
+
+  std::function<void(int, Translation, Translation, Translation)> rec =
+      [&](int level, Translation lx, Translation ly, Translation lz) {
+        const vtkIdType gid = cur->GetGlobalNodeIndex();
+        auto it = nodes.find({level, lx, ly, lz});
+        const HtgNode hn = (it != nodes.end()) ? it->second : HtgNode{};
+        const double box_volume = cell_volume / std::pow(2.0, 3.0 * level);
+        a_level->InsertValue(gid, double(level));
+        a_norm->InsertValue(gid, hn.norm);
+        a_rms->InsertValue(
+            gid, box_volume > 0.0 ? hn.norm / std::sqrt(box_volume) : 0.0);
+        a_dnorm->InsertValue(gid, hn.dnorm);
+        a_owner->InsertValue(gid, double(hn.owner));
+        if (it != nodes.end() && it->second.has_children) {
+          cur->SubdivideLeaf();
+          for (int c = 0; c < 8; ++c) {
+            cur->ToChild(c);
+            rec(level + 1, 2 * lx + (c & 1), 2 * ly + ((c >> 1) & 1),
+                2 * lz + ((c >> 2) & 1));
+            cur->ToParent();
+          }
+        }
+      };
+  rec(0, 0, 0, 0);  // root = (level 0, {0,0,0}) = FunctionImpl cdata.key0
+
+  htg->GetCellData()->AddArray(a_level.Get());
+  htg->GetCellData()->AddArray(a_norm.Get());
+  htg->GetCellData()->AddArray(a_rms.Get());
+  htg->GetCellData()->AddArray(a_dnorm.Get());
+  htg->GetCellData()->AddArray(a_owner.Get());
+
+  vtkNew<vtkXMLHyperTreeGridWriter> writer;
+  writer->SetFileName(path.c_str());
+  writer->SetInputData(htg.Get());
+  writer->Write();
+}
+
+// Collect (collective) + write (rank 0). Safe to call on every rank.
+void write_htg_from_function(World& world, const Function<double, 3>& f,
+                             const std::string& path) {
+  HtgMap nodes;
+  collect_live_tree(world, f, nodes);
+  write_htg(world, nodes, path);
+}
+#else
+// No-VTK build: a collective-safe no-op (nothing happens on any rank).
+inline void write_htg_from_function(World&, const Function<double, 3>&,
+                                    const std::string&) {}
+#endif  // MADNESS_HAS_VTK
+
 // Dump one orbital's octree in both representations. `stem` is the output path
-// prefix (no extension). Collective: must be called on every rank.
+// prefix (no extension). With `htg`, also write the native HyperTreeGrid next to
+// each JSON (<stem>_boxes.htg from the reconstructed tree, <stem>_error.htg from
+// the compressed tree). Collective: must be called on every rank.
 void dump_function_trees(World& world, Function<double, 3> f,
-                         const std::string& stem) {
+                         const std::string& stem, bool htg = false) {
   f.reconstruct();
   write_tree_json(world, f, stem + "_recon.json");
+  if (htg) write_htg_from_function(world, f, stem + "_boxes.htg");
   f.compress();
   write_tree_json(world, f, stem + "_comp.json");
+  if (htg) write_htg_from_function(world, f, stem + "_error.htg");
 }
 
 // Inverse of Perturbation::description() (Perturbations.hpp): turn a
@@ -242,7 +401,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
                   const std::string& out_dir, const std::string& label,
                   int max_orbitals, const vecfuncT& gs_amo,
                   const Molecule& mol, bool cube, int cube_npoints,
-                  double cube_pad) {
+                  double cube_pad, bool htg) {
   auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
   if (!loaded) {
     if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
@@ -260,7 +419,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
     for (std::size_t i = 0; i < n; ++i) {
       const std::string stem =
           out_dir + "/" + label + "_" + tag + std::to_string(i);
-      dump_function_trees(world, blk[i], stem);
+      dump_function_trees(world, blk[i], stem, htg);
       // Same in-memory Function -> .cube as the ground MOs (write_cube_file),
       // same stem as the _boxes.vtk so the local tools pick it up automatically.
       if (cube)
@@ -293,7 +452,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
   rgs.amo = amo_k;
   real_function_3d rho1 = Kernels<Type, Shell>::compute_density(world, rgs, store);
   const std::string rho1_stem = out_dir + "/" + label + "_rho1";
-  dump_function_trees(world, rho1, rho1_stem);
+  dump_function_trees(world, rho1, rho1_stem, htg);
   if (cube)
     write_cube_file(world, rho1, mol, rho1_stem + ".cube", cube_npoints,
                     cube_pad);
@@ -313,7 +472,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
 void dump_fd_states(World& world, double L, const std::string& calc_dir,
                     const std::string& out_dir, int max_orbitals,
                     const vecfuncT& gs_amo, const Molecule& mol, bool cube,
-                    int cube_npoints, double cube_pad) {
+                    int cube_npoints, double cube_pad, bool htg) {
   const std::string meta_path = calc_dir + "/response_metadata.json";
   if (!std::filesystem::exists(meta_path)) {
     if (world.rank() == 0)
@@ -362,11 +521,11 @@ void dump_fd_states(World& world, double L, const std::string& calc_dir,
         if (type == "static")
           npoints += dump_fd_point<Static, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad);
+              mol, cube, cube_npoints, cube_pad, htg);
         else if (type == "full")
           npoints += dump_fd_point<Full, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad);
+              mol, cube, cube_npoints, cube_pad, htg);
         else if (world.rank() == 0)
           print("  [FD] skip unknown type:", type, "for", label);
       }
@@ -390,10 +549,13 @@ int main(int argc, char** argv) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--fd] [--fd-calc-dir=DIR]");
+              "[--htg] [--fd] [--fd-calc-dir=DIR]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
+        print("  With --htg (needs a -DMADNESS_ENABLE_VTK=ON build), also writes");
+        print("  each tree as a native VTK HyperTreeGrid (<stem>_boxes.htg /");
+        print("  <stem>_error.htg) next to the legacy JSON/.vtk.");
         print("  With --fd, also dumps the converged closed-shell FD response");
         print("  orbitals from --fd-calc-dir (default: the archive's directory)");
         print("  into the same out dir -> one combined ground+response analysis.");
@@ -426,6 +588,15 @@ int main(int argc, char** argv) {
           parser.key_exists("fd-calc-dir")
               ? parser.value_raw("fd-calc-dir")
               : std::filesystem::path(archive_path).parent_path().string();
+      // Native HyperTreeGrid (.htg) export of every tree, in addition to the
+      // JSON/.vtk. Needs a -DMADNESS_ENABLE_VTK=ON build; otherwise a no-op.
+      const bool htg = parser.key_exists("htg");
+#ifndef MADNESS_HAS_VTK
+      if (htg && world.rank() == 0)
+        print("  [HTG] --htg requested but this binary was built without VTK; "
+              "reconfigure with -DMADNESS_ENABLE_VTK=ON. Skipping .htg "
+              "(JSON/.vtk output is unaffected).");
+#endif
 
       auto header = GroundState::read_archive_header(world, archive_path);
 
@@ -466,7 +637,7 @@ int main(int argc, char** argv) {
 
       for (std::size_t i = 0; i < n; ++i) {
         const std::string stem = out_dir + "/mo_" + std::to_string(i);
-        dump_function_trees(world, mos[i], stem);
+        dump_function_trees(world, mos[i], stem, htg);
         if (cube) {
           write_cube_file(world, mos[i], gs.molecule(), stem + ".cube",
                           cube_npoints, cube_pad);
@@ -481,7 +652,7 @@ int main(int argc, char** argv) {
       // each FD point's protocol). header.L is the box length from the GS header.
       if (dump_fd) {
         dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
-                       gs.molecule(), cube, cube_npoints, cube_pad);
+                       gs.molecule(), cube, cube_npoints, cube_pad, htg);
         world.gop.fence();
       }
     }

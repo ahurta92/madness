@@ -5,6 +5,17 @@ if(NOT TARGET MADchem)
   return()
 endif()
 
+# Optional VTK for native HyperTreeGrid (.htg) export from dump_mra_trees (--htg).
+# OFF by default so a stock build needs no VTK; turn on with -DMADNESS_ENABLE_VTK=ON
+# (point CMake at the cluster VTK via -DVTK_DIR=...). Only dump_mra_trees links it.
+option(MADNESS_ENABLE_VTK "Build dump_mra_trees with native VTK HyperTreeGrid (.htg) export" OFF)
+if(MADNESS_ENABLE_VTK)
+  find_package(VTK 9.0 REQUIRED COMPONENTS CommonCore CommonDataModel IOXML)
+  if(VTK_FOUND)
+    message(STATUS "molresponse_v3: VTK ${VTK_VERSION} found -> dump_mra_trees --htg enabled")
+  endif()
+endif()
+
 add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADresponse2;MADchem")
 # Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
 # along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
@@ -63,6 +74,13 @@ add_mad_executable(test_subspace_allreduce
 add_mad_executable(dump_mra_trees
                    "tools/dump_mra_trees.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
+# Native HTG export is optional: only when -DMADNESS_ENABLE_VTK=ON found VTK.
+# Guarded by MADNESS_HAS_VTK in the source; a no-VTK build is unchanged.
+if(MADNESS_ENABLE_VTK AND VTK_FOUND)
+  target_compile_definitions(dump_mra_trees PRIVATE MADNESS_HAS_VTK)
+  target_link_libraries(dump_mra_trees PRIVATE ${VTK_LIBRARIES})
+  vtk_module_autoinit(TARGETS dump_mra_trees MODULES ${VTK_LIBRARIES})
+endif()
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3
