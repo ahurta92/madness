@@ -55,6 +55,13 @@
 #include <vtkHyperTreeGridNonOrientedGeometryCursor.h>
 #include <vtkNew.h>
 #include <vtkXMLHyperTreeGridWriter.h>
+// Overlapping-AMR (function values on the adaptive octree -> .vthb)
+#include <vtkAMRBox.h>
+#include <vtkFloatArray.h>
+#include <vtkOverlappingAMR.h>
+#include <vtkUniformGrid.h>
+#include <vtkXMLUniformGridAMRWriter.h>
+#include <array>
 #endif
 
 #include <algorithm>
@@ -347,10 +354,144 @@ void write_htg_from_function(World& world, const Function<double, 3>& f,
   collect_live_tree(world, f, nodes);
   write_htg(world, nodes, path);
 }
+
+// ---- adaptive function-value export: vtkOverlappingAMR (.vthb) -------------
+//
+// PROTOTYPE (see AMR_EXPORT_NOTES.md). HTG stores ONE scalar per box (skeleton);
+// OverlappingAMR stores the FUNCTION sampled on a small m^3 uniform grid PER LEAF
+// BOX across refinement levels, so ParaView's AMR Contour gives smooth isosurfaces
+// at sub-box resolution while keeping adaptivity (fine blocks only where the tree
+// refined) -- the adaptive replacement for the dense .cube. Octree => refinement
+// ratio 2; origin/spacing in bohr (aligns with geometry.vtk / the .htg).
+//
+// The MADNESS-side mapping below (leaf walk, box geometry, level grouping,
+// index-space AMR box, per-level spacing) is the load-bearing logic. The VTK
+// OverlappingAMR API is version-sensitive -- the assembly calls are a best-effort
+// first cut to verify at the first -DMADNESS_ENABLE_VTK build (NOTES §VTK-API).
+
+// Leaf (level,lx,ly,lz) list replicated on ALL ranks: rank 0 walks the tree
+// (collect_live_tree_r), keeps the leaves (no children), and broadcasts the flat
+// list so the eval_cube sampling loop stays collective + in lockstep everywhere.
+std::vector<std::array<long, 4>>
+collect_leaf_keys(World& world, const Function<double, 3>& f) {
+  std::vector<long> flat;
+  if (world.rank() == 0) {
+    HtgMap nodes;
+    const auto impl = f.get_impl();
+    collect_live_tree_r(*impl, impl->get_cdata().key0, nodes);
+    for (const auto& [key, nd] : nodes)
+      if (!nd.has_children) {
+        flat.push_back(std::get<0>(key));
+        flat.push_back(std::get<1>(key));
+        flat.push_back(std::get<2>(key));
+        flat.push_back(std::get<3>(key));
+      }
+  }
+  world.gop.fence();  // pair rank 0's remote coeffs.find()s
+  std::size_t nflat = flat.size();
+  world.gop.broadcast(&nflat, 1, 0);
+  flat.resize(nflat);
+  if (nflat) world.gop.broadcast(flat.data(), nflat, 0);
+  std::vector<std::array<long, 4>> leaves(nflat / 4);
+  for (std::size_t i = 0; i < leaves.size(); ++i)
+    leaves[i] = {flat[4 * i], flat[4 * i + 1], flat[4 * i + 2], flat[4 * i + 3]};
+  return leaves;
+}
+
+// Sample f on every leaf box (m^3 uniform grid via the collective eval_cube; rank
+// 0 receives each grid) and assemble a vtkOverlappingAMR; write <path> on rank 0.
+void write_amr(World& world, Function<double, 3> f, const std::string& path,
+               int m) {
+  f.reconstruct();
+  const auto leaves = collect_leaf_keys(world, f);
+  const Tensor<double> cell = FunctionDefaults<3>::get_cell();
+  double lo[3], width[3];
+  for (int d = 0; d < 3; ++d) {
+    lo[d] = cell(d, 0);
+    width[d] = cell(d, 1) - cell(d, 0);
+  }
+  long Lmax = 0;
+  for (const auto& k : leaves) Lmax = std::max(Lmax, k[0]);
+
+  // collective sampling: ALL ranks call eval_cube per leaf; rank 0 keeps the grids
+  struct Block { long n, lx, ly, lz; Tensor<double> g; };
+  std::vector<Block> blocks;
+  const std::vector<long> npt(3, m);
+  for (const auto& k : leaves) {
+    Tensor<double> bc(3, 2);
+    for (int d = 0; d < 3; ++d) {
+      const double h = width[d] / std::pow(2.0, double(k[0]));
+      bc(d, 0) = lo[d] + double(k[d + 1]) * h;
+      bc(d, 1) = lo[d] + double(k[d + 1] + 1) * h;
+    }
+    Tensor<double> g = f.eval_cube(bc, npt);  // collective; rank 0 holds the grid
+    if (world.rank() == 0) blocks.push_back({k[0], k[1], k[2], k[3], copy(g)});
+  }
+  if (world.rank() != 0) return;
+
+  // --- assemble on rank 0 (VTK OverlappingAMR; verify the API at build) ---
+  std::vector<int> per_level(Lmax + 1, 0);
+  for (const auto& b : blocks) per_level[b.n]++;
+
+  vtkNew<vtkOverlappingAMR> amr;
+  amr->Initialize(int(Lmax + 1), per_level.data());
+  double origin[3] = {lo[0], lo[1], lo[2]};
+  amr->SetOrigin(origin);
+  amr->SetGridDescription(VTK_XYZ_GRID);
+  for (long n = 0; n <= Lmax; ++n) {
+    double sp[3];
+    for (int d = 0; d < 3; ++d) sp[d] = (width[d] / std::pow(2.0, double(n))) / m;
+    amr->SetSpacing(n, sp);
+    if (n > 0) amr->SetRefinementRatio(int(n - 1), 2);  // octree => 2x per level
+  }
+  std::vector<int> next(Lmax + 1, 0);
+  for (const auto& b : blocks) {
+    const int n = int(b.n), j = next[n]++;
+    const long l[3] = {b.lx, b.ly, b.lz};
+    int boxlo[3], boxhi[3];
+    for (int d = 0; d < 3; ++d) {
+      boxlo[d] = int(l[d] * m);
+      boxhi[d] = boxlo[d] + m - 1;
+    }
+    vtkAMRBox box(boxlo, boxhi);
+    amr->SetAMRBox(n, j, box);
+
+    vtkNew<vtkUniformGrid> grid;
+    double gorigin[3], sp[3];
+    for (int d = 0; d < 3; ++d) {
+      const double h = width[d] / std::pow(2.0, double(n));
+      gorigin[d] = lo[d] + double(l[d]) * h;
+      sp[d] = h / m;
+    }
+    grid->SetOrigin(gorigin);
+    grid->SetSpacing(sp);
+    grid->SetDimensions(m + 1, m + 1, m + 1);  // m^3 cells
+    vtkNew<vtkFloatArray> vals;
+    vals->SetName("psi");
+    vals->SetNumberOfValues(vtkIdType(m) * m * m);
+    for (int iz = 0; iz < m; ++iz)       // eval_cube g(ix,iy,iz); VTK cell x-fastest
+      for (int iy = 0; iy < m; ++iy)
+        for (int ix = 0; ix < m; ++ix)
+          vals->SetValue((vtkIdType(iz) * m + iy) * m + ix, float(b.g(ix, iy, iz)));
+    grid->GetCellData()->AddArray(vals.Get());
+    amr->SetDataSet(n, j, grid.Get());
+  }
+  vtkNew<vtkXMLUniformGridAMRWriter> w;
+  w->SetFileName(path.c_str());
+  w->SetInputData(amr.Get());
+  w->Write();
+}
+
+void write_amr_from_function(World& world, const Function<double, 3>& f,
+                             const std::string& path, int m) {
+  write_amr(world, f, path, m);
+}
 #else
-// No-VTK build: a collective-safe no-op (nothing happens on any rank).
+// No-VTK build: collective-safe no-ops (nothing happens on any rank).
 inline void write_htg_from_function(World&, const Function<double, 3>&,
                                     const std::string&) {}
+inline void write_amr_from_function(World&, const Function<double, 3>&,
+                                    const std::string&, int) {}
 #endif  // MADNESS_HAS_VTK
 
 // Dump one orbital's octree in both representations. `stem` is the output path
@@ -549,13 +690,15 @@ int main(int argc, char** argv) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--htg] [--fd] [--fd-calc-dir=DIR]");
+              "[--htg] [--amr] [--amr-m=N] [--fd] [--fd-calc-dir=DIR]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
         print("  With --htg (needs a -DMADNESS_ENABLE_VTK=ON build), also writes");
         print("  each tree as a native VTK HyperTreeGrid (<stem>_boxes.htg /");
-        print("  <stem>_error.htg) next to the legacy JSON/.vtk.");
+        print("  <stem>_error.htg) next to the legacy JSON/.vtk. With --amr,");
+        print("  writes ground MOs as vtkOverlappingAMR (<stem>.vthb; function");
+        print("  values on an --amr-m^3 grid/leaf box -> adaptive isosurfaces).");
         print("  With --fd, also dumps the converged closed-shell FD response");
         print("  orbitals from --fd-calc-dir (default: the archive's directory)");
         print("  into the same out dir -> one combined ground+response analysis.");
@@ -591,11 +734,17 @@ int main(int argc, char** argv) {
       // Native HyperTreeGrid (.htg) export of every tree, in addition to the
       // JSON/.vtk. Needs a -DMADNESS_ENABLE_VTK=ON build; otherwise a no-op.
       const bool htg = parser.key_exists("htg");
+      // Adaptive function-value export (.vthb, vtkOverlappingAMR) of the ground
+      // MOs -- samples each leaf box on an m^3 grid (--amr-m, default 8).
+      // PROTOTYPE; ground-state only for now (FD response is the same pattern).
+      const bool amr = parser.key_exists("amr");
+      const int amr_m = parser.key_exists("amr-m")
+                            ? std::stoi(parser.value("amr-m")) : 8;
 #ifndef MADNESS_HAS_VTK
-      if (htg && world.rank() == 0)
-        print("  [HTG] --htg requested but this binary was built without VTK; "
-              "reconfigure with -DMADNESS_ENABLE_VTK=ON. Skipping .htg "
-              "(JSON/.vtk output is unaffected).");
+      if ((htg || amr) && world.rank() == 0)
+        print("  [VTK] --htg/--amr requested but this binary was built without "
+              "VTK; reconfigure with -DMADNESS_ENABLE_VTK=ON. Skipping .htg/.vthb "
+              "(JSON/.vtk/.cube output is unaffected).");
 #endif
 
       auto header = GroundState::read_archive_header(world, archive_path);
@@ -642,6 +791,7 @@ int main(int argc, char** argv) {
           write_cube_file(world, mos[i], gs.molecule(), stem + ".cube",
                           cube_npoints, cube_pad);
         }
+        if (amr) write_amr_from_function(world, mos[i], stem + ".vthb", amr_m);
         const double nrm = mos[i].norm2();  // collective -- all ranks
         if (world.rank() == 0) print("  dumped mo_", i, "  norm2=", nrm);
       }
