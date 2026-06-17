@@ -162,13 +162,13 @@ compute threads on MPI.
   `Irecv` on `RMI_TAG` with `MPI_ANY_SOURCE` (`worldrmi.cc:227-322`).
 - **Server loop `process_some()`** (`worldrmi.cc:61-178`): polls up to `maxq_`
   requests with `Testsome`, up to 1000 spins, then backs off `MAD_BACKOFF_US`
-  µs (default 5). For each arrived message it reads the handler pointer and
+  µs (default 2). For each arrived message it reads the handler pointer and
   attributes from the header and invokes the handler.
 - **Ordering:** the top 16 bits of the attribute word carry a per-destination
   sequence counter. `ATTR_ORDERED` messages from a given source are delivered to
   their handlers strictly in order; out-of-order arrivals are queued and sorted
-  (`worldrmi.cc:105-166`). This caps ordered in-flight messages per source at
-  ~2^14 ≈ 16k.
+  (`worldrmi.cc:105-166`). The sequence counter occupies the high 16 bits of the
+  attribute word, so up to ~2^16 ≈ 65k ordered messages per source before wrap.
 - **Huge messages** (> `max_msg_len_`) use a rendezvous protocol on tags
   4096–8191: a control AM, an ack, then the bulk transfer
   (`worldrmi.cc:180-199, 325-343`).
