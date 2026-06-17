@@ -1,6 +1,6 @@
 # Chapter 9 — Parameter tuning, per operation
 
-[← Operations](08-operations.md) · [Index](README.md) · [Performance models →](../parallel_runtime_and_performance_models.md)
+[← Operations](08-operations.md) · [Index](README.md) · [Next: Parallel function I/O →](10-io-and-hdf5.md)
 
 This chapter is the practical payoff: what every knob does, the symptom that tells
 you to touch it, and which knobs matter for each operation. Parameters fall into
@@ -166,4 +166,4 @@ mapping. (Costs from [Chapter 8](08-operations.md).)
 This is exactly the calibration loop the companion performance-models doc
 formalizes (fit `R, α, β, φ` on small cases, predict large ones).
 
-[← Operations](08-operations.md) · [Index](README.md) · [Performance models →](../parallel_runtime_and_performance_models.md)
+[← Operations](08-operations.md) · [Index](README.md) · [Next: Parallel function I/O →](10-io-and-hdf5.md)
