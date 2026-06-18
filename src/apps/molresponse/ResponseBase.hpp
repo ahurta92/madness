@@ -284,7 +284,10 @@ public:
 
     X_space J =
         X_space::zero_functions(world, x.num_states(), x.num_orbitals());
-    vector_real_function_3d temp_J(3);
+    // V1_PATCH: this used to be hardcoded `temp_J(3)` for the 3 dipole
+    // directions of FrequencyResponse. Excited-state runs with num_states != 3
+    // wrote past the buffer end and corrupted the heap.
+    vector_real_function_3d temp_J(x.num_states());
     for (const auto &b : x.active) {
       temp_J[b] = apply(*coulomb_ops, rho1[b]);
       J.x[b] = mul(world, temp_J[b], phi0.first, false);
@@ -304,7 +307,8 @@ public:
     X_space J =
         X_space::zero_functions(world, x.num_states(), x.num_orbitals());
     // if (world.rank() == 0) { print("J1StrategyStable"); }
-    vector_real_function_3d temp_J(3);
+    // V1_PATCH: see J1StrategyFull above — same hardcoded-3 bug.
+    vector_real_function_3d temp_J(x.num_states());
     for (const auto &b : x.active) {
       temp_J[b] = apply(*coulomb_ops, rho1[b]);
       if (false) {
@@ -336,13 +340,13 @@ public:
     Exchange<double, 3> k{world, lo};
     k.set_bra_and_ket(bra, ket);
     if (algorithm_ == "multiworld") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient);
     } else if (algorithm_ == "multiworld_row") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient_row);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
     } else if (algorithm_ == "largemem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::large_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::large_memory);
     } else if (algorithm_ == "smallmem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::small_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::small_memory);
     }
     return k;
   };
@@ -761,6 +765,29 @@ protected:
     mask = real_function_3d(
         real_factory_3d(world).f(mask3).initial_level(4).norefine());
 
+    // Reproject ground orbitals to the current k before rebuilding the
+    // density. set_protocol may run for a protocol whose k differs from
+    // the moldft-saved k (e.g. running response at thresh=1e-4 / k=6
+    // against a moldft saved at thresh=1e-6 / k=8 for fast iteration).
+    // Without this, the make_ground_density call below operates on
+    // mixed-k functions and crashes with a tensor-conform assertion.
+    // Also invalidate the stored hamiltonian so check_k's recompute
+    // branch runs against the reprojected orbitals.
+    if (!ground_orbitals.empty() &&
+        FunctionDefaults<3>::get_k() != ground_orbitals[0].k()) {
+      for (auto &orbital : ground_orbitals) {
+        orbital = project(orbital, FunctionDefaults<3>::get_k(), thresh, false);
+      }
+      world.gop.fence();
+      truncate(world, ground_orbitals);
+      hamiltonian = Tensor<double>();
+      ham_no_diag = Tensor<double>();
+      if (world.rank() == 0) {
+        print("set_protocol: projected ground orbitals to k=",
+              FunctionDefaults<3>::get_k());
+      }
+    }
+
     ground_density = make_ground_density(world);
     ground_density.truncate(FunctionDefaults<3>::get_thresh());
     // Basic print
@@ -846,7 +873,9 @@ protected:
   static auto orbital_load_balance(World &world, const gamma_orbitals &,
                                    double load_balance) -> gamma_orbitals;
 
-  auto compute_gamma_tda(World &world, const gamma_orbitals &density,
+  auto compute_gamma_tda(World &world,
+                         const vector_real_function_3d &phi0,
+                         const response_space &x,
                          const XCOperator<double, 3> &xc) const -> X_space;
 
   auto compute_gamma_static(World &world, const gamma_orbitals &,
@@ -856,6 +885,20 @@ protected:
                           const XCOperator<double, 3> &xc) const -> X_space;
   auto compute_gamma(World &world, const gamma_orbitals &,
                      const XCOperator<double, 3> &xc) const -> X_space;
+
+  /// Compute response gamma = (2J - K) per (state, orbital).
+  ///
+  /// For calc_type "full" or "static", dispatches via ResponseComputeGammaX
+  /// macrotask across MPI subworlds (per-orbital granularity). For "tda"
+  /// falls back to the serial compute_gamma_tda because that path also
+  /// needs the J[rho1] term that the per-orbital macrotask does not
+  /// compute. rho1 is only used in the TDA path; callers that never go
+  /// through TDA may pass an empty vector.
+  auto compute_gamma_dispatch(World &world, const X_space &chi,
+                              const XCOperator<double, 3> &xc,
+                              const std::string &calc_type,
+                              const vector_real_function_3d &rho1) const
+      -> X_space;
 
   auto compute_V0X(World &world, const X_space &X,
                    const XCOperator<double, 3> &xc,
@@ -1003,6 +1046,12 @@ void sort(World &world, Tensor<double> &vals, X_space &f);
 // Specialized for response calculations that returns orthonormalized
 // functions
 auto gram_schmidt(World &world, const response_space &f) -> response_space;
+
+// RPA-aware Gram-Schmidt under the indefinite metric <f|f> - <g|g>.
+// Mirror of legacy TDDFT::gram_schmidt(World&, response_space&, response_space&)
+// at molresponse_legacy/TDDFT.cc:2061. In-place: f and g are orthonormalized
+// jointly using the same coefficients.
+void gram_schmidt(World &world, response_space &f, response_space &g);
 
 /// Computes the transition density between set of two response functions x and
 /// y. Uses std::transform to iterate between x and y vectors \param world

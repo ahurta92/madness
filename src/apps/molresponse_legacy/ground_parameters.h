@@ -95,6 +95,12 @@ class GroundParameters {
     // written in the archive
     FunctionDefaults<3>::set_k(k);
 
+    // LEGACY_PATCH: newer MADNESS Function::load() rejects loading when the
+    // archive's cell differs from FunctionDefaults<3>::get_cell(). Set the
+    // cell from the archive's L now so the orbital reads below don't trip
+    // that check.
+    FunctionDefaults<3>::set_cubic_cell(-L, L);
+
     // Possible to call this function multiple times now
     // Do this to ensure everything works.
     g_orbitals.clear();

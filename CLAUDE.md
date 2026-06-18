@@ -2,7 +2,12 @@
 
 MADNESS (Multiresolution Adaptive Numerical Environment for Scientific Simulation) is a high-performance C++ framework for solving integral and differential equations in many dimensions using adaptive multiresolution analysis. It includes a full quantum chemistry stack (DFT, HF, post-HF, response properties) and a distributed task-based runtime (MADWorld).
 
-For excited-state reintegration contracts, hot files, and the focused validation matrix, use `$madness-excited-state-dev`. For environment/setup and cross-project run workflow, use `$gecko-madness-workspace`.
+**Active response development happens in `src/apps/molresponse_v3/`** — start at
+`src/apps/molresponse_v3/CLAUDE.md` and `src/apps/molresponse_v3/docs/00_status.md`
+(active workstreams, hot-file map, standing contracts). The build/run/validate
+harness is `cm.sh` (`/gpfs/scratch/ahurtado/madness_es_bench/README.md`); run MRA
+solves on a compute node via the `run-on-allocation` skill. The `molresponse_v2`
+notes below are retained as reference for the previous production module.
 
 ---
 
@@ -154,9 +159,13 @@ Test infrastructure uses **Google Test** (bundled) with CMake helpers: `AddUnitt
 
 ---
 
-## Active Development: molresponse_v2
+## molresponse_v2 (previous production — superseded by v3 for new work)
 
-The `molresponse_v2` module (`src/apps/molresponse_v2/`) is the **primary focus of active development**, with major additions landing via `molresponse-feature-next`. This branch adds excited-state support, enhanced subgroup scheduling, and a new persistence/metadata layer.
+> **Note:** new response work now lands in `src/apps/molresponse_v3/` (see the
+> top of this file). The section below describes `molresponse_v2`, kept as
+> reference for the previous production module.
+
+The `molresponse_v2` module (`src/apps/molresponse_v2/`) was the primary focus of earlier development, with major additions landing via `molresponse-feature-next`. It added excited-state support, enhanced subgroup scheduling, and a new persistence/metadata layer.
 
 ### Entry points
 - **Preferred:** `madqc --wf=response [options] [input_file]`

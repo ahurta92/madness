@@ -386,3 +386,38 @@ already checked into the repo (e.g.,
 
 This table grows with each increment and becomes the living record
 of the protocol-accuracy work (T3).
+
+---
+
+## Gaussian reference basis — MUST be basis-converged
+
+**MRA is effectively at the complete-basis limit.** A Gaussian reference
+(DALTON, Gaussian, gecko) is only a meaningful comparison if its basis is
+converged for the property in question. Comparing complete-basis MRA
+against an under-converged Gaussian basis manufactures a phantom error
+that is a basis-incompleteness artifact, not a bug in the solver.
+
+This bites hardest for **excited states with diffuse / Rydberg
+character**, which need **double augmentation** (`d-aug-cc-pVQZ`), not the
+singly-augmented `aug-cc-pVDZ`/`aug-cc-pVQZ` that suffices for valence
+properties like ground-state polarizability.
+
+Concrete case (the reason this section exists): the H2O ES reference was
+once tabulated at `aug-cc-pVDZ`. Root 3 is a diffuse state, so MRA looked
+**~3.5e-2** off — pure basis artifact. Re-referencing the SAME MRA result
+against `d-aug-cc-pVQZ` brought it to **~8e-5**:
+
+| H2O root | MRA (v3) | aug-cc-pVDZ | d-aug-cc-pVQZ |
+|---|---|---|---|
+| 0 | 0.31781 | 0.31733 (4.9e-4) | 0.31779 (2.9e-5) |
+| 1 | 0.37899 | 0.37909 (1.0e-4) | 0.37897 (1.4e-5) |
+| 2 | 0.39977 | 0.40334 (3.6e-3) | 0.39965 (1.2e-4) |
+| 3 | 0.40965 | 0.44483 (**3.5e-2**) | 0.40973 (**8.0e-5**) |
+
+**Rule:** ES (and any diffuse-state) Gaussian references in
+`test_v3_es_skeleton.cpp` use **`d-aug-cc-pVQZ`**. The values live in
+`madness_studies/refs/dalton_tdhf.json` (per-system `rpa.omegas_au` +
+`rpa.basis`); regenerate via `madness_studies/refs/compute_dalton_d-aug-pvqz.sh`.
+Never re-introduce a singly-augmented ES reference — it will look like a
+3% regression that isn't one. Valence-only properties (static α) may use
+`aug-cc-pVQZ`, but when in doubt, double-augment.

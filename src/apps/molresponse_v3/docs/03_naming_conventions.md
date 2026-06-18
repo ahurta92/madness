@@ -1,5 +1,11 @@
 # Naming Conventions for Response States
 
+> **Concrete implementation schema:** the unified protocol key + the single
+> `response_metadata.json` that ties FD and ES together (so properties can
+> assert a common protocol) are specified in
+> `13_unified_persistence_schema.md`. This doc is the conceptual rationale;
+> doc 13 is the authoritative on-disk layout.
+
 ## Current FD Response Naming
 
 The FD naming system encodes three things in the state name:

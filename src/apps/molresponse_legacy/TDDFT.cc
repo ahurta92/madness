@@ -1515,6 +1515,14 @@ X_space TDDFT::compute_residual(World& world,
     errX[i] = maxvalX[i];
     if (world.rank() == 0 and (r_params.print_level() > 1))
       print("BSH residual: rms", rmsX[i], "   max", maxvalX[i]);
+    // [RES-FULL] LEGACY_PATCH: mirror current diagnostic. Reports per-state
+    // full L2 of the residual vector across all orbitals.
+    if (r_params.print_level() > 2 && world.rank() == 0) {
+      double full_l2_sq = 0.0;
+      for (double v : rnormsX[i]) full_l2_sq += v * v;
+      printf("[RES-FULL] state=%zu  max_orb=%.3e  rms=%.3e  full_L2=%.3e\n",
+             i, maxvalX[i], rmsX[i], std::sqrt(full_l2_sq));
+    }
   }
   if (calc_type.compare("full") == 0) {
     std::vector<double> rmsY(m), maxvalY(m);
@@ -1566,7 +1574,9 @@ void TDDFT::print_residual_norms(World& world,
   if (compute_y) {
     for (size_t i = 0; i < m; i++) y_norms(i) = norm2(world, res.Y[i]);
   }
-  if (r_params.print_level() >= 0 and world.rank() == 0) {
+  // LEGACY_PATCH: was print_level >= 0 (always-on); tighten to >= 2
+  // matching the convergence-summary tier used elsewhere.
+  if (r_params.print_level() >= 2 and world.rank() == 0) {
     if (compute_y) {
       std::cout << "res " << iteration << " X :";
       for (size_t i(0); i < m; i++) {
@@ -1661,7 +1671,31 @@ void TDDFT::update_x_space_excited(World& world,
 
   Tensor<double> x_shifts(m);
   Tensor<double> y_shifts(m);
-  if (world.rank() == 0) print("Entering Compute Lambda");  // LEGACY_PATCH: rank gate
+
+  // [CHI-NORMS] LEGACY_PATCH helper - mirror current ResponseBase.cpp
+  // diagnostic. Collective-safe: norm2 runs on all ranks, printed on rank 0.
+  auto print_xy_norms = [&](const char* where, const X_space& S) {
+    if (r_params.print_level() < 4) return;
+    const size_t ns = S.num_states();
+    std::vector<double> nx(ns), ny(ns);
+    for (size_t b = 0; b < ns; ++b) {
+      nx[b] = norm2(world, S.X[b]);
+      ny[b] = norm2(world, S.Y[b]);
+    }
+    if (world.rank() != 0) return;
+    printf("[CHI-NORMS] %-28s iter=%zu  ", where, iter);
+    printf("|x|=");
+    for (size_t b = 0; b < ns; ++b) printf(" %.3e", nx[b]);
+    printf("  |y|=");
+    for (size_t b = 0; b < ns; ++b) printf(" %.3e", ny[b]);
+    printf("\n");
+    fflush(stdout);
+  };
+
+  print_xy_norms("entry", Chi);
+
+  if (r_params.print_level() >= 1 && world.rank() == 0)
+    print("Entering Compute Lambda");
 
   if (compute_y) {
     gram_schmidt(world, Chi.X, Chi.Y);
@@ -1670,8 +1704,11 @@ void TDDFT::update_x_space_excited(World& world,
     gram_schmidt(world, Chi.X);
     normalize(world, Chi.X);
   }
+
+  print_xy_norms("after Q+GS", Chi);
   //
   X_space Lambda_X = Compute_Lambda_X(world, Chi, xc, r_params.calc_type());
+  print_xy_norms("after Lambda_X", Lambda_X);
   // This diagonalizes XAX and computes new omegas
   // updates Chi
   if (world.rank() == 0) { print("omega before transform"); print(omega); }  // LEGACY_PATCH: rank gate
@@ -1693,24 +1730,27 @@ void TDDFT::update_x_space_excited(World& world,
   // roatate Chi and old Chi saves this value
   //  old_Chi = Chi.copy();
 
-  if (world.rank() == 0) {  // LEGACY_PATCH: rank gate omega debug prints
+  if (r_params.print_level() >= 2 && world.rank() == 0) {
     print("omega before transform");
     print(old_energy);
     print("omega after transform");
     print(omega);
   }
+  print_xy_norms("after rotate Chi", Chi);
   // Analysis gets messed up if BSH is last thing applied
   // so exit early if last iteration
   if (iter == r_params.maxiter() - 1) {
-    if (world.rank() == 0) print("Reached max iter");  // LEGACY_PATCH: rank gate
+    if (r_params.print_level() >= 1 && world.rank() == 0) print("Reached max iter");
   } else {
     X_space theta_X = Compute_Theta_X(world, Chi, xc, r_params.calc_type());
-    //  Calculates shifts needed for potential / energies
-    if (world.rank() == 0) print("BSH update iter = ", iter);  // LEGACY_PATCH: rank gate
+    print_xy_norms("after Theta_X", theta_X);
+    if (r_params.print_level() >= 2 && world.rank() == 0) print("BSH update iter = ", iter);
     X_space temp = bsh_update_excited(world, omega, theta_X, projector);
+    print_xy_norms("after BSH", temp);
 
     res = compute_residual(
         world, Chi, temp, bsh_residualsX, bsh_residualsY, r_params.calc_type());
+    print_xy_norms("after residual (res)", res);
     // kain if iteration >0 or first run where there should not be a problem
     // computed temp and res
     if (r_params.kain() && (iter > 0) && true) {
@@ -1907,13 +1947,32 @@ X_space TDDFT::kain_x_space_update(World& world,
     Xresidual[b].Y[0] = copy(world, res.Y[b]);
   }
 
+  const bool kain_io = r_params.print_level() > 3;
   for (size_t b = 0; b < m; b++) {
+    // [KAIN-IO] LEGACY_PATCH: collective-safe norm2 calls.
+    double n_chi_x = 0, n_chi_y = 0, n_res_x = 0, n_res_y = 0;
+    if (kain_io) {
+      n_chi_x = norm2(world, Xvector[b].X[0]);
+      n_chi_y = norm2(world, Xvector[b].Y[0]);
+      n_res_x = norm2(world, Xresidual[b].X[0]);
+      n_res_y = norm2(world, Xresidual[b].Y[0]);
+    }
     // passing xvectors
     X_vector kain_X = kain_x_space[b].update(
         Xvector[b], Xresidual[b], FunctionDefaults<3>::get_thresh(), 3.0);
     // deep copy of vector of functions
     kain_update.X[b] = copy(world, kain_X.X[0]);
     kain_update.Y[b] = copy(world, kain_X.Y[0]);
+    if (kain_io) {
+      double n_out_x = norm2(world, kain_update.X[b]);
+      double n_out_y = norm2(world, kain_update.Y[b]);
+      if (world.rank() == 0) {
+        printf("[KAIN-IO] legacy state=%zu  |chi.x|=%.3e  |chi.y|=%.3e  "
+               "|res.x|=%.3e  |res.y|=%.3e  |out.x|=%.3e  |out.y|=%.3e\n",
+               b, n_chi_x, n_chi_y, n_res_x, n_res_y, n_out_x, n_out_y);
+        fflush(stdout);
+      }
+    }
   }
   molresponse::end_timer(world, " KAIN update:");
   return kain_update;
@@ -2452,6 +2511,10 @@ Tensor<double> TDDFT::diagonalizeFockMatrix(World& world,
                                             Tensor<double>& A,
                                             Tensor<double>& S,
                                             const double thresh) {
+  // [ROT-PATH] LEGACY_PATCH: mirror current diagnostic.
+  if (r_params.print_level() >= 1 && world.rank() == 0) {
+    print("[ROT-PATH] TDA branch (legacy diagonalizeFockMatrix / get_fock_transformation)");
+  }
   // compute the unitary transformation matrix U that diagonalizes
   // the fock matrix
   Tensor<double> U = get_fock_transformation(world, S, A, evals, thresh);
@@ -2460,10 +2523,15 @@ Tensor<double> TDDFT::diagonalizeFockMatrix(World& world,
   Tensor<int> selected = sort_eigenvalues(world, evals, U);
 
   // Debugging output
-  if (r_params.print_level() >= 2 and world.rank() == 0) {
+  if (r_params.print_level() >= 10 and world.rank() == 0) {
     print("   U:");
     print(U);
   }
+
+  // Snapshot Chi.X before rotation so we can report ||rotated_chi.x[i]
+  // - chi.x[i]|| per state (matches current [ROT-DELTA] diagnostic).
+  response_space chi_before;
+  if (r_params.print_level() >= 4) chi_before = Chi.X.copy();
 
   // Start timer
   if (r_params.print_level() >= 1) molresponse::start_timer(world);
@@ -2479,6 +2547,28 @@ Tensor<double> TDDFT::diagonalizeFockMatrix(World& world,
 
   // Normalize x
   normalize(world, Chi.X);
+
+  // [ROT-DELTA] LEGACY_PATCH: per-state |rotated_chi.x - chi.x|.
+  if (r_params.print_level() >= 4) {
+    const size_t ns = Chi.X.size();
+    std::vector<double> dx(ns), drot(ns);
+    for (size_t b = 0; b < ns; ++b) {
+      auto diff = sub(world, Chi.X[b], chi_before[b]);
+      dx[b] = norm2(world, diff);
+      drot[b] = norm2(world, Chi.X[b]);
+    }
+    if (world.rank() == 0) {
+      printf("[ROT-DELTA] |rotated_chi.x - chi.x|: ");
+      for (size_t b = 0; b < ns; ++b) printf(" %.3e", dx[b]);
+      printf("\n");
+      printf("[ROT-DELTA] |rotated_chi.x|:         ");
+      for (size_t b = 0; b < ns; ++b) printf(" %.3e", drot[b]);
+      printf("\n");
+      print("[ROT-DELTA] U =");
+      print(U);
+      fflush(stdout);
+    }
+  }
 
   // Debugging output
   if (r_params.print_level() >= 2 and world.rank() == 0) {
@@ -2770,6 +2860,10 @@ Tensor<double> TDDFT::diagonalizeFullResponseMatrix(World& world,
                                                     Tensor<double>& A,
                                                     const double thresh,
                                                     size_t print_level) {
+  // [ROT-PATH] LEGACY_PATCH: mirror current diagnostic.
+  if (r_params.print_level() >= 1 && world.rank() == 0) {
+    print("[ROT-PATH] RPA branch (legacy diagonalizeFullResponseMatrix)");
+  }
   // compute the unitary transformation matrix U that diagonalizes
   // the response matrix
   Tensor<double> U = GetFullResponseTransformation(world, S, A, omega, thresh);
@@ -2777,11 +2871,37 @@ Tensor<double> TDDFT::diagonalizeFullResponseMatrix(World& world,
   // Sort into ascending order
   // Tensor<int> selected = sort_eigenvalues(world, omega, U);
 
+  // Snapshot Chi.X before rotation for [ROT-DELTA] diagnostic.
+  response_space chi_before_x;
+  if (r_params.print_level() >= 4) chi_before_x = Chi.X.copy();
+
   // Start timer
   if (r_params.print_level() >= 1) molresponse::start_timer(world);
 
   Chi.X = transform(world, Chi.X, U);
   Chi.Y = transform(world, Chi.Y, U);
+
+  // [ROT-DELTA] LEGACY_PATCH
+  if (r_params.print_level() >= 4) {
+    const size_t ns = Chi.X.size();
+    std::vector<double> dx(ns), drot(ns);
+    for (size_t b = 0; b < ns; ++b) {
+      auto diff = sub(world, Chi.X[b], chi_before_x[b]);
+      dx[b] = norm2(world, diff);
+      drot[b] = norm2(world, Chi.X[b]);
+    }
+    if (world.rank() == 0) {
+      printf("[ROT-DELTA] |rotated_chi.x - chi.x|: ");
+      for (size_t b = 0; b < ns; ++b) printf(" %.3e", dx[b]);
+      printf("\n");
+      printf("[ROT-DELTA] |rotated_chi.x|:         ");
+      for (size_t b = 0; b < ns; ++b) printf(" %.3e", drot[b]);
+      printf("\n");
+      print("[ROT-DELTA] U =");
+      print(U);
+      fflush(stdout);
+    }
+  }
   Tensor<double> Sxa, Sya, Sa;
 
   Sxa = response_space_inner(Chi.X, Chi.X);

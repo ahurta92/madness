@@ -16,7 +16,31 @@ struct ExcitedSpace {
 class ExcitedResponse : public ResponseBase {
 
 public:
-    ExcitedResponse(World& world, const CalcParams& params) : ResponseBase(world, params) {}
+    ExcitedResponse(World& world, const CalcParams& params)
+        : ResponseBase(world, params) {
+        // V1_PATCH: set inner-product/J1/K1/VXC strategies. FrequencyResponse
+        // does this in its ctor; the excited path was missing it, so inner()
+        // crashed at "Compute J1 Strategy isn't set" when running full TDDFT.
+        // For TDA we still need a static strategy; for full we use full
+        // inner product so the symplectic <X|X>-<Y|Y> path is exercised.
+        if (params.response_parameters.tda()) {
+            response_context.set_strategy(std::make_unique<static_inner_product>(),
+                                          std::make_unique<J1StrategyStable>(),
+                                          std::make_unique<K1StrategyStatic>(),
+                                          std::make_unique<VXC1StrategyStandard>(),
+                                          std::make_unique<StaticDensityStrategy>(),
+                                          std::make_unique<LoadFrequencyXSpace>(),
+                                          r_params);
+        } else {
+            response_context.set_strategy(std::make_unique<full_inner_product>(),
+                                          std::make_unique<J1StrategyStable>(),
+                                          std::make_unique<K1StrategyFull>(),
+                                          std::make_unique<VXC1StrategyStandard>(),
+                                          std::make_unique<FullDensityStrategy>(),
+                                          std::make_unique<LoadFrequencyXSpace>(),
+                                          r_params);
+        }
+    }
     void initialize(World& world) override;
     void iterate_trial(World& world, X_space& trial);
     friend class ExcitedTester;
@@ -117,6 +141,7 @@ private:
  * @return X_space
  */
     X_space bsh_update_excited(World& world, const Tensor<double>& omega, X_space& theta_X,
+                               const X_space& chi,
                                QProjector<double, 3>& projector);
     void analysis(World& world, const X_space& chi);
     void save(World& world, const std::string& name) override;

@@ -505,6 +505,9 @@ void SCF::do_plots(World& world) {
     START_TIMER(world);
 
     std::vector<long> npt(3, static_cast<long>(param.get<int>("npt_plot")));
+    const bool cube      = param.get<bool>("plotcube");
+    const int  npt_cube  = param.get<int>("npt_plot");
+    const auto cube_hdr  = molecule.cubefile_header();
 
     if (param.plot_cell().size() == 0)
         param.plot_cell() = copy(FunctionDefaults<3>::get_cell());
@@ -520,15 +523,18 @@ void SCF::do_plots(World& world) {
             functionT rho_spin = rho - rhob;
             rho += rhob;
             plotdx(rho_spin, "spin_density.dx", param.plot_cell(), npt, true);
+            if (cube) plot_cubefile<3>(world, rho_spin, "spin_density.cube", cube_hdr, npt_cube);
 
         }
         plotdx(rho, "total_density.dx", param.plot_cell(), npt, true);
+        if (cube) plot_cubefile<3>(world, rho, "total_density.cube", cube_hdr, npt_cube);
         if (param.get<bool>("plotcoul")) {
             real_function_3d vnuc = potentialmanager->vnuclear();
             functionT vlocl = vnuc + apply(*coulop, rho);
             vlocl.truncate();
             vlocl.reconstruct();
             plotdx(vlocl, "coulomb.dx", param.plot_cell(), npt, true);
+            if (cube) plot_cubefile<3>(world, vlocl, "coulomb.cube", cube_hdr, npt_cube);
         }
     }
 
@@ -538,10 +544,18 @@ void SCF::do_plots(World& world) {
         if (i < param.nalpha()) {
             snprintf(fname,bufsize, "amo-%5.5d.dx", i);
             plotdx(amo[i], fname, param.plot_cell(), npt, true);
+            if (cube) {
+                snprintf(fname,bufsize, "amo-%5.5d.cube", i);
+                plot_cubefile<3>(world, amo[i], fname, cube_hdr, npt_cube);
+            }
         }
         if (!param.spin_restricted() && i < param.nbeta()) {
             snprintf(fname,bufsize, "bmo-%5.5d.dx", i);
             plotdx(bmo[i], fname, param.plot_cell(), npt, true);
+            if (cube) {
+                snprintf(fname,bufsize, "bmo-%5.5d.cube", i);
+                plot_cubefile<3>(world, bmo[i], fname, cube_hdr, npt_cube);
+            }
         }
     }
     END_TIMER(world, "plotting");

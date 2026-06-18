@@ -107,8 +107,7 @@ int main(int argc, char **argv) {
                 } else if (calc_params.response_parameters.nuclear()) {
                     rhsGenerator = nuclear_generator;
                 }
-                auto omega = calc_params.response_parameters.omega();
-                FrequencyResponse calc(world, calc_params, omega, rhsGenerator);
+                FrequencyResponse calc(world, calc_params, rhsGenerator);
                 // Warm and fuzzy for the user
                 if (world.rank() == 0) {
                     print("\n\n");

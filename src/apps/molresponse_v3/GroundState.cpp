@@ -19,7 +19,10 @@ using namespace madness;
 
 GroundState::GroundState(World& world, std::shared_ptr<SCF> scf)
     : scf_(std::move(scf)),
-      original_k_(FunctionDefaults<3>::get_k()) {
+      original_k_(FunctionDefaults<3>::get_k()),
+      current_k_(FunctionDefaults<3>::get_k()) {
+    // from_archive overwrites original_k_/current_k_ with the archive's k right
+    // after this; the FunctionDefaults reads here are just safe initializers.
 }
 
 GroundState GroundState::from_archive(World& world,
@@ -43,6 +46,12 @@ GroundState GroundState::from_archive(World& world,
         prefix = prefix.substr(0, pos);
     }
     params.set_user_defined_value("prefix", prefix);
+    // Workaround for QCCalculationParametersBase::tostring<std::string>
+    // case-folding: re-set the prefix value directly via the QCParameter
+    // struct so the original path case is preserved (paths like
+    // /home/User/Projects/... would otherwise lowercase, breaking
+    // SCF::load_mos's archive lookup).
+    params.get_parameter("prefix").set_user_defined_value(prefix);
 
     // For open-shell: infer nopen from nmo_alpha and total electrons.
     if (world.rank() == 0) {
@@ -110,7 +119,12 @@ void GroundState::prepare(World& world, double vtol,
 
     // Re-project orbitals if k changed from what they currently are
     if (current_k_ != target_k) {
-        // Always reload from archive at original k, then project to target
+        // Reload pristine MOs at original_k_ from the archive, then project to
+        // target. The reload runs on every protocol climb, restoring the
+        // invariant that scf_->amo is at original_k_ before the reproject below
+        // (an in-place projection would otherwise leave it at a coarser k and a
+        // later climb back up would not conform). GroundState is only built via
+        // from_archive, so the checkpoint to reload from always exists.
         scf_->load_mos(world);
         if (original_k_ != target_k) {
             reconstruct(world, scf_->amo);

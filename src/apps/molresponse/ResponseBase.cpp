@@ -148,7 +148,6 @@ auto ResponseBase::ComputeHamiltonianPair(World &world) const
   bool debugging = true;
   if (debugging) {
 
-
     auto overlap = matrix_inner(world, phi, phi);
     if (world.rank() == 0) {
       print("check k: overlap");
@@ -216,13 +215,15 @@ auto ResponseBase::ComputeHamiltonianPair(World &world) const
     const double lo = 1.e-10;
     Exchange<double, 3> k{world, lo};
     if (r_params.hfexalg() == "multiworld") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient);
+      k.set_algorithm(
+          Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient);
     } else if (r_params.hfexalg() == "multiworld_row") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::multiworld_efficient_row);
+      k.set_algorithm(
+          Exchange<double, 3>::ExchangeAlgorithm::multiworld_efficient_row);
     } else if (r_params.hfexalg() == "largemem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::large_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::large_memory);
     } else if (r_params.hfexalg() == "smallmem") {
-      k.set_algorithm(Exchange<double, 3>::Algorithm::small_memory);
+      k.set_algorithm(Exchange<double, 3>::ExchangeAlgorithm::small_memory);
     }
     k.set_bra_and_ket(phi0, phi0);
     // k.set_symmetric(true).set_printlevel(r_params.print_level());
@@ -365,8 +366,8 @@ auto ResponseBase::update_density(World &world, const X_space &chi,
   return density;
 }
 
-auto ResponseBase::make_density(World &world,
-                                const X_space &chi) const -> vecfuncT {
+auto ResponseBase::make_density(World &world, const X_space &chi) const
+    -> vecfuncT {
   auto density = vector_real_function_3d(chi.num_states());
   auto calc_type = r_params.calc_type();
   auto thresh = FunctionDefaults<3>::get_thresh();
@@ -547,10 +548,11 @@ auto ResponseBase::compute_gamma(World &world, const gamma_orbitals &density,
   // Get sizes
 }
 
-auto ResponseBase::compute_theta_X(
-    World &world, const X_space &chi, const vector_real_function_3d &rho1,
-    const XCOperator<double, 3> &xc,
-    const std::string &calc_type) const -> X_space {
+auto ResponseBase::compute_theta_X(World &world, const X_space &chi,
+                                   const vector_real_function_3d &rho1,
+                                   const XCOperator<double, 3> &xc,
+                                   const std::string &calc_type) const
+    -> X_space {
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
@@ -597,51 +599,7 @@ auto ResponseBase::compute_theta_X(
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  auto gamma =
-      X_space::zero_functions(world, chi.num_states(), chi.num_orbitals());
-  if (calc_type != "tda") {
-
-    std::vector<int> state_index;
-    std::vector<int> ii;
-    auto orbs_per_state =
-        (compute_Y) ? 2 * chi.num_orbitals() : chi.num_orbitals();
-
-    int i = 0;
-    int si = 0;
-    for (auto &b : chi.active) {
-      for (int j = 0; j < orbs_per_state; j++) {
-        state_index.push_back(si);
-        ii.push_back(i++);
-      }
-      si++;
-    }
-
-    ResponseComputeGammaX t;
-    MacroTask gamma_task(world, t);
-
-    gamma.set_active(chi.active);
-    if (compute_Y) {
-      auto vec_chi = chi.to_vector();
-      auto gamma_vec =
-          gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
-      gamma.from_vector(gamma_vec);
-    } else {
-      auto vec_chi = chi.x.to_vector();
-      auto gamma_vec =
-          gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
-      auto gnorm = norm2s_T(world, gamma_vec);
-      // if (world.rank() == 0)
-      // {
-      //   print("gamma_vec norm: ", gnorm);
-      // }
-      gamma.x.from_vector(gamma_vec);
-      // gamma.y = gamma.x;
-    }
-
-    // gamma = compute_gamma(world, {chi, ground_orbitals, rho1}, xc);
-  } else {
-    gamma = compute_gamma_tda(world, {chi, ground_orbitals, rho1}, xc);
-  }
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type, rho1);
 
   if (r_params.print_level() >= 20) {
     print_inner(world, "gammaX", chi, gamma);
@@ -684,9 +642,10 @@ auto ResponseBase::compute_theta_X(
   return Theta_X;
 }
 
-auto ResponseBase::compute_gamma_full(
-    World &world, const gamma_orbitals &density,
-    const XCOperator<double, 3> &xc) const -> X_space {
+auto ResponseBase::compute_gamma_full(World &world,
+                                      const gamma_orbitals &density,
+                                      const XCOperator<double, 3> &xc) const
+    -> X_space {
   std::shared_ptr<WorldDCPmapInterface<Key<3>>> old_pmap =
       FunctionDefaults<3>::get_pmap();
 
@@ -798,9 +757,10 @@ auto ResponseBase::compute_gamma_full(
   // Get sizes
 }
 
-auto ResponseBase::compute_gamma_static(
-    World &world, const gamma_orbitals &gammaOrbitals,
-    const XCOperator<double, 3> &xc) const -> X_space {
+auto ResponseBase::compute_gamma_static(World &world,
+                                        const gamma_orbitals &gammaOrbitals,
+                                        const XCOperator<double, 3> &xc) const
+    -> X_space {
 
   auto old_pmap = FunctionDefaults<3>::get_pmap();
   auto [xy, phi0, rho1] =
@@ -921,77 +881,81 @@ auto ResponseBase::compute_gamma_static(
   // Get sizes
 }
 
-auto ResponseBase::compute_gamma_tda(
-    World &world, const gamma_orbitals &density,
-    const XCOperator<double, 3> &xc) const -> X_space {
-  auto [d_alpha, phi0, rho1] =
-      orbital_load_balance(world, density, r_params.loadbalparts());
-  std::shared_ptr<WorldDCPmapInterface<Key<3>>> oldpmap =
-      FunctionDefaults<3>::get_pmap();
-  size_t num_states = d_alpha.num_states();
-  size_t num_orbitals = d_alpha.num_orbitals();
+auto ResponseBase::compute_gamma_tda(World &world,
+                                     const vector_real_function_3d &phi0,
+                                     const response_space &x,
+                                     const XCOperator<double, 3> &xc) const
+    -> X_space {
+  // TDA response Hartree-XC kernel acting on the trial states.
+  //
+  //   gamma_b = 2 * J[rho1_b] * phi0  -  c_xc * K1[x_b] * phi0
+  //                                    + (1-c_xc) * W[rho1_b] * phi0
+  //
+  // where rho1_b = sum_p x_{b,p} * phi0_p is the transition density.
+  // Q-projection is applied per state at the end so gamma_b is orthogonal
+  // to the occupied subspace.
+  //
+  // Signature takes (world, phi0, x, xc) so the dependence on the trial
+  // vectors and ground orbitals is explicit. No class-member Chi or
+  // rho_omega is read; no load balancing is done here — the caller is
+  // responsible for arranging a sensible pmap before calling.
+  const size_t num_states = x.size();
+  const size_t num_orbitals = phi0.size();
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  X_space gamma(world, num_states, num_orbitals);
-  // x functions
-  vector_real_function_3d phi_phi;
-  real_function_3d temp_J;
-  response_space J(world, num_states, num_orbitals);
-  response_space k1_x(world, num_states, num_orbitals);
-  response_space W(world, num_states, num_orbitals);
+  // zero_functions so .x and .y are fully allocated (size num_orbitals
+  // per state) before any X_space arithmetic. Bare X_space ctor leaves
+  // inner vectors empty which makes downstream to_vector/from_vector
+  // OOB-access and silently corrupts arithmetic results.
+  X_space gamma = X_space::zero_functions(world, num_states, num_orbitals);
+  auto J    = response_space::zero_functions(world, num_states, num_orbitals);
+  auto k1_x = response_space::zero_functions(world, num_states, num_orbitals);
+  auto W    = response_space::zero_functions(world, num_states, num_orbitals);
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_zero_functions",
                            "gamma_zero_functions", iter_timing);
   }
 
+  // Per-state loop: for each excited state b in [0, num_states):
+  //   rho1_b      = sum_p x[b][p] * phi0[p]               (transition density)
+  //   J[b][p]     = poisson(rho1_b) * phi0[p]
+  //   W[b][p]     = (apply_xc_kernel(rho1_b)) * phi0[p]   (if hybrid/DFT)
+  //   k1_x[b][p]  = newK(x[b], phi0, phi0)[p]             (response exchange)
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
 
-  auto rho = transition_densityTDA(world, phi0, d_alpha.x);
+  const double c_xc = xcf.hf_exchange_coefficient();
+  const bool need_W = (c_xc != 1.0);
 
-  auto compute_jx = [&, &phi0 = phi0](auto rho_alpha) {
-    auto temp_J = apply(*shared_coulomb_operator, rho_alpha);
-    temp_J.truncate();
-    return mul(world, temp_J, phi0);
-  };
+  for (size_t b = 0; b < num_states; ++b) {
+    real_function_3d rho1_b = dot(world, x[b], phi0);
+    rho1_b.truncate();
 
-  std::transform(rho.begin(), rho.end(), J.begin(), compute_jx);
+    real_function_3d v_j_b = apply(*shared_coulomb_operator, rho1_b);
+    v_j_b.truncate();
+    J[b] = mul(world, v_j_b, phi0);
+
+    if (need_W) {
+      real_function_3d v_w_b = xc.apply_xc_kernel(rho1_b);
+      W[b] = mul(world, v_w_b, phi0);
+    }
+  }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "J[omega]", "J[omega]", iter_timing);
   }
 
-  // Create Coulomb potential on ground_orbitals
-  if (xcf.hf_exchange_coefficient() != 1.0) {
-    auto compute_wx = [&, &phi0 = phi0](auto rho_alpha) {
-      auto xc_rho = xc.apply_xc_kernel(rho_alpha);
-      return mul(world, xc_rho, phi0);
-    };
-    if (r_params.print_level() >= 1) {
-      molresponse::start_timer(world);
-    }
-    // for every transition density apply the exchange kernel and multiply the
-    // vector of orbitals
-    std::transform(rho.begin(), rho.end(), W.begin(), compute_wx);
-    W = W.copy();
-
-    if (r_params.print_level() >= 1) {
-      molresponse::end_timer(world, "XC[omega]", "XC[omega]", iter_timing);
-    }
-  }
-
+  // Response exchange K1 per state. Each newK call is the operator
+  //   K1|x_b>_p = sum_i phi0[i] * poisson(phi0[i] * x[b][p])
+  // wired through MADNESS's Exchange<double,3>.
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-
-  for (size_t b = 0; b < num_states; b++) {
-    vecfuncT x;
-    x = d_alpha.x[b];
-    k1_x[b] = newK(x, phi0, phi0);
+  for (size_t b = 0; b < num_states; ++b) {
+    k1_x[b] = newK(x[b], phi0, phi0);
   }
-
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "K[omega]", "K[omega]", iter_timing);
   }
@@ -1003,7 +967,25 @@ auto ResponseBase::compute_gamma_tda(
   J.truncate_rf();
   W.truncate_rf();
 
-  gamma.x = (J * 2) - k1_x * xcf.hf_exchange_coefficient() + W;
+  // [GAMMA-PARTS] print <X|2J|X>, <X|c_xc*K1|X>, <X|W|X> for parity with
+  // legacy diagnostics. Gated at print_level >= 20.
+  if (r_params.print_level() >= 20) {
+    response_space twoJ = J * 2;
+    response_space cK1  = k1_x * c_xc;
+    auto v_2j = response_space_inner(x, twoJ);
+    auto v_k1 = response_space_inner(x, cK1);
+    auto v_w  = response_space_inner(x, W);
+    if (world.rank() == 0) {
+      print("[GAMMA-PARTS] <X|2J|X>");
+      print(v_2j);
+      print("[GAMMA-PARTS] <X|c_xc*K1|X>");
+      print(v_k1);
+      print("[GAMMA-PARTS] <X|W|X>");
+      print(v_w);
+    }
+  }
+
+  gamma.x = (J * 2) - k1_x * c_xc + W;
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_truncate_add", "gamma_truncate_add",
                            iter_timing);
@@ -1012,7 +994,7 @@ auto ResponseBase::compute_gamma_tda(
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
-  QProjector<double, 3> projector(ground_orbitals);
+  QProjector<double, 3> projector(phi0);
   for (size_t i = 0; i < num_states; i++) {
     gamma.x[i] = projector(gamma.x[i]);
     truncate(world, gamma.x[i]);
@@ -1023,10 +1005,11 @@ auto ResponseBase::compute_gamma_tda(
   }
 
   if (r_params.print_level() >= 20) {
-    print("------------------------ Gamma Functions Norms  "
-          "------------------");
-    print("Gamma X norms");
-    print(gamma.x.norm2());
+    auto gx_norms = gamma.x.norm2();
+    if (world.rank() == 0) {
+      print("Gamma Function Norms norms");
+      print(gx_norms);
+    }
   }
 
   if (r_params.print_level() >= 1) {
@@ -1037,13 +1020,6 @@ auto ResponseBase::compute_gamma_tda(
   k1_x.clear();
   W.clear();
 
-  d_alpha.clear();
-  phi0.clear();
-
-  if (world.size() > 1) {
-    FunctionDefaults<3>::set_pmap(oldpmap); // ! DON'T FORGET !
-  }
-
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "gamma_clear_functions",
                            "gamma_clear_functions", iter_timing);
@@ -1053,9 +1029,10 @@ auto ResponseBase::compute_gamma_tda(
   return gamma;
 }
 
-auto ResponseBase::compute_lambda_X(
-    World &world, const X_space &chi, XCOperator<double, 3> &xc,
-    const std::string &calc_type) const -> X_space {
+auto ResponseBase::compute_lambda_X(World &world, const X_space &chi,
+                                    XCOperator<double, 3> &xc,
+                                    const std::string &calc_type) const
+    -> X_space {
   // compute
   bool compute_Y = calc_type == "full";
 
@@ -1080,18 +1057,8 @@ auto ResponseBase::compute_lambda_X(
     }
   }
   // put it all together
-  X_space gamma;
-  // compute
-  if (calc_type == "full") {
-    gamma = compute_gamma_full(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else if (calc_type == "static") {
-    gamma = compute_gamma_static(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else {
-    gamma = compute_gamma_tda(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  }
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type,
+                                         vector_real_function_3d{});
   if (r_params.print_level() >= 20) {
     auto gamma_mx = inner(Chi_truncated, gamma);
     if (world.rank() == 0) {
@@ -1113,10 +1080,63 @@ auto ResponseBase::compute_lambda_X(
   return Lambda_X;
 }
 
-auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
-                                               XCOperator<double, 3> &xc,
-                                               const std::string &calc_type)
-    const -> std::tuple<X_space, X_space, X_space> {
+auto ResponseBase::compute_gamma_dispatch(
+    World &world, const X_space &chi, const XCOperator<double, 3> &xc,
+    const std::string &calc_type, const vector_real_function_3d &rho1) const
+    -> X_space {
+
+  // TDA needs the J[rho1] term in addition to (2J - K); the macrotask only
+  // computes the latter per (state, orbital), so fall back to the serial
+  // routine for TDA.
+  if (calc_type == "tda") {
+    return compute_gamma_tda(world, ground_orbitals, chi.x, xc);
+  }
+  (void)rho1; // unused outside of TDA path
+
+  const bool compute_Y = (calc_type == "full");
+  auto gamma =
+      X_space::zero_functions(world, chi.num_states(), chi.num_orbitals());
+  gamma.set_active(chi.active);
+
+  // Build flat per-(state, orbital) indices. For RPA also include the Y
+  // half-block, doubling orbs_per_state.
+  std::vector<int> state_index;
+  std::vector<int> ii;
+  const size_t orbs_per_state =
+      compute_Y ? 2 * chi.num_orbitals() : chi.num_orbitals();
+  int i = 0;
+  int si = 0;
+  for (const auto &b : chi.active) {
+    (void)b;
+    for (size_t j = 0; j < orbs_per_state; j++) {
+      state_index.push_back(si);
+      ii.push_back(i++);
+    }
+    si++;
+  }
+
+  ResponseComputeGammaX t;
+  MacroTask gamma_task(world, t);
+
+  if (compute_Y) {
+    auto vec_chi = chi.to_vector();
+    auto gamma_vec =
+        gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
+    gamma.from_vector(gamma_vec);
+  } else {
+    auto vec_chi = chi.x.to_vector();
+    auto gamma_vec =
+        gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+    gamma.x.from_vector(gamma_vec);
+  }
+
+  return gamma;
+}
+
+auto ResponseBase::compute_response_potentials(
+    World &world, const X_space &chi, XCOperator<double, 3> &xc,
+    const std::string &calc_type) const
+    -> std::tuple<X_space, X_space, X_space> {
   // compute
   bool compute_Y = calc_type == "full";
 
@@ -1126,15 +1146,32 @@ auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
   size_t n = chi.num_orbitals();
   X_space chi_copy = chi.copy();
 
+  if (r_params.print_level() >= 20) {
+    print_inner(world, "[XX-CRP-IN] <chi|chi> at entry of compute_response_potentials",
+                chi, chi);
+    print_inner(world, "[XX-CRP-IN] <chi_copy|chi_copy> after chi.copy()",
+                chi_copy, chi_copy);
+  }
+
   molresponse::start_timer(world);
-  X_space T0X = X_space(world, m, n);
+  // LEGACY_PATCH: zero_functions so .x and .y are sized properly. Plain
+  // X_space ctor leaves the inner vectors empty; T0X.x = T(...) only
+  // populates .x, leaving .y with empty inner storage that to_vector
+  // would later index out of bounds.
+  X_space T0X = X_space::zero_functions(world, m, n);
   T0X.x = T(world, chi_copy.x);
   if (compute_Y) {
     T0X.y = T(world, chi_copy.y);
   }
+  // Match legacy Compute_F0X discipline: T0X carries derivatives which
+  // sharpen tree detail, so truncate before it enters Lambda.
+  T0X.truncate();
   if (r_params.print_level() >= 20) {
-    print("inner <X|T0|X>");
-    print(inner(chi_copy, T0X));
+    auto T0_mx = inner(chi_copy, T0X);
+    if (world.rank() == 0) {
+      print("<X|T0|X>");
+      print(T0_mx);
+    }
   }
   molresponse::end_timer(world, "TX", "TX", iter_timing);
 
@@ -1144,29 +1181,75 @@ auto ResponseBase::compute_response_potentials(World &world, const X_space &chi,
   if (compute_Y) {
     E0X.y = E0X.y * hamiltonian;
   }
+  // Match legacy Compute_Lambda_X discipline: E0X is truncated before
+  // entering Lambda assembly (Lambda_X.cc:53).
+  E0X.truncate();
+  if (r_params.print_level() >= 20) {
+    auto E0_mx = inner(chi_copy, E0X);
+    if (world.rank() == 0) {
+      print("<X|E0|X>");
+      print(E0_mx);
+    }
+  }
   molresponse::end_timer(world, "E0X", "E0X", iter_timing);
 
   X_space V0X = compute_V0X(world, chi_copy, xc, compute_Y);
-
-  // put it all together
-  X_space gamma;
-  // compute
-  if (calc_type == "full") {
-    gamma = compute_gamma_full(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else if (calc_type == "static") {
-    gamma = compute_gamma_static(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
-  } else {
-    gamma = compute_gamma_tda(
-        world, {chi, ground_orbitals, vector_real_function_3d{}}, xc);
+  if (r_params.print_level() >= 20) {
+    auto V0_mx = inner(chi_copy, V0X);
+    if (world.rank() == 0) {
+      print("<X|V0|X>");
+      print(V0_mx);
+    }
   }
 
-  X_space Lambda_X(
-      world, m,
-      n); // = X_space(world, chi.num_states(), chi.num_orbitals());
+  // F0X = T0X + V0X. Printed for parity with legacy Compute_F0X diagnostic
+  // (TDDFT.cc compute_F0X prints <X|F0|X> at print_level >= 20).
+  if (r_params.print_level() >= 20) {
+    // LEGACY_PATCH: zero_functions ctor (see T0X note above).
+    X_space F0X_diag = X_space::zero_functions(world, m, n);
+    F0X_diag = T0X + V0X;
+    auto F0_mx = inner(chi_copy, F0X_diag);
+    if (world.rank() == 0) {
+      print("<X|F0|X>");
+      print(F0_mx);
+    }
+  }
+
+  // put it all together
+  X_space gamma = compute_gamma_dispatch(world, chi, xc, calc_type,
+                                         vector_real_function_3d{});
+  if (r_params.print_level() >= 20) {
+    auto G_mx = inner(chi_copy, gamma);
+    if (world.rank() == 0) {
+      print("<X|Gamma|X>");
+      print(G_mx);
+    }
+  }
+
+  // LEGACY_PATCH: zero_functions ctor (see T0X note above) so .y is
+  // properly sized before the arithmetic + assignment.
+  X_space Lambda_X = X_space::zero_functions(world, m, n);
 
   Lambda_X = (T0X + V0X - E0X) + gamma;
+  if (r_params.print_level() >= 20) {
+    auto L_mx = inner(chi_copy, Lambda_X);
+    if (world.rank() == 0) {
+      print("<X|Lambda not truncated|X>");
+      print(L_mx);
+    }
+  }
+  // Match legacy Compute_Lambda_X discipline: truncate Lambda after
+  // assembly (Lambda_X.cc:85). Without this, untruncated kinetic and
+  // E0 noise contaminates <X|Lambda|X>, breaking the diagonalization
+  // for closely-spaced bound-state omegas.
+  Lambda_X.truncate();
+  if (r_params.print_level() >= 20) {
+    auto L_mx = inner(chi_copy, Lambda_X);
+    if (world.rank() == 0) {
+      print("<X|Lambda_truncated|X>");
+      print(L_mx);
+    }
+  }
 
   return {Lambda_X, V0X, gamma};
 }
@@ -1187,6 +1270,10 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
   size_t n = X.num_orbitals();
   X_space V0 = X_space::zero_functions(world, m, n);
   V0.set_active(X.active);
+
+  if (r_params.print_level() >= 20) {
+    print_inner(world, "[XX-V0X-IN] <X|X> at entry of compute_V0X", X, X);
+  }
 
   real_function_3d v_nuc, v_j0, v_k0, v_xc;
   if (not r_params.store_potential()) {
@@ -1233,45 +1320,81 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     molresponse::start_timer(world);
   }
   // K0 = ground_exchange(ground_orbitals, X, compute_Y, r_params);
-  std::vector<int> state_index;
-  std::vector<int> ii;
-  auto orbs_per_state = (compute_Y) ? 2 * X.num_orbitals() : X.num_orbitals();
-
-  int i = 0;
-  int si = 0;
-  for (auto &b : X.active) {
-    for (int j = 0; j < orbs_per_state; j++) {
-      state_index.push_back(si);
-      ii.push_back(i++);
-    }
-    si++;
-  }
-
   auto gamma0 =
       X_space::zero_functions(world, X.num_states(), X.num_orbitals());
   gamma0.set_active(X.active);
 
-  ResponseComputeGroundExchange t;
-  MacroTask gamma_task(world, t);
+  // [K0X-PATH] env var MAD_K0X_SERIAL=1 switches to the legacy serial path
+  // (one Exchange operator, loop over states - mirrors
+  // global_functions.cc::ground_exchange). Default is the MacroTask path.
+  // The serial path is for A/B diagnostics: if the macrotask is the source
+  // of <X|V0X|X> matrix asymmetry, the serial K0X should be exactly
+  // symmetric while the macrotask K0X is not.
+  const bool use_serial_k0 = std::getenv("MAD_K0X_SERIAL") != nullptr;
 
-  if (compute_Y) {
-    auto vec_chi = X.to_vector();
-    auto gamma_vec =
-        gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
-    gamma0.from_vector(gamma_vec);
+  if (use_serial_k0) {
+    if (world.rank() == 0 && r_params.print_level() >= 2) {
+      print("[K0X-PATH] serial (legacy ground_exchange pattern)");
+    }
+    const double lo = 1.e-10;
+    Exchange<double, 3> k0_op{world, lo};
+    k0_op.set_bra_and_ket(ground_orbitals, ground_orbitals);
+    if (r_params.hfexalg() == "multiworld") {
+      k0_op.set_algorithm(Exchange<double, 3>::multiworld_efficient);
+    } else if (r_params.hfexalg() == "multiworld_row") {
+      k0_op.set_algorithm(Exchange<double, 3>::multiworld_efficient_row);
+    } else if (r_params.hfexalg() == "smallmem") {
+      k0_op.set_algorithm(Exchange<double, 3>::small_memory);
+    } else if (r_params.hfexalg() == "largemem") {
+      k0_op.set_algorithm(Exchange<double, 3>::large_memory);
+    }
+    for (const auto &b : X.active) {
+      gamma0.x[b] = k0_op(X.x[b]);
+      if (compute_Y) {
+        gamma0.y[b] = k0_op(X.y[b]);
+      }
+    }
   } else {
-    auto vec_chi = X.x.to_vector();
-    auto gamma_vec =
-        gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+    if (world.rank() == 0 && r_params.print_level() >= 2) {
+      print("[K0X-PATH] macrotask (ResponseComputeGroundExchange)");
+    }
+    std::vector<int> state_index;
+    std::vector<int> ii;
+    auto orbs_per_state =
+        (compute_Y) ? 2 * X.num_orbitals() : X.num_orbitals();
 
-    gamma0.x.from_vector(gamma_vec);
-
-    if (r_params.print_level() >= 20) {
-      print_inner(world, "gamma0", gamma0, gamma0);
+    int i = 0;
+    int si = 0;
+    for (auto &b : X.active) {
+      for (int j = 0; j < orbs_per_state; j++) {
+        state_index.push_back(si);
+        ii.push_back(i++);
+      }
+      si++;
     }
 
-    // gamma0.y = gamma0.x;
+    ResponseComputeGroundExchange t;
+    MacroTask gamma_task(world, t);
+
+    if (compute_Y) {
+      auto vec_chi = X.to_vector();
+      auto gamma_vec =
+          gamma_task(ii, state_index, vec_chi, ground_orbitals, false);
+      gamma0.from_vector(gamma_vec);
+    } else {
+      auto vec_chi = X.x.to_vector();
+      auto gamma_vec =
+          gamma_task(ii, state_index, vec_chi, ground_orbitals, true);
+      gamma0.x.from_vector(gamma_vec);
+    }
   }
+
+  // Truncate K0X (gamma0) before it enters the matrix and the V0 subtraction.
+  // Both serial and macrotask K0 paths return un-truncated functions; without
+  // a uniform truncate, per-state noise floors in K0X differ and the
+  // <X_i | K0 | X_j> matrix picks up asymmetric noise that compounds across
+  // iterations (the source of the V0X matrix asymmetry observed in tda_loose).
+  gamma0.truncate();
 
   if (r_params.print_level() >= 20) {
     print_inner(world, "gamma0", X, gamma0);
@@ -1289,9 +1412,16 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
   double safety = 0.1;
   double v_tol = safety * FunctionDefaults<3>::get_thresh();
 
+  // Truncate the local-potential part v0*X to v_tol BEFORE the subtraction
+  // with K0X. K0X is already truncated above (gamma0.truncate()), so adding
+  // the same per-state truncate to v0*X gives both halves of V0X = v0*X -
+  // c_xc*K0X a uniform noise floor before they combine. Without this, v0*X
+  // carries per-state un-truncated noise (the bulk of the asymmetry once
+  // K0X is clean, observed in the tda_loose V0X-SPLIT diagnostic).
   if (compute_Y) {
 
     auto v0vec = X.to_vector() * v0;
+    truncate(world, v0vec, v_tol);
     auto gamma0vec = gamma0.to_vector();
 
     compress(world, gamma0vec, true);
@@ -1301,12 +1431,10 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     truncate(world, v0vec, v_tol);
     V0.from_vector(v0vec);
 
-    /*V0 = X * v0;*/
-    /*V0 = V0 - c_xc * gamma0;*/
-    /*V0.truncate(v_tol);*/
   } else {
 
     auto v0vec = X.x.to_vector() * v0;
+    truncate(world, v0vec, v_tol);
     auto gamma0vec = gamma0.x.to_vector();
     compress(world, gamma0vec, true);
     compress(world, v0vec, true);
@@ -1314,16 +1442,38 @@ auto ResponseBase::compute_V0X(World &world, const X_space &X,
     v0vec = v0vec - c_xc * gamma0vec;
     truncate(world, v0vec, v_tol);
     V0.x.from_vector(v0vec);
-
-    /**/
-    /*V0.x = v0 * X.x;*/
-    /*V0.x = V0.x - c_xc * gamma0.x;*/
-    /*V0.x.truncate_rf(vtol);*/
-    // V0.y = V0.x;
   }
   if (r_params.print_level() >= 20) {
 
     print_inner(world, "xV0x", X, V0);
+
+    // [V0X-SPLIT] Split V0X = v_local*X - c_xc*K0X. V_loc is truncated to
+    // v_tol here to mirror what the production V0 path now does (per-part
+    // truncate before the subtraction), so the printed matrix reflects
+    // what actually enters V0X. gamma0 was already truncated above.
+    {
+      X_space V_loc =
+          X_space::zero_functions(world, X.num_states(), X.num_orbitals());
+      V_loc.set_active(X.active);
+      X_space K0X =
+          X_space::zero_functions(world, X.num_states(), X.num_orbitals());
+      K0X.set_active(X.active);
+
+      if (compute_Y) {
+        auto vloc_vec = X.to_vector() * v0;
+        truncate(world, vloc_vec, v_tol);
+        V_loc.from_vector(vloc_vec);
+        K0X.from_vector(gamma0.to_vector());
+      } else {
+        auto vloc_vec = X.x.to_vector() * v0;
+        truncate(world, vloc_vec, v_tol);
+        V_loc.x.from_vector(vloc_vec);
+        K0X.x.from_vector(gamma0.x.to_vector());
+      }
+      print_inner(world, "[V0X-SPLIT] xV_localX (v_nuc+2J+(1-c)Vxc, trunc)",
+                  X, V_loc);
+      print_inner(world, "[V0X-SPLIT] xK0X (exchange, post-trunc)", X, K0X);
+    }
   }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "V0_add", "V0_add", iter_timing);
@@ -1463,11 +1613,25 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   }
   size_t m = chi.x.size();
   size_t n = chi.x.size_orbitals();
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
   //	compute residual
-  Tensor<double> residual_norms = copy(old_residuals);
+  Tensor<double> residual_norms = (old_residuals.size() == long(m))
+                                      ? copy(old_residuals)
+                                      : Tensor<double>(long(m));
   X_space res(world, m, n);
-  res.set_active(chi.active);
+  // V1_PATCH: chi.active may be stale (X_space's `=` operator overwrites
+  // .x.active but not .active in some paths, e.g. after select_functions).
+  // Use the canonical 0..m-1 list to keep loops below in bounds.
+  std::list<size_t> safe_active;
+  for (size_t i = 0; i < m; ++i)
+    safe_active.push_back(i);
+  res.set_active(safe_active);
   if (compute_y) {
     res = chi - g_chi;
     res.truncate();
@@ -1482,13 +1646,28 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
     } // / norm2(world, gx[b]); }
   } else {
     res.x = chi.x - g_chi.x;
+    // V1_PATCH: force active to canonical list to match res.x.size()
+    res.x.active = safe_active;
     res.x.truncate_rf();
-    for (const auto &b : chi.active) {
-
+    for (const auto &b : safe_active) {
       auto rnorm = norm2s(world, res.x[b]);
       double rms, maxval;
       vector_stats(rnorm, rms, maxval);
       residual_norms(static_cast<long>(b)) = maxval;
+      // [RES-FULL] additionally report the full-state L2 residual
+      //   full_L2 = sqrt(sum_j ||res.x[b][j]||^2)
+      // This is the natural per-state convergence metric. The max-orbital
+      // 'maxval' is sensitive to one outlier; full_L2 is the actual
+      // 2-norm of the per-state residual vector. If full_L2 drops while
+      // maxval plateaus, the iteration is converging except for one
+      // bad orbital index.
+      if (r_params.print_level() > 2 && world.rank() == 0) {
+        double full_l2_sq = 0.0;
+        for (double v : rnorm)
+          full_l2_sq += v * v;
+        printf("[RES-FULL] state=%zu  max_orb=%.3e  rms=%.3e  full_L2=%.3e\n",
+               b, maxval, rms, std::sqrt(full_l2_sq));
+      }
     } // / norm2(world, g_chi.x[b]); }
   }
   if (r_params.print_level() >= 1) {
@@ -1499,9 +1678,10 @@ auto ResponseBase::update_residual(World &world, const X_space &chi,
   return {res, residual_norms};
 }
 
-auto ResponseBase::kain_rf_space_update(
-    World &world, const X_space &chi, const X_space &residual_chi,
-    response_function_solver &kain_x_space) -> X_space
+auto ResponseBase::kain_rf_space_update(World &world, const X_space &chi,
+                                        const X_space &residual_chi,
+                                        response_function_solver &kain_x_space)
+    -> X_space
 
 {
   if (r_params.print_level() >= 1) {
@@ -1512,7 +1692,13 @@ auto ResponseBase::kain_rf_space_update(
 
   auto kain_update = chi.copy();
   kain_update.set_active(chi.active);
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
   if (compute_y) {
     auto chi_vec = chi.to_vector();
     auto res_vec = residual_chi.to_vector();
@@ -1567,9 +1753,10 @@ auto ResponseBase::kain_rf_space_update(
   }
 }
 
-auto ResponseBase::kain_x_space_update(
-    World &world, const X_space &chi, const X_space &residual_chi,
-    response_solver &kain_x_space) -> X_space {
+auto ResponseBase::kain_x_space_update(World &world, const X_space &chi,
+                                       const X_space &residual_chi,
+                                       response_solver &kain_x_space)
+    -> X_space {
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
@@ -1579,24 +1766,64 @@ auto ResponseBase::kain_x_space_update(
   X_space kain_update = chi.copy();
   // kain_update.set_active(chi.active);
 
-  bool compute_y = r_params.omega() != 0.0;
+  // calc_type == "full" captures both excited-state RPA AND FD-dynamic
+  // response (both write "full" via response_parameters set_derived_value).
+  // The previous test (r_params.omega() != 0.0) conflated the two response
+  // modes: it returned false for excited-state RPA (where omega is unused
+  // and defaults to 0.0), leaving Y un-accelerated by KAIN and absent from
+  // the residual metric.
+  bool compute_y = (r_params.calc_type() == "full");
+
+  // [KAIN-IO] Per-state diagnostic. Collective-safe: norm2(world, vec) is
+  // collective, so all ranks compute, then rank 0 prints. Goal is to
+  // identify whether KAIN extrapolation is divergent (large ||kain_update||
+  // while ||chi||, ||residual|| are sane) vs being fed bad input. Gated
+  // at print_level > 3 to align with other per-state diagnostics.
+  const bool kain_io = r_params.print_level() > 3;
   if (compute_y) {
     auto x_vectors = to_response_matrix(chi);
     auto x_residuals = to_response_matrix(residual_chi);
     // compute the norm of the residuals
 
     for (const auto &i : Chi.active) {
+      double n_chi = 0.0, n_res = 0.0;
+      if (kain_io) {
+        n_chi = norm2(world, x_vectors[i]);
+        n_res = norm2(world, x_residuals[i]);
+      }
       auto temp = kain_x_space[i].update(x_vectors[i], x_residuals[i]);
       truncate(world, temp);
+      double n_out = 0.0;
+      if (kain_io) n_out = norm2(world, temp);
       std::copy(temp.begin(), temp.begin() + n, kain_update.x[i].begin());
       std::copy(temp.begin() + n, temp.end(), kain_update.y[i].begin());
+      if (kain_io && world.rank() == 0) {
+        printf("[KAIN-IO] full  state=%zu  |chi(2n)|=%.3e  |res(2n)|=%.3e  "
+               "|kain_out(2n)|=%.3e\n",
+               i, n_chi, n_res, n_out);
+        fflush(stdout);
+      }
     };
   } else {
     // first compute the residuals
     for (const auto &i : Chi.active) {
+      double n_chi = 0.0, n_res = 0.0;
+      if (kain_io) {
+        n_chi = norm2(world, chi.x[i]);
+        n_res = norm2(world, residual_chi.x[i]);
+      }
       kain_update.x[i] = kain_x_space[i].update(chi.x[i], residual_chi.x[i]);
       // truncate the update
       truncate(world, kain_update.x[i]);
+      if (kain_io) {
+        double n_out = norm2(world, kain_update.x[i]);
+        if (world.rank() == 0) {
+          printf("[KAIN-IO] tda   state=%zu  |chi|=%.3e  |res|=%.3e  "
+                 "|kain_out|=%.3e\n",
+                 i, n_chi, n_res, n_out);
+          fflush(stdout);
+        }
+      }
     }
   }
 
@@ -1614,50 +1841,44 @@ void ResponseBase::x_space_step_restriction(World &world,
                                             X_space &temp, bool restrict_y,
                                             const double &max_bsh_rotation) {
   size_t m = old_Chi.num_states();
-  size_t n = old_Chi.num_orbitals();
-
-  bool compute_y = r_params.omega() != 0.0;
 
   if (r_params.print_level() >= 1) {
     molresponse::start_timer(world);
   }
 
-  if (compute_y) {
-
-    auto temp_vecs = to_response_matrix(temp);
-    auto old_vecs = to_response_matrix(old_Chi);
-
-    for (const auto ai : old_Chi.active) {
-
-      auto norm_diff_ai = norm2(world, sub(world, old_vecs[ai], temp_vecs[ai]));
-
-      if (norm_diff_ai > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff_ai;
-        if (world.rank() == 0) {
-          printf(" %d:%f", ai, s);
-        }
-        temp_vecs[ai] = gaxpy_oop(s, old_vecs[ai], 1.0 - s, temp_vecs[ai]);
-      }
+  // Mirror legacy TDDFT::do_step_restriction(x, y) at
+  // molresponse_legacy/TDDFT.cc:1050-1090: per-state loop using the
+  // COMBINED Euclidean norm of the (dx, dy) delta vector, with a single
+  // scale factor s applied to BOTH X and Y. This couples X and Y
+  // correctly (a 0.5 step in each has total size 0.707, not (0.5, 0.5)
+  // independently) and produces a well-defined positive distance even
+  // for RPA - the indefinite metric used in normalize() is NOT
+  // appropriate here since step size has to be a positive quantity.
+  //
+  // For TDA (restrict_y=false), the Y contribution is zero and this
+  // collapses to a pure X-block restriction.
+  for (size_t b = 0; b < m; b++) {
+    const double nx = norm2(world, sub(world, old_Chi.x[b], temp.x[b]));
+    double ny2 = 0.0;
+    if (restrict_y) {
+      const double ny = norm2(world, sub(world, old_Chi.y[b], temp.y[b]));
+      ny2 = ny * ny;
     }
-  } else {
-    for (const auto ai : old_Chi.active) {
+    const double norm_diff = std::sqrt(nx * nx + ny2);
 
-      auto norm_diff_ai = norm2(world, sub(world, old_Chi.x[ai], temp.x[ai]));
-
-      if (norm_diff_ai > max_bsh_rotation) {
-        double s = max_bsh_rotation / norm_diff_ai;
-        if (world.rank() == 0) {
-          printf(" %d:%f", ai, s);
-        }
-        temp.x[ai] = gaxpy_oop(s, temp.x[ai], 1.0 - s, old_Chi.x[ai]);
+    if (norm_diff > max_bsh_rotation) {
+      const double s = max_bsh_rotation / norm_diff;
+      if (world.rank() == 0)
+        printf(" b%zu:%f", b, s);
+      // Standard step restriction: result = s*temp + (1-s)*old (mostly old).
+      // Same scale factor applied to both X and Y of state b.
+      temp.x[b] = gaxpy_oop(s, temp.x[b], 1.0 - s, old_Chi.x[b]);
+      if (restrict_y) {
+        temp.y[b] = gaxpy_oop(s, temp.y[b], 1.0 - s, old_Chi.y[b]);
       }
     }
   }
 
-  // if (world.rank() == 0)
-  // {
-  //   print("----------------End Step Restriction -----------------");
-  // }
   if (r_params.print_level() >= 1) {
     molresponse::end_timer(world, "x_space_restriction", "x_space_restriction",
                            iter_timing);
@@ -1753,20 +1974,32 @@ void ResponseBase::solve(World &world) {
   for (const auto &iter_thresh : protocol) {
     // We set the protocol and function defaults here for the given threshold of
     set_protocol(world, iter_thresh);
+    // V1_PATCH: build the ground-state Hamiltonian before initialize().
+    // ExcitedResponse::initialize() runs an iterate_trial step that consumes
+    // `hamiltonian`, so leaving check_k after initialize() crashes with an
+    // empty-tensor transform. check_k only touches ground-state quantities,
+    // so it's safe to call before Chi is built.
+    check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
     if (first_protocol) {
       if (r_params.restart()) {
         if (world.rank() == 0) {
           print("   Restarting from file:", r_params.restart_file());
         }
         load(world, r_params.restart_file());
-        first_protocol = false;
+        // Project the just-loaded Chi to the current protocol's k. The
+        // earlier check_k() call above ran on an empty Chi (load hadn't
+        // happened yet) so it was a no-op for Chi. Without this second
+        // call, a restart file saved at a different thresh/k than the
+        // current protocol causes a tensor-dimension mismatch on the
+        // first operator apply in iterate(). Symmetric: handles both
+        // downscale (saved at finer thresh, current protocol coarser)
+        // and upscale (saved at coarser, current finer).
+        ::check_k(world, Chi, iter_thresh, FunctionDefaults<3>::get_k());
       } else {
         this->initialize(world);
       }
-      check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
       first_protocol = false;
     } else {
-      check_k(world, iter_thresh, FunctionDefaults<3>::get_k());
       if (world.rank() == 0) {
         print("Successfully check K not first initialization ");
       }
@@ -1806,8 +2039,8 @@ void check_k(World &world, X_space &Chi,
 /// \param f
 /// \param magnitude
 /// \return
-auto add_randomness(World &world, const response_space &f,
-                    double magnitude) -> response_space {
+auto add_randomness(World &world, const response_space &f, double magnitude)
+    -> response_space {
   // Copy input functions
   response_space f_copy = f.copy();
 
@@ -1873,8 +2106,8 @@ void normalize(World &world, X_space &Chi) {
   }
 }
 
-auto solid_harmonics(World &world,
-                     int n) -> std::map<std::vector<int>, real_function_3d> {
+auto solid_harmonics(World &world, int n)
+    -> std::map<std::vector<int>, real_function_3d> {
   // Container to return
   std::map<std::vector<int>, real_function_3d> result;
 
@@ -1997,9 +2230,10 @@ transition_density(World &world, const vector_real_function_3d &orbitals,
  * @param load_balance
  * @return
  */
-auto ResponseBase::orbital_load_balance(
-    World &world, const gamma_orbitals &gammaOrbitals,
-    const double load_balance) -> gamma_orbitals {
+auto ResponseBase::orbital_load_balance(World &world,
+                                        const gamma_orbitals &gammaOrbitals,
+                                        const double load_balance)
+    -> gamma_orbitals {
   auto X = std::get<0>(gammaOrbitals);
   auto psi0 = std::get<1>(gammaOrbitals);
   auto rho1 = std::get<2>(gammaOrbitals);
@@ -2113,8 +2347,8 @@ auto ResponseBase::project_ao_basis_only(World &world,
   return ao;
 }
 
-auto ResponseBase::project_ao_basis(World &world,
-                                    const AtomicBasisSet &aobasis) -> vecfuncT {
+auto ResponseBase::project_ao_basis(World &world, const AtomicBasisSet &aobasis)
+    -> vecfuncT {
   // Make at_to_bf, at_nbf ... map from atom to first bf on atom, and nbf/atom
   std::vector<int> at_to_bf, at_nbf;
   aobasis.atoms_to_bfn(molecule, at_to_bf, at_nbf);
@@ -2202,8 +2436,8 @@ response_space transform(World &world, const response_space &f,
   return result;
 }
 
-auto transform(World &world, const X_space &x,
-               const Tensor<double> &U) -> X_space {
+auto transform(World &world, const X_space &x, const Tensor<double> &U)
+    -> X_space {
   // Return container
   X_space result(world, x.num_states(), x.num_orbitals());
 
@@ -2213,8 +2447,8 @@ auto transform(World &world, const X_space &x,
   return result;
 }
 
-auto expectation(World &world, const response_space &A,
-                 const response_space &B) -> Tensor<double> {
+auto expectation(World &world, const response_space &A, const response_space &B)
+    -> Tensor<double> {
   // Get sizes
   MADNESS_ASSERT(!A[0].empty());
   MADNESS_ASSERT(A[0].size() == B[0].size());
@@ -2393,6 +2627,32 @@ auto gram_schmidt(World &world, const response_space &f) -> response_space {
 
   // Done
   return result;
+}
+
+// RPA-aware Gram-Schmidt under the indefinite metric <f|f> - <g|g>.
+// Mirror of legacy TDDFT::gram_schmidt at
+// molresponse_legacy/TDDFT.cc:2061-2089. In-place: f and g are orthonormalized
+// together using identical scaling and projection coefficients. NOTE: matches
+// legacy in not guarding against non-positive pseudo-norms (norm <= 0). A
+// non-positive norm produces NaN/inf downstream; revisit if observed in
+// practice.
+void gram_schmidt(World &world, response_space &f, response_space &g) {
+  size_t m = f.size();
+
+  for (size_t j = 0; j < m; j++) {
+    double norm = inner(f[j], f[j]) - inner(g[j], g[j]);
+    scale(world, f[j], 1.0 / sqrt(norm));
+    scale(world, g[j], 1.0 / sqrt(norm));
+
+    for (size_t k = j + 1; k < m; k++) {
+      double temp = inner(f[j], f[k]) - inner(g[j], g[k]);
+      gaxpy(world, 1.0, f[k], -temp, f[j]);
+      gaxpy(world, 1.0, g[k], -temp, g[j]);
+    }
+  }
+
+  f.truncate_rf();
+  g.truncate_rf();
 }
 
 auto make_xyz_functions(World &world) -> vector_real_function_3d {

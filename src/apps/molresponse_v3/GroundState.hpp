@@ -23,10 +23,6 @@ using namespace madness;
 /// directly — no reimplementation of the Fock construction pipeline.
 class GroundState {
 public:
-    /// Construct from an existing SCF calculation (shared ownership).
-    /// Used by the madqc workflow where SCF is already available.
-    explicit GroundState(World& world, std::shared_ptr<SCF> scf);
-
     /// Factory: load from a moldft restart archive.
     /// Reads the archive header to extract L, xc, etc., constructs an SCF
     /// with matching parameters, then delegates to SCF::load_mos().
@@ -112,6 +108,12 @@ public:
     void print_info() const;
 
 private:
+    /// Construct a shell around an SCF (shared ownership). Private: GroundState
+    /// is only built via from_archive, so prepare() can always reload pristine
+    /// MOs from the checkpoint on each protocol climb — the restart-safe
+    /// invariant the madqc and CLI paths both rely on.
+    explicit GroundState(World& world, std::shared_ptr<SCF> scf);
+
     std::shared_ptr<SCF> scf_;
     int original_k_;
     int current_k_ = 0;  // k that orbitals are currently projected to
@@ -126,8 +128,12 @@ private:
     QProjector<double, 3> q_beta_;
     bool prepared_ = false;
 
+public:
     /// Read just the archive header to extract L, k, xc, etc.
-    /// Used by from_archive to set up CalculationParameters before load_mos.
+    /// Used by from_archive to set up CalculationParameters before load_mos,
+    /// and by callers that need to set FunctionDefaults<3> via
+    /// `set_response_protocol(...)` *before* the archive is opened so that
+    /// orbitals load directly into the intended (k, thresh) representation.
     struct ArchiveHeader {
         unsigned int version = 0;
         double energy = 0.0;
@@ -142,6 +148,8 @@ private:
 
     static ArchiveHeader read_archive_header(World& world,
                                               const std::string& archive_path);
+
+private:
 
     /// Build V_local (V_nuc + V_coul + V_xc) for the response solver.
     /// This is the multiplicative local potential used in the response
