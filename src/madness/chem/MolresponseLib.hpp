@@ -713,8 +713,13 @@ private:
           continue;
         }
 
-        for (const auto &[protocol_key, shard_proto] :
+        for (const auto &[protocol_key, shard_proto_b] :
              shard_state["protocols"].items()) {
+          // Bind the structured binding to a named reference: the merge_flag_map
+          // lambda below captures it, and capturing a structured binding directly
+          // is a C++20 extension (-Wc++20-extensions, fatal under -Werror) when
+          // building as C++17.
+          const auto &shard_proto = shard_proto_b;
           auto &dst_proto = dst_state["protocols"][protocol_key];
           if (!dst_proto.is_object()) {
             dst_proto = nlohmann::json::object();
