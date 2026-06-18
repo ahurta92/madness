@@ -1,3 +1,9 @@
+<!-- THREAD BANNER (io-hdf5) — drop on merge to trunk -->
+> **THREAD: io-hdf5** — branch `io-hdf5`, off `molresponse-feature-next`. IO survey + HDF5 prototype.
+> Mandate, test recipe, do-not-touch, contracts: see the **io-hdf5** brief in `madness_studies/RELEASE_STATUS.md`.
+> Start with a read-only IO audit + written plan before any core IO edits. Coordinate the HDF5 layer with `feat/amr-export` (VTKHDF) — one shared stack.
+> Log progress under a `## io-hdf5 log` section in this file; the status below is inherited from trunk — append, don't rewrite.
+
 # molresponse_v3 — Active Workstream Status
 
 **Purpose:** the single page an agent reads first so it does *not* re-derive
