@@ -1,3 +1,9 @@
+<!-- THREAD BANNER (perf-model) — drop on merge to trunk -->
+> **THREAD: perf-model** — branch `perf-model`, off `molresponse-feature-next`. Instrumentation + cost model (the measurement arm).
+> Mandate, test recipe, do-not-touch, contracts: see the **perf-model** brief in `madness_studies/RELEASE_STATUS.md`.
+> Exposes the meter API + profile schema that `exchange` reports into and `parallel-runtime` uses to settle the doc-24-vs-25 fork.
+> Log progress under a `## perf-model log` section in this file; the status below is inherited from trunk — append, don't rewrite.
+
 # molresponse_v3 — Active Workstream Status
 
 **Purpose:** the single page an agent reads first so it does *not* re-derive
