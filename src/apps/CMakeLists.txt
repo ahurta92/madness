@@ -4,6 +4,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(plot)
 add_subdirectory(tdse)
+add_subdirectory(bench)
 add_subdirectory(moldft)
 #add_subdirectory(molresponse)
 # Frozen compatibility baseline for excited-state parity/reference work.
