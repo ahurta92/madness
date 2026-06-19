@@ -74,9 +74,16 @@ has already chdir'd (ScopedCWD) into the response `outdir` → `ParallelInputArc
 `access()` resolved the relative path against the wrong cwd. Fix mirrors v2's
 `make_ground_context` (and CC2/TDHF/OEP): `fs::proximate(scf_calc->work_dir, outdir)`
 (`madqc_adapter.hpp`). **Climb fix itself was never at fault** (archive existed,
-prefix correct). Deeper inconsistency noted as follow-up: `SCFApplication` (`Applications.hpp`
-~158) stores a *relative* work_dir while the Nemo path (~894) stores `current_path()`
-absolute — fixing that touches every workflow, so left out of the surgical adapter fix.
+prefix correct). **Root-cause follow-up FIXED:** the relative-vs-absolute work_dir
+inconsistency (`SCFApplication` `Applications.hpp` ~158 stored a *relative* `pm.dir()`
+while the Nemo path ~894 stored `current_path()` absolute) is resolved at the chokepoint
+— `PathManager` now stores `std::filesystem::absolute(base)` (`PathManager.hpp`), so
+`pm.dir()`/`work_dir` are absolute everywhere and a raw `work_dir` use is no longer
+cwd-dependent (the original bug class is gone, not worked around). The adapter's
+`proximate` is kept (now abs-vs-abs, still correct, and robust if PathManager reverts).
+NB on coordinate systems: `proximate(p, base)` is only correct when `p` and `base`
+share a system — making work_dir absolute alone (without absolute `outdir`) would have
+broken the adapter fix; normalizing at PathManager makes both absolute together.
 **Re-validation PASS 2026-06-19** (FRESH h2o climb via `cm_mq h2o` `PROTOCOL=1e-4,1e-6`,
 k6→k8: archive opened, no "could not find file"; final `1e-06_k8` α_zz(static)=8.5328,
 α_zz(ω=0.04)=8.5700; matches the R3a single-rung smoke 8.5346 to ~2e-3). On a 1TB
