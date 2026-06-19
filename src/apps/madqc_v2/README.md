@@ -244,15 +244,16 @@ Plot knobs (`dft` group):
 
 Files land in the per-task work dir, e.g. `h2o/task_0/moldft/total_density.cube`.
 
-> **Fixed (was: plotdx segfault):** `SCF::do_plots` used to pass an empty plot
-> cell to the OpenDX writer (`plotdx`, `mraimpl.h`) whenever the `plot_cell` knob
-> was unset — the common case — because `CalculationParameters::plot_cell()`
-> returns a copy, so the defaulting assignment hit a discarded temporary. plotdx
-> then dereferenced an empty cell and crashed. `do_plots` now builds a local cell
-> defaulted to the simulation cell, so `plotdens`/`plotcoul` work without an
-> explicit `plot_cell`. The underlying `plotdx` still has no empty-cell guard, so
-> a future caller passing an empty cell would crash — defensive hardening there
-> is a separate (MRA-layer) follow-up.
+> **Fixed (was: plotdx segfault) — runtime-confirmed:** `SCF::do_plots` used to
+> pass an empty plot cell to the OpenDX writer (`plotdx`, `mraimpl.h`) whenever
+> the `plot_cell` knob was unset — the common case — because
+> `CalculationParameters::plot_cell()` returns a copy, so the defaulting
+> assignment hit a discarded temporary. plotdx then dereferenced an empty cell and
+> crashed. `do_plots` now builds a local cell defaulted to the simulation cell, so
+> `plotdens`/`plotcoul` work without an explicit `plot_cell` (confirmed on h2o:
+> `total_density.dx` + `coulomb.dx` written, no crash). `plotdx` itself now also
+> `MADNESS_CHECK_THROW`s on an empty/ill-shaped cell, so a future caller passing
+> one gets a clear error instead of a segfault.
 
 After the run, the driver scans the output tree and writes
 **`<prefix>.viz_manifest.json`** — a single discovery index:
