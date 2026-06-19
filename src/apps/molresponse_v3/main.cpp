@@ -15,8 +15,10 @@
 #include <madness/misc/info.h>
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
+#include <madness/world/worldprofile.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,12 @@ int main(int argc, char **argv) {
       }
 
       ResponseWorkflowOutput out = run_response(world, in);
+
+      // perf-model (doc 29): emit the per-phase profile when asked. COLLECTIVE
+      // (all ranks). No-op unless built with -DENABLE_WORLD_PROFILE=ON AND env
+      // MADQC_PROFILE_JSON is set (zero-effect-when-off contract).
+      if (const char *pj = std::getenv("MADQC_PROFILE_JSON"))
+        WorldProfile::dump_json(world, pj);
 
       if (world.rank() == 0) {
         const std::string top = protocol_key_at(in.protocols.back());

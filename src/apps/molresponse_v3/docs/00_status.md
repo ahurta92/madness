@@ -206,3 +206,38 @@ care; a full `ninja` (not just the cm targets) is the real check.
   phantom ~3% error on diffuse roots) — `madness_studies/refs/dalton_tdhf.json`.
 - Commit with `git -c core.hooksPath=/dev/null` (a repo hook corrupts
   `.git/index`).
+
+---
+
+## perf-model log
+*(measurement-arm thread; design anchor: `docs/29_perf_model_design.md`. Append
+newest-first; the status above is inherited from trunk — do not rewrite it.)*
+
+- **2026-06-19 — thread bootstrapped.** Read the cross-thread board + brief +
+  contracts + runtime/perf guide (`docs/parallel_runtime_guide/`, companion
+  `parallel_runtime_and_performance_models.md` §9 model / §12 measurement plan).
+  **Key finding:** the "per-phase timers/counters in the core" the brief asks for
+  *already exist* — core MADNESS `WorldProfile` (`src/madness/world/worldprofile.{h,cc}`)
+  is compile-gated (`ENABLE_WORLD_PROFILE`, default OFF; macros → no code when off
+  = the zero-effect-when-off contract), already wraps apply/compress/reconstruct/
+  project/truncate, and already captures CPU time + msg/byte counts parallel-reduced
+  per call-site. **Decision (user-confirmed): extend `WorldProfile`** rather than
+  build a v3-local meter. Gaps = this thread's deliverables: a machine-readable
+  JSON emitter + pinned schema (PM-1), a canonical phase taxonomy + 2 named
+  response-level meter blocks for exchange/projection (PM-2), and the cost-model fit
+  (PM-3). Wrote design doc 29; pinned draft profile schema in `operator_contracts.md`.
+  **PM-1 APPLIED (not yet built/committed):** `WorldProfile::dump_json(world,path)`
+  added (`worldprofile.{h,cc}`; self-contained binary-tree gather mirroring `print`,
+  hand-rolled JSON, no nlohmann dep in `world/`). Env-gated collective call
+  (`MADQC_PROFILE_JSON`) wired into BOTH the app (`main.cpp`) and
+  `tests/test_calc_manager_run.cpp` — the latter is what `cm_run` actually launches
+  (cm_run runs `test_calc_manager_run`, NOT the app binary). Harness: added a
+  `perf-model)` case to `cm_use` (`es_bench/cm.sh`) so the branch auto-builds with
+  `-DENABLE_WORLD_PROFILE=ON` (mirrors the viz-branch VTK precedent). Schema v1
+  pinned in `operator_contracts.md`.
+  **NEXT (you run on alloc):** `cm_use perf-model; cm_rebuild` (force reconfigure to
+  pick up the flag — turns on all PROFILE_ macros → full lib rebuild) then
+  `MADQC_PROFILE_JSON=$PWD/p.r1.json cm_run h2o` ×2; confirm JSON emits + structural
+  counters (count/nmsg/nbyte) bit-identical across runs (cpu within noise). Then
+  PM-2 (phase taxonomy + `rs_exchange_gamma`/`rs_projection` blocks) and PM-3
+  (`refs/perf_model_fit.py`).

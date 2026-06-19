@@ -30,8 +30,10 @@
 #include <madness/misc/info.h>
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
+#include <madness/world/worldprofile.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -525,6 +527,11 @@ int main(int argc, char **argv) {
       print("EXCEPTION:", e.what());
     rc = 2;
   }
+  // perf-model (doc 29): emit the per-phase profile when asked. COLLECTIVE (all
+  // ranks); world is valid until finalize(). No-op unless built with
+  // -DENABLE_WORLD_PROFILE=ON AND env MADQC_PROFILE_JSON is set.
+  if (const char *pj = std::getenv("MADQC_PROFILE_JSON"))
+    WorldProfile::dump_json(world, pj);
   finalize();
   return rc;
 }

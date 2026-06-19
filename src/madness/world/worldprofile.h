@@ -158,6 +158,13 @@ namespace madness {
         /// Prints global profiling information.  Global fence involved.  Implemented in worldstuff.cc
         static void print(World& world);
 
+        /// Reduces (binary-tree gather, like print) and writes the per-phase
+        /// profile as JSON to `path` on rank 0.  COLLECTIVE: must be called on
+        /// every rank.  No-op unless built with WORLD_PROFILE_ENABLE.  Consumes
+        /// the live counters via the gather, so it is mutually exclusive with
+        /// print() within a single run.  Schema: docs/operator_contracts.md.
+        static void dump_json(World& world, const std::string& path);
+
     private:
         /// Private.  Accumlates data from process into parallel statistics.  Implemented in worldstuff.cc
         static void recv_stats(World& world, ProcessID p);

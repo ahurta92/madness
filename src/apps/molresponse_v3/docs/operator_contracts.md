@@ -131,3 +131,60 @@ A contract table is a human aid; the gate is the test. See
 When adding an operation, add its row above **and** a check that ties it
 to legacy — the table alone did not prevent the metric bug; the missing
 piece was the automated tight comparison.
+
+---
+
+## Performance profile schema (v1)
+
+Pinned by the **perf-model** thread (design: `docs/29_perf_model_design.md`).
+The cross-thread contract: the machine-readable profile that
+`WorldProfile::dump_json` emits, that `exchange` reports its Tx/tile counts +
+phase timings into, and that `parallel-runtime` reads to settle the doc-24-vs-25
+fork with measured numbers. **Stable key names — coordinate changes here.**
+
+Emitted once per run by rank 0, **only** when built with `ENABLE_WORLD_PROFILE=ON`
+**and** env `MADQC_PROFILE_JSON` is set (else absent — zero-effect contract).
+Every per-phase statistic is a faithful copy of a reduced `WorldProfileEntry`
+field: `{sum, min, max, pmin, pmax}` (`pmin`/`pmax` = the rank holding the min/max).
+
+```jsonc
+{
+  "schema_version": 1,
+  "world_size": 6,                 // P (MPI ranks)
+  "total_cpu_s": 812.4,            // rank-0 cpu_time - WorldProfile::cpu_start
+  "total_wall_s": 141.2,           // rank-0 wall_time - WorldProfile::wall_start
+  "overhead_s_per_call": 3.0e-7,   // estimated profiling overhead/call
+  "context": {                     // OPTIONAL; filled by the v3 caller, null in
+                                   // core. The join key for the cost-model fit.
+    "molecule": "h2o", "n_occ": 5, "k": 6, "thresh": 1e-4,
+    "protocol": 0, "box_L": 30.0
+  },
+  "phases": [
+    {
+      "name": "FunctionImpl::apply",   // raw __FUNCTION__ / class::function key
+      "phase": "apply",                // canonical taxonomy (PM-2); else "other"
+      "count":      {"sum": 1.2e5, "min": 1.9e4, "max": 2.1e4, "pmin": 3, "pmax": 0},
+      "cpu_excl_s": {"sum": 402.1, "min": 61.0, "max": 71.3, "pmin": 4, "pmax": 0},
+      "cpu_incl_s": {"sum": 588.0, "min": 90.2, "max": 99.8, "pmin": 4, "pmax": 0},
+      "nmsg_sent_excl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nmsg_sent_incl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nbyte_sent_excl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nbyte_sent_incl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nmsg_recv_excl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nmsg_recv_incl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nbyte_recv_excl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0},
+      "nbyte_recv_incl": {"sum": 0, "min": 0, "max": 0, "pmin": 0, "pmax": 0}
+    }
+    // … one object per registered profile entry
+  ]
+}
+```
+
+Canonical `phase` values (PM-2): `apply`, `compress`, `reconstruct`, `multiply`,
+`inner`, `gaxpy`, `truncate`, `exchange` (γ build, block `rs_exchange_gamma`),
+`projection` (`Q·v`, block `rs_projection`), `other`. The exchange thread's
+Tx/tile counters aggregate under the `rs_exchange_gamma` block so they land in the
+`exchange` phase. Cost-model consumers (§9 of the companion doc): use `cpu_excl_s`
++ `count` for `T_compute`, `nmsg_*`/`nbyte_*` for `T_comm`, and `max/sum` ratios
+for the imbalance factor φ; recover wall by joining `context` with the coarse
+`StateMetrics.wall_s` layer.
