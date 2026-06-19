@@ -77,7 +77,11 @@ has already chdir'd (ScopedCWD) into the response `outdir` → `ParallelInputArc
 prefix correct). Deeper inconsistency noted as follow-up: `SCFApplication` (`Applications.hpp`
 ~158) stores a *relative* work_dir while the Nemo path (~894) stores `current_path()`
 absolute — fixing that touches every workflow, so left out of the surgical adapter fix.
-**Re-validation pending** (FRESH h2o climb via `cm_mq h2o` `PROTOCOL=1e-4,1e-6`).
+**Re-validation PASS 2026-06-19** (FRESH h2o climb via `cm_mq h2o` `PROTOCOL=1e-4,1e-6`,
+k6→k8: archive opened, no "could not find file"; final `1e-06_k8` α_zz(static)=8.5328,
+α_zz(ω=0.04)=8.5700; matches the R3a single-rung smoke 8.5346 to ~2e-3). On a 1TB
+cache-mode node the HBM `numactl --preferred-many=8-15` had to be dropped (`cm.sh`
+now auto-detects flat vs cache mode); run used `LAUNCHER="mpirun -n 2 --map-by=socket"`.
 Caveat from Sweep 1: c2h4/c6h6/naphthalene
 hit the 25-iter cap at k6 (static α unconverged — memory robust, wall is to-cap). Then
 R5 state-parallel. (raman maps single-component only — full tensor
