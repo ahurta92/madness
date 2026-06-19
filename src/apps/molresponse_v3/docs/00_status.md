@@ -5,7 +5,10 @@ context. It says what is in flight, which files are hot (= conflict risk), how t
 test each thing, and the standing contracts. Keep it short and current — update
 the affected row in the same change that lands the work.
 
-Last updated: 2026-06-08 (branch `molresponse-feature-next`) — WS2 stabilized
+Last updated: 2026-06-19 (branch `madqc-refactor`) — fixed the v3 madqc adapter
+ground-archive path resolution (`fs::proximate(work_dir, outdir)`, mirrors v2);
+prior R3 entry below reconciled (climb fix is committed, not "pending"). Earlier:
+2026-06-08 (`molresponse-feature-next`) — WS2 stabilized
 (`ca2c21dfc` + `3a7a1dfee`, doc-15 #5). **Ground-up rebuild started:** master
 architecture is `docs/16_architecture.md` (L0→L5 layer cake, R0..R5 sequence,
 state-parallel LAST). **R0a done:** `run_response` seam
@@ -57,13 +60,25 @@ restart-in-place path (rerun madqc in an existing dir): **segfault in
 built `GroundState` from the live SCF) dereferences nothing. **Both bugs share one root:
 R3a's in-memory `GroundState` shortcut.** v2 is immune — it loads the ground state from
 the moldft archive (`scf_calc->work_dir`+`prefix+.restartdata`, `MolresponseLib.hpp`
-~1149). **Real fix (applied, NOT committed):** (1) madqc adapter now builds via
-`GroundState::from_archive` exactly like v2 (resolve archive from `scf_calc->work_dir`);
-(2) `from_archive` resets `from_memory_=false` so `prepare()` reloads pristine MOs from
-disk on each climb (restores pre-R3a behavior); (3) reverted the in-memory pristine-
-snapshot band-aid. One mechanism (archive load) fixes climb + restart segfault; compiles
-clean. **Validation pending** (SLURM job 2015778: FRESH h2o climb via from_archive +
-restart-in-place c2h4/c6h6 maxiter=80). Caveat from Sweep 1: c2h4/c6h6/naphthalene
+~1149). **Real fix (COMMITTED + merged into `madqc-refactor`):** (1) madqc adapter
+builds via `GroundState::from_archive` exactly like v2; (2) `from_archive` resets
+`from_memory_=false` so `prepare()` reloads pristine MOs from disk on each climb
+(restores pre-R3a behavior); (3) reverted the in-memory pristine-snapshot band-aid.
+One mechanism (archive load) fixes climb + restart segfault. **Validation (SLURM job
+`r4_resume_20260611`) surfaced a SECOND, separate adapter bug — now also fixed
+(`madqc-refactor`):** the multi-node FRESH climb died with `could not find file:
+resp/task_0/moldft/resp.restartdata` even though the archive existed. Root cause:
+the v3 madqc adapter resolved the ground archive from `scf_calc->work_dir` **raw**,
+but `work_dir` is stored relative to the top calc dir while `ResponseApplication::run`
+has already chdir'd (ScopedCWD) into the response `outdir` → `ParallelInputArchive`'s
+`access()` resolved the relative path against the wrong cwd. Fix mirrors v2's
+`make_ground_context` (and CC2/TDHF/OEP): `fs::proximate(scf_calc->work_dir, outdir)`
+(`madqc_adapter.hpp`). **Climb fix itself was never at fault** (archive existed,
+prefix correct). Deeper inconsistency noted as follow-up: `SCFApplication` (`Applications.hpp`
+~158) stores a *relative* work_dir while the Nemo path (~894) stores `current_path()`
+absolute — fixing that touches every workflow, so left out of the surgical adapter fix.
+**Re-validation pending** (FRESH h2o climb via `cm_mq h2o` `PROTOCOL=1e-4,1e-6`).
+Caveat from Sweep 1: c2h4/c6h6/naphthalene
 hit the 25-iter cap at k6 (static α unconverged — memory robust, wall is to-cap). Then
 R5 state-parallel. (raman maps single-component only — full tensor
 deferred; ES uses default SolidHarmonics guess — VirtualAO/es-guess madqc knob =

@@ -69,13 +69,20 @@ struct molresponse_v3_lib {
     //    MOs into memory (lib_.calc() just constructs the SCF), so scf_calc->amo is
     //    empty — building from the live SCF then segfaults in build_fock_matrices.
     //    Loading from the archive (exactly like v2's make_ground_context) avoids
-    //    that AND lets prepare() reproject pristine MOs on each protocol climb. The
-    //    archive lives in the moldft work dir (scf_calc->work_dir).
+    //    that AND lets prepare() reproject pristine MOs on each protocol climb.
+    //
+    //    Resolve the moldft work dir RELATIVE to the response `outdir`, exactly
+    //    like v2's make_ground_context (MolresponseLib.hpp ~1154) and the
+    //    CC2/TDHF/OEP applications. scf_calc->work_dir is stored relative to the
+    //    top calc dir, but ResponseApplication::run has already chdir'd (ScopedCWD)
+    //    into `outdir` (the response task dir), so using work_dir raw makes the
+    //    archive lookup resolve against the wrong cwd → "could not find file:
+    //    <work_dir>/<prefix>.restartdata" on multi-node madqc runs.
     namespace fs = std::filesystem;
     const double L = cp.L();
     set_response_protocol(world, L, protocol.front());
     const std::string prefix     = cp.prefix();
-    const fs::path    moldft_dir = scf_calc->work_dir;
+    const fs::path    moldft_dir = fs::proximate(scf_calc->work_dir, outdir);
     const std::string archive    = (moldft_dir / (prefix + ".restartdata")).string();
     const std::string fock_json  = (moldft_dir / (prefix + ".fock.json")).string();
     GroundState gs = GroundState::from_archive(world, archive, scf_calc->molecule);
@@ -154,8 +161,8 @@ struct molresponse_v3_lib {
     // ResponseApplication::run has already chdir'd (ScopedCWD) into `outdir`, and
     // `outdir` is RELATIVE — so the calc dir is the cwd ("."). Using outdir here
     // would double the path (outdir/outdir) and the metadata would be written/read
-    // in different places, leaving Output.properties empty.
-    (void)outdir;
+    // in different places, leaving Output.properties empty. (outdir is still used
+    // above to resolve the ground archive relative to this cwd.)
     in.settings.calc_dir = ".";
     in.settings.max_iters = static_cast<int>(rp.maxiter());
     in.settings.policy.dconv_user = rp.dconv();
