@@ -77,11 +77,12 @@ end
 
 ---
 
-## First hyperpolarizability β
+## First hyperpolarizability β  ✅ supported (static + dynamic)
 
-The quadratic response β. **Static β is supported**; dynamic β (SHG/OR) is
-**experimental** — it can be incomplete when the dynamic VBC contributions don't
-all reach the top protocol.
+The quadratic response β, static and dynamic (SHG/OR) — a benchmark-quality
+capability; validate against published reference β values. **Operational
+caveat:** for dynamic β, make sure all VBC contributions reach the top protocol
+(check the convergence diagnostics) — otherwise the assembled β is incomplete.
 
 | Knob | Meaning |
 |------|---------|
@@ -106,11 +107,15 @@ Example (H₂O/HF): β_zzz(0,0)≈7.76.
 
 ---
 
-## Vibrational Raman  ✅ supported (single component)
+## Vibrational Raman  🟡 single component (validation pending)
 
 Raman intensity from β(dipole; dipole, nuclear) — the response to a nuclear
-displacement. **Currently single-component** (one `(atom, axis)`); the full
-per-atom/axis tensor is in development (it depends on the state-parallel layer).
+displacement. The method is benchmark-quality in principle, but in v3 it is
+**not yet validated**: there is no reference value on file, and the correctness
+of the printed Raman output has not been confirmed — treat results as
+provisional until checked. **Currently single-component** (one `(atom, axis)`);
+the full per-atom/axis tensor is in development (it depends on the state-parallel
+layer).
 
 | Knob | Meaning |
 |------|---------|

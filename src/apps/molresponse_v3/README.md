@@ -21,9 +21,8 @@ recipes and examples: [`../madqc_v2/RESPONSE_PROPERTIES.md`](../madqc_v2/RESPONS
 | Property | Status | Notes |
 |----------|--------|-------|
 | **Polarizability α** (static + frequency-dependent) | ✅ **supported** | validated vs v2 / reference (e.g. H₂O α_zz=8.53) |
-| **First hyperpolarizability β** — static | ✅ **supported** | 2n+1 / VBC path (e.g. H₂O β_zzz≈7.76) |
-| **Vibrational Raman** — single component | ✅ **supported** | β(dipole; dipole, nuclear) for one (atom, axis) |
-| **First hyperpolarizability β** — dynamic (SHG/OR) | 🟡 **experimental** | incomplete when the dynamic VBC pairs don't all reach the top protocol |
+| **First hyperpolarizability β** (static + dynamic SHG/OR) | ✅ **supported** | 2n+1 / VBC path (e.g. H₂O β_zzz≈7.76); validate vs published benchmark β. Dynamic runs need all VBC contributions to reach the top protocol |
+| **Vibrational Raman** — single component | 🟡 **implemented; validation pending** | β(dipole; dipole, nuclear) for one (atom, axis); runs end-to-end but no reference yet — confirm the printed values |
 | **Excited states** (TDA / full RPA) | 🟡 **experimental** | eigenpairs compute; convergence/climb across protocols is being stabilized |
 | **2-photon absorption (2PA)** | 🔬 **in development** | kernel designed (`docs/TPA_DESIGN.md`); gated on ES convergence |
 | **Resonance Raman** | 🔬 **in development** | gated on ES convergence |

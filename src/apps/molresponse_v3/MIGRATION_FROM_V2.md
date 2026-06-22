@@ -40,9 +40,8 @@ runs under v3 unchanged; only the solver behind it differs.
 | Property | Recommendation |
 |----------|----------------|
 | **Polarizability α** (static + dynamic) | ✅ v3 ready — validated vs v2 |
-| **Static β** | ✅ v3 ready — validated vs v2 |
-| **Single-component Raman** | ✅ v3 ready (one `(atom, axis)`) |
-| **Dynamic β (SHG/OR)** | ⚠️ stay on v2 — v3 dynamic β is experimental |
+| **First hyperpolarizability β** (static + dynamic SHG/OR) | ✅ v3 ready — validate vs published benchmark β; for dynamic β confirm all VBC contributions climb |
+| **Single-component Raman** | 🟡 v3 runs it, but unvalidated — no reference yet; confirm the printed values |
 | **Full-tensor Raman** | ⚠️ stay on v2 — v3 full tensor is in development |
 | **Excited states, 2PA, resonant Raman** | ⚠️ stay on v2 — v3 ES is experimental, 2PA/resonant in development |
 | **Large systems (state-parallel)** | ⚠️ stay on v2 — v3 scaling layer is in development |
