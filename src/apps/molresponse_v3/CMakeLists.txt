@@ -63,6 +63,25 @@ add_mad_executable(test_subspace_allreduce
 add_mad_executable(dump_mra_trees
                    "tools/dump_mra_trees.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
+# --- io-hdf5 thread: HDF5-backed I/O (opt-in; docs/30) -----------------------
+# Native MADNESS archive stays the default. No-op unless configured with
+# -DMADNESS_ENABLE_HDF5=ON, so a normal build is byte-for-byte unchanged.
+option(MADNESS_ENABLE_HDF5 "Enable HDF5-backed function/checkpoint I/O in molresponse_v3 (opt-in; native archive remains the default)" OFF)
+if(MADNESS_ENABLE_HDF5)
+  find_package(HDF5 REQUIRED COMPONENTS C)
+  message(STATUS "molresponse_v3: HDF5 enabled — ${HDF5_LIBRARIES}")
+  # P1 build-wiring smoke: pure HDF5 C-API round-trip, no MADNESS function code.
+  add_mad_executable(test_hdf5_smoke "tests/test_hdf5_smoke.cpp" "MADworld")
+  target_include_directories(test_hdf5_smoke PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(test_hdf5_smoke PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(test_hdf5_smoke PRIVATE MADNESS_HAS_HDF5)
+  # P2 Layer A: Function raw-coeff round-trip vs the native archive.
+  add_mad_executable(test_function_hdf5 "tests/test_function_hdf5.cpp" "MADchem")
+  target_include_directories(test_function_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(test_function_hdf5 PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(test_function_hdf5 PRIVATE MADNESS_HAS_HDF5)
+endif()
+
 add_dependencies(applications-madness molresponse_v3)
 
 install(TARGETS molresponse_v3

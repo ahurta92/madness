@@ -206,3 +206,127 @@ care; a full `ninja` (not just the cm targets) is the real check.
   phantom ~3% error on diffuse roots) — `madness_studies/refs/dalton_tdhf.json`.
 - Commit with `git -c core.hooksPath=/dev/null` (a repo hook corrupts
   `.git/index`).
+
+---
+
+## io-hdf5 log
+*(thread `io-hdf5`, off trunk — IO survey + HDF5 prototype. Append, don't rewrite.)*
+
+### 2026-06-19 — P0 audit + plan complete
+- **Read-only IO audit done** + written plan → `docs/30_io_hdf5_survey_and_plan.md`.
+- **Legacy stack mapped:** archive core (`world/archive.h`,
+  `binary_fstream_archive.h`, `parallel_archive.h`), function persistence
+  (`mra.h:2901/2907` free `save/load` → `ParallelOutputArchive` `nio=1`;
+  `funcimpl.h`/`worlddc.h:2069` rank-0-gather single file), and the v3 call sites
+  (`response_state.hpp`, `fd_/es_/vbc_save_load.hpp`; metadata = JSON, stays JSON).
+- **Existing HDF5 prototype** (`src/examples/writecoeffs/`) is **not actually
+  wired** — values-based text/JSON only; `writecoeff_hdf5.cc` includes the *text*
+  `FunctionIO.h`; h5cpp demos aren't in the build list. `h5cpp`/`HighFive` not
+  installed on the cluster.
+- **Build reality:** no `find_package(HDF5)` in MADNESS CMake. GCC13/Milan
+  **serial** HDF5 at `/gpfs/software/hdf5/gcc13/milan/1.14.3` matches the v3
+  toolchain — enough for a rank-0-gather (`nio=1`-mirroring) prototype; parallel
+  HDF5 deferred (would need a GCC13 parallel build).
+- **`upstream/pr_writecoeff` checked** (user ask): it's the origin of the
+  writecoeffs examples (already in trunk), and adds **no HDF5 build wiring** —
+  furthest-along path is the validated values+JSON round-trip (`writecoeff3.cc` /
+  `FunctionIO2.h`). Noted a NDIM==3 coords bug (`FunctionIO2.h:242-249`).
+- **Decisions (doc 30 §6):** representation = **two layers** (A raw-coeffs for
+  restart, B values+coords for plotting/MRChem, separate writer; build A first);
+  concurrency = **rank-0 gather single file** (serial HDF5). Access layer =
+  **native HDF5 C API** recommended, *pending user confirm*.
+- **Access layer = native HDF5 C API (user-confirmed).**
+- **P1 build wiring APPLIED** (isolated to molresponse_v3, zero core/root-CMake
+  churn): `option(MADNESS_ENABLE_HDF5 OFF)` + gated `find_package(HDF5 COMPONENTS C)`
+  + `test_hdf5_smoke` (pure HDF5 C-API round-trip, no MADNESS fn code) in
+  `molresponse_v3/CMakeLists.txt` + `tests/test_hdf5_smoke.cpp`. No-op when OFF.
+- **Test infra wired into cm.sh** (canonical `madness_studies/es_bench/cm.sh`):
+  `cm_use io-hdf5` now injects `-DMADNESS_ENABLE_HDF5=ON -DHDF5_ROOT=…1.14.3`
+  (override `HDF5_ROOT`); `test_hdf5_smoke` added to `cm_build`'s default targets
+  (auto-skipped off-branch). Worktree verify script:
+  `es_bench/verify_hdf5.sh` (self-sbatch → cm_use + cm_reconfigure + run →
+  PASS/FAIL verdict), mirroring `verify_fd_tensor.sh` / `verify_es_build_subworld.sh`.
+- **cm.sh bug fixed (affected ALL non-VTK verify scripts):** `cm_use` ended on a
+  bare `[[ …VTK… ]] && echo`, returning 1 on non-VTK branches → `cm_use||exit`
+  false-FATAL'd as "no worktree" (job 2031937 died in 3s despite resolving the
+  worktree + flags correctly). Added explicit `return 0`. Confirmed `cm_use
+  io-hdf5` → rc=0.
+- **P1 COMPLETE — VERDICT PASS** (job 2032058, xeonmax node xm028, 2026-06-19):
+  `find_package(HDF5)` resolved, C API compiled + linked + ran →
+  `test_hdf5_smoke: PASS (HDF5 1.14.3, round-tripped 6 doubles)`. **Cross-arch
+  confirmed:** the *milan*-built gcc13 HDF5 1.14.3 links AND runs on xeonmax — no
+  separate xeonmax HDF5 build needed. Re-run anytime: `bash es_bench/verify_hdf5.sh`.
+- **P2 Layer A WRITTEN** (first increment; NP=1, double; awaiting alloc build):
+  `solvers/function_hdf5_io.hpp` (`save/load_function_hdf5` — structured `.h5`:
+  `/meta` attrs + `/keys` int64 + chunked `/coeffs` double; stores raw coeff
+  tensors + per-node has_children/has_coeff, mirroring `ar & coeffs`) +
+  `tests/test_function_hdf5.cpp` (round-trip + size/time vs `madness::save/load`,
+  prints VERDICT). Wired: CMakeLists HDF5 block + `cm_build` targets +
+  `es_bench/verify_hdf5_function.sh`.
+- **P2 Layer A NUMERICS PASS** (xeonmax, NP=1, 3D Gaussian k=8/1e-6): round-trip
+  **bit-exact** — `(f-f_h5).norm2()=0.0`, `(f_h5-f_legacy).norm2()=0.0`. Size:
+  HDF5 1,156,152 B vs legacy 1,167,512 B (**0.990×**). I/O: write 0.0129s/0.0063s,
+  read 0.0048s/0.0022s (HDF5 ~2× slower at this size — chunked-per-leaf overhead,
+  not a bottleneck). Two **test-harness** bugs fixed (not HDF5): (1) free
+  `madness::load(f,name)` builds its archive from `f.world()` → aborts on a fresh
+  (null-impl) Function; use `ParallelInputArchive(world,...) & f` instead (v3
+  loaders already do). (2) `main()`-local Functions outlived `finalize()` →
+  RecursiveMutex EINVAL abort at exit; wrap work in a scope (helper fn) so they
+  destruct first.
+- **P2 Layer A GREEN — sweep PASS** (xeonmax NP=1, off-center Gaussian, box
+  [-50,50]³, k/thresh = 6/1e-4, 8/1e-6, 10/1e-8): all **bit-exact** (max_err 0.0),
+  norm2=1.152477 steady (projection OK in big box; mid-process k-switch clean).
+  **Efficiency:** HDF5 size 0.976→0.993× legacy (≈parity, slightly smaller); HDF5
+  I/O ~2× slower — a *constant factor* ⇒ per-call overhead from **chunk-per-leaf**
+  (`chunk=[1,k³]`), not data volume. (complex<T> dropped per user — efficiency
+  focus.)
+- **Contiguous `/coeffs` LANDED — speed parity** (re-ran sweep): write gap 2.3×→
+  ~1.2×, read at k=8 now 0.92× (HDF5 *beats* archive), files shrank further (size
+  0.949→0.988×). HDF5 now ≈parity on speed + consistently smaller; residual gap is
+  small/noise (0.01 s ops). Bit-exact preserved.
+- **Archive-backend path WRITTEN** (`save/load_function_archive_hdf5` in
+  `function_hdf5_io.hpp`; awaiting build): the "vector-archive HDF5" — serialize
+  via the optimized `ParallelOutputArchive<VectorOutputArchive>` gather (worlddc.h
+  2067, thread-parallel + Gatherv), persist the byte vector to one HDF5 dataset,
+  reverse via `ParallelInputArchive<VectorInputArchive>` (2328). **No custom
+  archive class, no core edits** (Vector archives hold a *pointer* to the buffer,
+  so the parallel wrapper's copy shares it; 2067/2328 are a symmetric pair). Key
+  wins: **universal** (any type/tree-state, complex for free) + **multi-rank at
+  nio=1** (unlike the NP=1-only structured path) + near drop-in for
+  `madness::save/load`. Opaque ⇒ restart-only (structured stays for interop).
+  `test_function_hdf5` rewritten as a 3-way A/B (legacy / structured / archive).
+- **3-way A/B PASS** (xeonmax NP=1, box 100, k=6/8/10; all bit-exact 0.0):
+  **archive reads FASTEST at every k** (~15-40% < legacy: e.g. k10 read 0.0046 vs
+  legacy 0.0054 vs structured 0.0074) — one bulk `H5Dread` + in-RAM deserialize
+  beats `BinaryFstream`'s interleaved read-during-deserialize. Archive size≈legacy
+  (marginally smaller, one file vs header+.00000), archive write≈legacy. Structured
+  = smallest files but slowest reads (multi-object open) ⇒ confirms it's the
+  interop path, not restart. **Archive-backend is the restart winner.**
+- **gzip (B) DONE — `deflate_level` opt-in, default OFF** (`save_function_archive_hdf5`,
+  chunked + `H5Pset_deflate`; reads transparent; bit-exact). **Level-6 measured
+  (box 100):** size 0.774×(k6)/0.832×(k8)/0.872×(k10) — win SHRINKS with k (dense
+  high-entropy coeffs); CPU cost EXPLODES — write 2.9×/7.3×/**11.2×**, read
+  3.3×/5.1×/4.7×. **Verdict:** bad trade for the hot restart path (memory, not
+  disk, is the bottleneck here) ⇒ **restart = uncompressed archive**; gzip is an
+  opt-in for disk-constrained/archival/transfer (legacy can't compress at all).
+  **Level-1 measured:** ~identical size to L6 (0.779/0.836/0.875×) but still ~3-12×
+  write cost ⇒ if compressing, use **level 1** (same size as 6, cheaper); gzip stays
+  default-off. gzip question CLOSED.
+- **NET P2 efficiency conclusion:** archive-backend (uncompressed) = the restart
+  format — universal, multi-rank(nio=1), ≈legacy size/write, faster reads.
+  Structured = interop only (Layer B). gzip = opt-in size knob.
+- **MULTI-RANK NP=4 PASS** (xeonmax, box 100, k=6/8/10; all paths bit-exact 0.0):
+  archive + archive+gz round-trip exact at 4 ranks (2067 gather → 1 file → 2328
+  distribute); structured auto-skips (`skip(NP>1)`). Archive write/read ≈ legacy
+  (read edges it at k10: 0.0289 vs 0.0326). **Archive file size byte-identical at
+  NP=1 and NP=4** (legacy grew +57 B from per-client framing) ⇒ rank-count-stable,
+  ideal for restart on a different node count (nio=1 ⇒ reader nio forced to 1).
+- **P2 Layer A COMPLETE.** Archive-backend = validated restart format (universal,
+  bit-exact, multi-rank, ≈legacy speed/faster reads, rank-stable). Structured =
+  interop (Layer B). gzip = opt-in (level 1) size knob, default off.
+- **NEXT:** consolidate (commit milestone); then real h2o MO instead of analytic
+  fn (true orbital tree); cross-rank explicit check (write NP=1, load NP=4); wire
+  archive path into a real v3 restart site (opt-in); Layer B (values+coords) for
+  MRChem/plotting interop.
+- **Coordinate w/ `feat/amr-export`:** same system libhdf5 + bohr/cell + chunk
+  conventions; pin in `operator_contracts.md` once P1/P2 land.
