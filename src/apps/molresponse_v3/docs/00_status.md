@@ -158,6 +158,25 @@ source persistence; in-flight kernel-naming refactor.
 - **Validation gap:** no Raman reference yet — `cm_record` reports PASS as "recorded,
   no ref". **Next:** get a molresponse_v2 Raman value for h2o to gate correctness.
 
+### WS-PR — parallel runtime / state-parallel  *(this branch: `parallel-runtime`)*
+The runtime-architecture thread (cross-thread board: `madness_studies/RELEASE_STATUS.md`).
+- **Fork RESOLVED — doc 31** (`docs/31_fd_multiworld_decomposition_decision.md`).
+  `strong_scale_es` showed G=1 strong scaling walls (18% γ-eff at 32 ranks — *expected*;
+  respect the ~5-occ/node floor). Parallelism comes from the **state** axis, not spatial.
+  Decision: **two-axis decomposition (states × space), one solve per World, FD first**
+  (FD states are coupling-free → pure fan-out/gather), first cut = one FD state per
+  node-aligned subworld, simplest-first / measurement-driven. Sub-node packing (small)
+  and multi-node-per-state (large) deferred; ES state-parallel reuses the World pool +
+  keystone allreduce (doc 24 §2) later.
+- **Proven primitives reused:** `make_node_aligned_subworld` (node_subworlds.hpp, Inc1),
+  GS ship-in under `set_default_pmap(subworld)` (S1, doc 23), keystone A/S allreduce.
+- **Seams:** `calc_executor.hpp` `run()` (:903; the single-group comment at :859-867 names
+  this as the 15c STATE_PARALLEL design), `ExecutorContext::world` (:131), `solve_fd_protocol`
+  (:254). Knob `--fd-subworlds=G` (0 = single-World reference).
+- **NEXT:** doc 32 FD impl plan (propose-diff-first) — **F1** standalone fan-out/gather
+  proof (no solver change; A/B converged α bit-identical) → **F2** gated `run()` +
+  `--fd-subworlds` + pre-flight memory abort → **F3** `weak_scale_fd.sh` + auto-selector.
+
 ### Cross-cutting — core-lib debug-logging tweak
 `src/madness/chem/exchangeoperator.h` + `src/madness/mra/macrotaskq.h`: moved a
 `MacroTaskInfo` parser print into a verbosity-gated `set_macro_task_info`. These
