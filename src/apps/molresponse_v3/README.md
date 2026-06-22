@@ -78,6 +78,10 @@ mpirun -n <N> molresponse_v3 --archive=<path>
 v3's result object (`ResponseWorkflowOutput`) is a strict **superset** of v2's
 `Results` — it adds first-class `timing`, `diagnostics`, and `exports`.
 
+Switching an existing v2 deck to v3 is a one-line `engine v3` opt-in — see
+[`MIGRATION_FROM_V2.md`](MIGRATION_FROM_V2.md) for what changes (and what to keep
+on v2 for now).
+
 ## Architecture & design docs
 
 - [`docs/16_architecture.md`](docs/16_architecture.md) — the master architecture:

@@ -205,5 +205,7 @@ tasks, tensor-json encoding) see the **Output** section of [`README.md`](README.
   format, full `calc_info.json` schema, visualization.
 - [`../molresponse_v3/README.md`](../molresponse_v3/README.md) — the v3 response
   engine: capability matrix, status, v2 relationship.
+- [`../molresponse_v3/MIGRATION_FROM_V2.md`](../molresponse_v3/MIGRATION_FROM_V2.md)
+  — switching a v2 deck to `engine v3` (and what to keep on v2 for now).
 - `cm.sh` (`/gpfs/scratch/ahurtado/madness_es_bench/README.md`) — the build/run/
   validate harness; `cm_mq <mol>` drives exactly this response path.
