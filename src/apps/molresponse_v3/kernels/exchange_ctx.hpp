@@ -162,9 +162,10 @@ build_ctx_full_cs(madness::World &world, const ResponseGroundState &gs,
 ///   groundK(x) = K[phi,phi](x) = contract_col(phi, Tx, n)   (V0x, X)
 ///   groundK(y) = K[phi,phi](y) = contract_col(phi, Ty, n)   (V0x, Y)
 ///   X gamma-exch = K[phi,x](phi)+K[y,phi](phi)
-///                = contract_row(phi,Tx,n) + contract_col(y,g0,n)
+///                = contract_col(x,g0,n) + contract_row(phi,Ty,n)
 ///   Y gamma-exch = K[phi,y](phi)+K[x,phi](phi)
-///                = contract_row(phi,Ty,n) + contract_col(x,g0,n)
+///                = contract_col(y,g0,n) + contract_row(phi,Tx,n)
+/// (MADNESS Exchange K[bra,ket](f)=Σ_i ket_i·P(bra_i·f): {phi,a}→col(a,g0); {a,phi}→row(phi,Ta).)
 inline ResponseStateXY<ClosedShell>
 assemble_theta_full_cs(madness::World &world, const ResponseGroundState &gs,
                        const ResponseStateXY<ClosedShell> &state,
@@ -189,17 +190,24 @@ assemble_theta_full_cs(madness::World &world, const ResponseGroundState &gs,
     madness::gaxpy(world, 1.0, theta_y, -1.0, E0.y_alpha);
   }
   // --- + gamma (WITH Q per block): same J*phi Coulomb on X and Y ---
+  // MADNESS Exchange (exchangeoperator.cc): K[bra,ket](f) = Σ_i ket_i·P(bra_i·f)
+  // — the KET multiplies outside, the BRA forms the density with f. So a reference
+  // pair {bra,ket} on apply_to=φ maps to:
+  //   {φ,a} → Σ a_i·P(φ_i·φ_k) = contract_col(a, g0);
+  //   {a,φ} → Σ φ_i·P(a_i·φ_k) = contract_row(φ, Ta).
   auto gx = mul(world, ctx.J, gs.amo, true);
   auto gy = mul(world, ctx.J, gs.amo, true);
   if (gs.c_xc > 0.0) {
-    auto x_phix = contract_row(world, gs.amo,        ctx.Tx, n);  // K[phi,x](phi)
-    auto x_yphi = contract_col(world, state.y_alpha, g0,     n);  // K[y,phi](phi)
-    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_phix);
-    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_yphi);
-    auto y_phiy = contract_row(world, gs.amo,        ctx.Ty, n);  // K[phi,y](phi)
-    auto y_xphi = contract_col(world, state.x_alpha, g0,     n);  // K[x,phi](phi)
-    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_phiy);
-    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_xphi);
+    // γ_X = K[φ,x](φ) + K[y,φ](φ)
+    auto x_Kphix = contract_col(world, state.x_alpha, g0,     n);  // {φ,x}: Σ x_i P(φ_i φ_k)
+    auto x_Kyphi = contract_row(world, gs.amo,        ctx.Ty, n);  // {y,φ}: Σ φ_i P(y_i φ_k)
+    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_Kphix);
+    madness::gaxpy(world, 1.0, gx, -gs.c_xc, x_Kyphi);
+    // γ_Y = K[φ,y](φ) + K[x,φ](φ)
+    auto y_Kphiy = contract_col(world, state.y_alpha, g0,     n);  // {φ,y}: Σ y_i P(φ_i φ_k)
+    auto y_Kxphi = contract_row(world, gs.amo,        ctx.Tx, n);  // {x,φ}: Σ φ_i P(x_i φ_k)
+    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_Kphiy);
+    madness::gaxpy(world, 1.0, gy, -gs.c_xc, y_Kxphi);
   }
   gx = gs.Qa(gx);
   gy = gs.Qa(gy);

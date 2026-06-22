@@ -25,7 +25,9 @@
 using namespace madness;
 using namespace molresponse_v3;
 using K      = Kernels<Static, ClosedShell>;
+using KF     = Kernels<Full,   ClosedShell>;
 using StateX = ResponseStateX<ClosedShell>;
+using StateXY= ResponseStateXY<ClosedShell>;
 
 namespace {
 class GaussFunctor : public FunctionFunctorInterface<double, 3> {
@@ -75,7 +77,7 @@ int main(int argc, char **argv) {
   // destroyed BEFORE finalize(). gs.Qa (a QProjector) holds orbital copies; if
   // gs leaves main-scope AFTER finalize(), those Function dtors throw inside a
   // destructor -> std::terminate -> SIGABRT (the rc=134 seen right after PASS).
-  bool ok = false;
+  bool ok_static = false, ok_full = false;
   {
   FunctionDefaults<3>::set_k(8);
   FunctionDefaults<3>::set_thresh(1e-5);
@@ -121,19 +123,59 @@ int main(int argc, char **argv) {
     den += theta_ref.x_alpha[p].norm2() * theta_ref.x_alpha[p].norm2();
   }
   const double rel = (den > 0.0) ? std::sqrt(num/den) : 0.0;
-  ok = (rel < 1e-3);
+  ok_static = (rel < 1e-3);
 
   if (universe.rank() == 0) {
     print("\n=== FD exchange tensor-layer θ equivalence (Static CS, n_occ=", n_occ, ") ===");
     print("  θ_ref = compute_V0x − compute_E0x + compute_gamma  (Exchange operator)");
     print("  θ_new = assemble_theta(build_ctx) [shared Tx + cached g0, dot-contracted]");
     print("  ||θ_new − θ_ref|| / ||θ_ref|| =", rel, " (tol 1e-3; same math, diff truncation)");
-    print("\nEXCHANGE_CTX_TEST:", ok ? "PASS" : "FAIL");
+    print("\nEXCHANGE_CTX_TEST:", ok_static ? "PASS" : "FAIL");
+  }
+
+  // ===== Full ClosedShell: A/B the paired (X,Y) θ — exercises the Inc-2 path =====
+  // Same gs/g0; add a Y block so the cross-channel γ (K[y,φ], K[x,φ]) is exercised.
+  StateXY fstate;
+  fstate.x_alpha = state.x_alpha;                       // reuse the X block
+  fstate.y_alpha.resize(n_occ);
+  for (int p = 0; p < n_occ; ++p) {
+    coord_3d c{{-2.2 + 1.0*p, -0.15*((p%3)-1), -0.1}};
+    fstate.y_alpha[p] = real_factory_3d(universe).functor(
+        real_functor_3d(new GaussFunctor(c, 0.75 + 0.045*p)));
+  }
+  truncate(universe, fstate.y_alpha);
+  universe.gop.fence();
+
+  auto frho = KF::compute_density(universe, gs, fstate);
+  StateXY th_ref = KF::compute_V0x(universe, gs, fstate);
+  { auto E0 = KF::compute_E0x(universe, gs, fstate); th_ref.axpy(universe, -1.0, E0); }
+  { auto gam = KF::compute_gamma(universe, gs, fstate, frho); th_ref.axpy(universe, +1.0, gam); }
+  th_ref.truncate_all(universe, FunctionDefaults<3>::get_thresh());
+
+  auto fctx   = exch::build_ctx_full_cs(universe, gs, fstate, frho, vtol);
+  auto th_new = exch::assemble_theta_full_cs(universe, gs, fstate, g0, fctx);
+  universe.gop.fence();
+
+  double numx=0,denx=0,numy=0,deny=0;
+  for (int p = 0; p < n_occ; ++p) {
+    auto dx = th_ref.x_alpha[p] - th_new.x_alpha[p];
+    auto dy = th_ref.y_alpha[p] - th_new.y_alpha[p];
+    numx += dx.norm2()*dx.norm2(); denx += th_ref.x_alpha[p].norm2()*th_ref.x_alpha[p].norm2();
+    numy += dy.norm2()*dy.norm2(); deny += th_ref.y_alpha[p].norm2()*th_ref.y_alpha[p].norm2();
+  }
+  const double relx = (denx>0)? std::sqrt(numx/denx):0.0;
+  const double rely = (deny>0)? std::sqrt(numy/deny):0.0;
+  ok_full = (relx < 1e-3) && (rely < 1e-3);
+  if (universe.rank() == 0) {
+    print("\n=== FD exchange tensor-layer θ equivalence (Full CS, n_occ=", n_occ, ") ===");
+    print("  X block ||θ_new − θ_ref||/||θ_ref|| =", relx, " (tol 1e-3)");
+    print("  Y block ||θ_new − θ_ref||/||θ_ref|| =", rely, " (tol 1e-3)");
+    print("\nEXCHANGE_CTX_FULL_TEST:", ok_full ? "PASS" : "FAIL");
   }
 
   universe.gop.fence();
   }  // gs/state/theta_ref/theta_new/ctx/g0/rho destroyed here, before finalize()
 
   finalize();
-  return ok ? 0 : 1;
+  return (ok_static && ok_full) ? 0 : 1;
 }
