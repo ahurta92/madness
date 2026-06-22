@@ -1,9 +1,39 @@
 # `dump_mra_trees --amr` — Overlapping-AMR function-value export (PROTOTYPE)
 
-**Status:** prototype on branch `feat/amr-export` (off `feat/htg-writer`). Not yet
-built/validated — needs a `-DMADNESS_ENABLE_VTK=ON` build on the cluster and a
-ParaView pass. This note pins the design so the build shake-out + iteration start
-from a documented base.
+**Status:** **BUILT + VALIDATED (2026-06-22, xm047, NP=1, c2h4).** Both `--htg`
+(HyperTreeGrid) and `--amr` (Overlapping-AMR `.vthb`) build with
+`-DMADNESS_ENABLE_VTK=ON` against the cluster VTK 9.1 and **parse in ParaView 6.0.1
+(VTK 9.5)** via pvpython: HTG = 1833 nodes + arrays [level,norm,rms,dnorm,owner];
+AMR = `vtkOverlappingAMR` 17 levels / 1604 blocks, `psi` present, reader OK.
+Getting there fixed three prototype bugs (all in `dump_mra_trees.cpp`):
+1. **Writer corruption** — the default `Appended` data mode mangles the file header
+   in VTK 9.1 (offset fragment overwrites `<VTKFile>` → ParaView "not well-formed");
+   fix = `writer->SetDataModeToAscii()` on both XML writers.
+2. **`--amr` crash** — per-leaf `eval_cube` sampled box corners; a boundary leaf's
+   outer corner maps to `x=1.0+ε` and trips `plot_cube_kernel`'s `x∈[0,1]` assert;
+   fix = sample at the m cell **centers** (strictly interior; also fixes offset #2).
+3. **`.vthb` reader segfault** — MADNESS leaves never sit at the top tree levels, so
+   AMR levels 0/1 were empty and `vtkXMLUniformGridAMRReader::UpdateInformation`
+   segfaulted; fix = **re-base** the AMR hierarchy to `[Lmin, Lmax]` (AMR level 0 =
+   coarsest populated MADNESS level).
+Remaining: (a) multi-rank (NP>1) launch is blocked in a nested `srun` step on this
+OpenMPI 5.0.2/SLURM (`mpirun --mca plm isolated` and `srun --mpi=pmix` both fail) —
+NP=1 fully exercises the rank-0 export, so the multi-rank `owner` view is deferred;
+(b) ParaView visual pass (AMR Contour smoothness, blanking) still to eyeball in the
+GUI; (c) `SetDataModeToBinary()` is the size-optimized follow-up to ASCII.
+
+**Build prerequisite RESOLVED (2026-06-19, env check, no alloc):** the buildable
+VTK on the cluster is **VTK 9.1.0** at
+`VTK_DIR=/gpfs/software/fsl/6.0.6.5/lib/cmake/vtk-9.1` (FSL package). A standalone
+`find_package(VTK 9.0 REQUIRED COMPONENTS CommonCore CommonDataModel IOXML)`
+configure resolves against it cleanly, so the current `CMakeLists.txt` component
+list is sufficient — **`FiltersAMR` is NOT needed** (resolves the §VTK-API hedge
+below). Every HTG + AMR VTK call in this prototype was checked against the 9.1
+headers and the signatures match (see §VTK-API). The `paraview/6.0.1` module is a
+**view-only** runtime binary (no dev headers / `*Config.cmake`) — usable to open
+`.htg`/`.vthb`, not to build. Only-unverified step left = link/runtime ABI of the
+conda-built VTK 9.1 against the GCC 13.2.0 static MADNESS build (settles at the
+alloc build; put `/gpfs/software/fsl/6.0.6.5/lib` on `LD_LIBRARY_PATH` to run).
 
 ## Why a third export format
 
@@ -52,25 +82,40 @@ per-cell, cannot hold sub-box grids).
    if not, call `vtkOverlappingAMR::GenerateParentChildInformation()` / set blanking.
 4. **Ground-state only** — FD response/ρ⁽¹⁾ not yet wired (trivial follow-up).
 
-## VTK API to verify at the first build (version-sensitive)
+## VTK API — CONFIRMED against cluster VTK 9.1.0 (2026-06-19, header check)
 
-The MADNESS-side mapping is solid; these VTK calls are a best-effort first cut:
-- `vtkOverlappingAMR::Initialize(int nLevels, const int* blocksPerLevel)` — confirm signature.
-- `SetGridDescription(VTK_XYZ_GRID)` — the constant may need `#include <vtkStructuredData.h>`.
-- `SetSpacing(level, double[3])`, `SetRefinementRatio(level, ratio)` — confirm they exist on
-  `vtkOverlappingAMR` in the cluster VTK (some versions route via the AMR metadata object).
-- `SetAMRBox(level, id, vtkAMRBox)`, `SetDataSet(level, id, vtkUniformGrid*)` — confirm.
-- `vtkXMLUniformGridAMRWriter` writes `.vthb` — confirm; alternatively the HDF AMR writer.
-- **CMake components:** the existing `find_package(VTK COMPONENTS CommonCore CommonDataModel
-  IOXML)` may need **`FiltersAMR`** (and possibly `IOAMR`) added for the AMR classes/writer.
-  Update the `MADNESS_ENABLE_VTK` find_package in `CMakeLists.txt` if the link fails.
+All calls below were checked against `/gpfs/software/fsl/6.0.6.5/include/vtk-9.1`
+and the signatures match — no version drift from the 9.5-era prototype:
+- `vtkOverlappingAMR::Initialize(int, const int*)` — `vtkUniformGridAMR.h:55`. ✓
+- `SetGridDescription(int)` — on the parent `vtkUniformGridAMR.h:60`; `VTK_XYZ_GRID`
+  (= 8) in `vtkStructuredData.h:46`. (`<vtkStructuredData.h>` not yet `#include`d —
+  it transitively resolves today, but add it if the constant goes unfound.) ✓
+- `SetSpacing(unsigned int, const double[3])` — `vtkOverlappingAMR.h:70`. ✓
+- `SetRefinementRatio(unsigned int, int)` — `vtkOverlappingAMR.h:114`. ✓
+- `SetAMRBox(unsigned int, unsigned int, const vtkAMRBox&)` — `vtkOverlappingAMR.h:78`;
+  `vtkAMRBox(const int lo[3], const int hi[3])` — `vtkAMRBox.h:61`. ✓
+- `SetDataSet(unsigned int, unsigned int, vtkUniformGrid*)` — `vtkUniformGridAMR.h:89`. ✓
+- `vtkXMLUniformGridAMRWriter` / `vtkXMLHyperTreeGridWriter` — headers present (IOXML). ✓
+- HTG: `SetDimensions(int,int,int)`/`SetBranchFactor`/`SetXCoordinates` and the cursor's
+  `SetGlobalIndexStart`/`GetGlobalNodeIndex`/`SubdivideLeaf`/`ToChild`/`ToParent`. ✓
+- **CMake components:** the existing `find_package(VTK 9.0 REQUIRED COMPONENTS CommonCore
+  CommonDataModel IOXML)` is **sufficient** — it resolves against 9.1 (the AMR data-model
+  classes live in CommonDataModel, the XML AMR writer in IOXML). **`FiltersAMR`/`IOAMR`
+  are NOT needed.** Re-check only if the *link/ABI* step (conda VTK vs GCC 13.2 static
+  MADNESS) fails — that, not the component list, is the remaining unknown.
 
 ## Build + validate (on the alloc)
 
 ```bash
-cmake -B build -DMADNESS_ENABLE_VTK=ON -DVTK_DIR=$VTK_DIR <usual flags>
-cmake --build build --target dump_mra_trees
-mpirun -np 4 dump_mra_trees --archive=.../h2o/mad.restartdata --out=amr --amr --amr-m=8
+# via the cm.sh harness (note: export VTK_DIR BEFORE cm_use — it bakes the flag in):
+source /gpfs/projects/rjh/adrian/madness_studies/es_bench/cm.sh
+cm_arch <arch>                  # e.g. the xeonmax/amd96 you build on
+export VTK_DIR=/gpfs/software/fsl/6.0.6.5/lib/cmake/vtk-9.1
+cm_use feat/amr-export          # -> CM_CMAKE_EXTRA="-DMADNESS_ENABLE_VTK=ON -DVTK_DIR=$VTK_DIR"
+cm_build                        # configures fresh + builds dump_mra_trees (+ v3 tests)
+# run (FSL VTK is conda-built -> put its lib on the runtime path):
+export LD_LIBRARY_PATH=/gpfs/software/fsl/6.0.6.5/lib:$LD_LIBRARY_PATH
+mpirun -np 4 $BUILD/.../dump_mra_trees --archive=.../h2o/mad.restartdata --out=amr --htg --amr --amr-m=8
 ```
 Then in ParaView: open `amr/mo_0.vthb` → **Contour** on `psi` → expect a **smooth**
 isosurface (vs the blocky `.htg`), with **finer blocks near the nuclei**. Cross-check the

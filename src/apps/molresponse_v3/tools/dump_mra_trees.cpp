@@ -343,6 +343,13 @@ void write_htg(World& world, const HtgMap& nodes, const std::string& path) {
 
   vtkNew<vtkXMLHyperTreeGridWriter> writer;
   writer->SetFileName(path.c_str());
+  // Inline ASCII, NOT the default Appended mode: in VTK 9.1 the appended-data
+  // offset-fixup pass mangles the header (writes a RangeMax/offset fragment over
+  // byte 0, clobbering <VTKFile>), so ParaView/VTK 9.5 rejects it as not
+  // well-formed. ASCII writes data inline (no seek-back). Switch to
+  // SetDataModeToBinary() later for the size win once validated -- it is also
+  // inline (base64) and avoids the buggy appended path.
+  writer->SetDataModeToAscii();
   writer->SetInputData(htg.Get());
   writer->Write();
 }
@@ -410,8 +417,11 @@ void write_amr(World& world, Function<double, 3> f, const std::string& path,
     lo[d] = cell(d, 0);
     width[d] = cell(d, 1) - cell(d, 0);
   }
-  long Lmax = 0;
-  for (const auto& k : leaves) Lmax = std::max(Lmax, k[0]);
+  long Lmax = 0, Lmin = leaves.empty() ? 0 : leaves.front()[0];
+  for (const auto& k : leaves) {
+    Lmax = std::max(Lmax, k[0]);
+    Lmin = std::min(Lmin, k[0]);
+  }
 
   // collective sampling: ALL ranks call eval_cube per leaf; rank 0 keeps the grids
   struct Block { long n, lx, ly, lz; Tensor<double> g; };
@@ -420,33 +430,48 @@ void write_amr(World& world, Function<double, 3> f, const std::string& path,
   for (const auto& k : leaves) {
     Tensor<double> bc(3, 2);
     for (int d = 0; d < 3; ++d) {
-      const double h = width[d] / std::pow(2.0, double(k[0]));
-      bc(d, 0) = lo[d] + double(k[d + 1]) * h;
-      bc(d, 1) = lo[d] + double(k[d + 1] + 1) * h;
+      const double h = width[d] / std::pow(2.0, double(k[0]));  // leaf box width
+      const double dx = h / m;                                  // m-grid sub-cell width
+      // Sample at the m CELL CENTERS, not box corners: the outer corner of a
+      // boundary leaf sits exactly on the sim-cell edge, where eval_cube ->
+      // plot_cube_kernel maps it to x=1.0(+fp eps) and trips its x in [0,1]
+      // assertion. Centers are strictly interior (x in (0,1)) and also align the
+      // sampled values with the m-cell block's cell-data positions (fixes the
+      // half-cell offset noted in AMR_EXPORT_NOTES.md simplification #2).
+      bc(d, 0) = lo[d] + double(k[d + 1]) * h + 0.5 * dx;       // first cell center
+      bc(d, 1) = lo[d] + double(k[d + 1] + 1) * h - 0.5 * dx;   // last cell center
     }
     Tensor<double> g = f.eval_cube(bc, npt);  // collective; rank 0 holds the grid
     if (world.rank() == 0) blocks.push_back({k[0], k[1], k[2], k[3], copy(g)});
   }
   if (world.rank() != 0) return;
 
-  // --- assemble on rank 0 (VTK OverlappingAMR; verify the API at build) ---
-  std::vector<int> per_level(Lmax + 1, 0);
-  for (const auto& b : blocks) per_level[b.n]++;
+  // --- assemble on rank 0 (VTK OverlappingAMR) ---
+  // RE-BASE the hierarchy to the populated level range [Lmin, Lmax]: MADNESS
+  // leaves never sit at the top tree levels (the root box is always subdivided),
+  // so AMR level 0 must map to Lmin, not the MADNESS root. An empty AMR level 0
+  // segfaults vtkXMLUniformGridAMRReader::UpdateInformation (it cannot build the
+  // metadata). AMR level index = n - Lmin; spacing/origin stay physical (bohr).
+  const int nlev = int(Lmax - Lmin + 1);
+  std::vector<int> per_level(nlev, 0);
+  for (const auto& b : blocks) per_level[b.n - Lmin]++;
 
   vtkNew<vtkOverlappingAMR> amr;
-  amr->Initialize(int(Lmax + 1), per_level.data());
+  amr->Initialize(nlev, per_level.data());
   double origin[3] = {lo[0], lo[1], lo[2]};
   amr->SetOrigin(origin);
   amr->SetGridDescription(VTK_XYZ_GRID);
-  for (long n = 0; n <= Lmax; ++n) {
+  for (int lev = 0; lev < nlev; ++lev) {
+    const long n = Lmin + lev;
     double sp[3];
     for (int d = 0; d < 3; ++d) sp[d] = (width[d] / std::pow(2.0, double(n))) / m;
-    amr->SetSpacing(n, sp);
-    if (n > 0) amr->SetRefinementRatio(int(n - 1), 2);  // octree => 2x per level
+    amr->SetSpacing(lev, sp);
+    if (lev > 0) amr->SetRefinementRatio(lev - 1, 2);  // octree => 2x per level
   }
-  std::vector<int> next(Lmax + 1, 0);
+  std::vector<int> next(nlev, 0);
   for (const auto& b : blocks) {
-    const int n = int(b.n), j = next[n]++;
+    const long n = b.n;
+    const int lev = int(n - Lmin), j = next[lev]++;
     const long l[3] = {b.lx, b.ly, b.lz};
     int boxlo[3], boxhi[3];
     for (int d = 0; d < 3; ++d) {
@@ -454,7 +479,7 @@ void write_amr(World& world, Function<double, 3> f, const std::string& path,
       boxhi[d] = boxlo[d] + m - 1;
     }
     vtkAMRBox box(boxlo, boxhi);
-    amr->SetAMRBox(n, j, box);
+    amr->SetAMRBox(lev, j, box);
 
     vtkNew<vtkUniformGrid> grid;
     double gorigin[3], sp[3];
@@ -474,10 +499,11 @@ void write_amr(World& world, Function<double, 3> f, const std::string& path,
         for (int ix = 0; ix < m; ++ix)
           vals->SetValue((vtkIdType(iz) * m + iy) * m + ix, float(b.g(ix, iy, iz)));
     grid->GetCellData()->AddArray(vals.Get());
-    amr->SetDataSet(n, j, grid.Get());
+    amr->SetDataSet(lev, j, grid.Get());
   }
   vtkNew<vtkXMLUniformGridAMRWriter> w;
   w->SetFileName(path.c_str());
+  w->SetDataModeToAscii();  // see write_htg: default Appended mode mangles VTK 9.1 output
   w->SetInputData(amr.Get());
   w->Write();
 }
