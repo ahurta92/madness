@@ -12,14 +12,19 @@
 // MADNESS_ENABLE_HDF5=ON.
 // =========================================================================
 
+#include "../GroundState.hpp"
 #include "../solvers/function_hdf5_io.hpp"
 
+#include <madness/chem/molecule.h>
+#include <madness/external/nlohmann_json/json.hpp>
+#include <madness/misc/info.h>  // commandlineparser
 #include <madness/mra/mra.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -171,10 +176,105 @@ static void print_block(const RunResult& r) {
                 GZ_LEVEL, double(r.archive_gz.bytes) / double(r.archive.bytes));
 }
 
+// Real-orbital mode (--archive=<moldft restart>): load the actual ground state
+// and round-trip EACH orbital through legacy + the archive-backend HDF5 path
+// (true, irregular orbital trees — the realistic restart payload). Multi-rank
+// OK (the archive path gathers/distributes). Scaffolding mirrors
+// test_v3_fd_skeleton's ground-state loader.
+static bool run_real_mo(World& world, const std::string& archive_path) {
+  auto header = GroundState::read_archive_header(world, archive_path);
+  FunctionDefaults<D>::set_cubic_cell(-header.L / 2, header.L / 2);
+  FunctionDefaults<D>::set_k(header.k);
+  FunctionDefaults<D>::set_thresh(1e-6);  // round-trip is exact regardless of thresh
+
+  Molecule molecule;
+  auto archive_dir = fs::path(archive_path).parent_path();
+  for (const auto& name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
+    auto cand = archive_dir / name;
+    if (fs::exists(cand)) {
+      std::ifstream ifs(cand);
+      nlohmann::json j;
+      ifs >> j;
+      nlohmann::json mj;
+      if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
+        mj = j["tasks"][0]["molecule"];
+      else if (j.contains("molecule"))
+        mj = j["molecule"];
+      if (!mj.is_null()) molecule.from_json(mj);
+      break;
+    }
+  }
+  auto gs = GroundState::from_archive(world, archive_path, molecule);
+  const auto& mos = gs.orbitals();
+  const int nmo = static_cast<int>(mos.size());
+
+  if (world.rank() == 0)
+    std::printf("\n=== real ground-state MOs: %d orbitals, k=%d, L=%.2f, NP=%d ===\n"
+                "  %4s %12s %12s %12s\n",
+                nmo, header.k, header.L, world.size(), "mo", "norm2",
+                "err(legacy)", "err(archive)");
+
+  double tw_leg = 0, tr_leg = 0, tw_arc = 0, tr_arc = 0, max_err = 0;
+  long long sz_leg = 0, sz_arc = 0;
+  for (int i = 0; i < nmo; ++i) {
+    const auto& mo = mos[i];
+    double t = wall_time();
+    madness::save(mo, "mo_legacy");
+    tw_leg += wall_time() - t;
+    t = wall_time();
+    Function<double, D> f_leg;
+    {
+      archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(
+          world, "mo_legacy", 1);
+      ar& f_leg;
+    }
+    tr_leg += wall_time() - t;
+
+    t = wall_time();
+    molresponse_v3::save_function_archive_hdf5(mo, "mo_arc.mad.h5");
+    tw_arc += wall_time() - t;
+    t = wall_time();
+    Function<double, D> f_arc =
+        molresponse_v3::load_function_archive_hdf5<double, D>(world, "mo_arc.mad.h5");
+    tr_arc += wall_time() - t;
+
+    const double n0 = mo.norm2();
+    const double e_leg = (mo - f_leg).norm2();
+    const double e_arc = (mo - f_arc).norm2();
+    max_err = std::max({max_err, e_leg, e_arc});
+    sz_leg += sum_sizes("mo_legacy");
+    sz_arc += sum_sizes("mo_arc.");
+    if (world.rank() == 0)
+      std::printf("  %4d %12.6f %12.1e %12.1e\n", i, n0, e_leg, e_arc);
+  }
+
+  const bool ok = max_err < 1e-10;
+  if (world.rank() == 0) {
+    std::printf("  --------------------------------------------------------\n");
+    std::printf("  totals over %d MOs:  legacy %lld B (w %.3f r %.3f) | "
+                "archive %lld B (w %.3f r %.3f)\n",
+                nmo, sz_leg, tw_leg, tr_leg, sz_arc, tw_arc, tr_arc);
+    std::printf(ok ? " VERDICT: PASS — every real MO round-trips exact "
+                     "(max_err %.1e).\n"
+                   : " VERDICT: FAIL — a real MO drifted (max_err %.1e).\n",
+                max_err);
+  }
+  return ok;
+}
+
 int main(int argc, char** argv) {
   World& world = initialize(argc, argv);
   startup(world, argc, argv);
   std::cout.precision(8);
+
+  // --archive=<moldft restart> => real-orbital mode; otherwise the analytic sweep.
+  commandlineparser parser(argc, argv);
+  if (parser.key_exists("archive")) {
+    const bool ok = run_real_mo(world, parser.value_raw("archive"));
+    world.gop.fence();
+    finalize();
+    return ok ? 0 : 1;
+  }
 
   if (world.rank() == 0)
     std::printf("NP=%d  (legacy + archive[+gz] run at any rank count; "

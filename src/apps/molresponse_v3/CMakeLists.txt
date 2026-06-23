@@ -76,7 +76,7 @@ if(MADNESS_ENABLE_HDF5)
   target_link_libraries(test_hdf5_smoke PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(test_hdf5_smoke PRIVATE MADNESS_HAS_HDF5)
   # P2 Layer A: Function raw-coeff round-trip vs the native archive.
-  add_mad_executable(test_function_hdf5 "tests/test_function_hdf5.cpp" "MADchem")
+  add_mad_executable(test_function_hdf5 "tests/test_function_hdf5.cpp;GroundState.cpp" "MADchem")
   target_include_directories(test_function_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(test_function_hdf5 PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(test_function_hdf5 PRIVATE MADNESS_HAS_HDF5)

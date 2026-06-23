@@ -321,12 +321,26 @@ care; a full `ninja` (not just the cm targets) is the real check.
   (read edges it at k10: 0.0289 vs 0.0326). **Archive file size byte-identical at
   NP=1 and NP=4** (legacy grew +57 B from per-client framing) ⇒ rank-count-stable,
   ideal for restart on a different node count (nio=1 ⇒ reader nio forced to 1).
-- **P2 Layer A COMPLETE.** Archive-backend = validated restart format (universal,
-  bit-exact, multi-rank, ≈legacy speed/faster reads, rank-stable). Structured =
-  interop (Layer B). gzip = opt-in (level 1) size knob, default off.
-- **NEXT:** consolidate (commit milestone); then real h2o MO instead of analytic
-  fn (true orbital tree); cross-rank explicit check (write NP=1, load NP=4); wire
-  archive path into a real v3 restart site (opt-in); Layer B (values+coords) for
-  MRChem/plotting interop.
+- **P2 Layer A COMPLETE — COMMITTED `c8b8f994c`** (6 files, opt-in, no core edits).
+  Archive-backend = validated restart format (universal, bit-exact, multi-rank,
+  ≈legacy speed/faster reads, rank-stable). Structured = interop (Layer B). gzip =
+  opt-in (level 1) size knob, default off.
+- **PARALLEL I/O is NOT faster (and that's expected):** at NP=4 archive read got
+  3-6× SLOWER than NP=1 (0.0052→0.0289 at k10) — both archive AND legacy use
+  **nio=1**, so all disk I/O funnels through rank 0; more ranks just add gather
+  (write) / scatter (read) MPI overhead, the disk transfer stays single-stream.
+  HDF5 is not the bottleneck — the rank-0 funnel is, shared by both formats. TRUE
+  parallel speedup needs **Parallel HDF5 / MPI-IO** (all ranks write 1 file via
+  `H5Pset_fapl_mpio`, no rank-0 gather; also removes the rank-0 memory buffer — the
+  relevant lever for large-system OOM). **Gated** on a GCC13 parallel HDF5 build
+  (we have serial; cluster `-parallel` builds are Intel-ABI) + evidence the gather
+  hurts at target sizes. Caveat: checkpoint I/O is a tiny fraction of wall time
+  (solve dominates) — so this is a memory/scaling item, not a speed one.
+- **NEXT (1→2):** (1) real h2o MO round-trip (true orbital tree) — extend
+  `test_function_hdf5` with optional `--archive=<moldft restart>` mode reusing the
+  FD-skeleton's molecule/header/`from_archive` scaffolding (h2o fixture exists at
+  `…/v3_fd_skeleton/h2o/mad.restartdata`); then (2) wire the archive path into a
+  real v3 restart site (opt-in). Later: cross-rank check (write NP1/load NP4),
+  Layer B interop, Parallel-HDF5/MPI-IO (gated above).
 - **Coordinate w/ `feat/amr-export`:** same system libhdf5 + bohr/cell + chunk
   conventions; pin in `operator_contracts.md` once P1/P2 land.
