@@ -93,13 +93,18 @@ Tensor<double> read_alpha(const std::string &calc_dir, const std::string &key) {
   Tensor<double> a(3, 3);
   auto meta = ResponseMetadata::load_or_create(calc_dir + "/response_metadata.json");
   const auto &j = meta.json();
-  if (j.contains("properties") && j["properties"].contains("alpha") &&
-      j["properties"]["alpha"].contains(key)) {
-    const auto &row = j["properties"]["alpha"][key];
-    const auto &m = row["alpha"];
-    for (long i = 0; i < 3; ++i)
-      for (long jj = 0; jj < 3; ++jj) a(i, jj) = m[i][jj].get<double>();
-  }
+  // Layout (add_property, response_metadata.hpp): properties.alpha[<key>] is an
+  // ARRAY of records (push_back per assemble call); each record has .alpha = the
+  // 3×3 matrix. Take the most recent record. Return zeros if any level is absent
+  // (the vacuous-pass guard in main then flags it as "no usable α").
+  if (!j.contains("properties")) return a;
+  const auto &props = j["properties"];
+  if (!props.contains("alpha") || !props["alpha"].contains(key)) return a;
+  const auto &arr = props["alpha"][key];
+  if (!arr.is_array() || arr.empty() || !arr.back().contains("alpha")) return a;
+  const auto &m = arr.back()["alpha"];
+  for (long i = 0; i < 3; ++i)
+    for (long jj = 0; jj < 3; ++jj) a(i, jj) = m[i][jj].get<double>();
   return a;
 }
 
