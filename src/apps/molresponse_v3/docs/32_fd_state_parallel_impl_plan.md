@@ -57,18 +57,27 @@ auto-selector). Each stage is verifiable and low-risk, the Inc1/keystone/S1 disc
 
 ## 3. GS provisioning into the subworld (the key wiring decision)
 
-Each subworld needs the ground state in its own World. Two options:
+Each subworld needs the ground state in its own World. **Code finding (2026-06-22):
+`GroundState`'s constructor is PRIVATE — `from_archive(World&, archive, molecule)`
+is the only construction path** (`GroundState.hpp:29,111-115`; deliberate, so
+`prepare()` can reload pristine MOs each protocol climb). So:
 
-- **(a) Ship-in via `copy(*sub, f)` from a universe-loaded GS** — S1-proven, safe,
-  pmap-correct. **RECOMMENDED for F1 and F2.** Load the GS once in the universe
-  (`GroundState::from_archive`, as the run_response/madqc path already does), then
-  `copy` `amo` / `V_local` / etc. into each node-subworld under the pmap discipline.
-  Per the feasibility study this leaves φ as **one distributed copy per node**
-  (per-rank φ = |φ|/R) — the whole memory win.
-- **(b) Per-subworld `from_archive` load** — simpler (no copy) but hits the
-  ParallelInputArchive **nio/nproc np-mismatch** hazard (the archive was written by
-  moldft with a fixed writer nproc; reading into an R-rank subworld is the
-  `e544ae063` failure class). **Deferred** until archive np-robustness is confirmed.
+- **(a) Ship-in via `copy(*sub, f)`** — S1-proven for raw `Function`s, but there is
+  **no public GroundState API to assemble one from copied functions**; it would need
+  new GroundState plumbing (a `from_functions`/`from_memory` factory + an SCF shell
+  that skips `load_mos`). Deferred — not worth new core plumbing before the
+  architecture is proven.
+- **(b) Per-subworld `from_archive(*sub, …)`** — the ONLY path available without new
+  plumbing, and what F1/F2 use. It exercises the ParallelInputArchive **nio/nproc**
+  round-trip (moldft wrote the archive at a fixed writer nproc; reading into an
+  R-rank subworld is the `e544ae063` failure class). **This makes F1 doubly
+  valuable**: it is the cheap test of whether `from_archive` into an R-rank subworld
+  (and `save_fd_state` written by a subworld, re-read by the universe) is np-robust.
+  If F1 hits the np-mismatch, the fix (writer_nproc-aware read, or a scalar α gather
+  instead of the filesystem gather — see §4/§7) is scoped *before* F2 touches `run()`.
+
+Either way the memory win holds: a subworld-loaded GS leaves φ as **one distributed
+copy per node** (per-rank φ = |φ|/R, the feasibility-study identity).
 
 ## 4. F1 — standalone fan-out/gather proof (NO solver change)
 
@@ -132,7 +141,13 @@ Bring the diff for approval before coding. Pieces:
 
 - **Metadata write race** → per-group shards merged on rank 0 (§5.3) — the only new
   persistence mechanism; everything else is existing per-state archives.
-- **GS np-mismatch** if per-subworld archive load → use ship-in (§3a).
+- **Archive np-robustness** (§3): `from_archive` reads into an R-rank subworld AND
+  `save_fd_state` written by a subworld is re-read by the universe (the filesystem
+  gather). F1 tests both. **Fallback if either fails:** gather the α *scalars*
+  directly (`universe.gop`, keystone pattern) — each subworld computes its owned rows
+  `α_i,: = −2(⟨x_i|v_j⟩+⟨y_i|v_j⟩)` locally (v_j built per-subworld) and the universe
+  sums them; functions/archives never cross worlds. Costs new gather code but sidesteps
+  cross-world archive I/O entirely.
 - **Single-node degenerate case:** `n_nodes == 1` → one subworld == universe → the
   partition is a no-op and **must** equal the `G=0` path bit-identically. A free
   regression check (assert it in F1/F2).
