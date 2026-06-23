@@ -21,6 +21,7 @@
 
 #include <madness/mra/mra.h>
 #include <madness/tensor/tensor.h>
+#include <madness/world/worldprofile.h>  // PROFILE_BLOCK (perf-model meters; no-op unless WORLD_PROFILE_ENABLE)
 #include <madness/tensor/tensor_lapack.h>
 
 #include <utility>
@@ -493,6 +494,7 @@ transform(madness::World &world, std::vector<State> &X,
 template <typename State, typename Proj>
 inline void project(std::vector<State> &roots,
                     const Proj &Qa, const Proj &Qb) {
+  PROFILE_BLOCK(rs_projection);  // top-of-iteration Q·v projection (per-spin)
   for (auto &s : roots) {
     s.x_alpha = Qa(s.x_alpha);
     if constexpr (detail::has_y_alpha<State>::value) s.y_alpha = Qa(s.y_alpha);
