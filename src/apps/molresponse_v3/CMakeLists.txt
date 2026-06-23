@@ -64,6 +64,13 @@ add_mad_executable(test_subspace_allreduce
 add_mad_executable(test_es_build_subworld
                    "tests/test_es_build_subworld.cpp"
                    "MADresponse2;MADchem")
+# F1 of the FD state-parallel design (docs/31,32): independent dipole FD states
+# solved one-per-node-subworld give an alpha tensor bit-identical to the single-
+# World path (pure fan-out -> solve -> filesystem gather). Needs GroundState.cpp
+# (uses a real moldft archive, unlike the synthetic-GS subworld proofs above).
+add_mad_executable(test_fd_subworld_fanout
+                   "tests/test_fd_subworld_fanout.cpp;GroundState.cpp"
+                   "MADresponse2;MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees

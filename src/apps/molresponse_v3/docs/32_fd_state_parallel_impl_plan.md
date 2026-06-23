@@ -148,6 +148,21 @@ Bring the diff for approval before coding. Pieces:
   `α_i,: = −2(⟨x_i|v_j⟩+⟨y_i|v_j⟩)` locally (v_j built per-subworld) and the universe
   sums them; functions/archives never cross worlds. Costs new gather code but sidesteps
   cross-world archive I/O entirely.
+
+## 7a. Design principle — ONE systematic property-assembly path (do not special-case)
+
+The filesystem gather is **not** kept merely for convenience: property assembly
+(α, β, Raman, derived) must follow **one systematic format**, not a growing list of
+per-property exceptions. Today that format is: each state persists to its archive →
+assembly reads states back → contracts. F1/F2 stay on it.
+
+The **online / scalar gather** (compute the property incrementally as states converge,
+functions never crossing worlds) is the right *long-term* memory-limiting direction —
+but it is a **uniform redesign of the property layer applied to every property at
+once**, NOT an α-only shortcut bolted into the FD path. Until that redesign happens,
+the scalar gather lives only as the §7 *fallback* for an np-robustness failure, not as
+a parallel code path. This keeps the rule count low and the memory-reduction work
+coherent (see the scaling goals in the root CLAUDE.md).
 - **Single-node degenerate case:** `n_nodes == 1` → one subworld == universe → the
   partition is a no-op and **must** equal the `G=0` path bit-identically. A free
   regression check (assert it in F1/F2).
