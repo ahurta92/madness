@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
     gs_u.prepare(universe, 0.001 * t0, cop, fj);
   }
   ExecutorContext ctx_ref(universe, gs_u, L, fj,
-                          ExecutorSettings{policy, /*print_level=*/1, dir_ref, max_iters});
+                          ExecutorSettings{policy, PrintLevel::Normal, dir_ref, max_iters});
   for (int ax = 0; ax < 3; ++ax)
     solve_fd_protocol<Static, ClosedShell>(ctx_ref, Perturbation::dipole(ax),
                                            0.0, thresh, NodeAction::Fresh);
@@ -198,7 +198,7 @@ int main(int argc, char **argv) {
       gs_s.prepare(*sub, 0.001 * t0, cop, fj);
     }
     ExecutorContext ctx_sub(*sub, gs_s, L, fj,
-                            ExecutorSettings{policy, /*print_level=*/1, dir_sub, max_iters});
+                            ExecutorSettings{policy, PrintLevel::Normal, dir_sub, max_iters});
 
     for (int ax = 0; ax < 3; ++ax)
       if (ax % G == nid)                                        // round-robin partition
@@ -216,22 +216,36 @@ int main(int argc, char **argv) {
   // which re-reads those archives (← np-robustness, write-then-read).
   set_response_protocol(universe, L, thresh);
   ExecutorContext ctx_gather(universe, gs_u, L, fj,
-                             ExecutorSettings{policy, /*print_level=*/1, dir_sub, max_iters});
+                             ExecutorSettings{policy, PrintLevel::Normal, dir_sub, max_iters});
   assemble_alpha(ctx_gather, dipole_plan(thresh), thresh);      // → dir_sub metadata
   const Tensor<double> alpha_sub = read_alpha(dir_sub, key);
   universe.gop.fence();
 
   // -------------------------------------------------------------------------
-  // A/B gate.
-  // -------------------------------------------------------------------------
-  const double diff = maxabs_diff(alpha_sub, alpha_ref);
-  const bool ok = (diff < 1e-9);
+  // A/B gate. NB: the comparison is only meaningful on a CONVERGED reference —
+  // unconverged FD states are path-chaotic (not bit-stable across decomposition)
+  // and, if a state never converges, assemble_alpha writes no α so read_alpha
+  // returns zeros. Guard against a VACUOUS pass (0 vs 0) by requiring α_ref to
+  // be non-trivial: a real h2o α is O(1-10), so a near-zero ref means "didn't
+  // produce a usable α" (raise --maxiter / use a converging mol+thresh), FAIL.
+  double ref_mag = 0.0;
+  for (long i = 0; i < alpha_ref.dim(0); ++i)
+    for (long j = 0; j < alpha_ref.dim(1); ++j)
+      ref_mag = std::max(ref_mag, std::abs(alpha_ref(i, j)));
+  const double diff      = maxabs_diff(alpha_sub, alpha_ref);
+  const bool   ref_ok    = (ref_mag > 1e-6);     // reference actually produced an α
+  const bool   match     = (diff < 1e-9);
+  const bool   ok        = ref_ok && match;
   if (universe.rank() == 0) {
     print("\n=== FD subworld fan-out A/B (nodes=", G, " ranks=", universe.size(),
           " thresh=", thresh, ") ===");
     print("  α_ref =\n", alpha_ref);
     print("  α_sub =\n", alpha_sub);
+    print("  max|α_ref| =", ref_mag, " (must be > 1e-6 — else no usable α)");
     print("  max|α_sub − α_ref| =", diff, " (tol 1e-9)");
+    if (!ref_ok)
+      print("  WARNING: reference α ~ 0 — FD did not converge into a usable α; "
+            "raise --maxiter or pick a converging mol/thresh. NOT a valid A/B.");
     print("\nFD_SUBWORLD_FANOUT_TEST:", ok ? "PASS" : "FAIL");
   }
   universe.gop.fence();
