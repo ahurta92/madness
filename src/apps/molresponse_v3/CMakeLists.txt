@@ -80,6 +80,21 @@ if(MADNESS_ENABLE_HDF5)
   target_include_directories(test_function_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(test_function_hdf5 PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(test_function_hdf5 PRIVATE MADNESS_HAS_HDF5)
+  # P2a: ResponseStateX round-trip through the opt-in restart path.
+  add_mad_executable(test_state_archive_hdf5 "tests/test_state_archive_hdf5.cpp" "MADchem")
+  target_include_directories(test_state_archive_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(test_state_archive_hdf5 PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(test_state_archive_hdf5 PRIVATE MADNESS_HAS_HDF5)
+  # Make the real solver binaries HDF5-aware so cm_run / madqc can use the opt-in
+  # restart path in response_state.hpp. MADNESS_HAS_HDF5 only enables the path;
+  # default (env MADRESPONSE_IO_HDF5 unset) still writes the legacy archive.
+  foreach(_hdf5_tgt molresponse_v3 test_calc_manager_run)
+    if(TARGET ${_hdf5_tgt})
+      target_include_directories(${_hdf5_tgt} PRIVATE ${HDF5_INCLUDE_DIRS})
+      target_link_libraries(${_hdf5_tgt} PRIVATE ${HDF5_LIBRARIES})
+      target_compile_definitions(${_hdf5_tgt} PRIVATE MADNESS_HAS_HDF5)
+    endif()
+  endforeach()
 endif()
 
 add_dependencies(applications-madness molresponse_v3)

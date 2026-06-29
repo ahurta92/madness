@@ -31,12 +31,14 @@
 // =========================================================================
 
 #include "../kernels/tags.hpp"
+#include "function_hdf5_io.hpp"  // opt-in HDF5 restart (no-op unless MADNESS_HAS_HDF5)
 
 #include <madness/mra/mra.h>
 #include <madness/world/parallel_archive.h>
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -151,6 +153,16 @@ struct ResponseStateX<ClosedShell> {
   }
 
   void save(World &world, const std::string &filename) const {
+#ifdef MADNESS_HAS_HDF5
+    if (hdf5_io_enabled()) {  // opt-in (env MADRESPONSE_IO_HDF5); writes <file>.h5
+      save_parallel_archive_hdf5(world, filename + ".h5", 0, [&](auto &ar) {
+        const std::size_t na = x_alpha.size();
+        ar & na;
+        for (const auto &f : x_alpha) ar & f;
+      });
+      return;
+    }
+#endif
     archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(
         world, filename.c_str(), 1);
     const std::size_t na = x_alpha.size();
@@ -159,9 +171,20 @@ struct ResponseStateX<ClosedShell> {
   }
 
   static ResponseStateX load(World &world, const std::string &filename) {
+    ResponseStateX s;
+#ifdef MADNESS_HAS_HDF5
+    if (std::filesystem::exists(filename + ".h5")) {  // auto-detect HDF5 checkpoint
+      load_parallel_archive_hdf5(world, filename + ".h5", [&](auto &ar) {
+        std::size_t na;
+        ar & na;
+        s.x_alpha.resize(na);
+        for (auto &f : s.x_alpha) ar & f;
+      });
+      return s;
+    }
+#endif
     archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(
         world, filename.c_str(), 1);
-    ResponseStateX s;
     std::size_t na;
     ar & na;
     s.x_alpha.resize(na);

@@ -45,6 +45,7 @@
 #include <hdf5.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -55,6 +56,24 @@ using namespace madness;
 inline constexpr int kFunctionHdf5Schema = 1;
 
 namespace detail_function_hdf5 {
+
+// HDF5's default handler auto-prints the error stack to stderr on any failed
+// call. On this build (1.14.3, threadsafety=no) that printer can recurse
+// (H5E_printf_stack -> H5I_inc_ref -> H5E__push_stack -> ...) and overflow the
+// stack, turning a benign/recoverable error into a SIGSEGV. Disable it around
+// our I/O so failures surface as checked return codes, not a crash. RAII:
+// restores the prior handler on scope exit.
+struct H5ErrorScope {
+  H5E_auto2_t old_func = nullptr;
+  void* old_data = nullptr;
+  H5ErrorScope() {
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+  }
+  ~H5ErrorScope() { H5Eset_auto2(H5E_DEFAULT, old_func, old_data); }
+  H5ErrorScope(const H5ErrorScope&) = delete;
+  H5ErrorScope& operator=(const H5ErrorScope&) = delete;
+};
 
 // --- thin core-HDF5-C-API helpers (no HL dependency) ---------------------
 inline void write_attr(hid_t loc, const char* name, hid_t htype, const void* v) {
@@ -283,74 +302,115 @@ Function<T, NDIM> load_function_hdf5(World& world, const std::string& path) {
 // checkpoint, NOT interchange. Use the structured path for MRChem/plotting.
 // =========================================================================
 
-// Save f as a single HDF5 dataset holding MADNESS's parallel-archive bytes.
-// deflate_level 0 = uncompressed (contiguous); 1..9 = gzip (chunked) — legacy
-// has no compression option, so this is HDF5's universal size lever. Reads are
-// transparent (H5Dread decompresses), so load_function_archive_hdf5 is unchanged.
-template <typename T, std::size_t NDIM>
-void save_function_archive_hdf5(const Function<T, NDIM>& f, const std::string& path,
-                                int deflate_level = 0) {
-  World& world = f.world();
+namespace detail_function_hdf5 {
+// rank-0 byte-blob write: one uint8 dataset "madness_archive" (+ tiny /meta).
+// deflate_level 0 = contiguous; 1..9 = chunked + gzip (transparent on read).
+inline void write_byte_dataset(const std::string& path,
+                               const std::vector<unsigned char>& buf,
+                               int deflate_level) {
+  H5ErrorScope h5errs;  // no recursive auto-print; codes checked below
+  hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  MADNESS_CHECK_THROW(file >= 0, "write_byte_dataset: H5Fcreate failed (path/permissions/disk?)");
+  hid_t meta = H5Gcreate2(file, "meta", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  MADNESS_CHECK_THROW(meta >= 0, "write_byte_dataset: H5Gcreate2(/meta) failed");
+  write_attr_i(meta, "schema", kFunctionHdf5Schema);
+  write_attr_i(meta, "archive_format", 1);
+  write_attr_i(meta, "deflate", deflate_level);
+  H5Gclose(meta);
+  hsize_t n = buf.size();
+  hid_t sp = H5Screate_simple(1, &n, nullptr);
+  MADNESS_CHECK_THROW(sp >= 0, "write_byte_dataset: H5Screate_simple failed");
+  hid_t dcpl = H5P_DEFAULT, plist = -1;
+  if (deflate_level > 0 && n > 0) {  // gzip needs chunked storage
+    plist = H5Pcreate(H5P_DATASET_CREATE);
+    hsize_t chunk = std::min<hsize_t>(n, hsize_t(1) << 20);  // ~1 MiB chunks
+    H5Pset_chunk(plist, 1, &chunk);
+    H5Pset_deflate(plist, unsigned(deflate_level));
+    dcpl = plist;
+  }
+  hid_t ds = H5Dcreate2(file, "madness_archive", H5T_NATIVE_UCHAR, sp, H5P_DEFAULT,
+                        dcpl, H5P_DEFAULT);
+  MADNESS_CHECK_THROW(ds >= 0, "write_byte_dataset: H5Dcreate2(madness_archive) failed");
+  if (n) {
+    herr_t st = H5Dwrite(ds, H5T_NATIVE_UCHAR, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf.data());
+    MADNESS_CHECK_THROW(st >= 0, "write_byte_dataset: H5Dwrite failed");
+  }
+  H5Dclose(ds);
+  if (plist >= 0) H5Pclose(plist);
+  H5Sclose(sp);
+  H5Fclose(file);
+}
+inline void read_byte_dataset(const std::string& path,
+                              std::vector<unsigned char>& buf) {
+  H5ErrorScope h5errs;
+  hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  MADNESS_CHECK_THROW(file >= 0, "read_byte_dataset: H5Fopen failed");
+  hid_t ds = H5Dopen2(file, "madness_archive", H5P_DEFAULT);
+  MADNESS_CHECK_THROW(ds >= 0, "read_byte_dataset: H5Dopen2(madness_archive) failed");
+  hid_t sp = H5Dget_space(ds);
+  hssize_t n = H5Sget_simple_extent_npoints(sp);
+  buf.resize(n > 0 ? std::size_t(n) : 0);
+  if (n > 0) {
+    herr_t st = H5Dread(ds, H5T_NATIVE_UCHAR, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf.data());
+    MADNESS_CHECK_THROW(st >= 0, "read_byte_dataset: H5Dread failed");
+  }
+  H5Sclose(sp);
+  H5Dclose(ds);
+  H5Fclose(file);
+}
+}  // namespace detail_function_hdf5
+
+/// Opt-in switch for HDF5-backed restart I/O: env MADRESPONSE_IO_HDF5 set and
+/// not "0". Controls only what is WRITTEN; readers auto-detect a `.h5` file.
+inline bool hdf5_io_enabled() {
+  const char* e = std::getenv("MADRESPONSE_IO_HDF5");
+  return e && e[0] && e[0] != '0';
+}
+
+/// Generic: serialize arbitrary parallel-archive content to one HDF5 dataset via
+/// the optimized VectorOutputArchive gather. The callback runs the `ar & ...`
+/// ops exactly as the BinaryFstream path would (e.g. `ar & na; for(f) ar & f;`).
+template <class StoreCb>
+void save_parallel_archive_hdf5(World& world, const std::string& path,
+                                int deflate_level, StoreCb&& cb) {
   std::vector<unsigned char> buf;
   {
     archive::VectorOutputArchive var(buf);
     archive::ParallelOutputArchive<archive::VectorOutputArchive> par(world, var, 1);
-    par& f;  // 2067: thread-parallel serialize + gather to rank 0's buf
+    cb(par);  // 2067: thread-parallel serialize + MPI_Gatherv to rank 0's buf
     par.flush();
   }
-  if (world.rank() == 0) {
-    hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-    MADNESS_CHECK(file >= 0);
-    hid_t meta = H5Gcreate2(file, "meta", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    detail_function_hdf5::write_attr_i(meta, "schema", kFunctionHdf5Schema);
-    detail_function_hdf5::write_attr_i(meta, "archive_format", 1);
-    detail_function_hdf5::write_attr_i(meta, "deflate", deflate_level);
-    H5Gclose(meta);
-    hsize_t n = buf.size();
-    hid_t sp = H5Screate_simple(1, &n, nullptr);
-    hid_t dcpl = H5P_DEFAULT;
-    hid_t plist = -1;
-    if (deflate_level > 0 && n > 0) {  // gzip needs chunked storage
-      plist = H5Pcreate(H5P_DATASET_CREATE);
-      hsize_t chunk = std::min<hsize_t>(n, hsize_t(1) << 20);  // ~1 MiB chunks
-      H5Pset_chunk(plist, 1, &chunk);
-      H5Pset_deflate(plist, unsigned(deflate_level));
-      dcpl = plist;
-    }
-    hid_t ds = H5Dcreate2(file, "madness_archive", H5T_NATIVE_UCHAR, sp,
-                          H5P_DEFAULT, dcpl, H5P_DEFAULT);
-    if (n) H5Dwrite(ds, H5T_NATIVE_UCHAR, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf.data());
-    H5Dclose(ds);
-    if (plist >= 0) H5Pclose(plist);
-    H5Sclose(sp);
-    H5Fclose(file);
-  }
+  if (world.rank() == 0)
+    detail_function_hdf5::write_byte_dataset(path, buf, deflate_level);
   world.gop.fence();
+}
+
+/// Generic inverse of save_parallel_archive_hdf5 (rank 0 reads; the callback's
+/// `ar & ...` distributes — header broadcast, containers to owners).
+template <class LoadCb>
+void load_parallel_archive_hdf5(World& world, const std::string& path, LoadCb&& cb) {
+  std::vector<unsigned char> buf;  // only the io-node (rank 0) needs the bytes
+  if (world.rank() == 0) detail_function_hdf5::read_byte_dataset(path, buf);
+  archive::VectorInputArchive var(buf);
+  archive::ParallelInputArchive<archive::VectorInputArchive> par(world, var, 1);
+  cb(par);  // 2328
+  world.gop.fence();
+}
+
+// Save f as a single HDF5 dataset of MADNESS parallel-archive bytes.
+// deflate_level 0 = uncompressed; 1..9 = gzip (opt-in size lever).
+template <typename T, std::size_t NDIM>
+void save_function_archive_hdf5(const Function<T, NDIM>& f, const std::string& path,
+                                int deflate_level = 0) {
+  save_parallel_archive_hdf5(f.world(), path, deflate_level,
+                             [&](auto& ar) { ar & f; });
 }
 
 // Load a Function previously written by save_function_archive_hdf5.
 template <typename T, std::size_t NDIM>
 Function<T, NDIM> load_function_archive_hdf5(World& world, const std::string& path) {
-  std::vector<unsigned char> buf;  // only the io-node (rank 0) needs the bytes
-  if (world.rank() == 0) {
-    hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-    MADNESS_CHECK(file >= 0);
-    hid_t ds = H5Dopen2(file, "madness_archive", H5P_DEFAULT);
-    hid_t sp = H5Dget_space(ds);
-    hssize_t n = H5Sget_simple_extent_npoints(sp);
-    buf.resize(n > 0 ? std::size_t(n) : 0);
-    if (n > 0) H5Dread(ds, H5T_NATIVE_UCHAR, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf.data());
-    H5Sclose(sp);
-    H5Dclose(ds);
-    H5Fclose(file);
-  }
   Function<T, NDIM> f;  // null impl OK: parallel Function load takes world from ar
-  {
-    archive::VectorInputArchive var(buf);
-    archive::ParallelInputArchive<archive::VectorInputArchive> par(world, var, 1);
-    par& f;  // 2328: rank-0 deserializes (header broadcast, container distributed)
-  }
-  world.gop.fence();
+  load_parallel_archive_hdf5(world, path, [&](auto& ar) { ar & f; });
   return f;
 }
 

@@ -30,6 +30,7 @@
 #include <vector>
 
 using namespace madness;
+using namespace molresponse_v3;  // GroundState, etc.
 namespace fs = std::filesystem;
 
 static const std::size_t D = 3;

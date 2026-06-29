@@ -325,22 +325,46 @@ care; a full `ninja` (not just the cm targets) is the real check.
   Archive-backend = validated restart format (universal, bit-exact, multi-rank,
   ≈legacy speed/faster reads, rank-stable). Structured = interop (Layer B). gzip =
   opt-in (level 1) size knob, default off.
-- **PARALLEL I/O is NOT faster (and that's expected):** at NP=4 archive read got
-  3-6× SLOWER than NP=1 (0.0052→0.0289 at k10) — both archive AND legacy use
-  **nio=1**, so all disk I/O funnels through rank 0; more ranks just add gather
-  (write) / scatter (read) MPI overhead, the disk transfer stays single-stream.
-  HDF5 is not the bottleneck — the rank-0 funnel is, shared by both formats. TRUE
-  parallel speedup needs **Parallel HDF5 / MPI-IO** (all ranks write 1 file via
-  `H5Pset_fapl_mpio`, no rank-0 gather; also removes the rank-0 memory buffer — the
-  relevant lever for large-system OOM). **Gated** on a GCC13 parallel HDF5 build
-  (we have serial; cluster `-parallel` builds are Intel-ABI) + evidence the gather
-  hurts at target sizes. Caveat: checkpoint I/O is a tiny fraction of wall time
-  (solve dominates) — so this is a memory/scaling item, not a speed one.
-- **NEXT (1→2):** (1) real h2o MO round-trip (true orbital tree) — extend
-  `test_function_hdf5` with optional `--archive=<moldft restart>` mode reusing the
-  FD-skeleton's molecule/header/`from_archive` scaffolding (h2o fixture exists at
-  `…/v3_fd_skeleton/h2o/mad.restartdata`); then (2) wire the archive path into a
-  real v3 restart site (opt-in). Later: cross-rank check (write NP1/load NP4),
-  Layer B interop, Parallel-HDF5/MPI-IO (gated above).
+- **PARALLEL disk I/O is serial (nio=1, both formats) — BUT archive gather scales:**
+  no parallel disk I/O (rank-0 funnel; true MPI-IO is future, gated on a GCC13
+  parallel HDF5 build — removes rank-0 gather + its memory buffer, the real
+  large-system OOM lever). HOWEVER on real data at NP=4 the archive **write is 3×
+  faster than legacy** (h2o 5 MOs: 0.419 vs 1.303 s) because archive uses one bulk
+  `MPI_Gatherv` (2067) vs legacy's per-datum MPI streaming (2268) — gap grows with
+  data/ranks. Reads ~tie (slight legacy edge from the distribute). Caveat:
+  checkpoint I/O is a small fraction of wall time (solve dominates).
+- **(1) REAL h2o MO round-trip PASS** (`--archive=<moldft restart>` mode in
+  `test_function_hdf5`, +`GroundState.cpp`): 5 MOs, k=8, L=200, **bit-exact NP=1 &
+  NP=4** (err 0.0). Archive total 28,698,479 B **byte-identical NP1≡NP4** (legacy
+  28,765,466, ~0.2% larger + rank-varying); NP=4 write 3× faster (above).
+- **(2) DONE — opt-in HDF5 restart wired into `response_state.hpp` + VALIDATED PASS**
+  (job 2047076, xeonmax NP=1, 2026-06-29): `ResponseStateX<ClosedShell>::save/load`
+  now writes/auto-detects `<file>.h5` when env `MADRESPONSE_IO_HDF5` is set (default
+  = legacy archive, unchanged). New generic primitive `save/load_parallel_archive_hdf5`
+  (callback over `ParallelOutputArchive<VectorOutputArchive>`; the single-`Function`
+  `save/load_function_archive_hdf5` now delegate to it — no behavior change). New
+  `tests/test_state_archive_hdf5.cpp`: 3-orbital state round-trip both paths
+  **bit-exact (max_err 0.0)**, `.h5` auto-detected. CMake makes `molresponse_v3` +
+  `test_calc_manager_run` HDF5-aware so the opt-in path is reachable from the real
+  solver / `cm_run` / `cm_es`. Scope: ClosedShell-X only; `ResponseStateXY<ClosedShell>`
+  (dynamic-α / Full-ES, two vecfuncs — same pattern) + OpenShell are follow-ups.
+- **⚠ GOTCHA — runtime HDF5 ABI conflict (cost ~5 jobs to find; cm.sh now pins it):**
+  `load_<arch>.sh` auto-loads module `hdf5/parallel/intel2024.0/1.14.3`, which puts an
+  **Intel parallel** `libhdf5.so.310` on `LD_LIBRARY_PATH`. We BUILD against the
+  **gcc13 serial** HDF5 (`HDF5_ROOT`), but our binaries use **DT_RUNPATH** (searched
+  *after* `LD_LIBRARY_PATH`), so the Intel `.so` won at load time → header≠runtime ABI
+  → corrupt HDF5 ID tables → **infinite recursion in `H5E__push_stack`/`H5I_inc_ref`
+  → SIGSEGV** on the first HDF5 call (looked like a write bug; wasn't). Diagnosed via
+  `gdb` break on `H5E__push_stack` (backtrace named the wrong `.so` path). **Fix:**
+  `cm_use io-hdf5` now prepends `${HDF5_ROOT}/lib` to `LD_LIBRARY_PATH` so the
+  build-matched HDF5 loads first (confirmed: `ldd` resolves gcc13, both tests PASS).
+  Defensive: `function_hdf5_io.hpp` now disables HDF5's (recursion-prone) auto-error
+  printer + checks every H5 return code (`MADNESS_CHECK_THROW`) → a real future error
+  aborts cleanly instead of stack-overflowing. **Permanent-fix follow-up:** link the
+  HDF5 targets with `-Wl,--disable-new-dtags` (RUNPATH→RPATH, wins over LD_LIBRARY_PATH)
+  so the binary self-protects even outside cm.sh.
 - **Coordinate w/ `feat/amr-export`:** same system libhdf5 + bohr/cell + chunk
-  conventions; pin in `operator_contracts.md` once P1/P2 land.
+  conventions; pin in `operator_contracts.md` once P1/P2 land. **Directly relevant to
+  the "one shared HDF5 stack" contract:** the cluster has ≥2 `libhdf5.so.310` (gcc13
+  serial + intel parallel) with the same SONAME — viz must build+run against the SAME
+  one we pin here, or hit the identical ABI crash.
