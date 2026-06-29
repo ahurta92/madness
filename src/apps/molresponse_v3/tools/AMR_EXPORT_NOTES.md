@@ -63,9 +63,10 @@ per-cell, cannot hold sub-box grids).
   Level-n cell spacing = `(cell_width/2^n)/m`. Each leaf box → one `vtkUniformGrid` block
   (origin = box lower corner bohr, m³ cells) at AMR level n, with index-space
   `vtkAMRBox` lo = `l·m`, hi = `l·m + m − 1`. Values attached as cell data `"psi"`.
-- Output `<stem>.vthb` via `vtkXMLUniformGridAMRWriter`. Ground MOs only in this
-  prototype (extending to FD response orbitals / ρ⁽¹⁾ is the same threading as
-  `--cube`/`--htg`).
+- Output `<stem>.vthb` via `vtkXMLUniformGridAMRWriter`. Wired for the ground MOs
+  **and** (with `--fd`) the FD response orbitals + ρ⁽¹⁾ — same call-chain threading
+  as `--cube` (`dump_fd_states → dump_fd_point → dump_block`), parity with
+  `--cube`/`--htg`.
 
 ## Known prototype simplifications (intentional — fix during iteration)
 
@@ -80,7 +81,11 @@ per-cell, cannot hold sub-box grids).
 3. **Blanking** (coarse cells covered by finer blocks) is left to ParaView's AMR overlap
    resolution from the box geometry; we do not pre-blank. Verify it renders correctly;
    if not, call `vtkOverlappingAMR::GenerateParentChildInformation()` / set blanking.
-4. **Ground-state only** — FD response/ρ⁽¹⁾ not yet wired (trivial follow-up).
+4. ~~**Ground-state only** — FD response/ρ⁽¹⁾ not yet wired (trivial follow-up).~~
+   **DONE:** `--amr` now threads through `dump_fd_states → dump_fd_point →
+   dump_block` (alongside `--cube`), so `--fd --amr` emits `fd_*_x*.vthb`,
+   `fd_*_y*.vthb` (Full), and `fd_*_rho1.vthb`. Pending alloc rebuild + ParaView
+   eyeball of the FD `.vthb` outputs.
 
 ## VTK API — CONFIRMED against cluster VTK 9.1.0 (2026-06-19, header check)
 

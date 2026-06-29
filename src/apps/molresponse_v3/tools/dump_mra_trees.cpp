@@ -568,7 +568,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
                   const std::string& out_dir, const std::string& label,
                   int max_orbitals, const vecfuncT& gs_amo,
                   const Molecule& mol, bool cube, int cube_npoints,
-                  double cube_pad, bool htg) {
+                  double cube_pad, bool htg, bool amr, int amr_m) {
   auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
   if (!loaded) {
     if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
@@ -592,6 +592,9 @@ int dump_fd_point(World& world, const std::string& calc_dir,
       if (cube)
         write_cube_file(world, blk[i], mol, stem + ".cube", cube_npoints,
                         cube_pad);
+      // vtkOverlappingAMR (.vthb) value export, same in-memory Function -> one
+      // adaptive-isosurface dataset per response orbital (parity with --cube).
+      if (amr) write_amr_from_function(world, blk[i], stem + ".vthb", amr_m);
       const double nrm = blk[i].norm2();  // collective -- all ranks
       if (world.rank() == 0)
         print("  dumped", label, tag, i, " norm2=", nrm);
@@ -623,6 +626,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
   if (cube)
     write_cube_file(world, rho1, mol, rho1_stem + ".cube", cube_npoints,
                     cube_pad);
+  if (amr) write_amr_from_function(world, rho1, rho1_stem + ".vthb", amr_m);
   const double rnorm = rho1.norm2();  // collective -- all ranks
   if (world.rank() == 0) print("  dumped", label, "rho1  norm2=", rnorm);
   return 1;
@@ -639,7 +643,8 @@ int dump_fd_point(World& world, const std::string& calc_dir,
 void dump_fd_states(World& world, double L, const std::string& calc_dir,
                     const std::string& out_dir, int max_orbitals,
                     const vecfuncT& gs_amo, const Molecule& mol, bool cube,
-                    int cube_npoints, double cube_pad, bool htg) {
+                    int cube_npoints, double cube_pad, bool htg, bool amr,
+                    int amr_m) {
   const std::string meta_path = calc_dir + "/response_metadata.json";
   if (!std::filesystem::exists(meta_path)) {
     if (world.rank() == 0)
@@ -688,11 +693,11 @@ void dump_fd_states(World& world, double L, const std::string& calc_dir,
         if (type == "static")
           npoints += dump_fd_point<Static, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg);
+              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m);
         else if (type == "full")
           npoints += dump_fd_point<Full, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg);
+              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m);
         else if (world.rank() == 0)
           print("  [FD] skip unknown type:", type, "for", label);
       }
@@ -723,8 +728,9 @@ int main(int argc, char** argv) {
         print("  With --htg (needs a -DMADNESS_ENABLE_VTK=ON build), also writes");
         print("  each tree as a native VTK HyperTreeGrid (<stem>_boxes.htg /");
         print("  <stem>_error.htg) next to the legacy JSON/.vtk. With --amr,");
-        print("  writes ground MOs as vtkOverlappingAMR (<stem>.vthb; function");
-        print("  values on an --amr-m^3 grid/leaf box -> adaptive isosurfaces).");
+        print("  writes vtkOverlappingAMR (<stem>.vthb; function values on an");
+        print("  --amr-m^3 grid/leaf box -> adaptive isosurfaces) for the ground");
+        print("  MOs and (with --fd) the response orbitals + rho^(1).");
         print("  With --fd, also dumps the converged closed-shell FD response");
         print("  orbitals from --fd-calc-dir (default: the archive's directory)");
         print("  into the same out dir -> one combined ground+response analysis.");
@@ -760,9 +766,9 @@ int main(int argc, char** argv) {
       // Native HyperTreeGrid (.htg) export of every tree, in addition to the
       // JSON/.vtk. Needs a -DMADNESS_ENABLE_VTK=ON build; otherwise a no-op.
       const bool htg = parser.key_exists("htg");
-      // Adaptive function-value export (.vthb, vtkOverlappingAMR) of the ground
-      // MOs -- samples each leaf box on an m^3 grid (--amr-m, default 8).
-      // PROTOTYPE; ground-state only for now (FD response is the same pattern).
+      // Adaptive function-value export (.vthb, vtkOverlappingAMR) -- samples each
+      // leaf box on an m^3 grid (--amr-m, default 8). Covers the ground MOs and
+      // (with --fd) the response orbitals + rho^(1), matching --cube/--htg.
       const bool amr = parser.key_exists("amr");
       const int amr_m = parser.key_exists("amr-m")
                             ? std::stoi(parser.value("amr-m")) : 8;
@@ -828,7 +834,8 @@ int main(int argc, char** argv) {
       // each FD point's protocol). header.L is the box length from the GS header.
       if (dump_fd) {
         dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
-                       gs.molecule(), cube, cube_npoints, cube_pad, htg);
+                       gs.molecule(), cube, cube_npoints, cube_pad, htg, amr,
+                       amr_m);
         world.gop.fence();
       }
     }
