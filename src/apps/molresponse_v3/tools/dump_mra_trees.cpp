@@ -64,6 +64,14 @@
 #include <array>
 #endif
 
+// Native MRA coefficient export (.mad.h5) is OPTIONAL, behind MADNESS_ENABLE_HDF5
+// (CMake -> defines MADNESS_HAS_HDF5). It reuses the io-hdf5 structured Function
+// writer (solvers/function_hdf5_io.hpp); a no-HDF5 build compiles unchanged and
+// --coeffs becomes a one-line notice (the header is itself a no-op without the macro).
+#ifdef MADNESS_HAS_HDF5
+#include "../solvers/function_hdf5_io.hpp"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -520,6 +528,39 @@ inline void write_amr_from_function(World&, const Function<double, 3>&,
                                     const std::string&, int) {}
 #endif  // MADNESS_HAS_VTK
 
+// ---- native MRA coefficient export: .mad.h5 (io-hdf5 structured writer) -----
+//
+// Reuse the io-hdf5 structured Function writer (solvers/function_hdf5_io.hpp) to emit
+// each function's RECONSTRUCTED octree as one <stem>.mad.h5: /meta (k, thresh, cell,
+// tree_state, ...), /keys [n_nodes x (3+NDIM)] = (level, lx,ly,lz, has_children,
+// has_coeff) per node, /coeffs [n_coeff_nodes x k^3] = the scaling-coefficient tensor
+// per leaf. Unlike --amr (which point-SAMPLES each leaf onto an m^3 grid), this is the
+// function's native multiresolution basis, so a reader can reconstruct the MADNESS
+// expansion exactly at any point/zoom. "Don't roll a new serializer"
+// (native_mra_reader_proposal.md): we write through the same writer io-hdf5 built.
+//
+// The structured writer is double-only and MADNESS_CHECKs world.size()==1 (the local
+// container == the whole tree only at NP=1) and t.size()==k^3 per coeff node (so the
+// tree MUST be reconstructed -- a compressed (2k)^3 node would trip the check). We
+// therefore reconstruct first and skip cleanly under NP>1. The skip is uniform across
+// ranks (every rank evaluates world.size()>1 identically) -> no collective divergence.
+#ifdef MADNESS_HAS_HDF5
+void write_coeffs_hdf5(World& world, Function<double, 3> f,
+                       const std::string& path) {
+  if (world.size() > 1) {
+    if (world.rank() == 0)
+      print("  [HDF5] --coeffs needs NP=1 (structured writer is single-rank); "
+            "skipping", path);
+    return;
+  }
+  f.reconstruct();  // leaves -> k^3 scaling coefficients (the shape /coeffs expects)
+  molresponse_v3::save_function_hdf5(f, path);
+}
+#else
+// No-HDF5 build: collective-safe no-op (nothing happens on any rank).
+inline void write_coeffs_hdf5(World&, Function<double, 3>, const std::string&) {}
+#endif  // MADNESS_HAS_HDF5
+
 // Dump one orbital's octree in both representations. `stem` is the output path
 // prefix (no extension). With `htg`, also write the native HyperTreeGrid next to
 // each JSON (<stem>_boxes.htg from the reconstructed tree, <stem>_error.htg from
@@ -568,7 +609,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
                   const std::string& out_dir, const std::string& label,
                   int max_orbitals, const vecfuncT& gs_amo,
                   const Molecule& mol, bool cube, int cube_npoints,
-                  double cube_pad, bool htg, bool amr, int amr_m) {
+                  double cube_pad, bool htg, bool amr, int amr_m, bool coeffs) {
   auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
   if (!loaded) {
     if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
@@ -595,6 +636,8 @@ int dump_fd_point(World& world, const std::string& calc_dir,
       // vtkOverlappingAMR (.vthb) value export, same in-memory Function -> one
       // adaptive-isosurface dataset per response orbital (parity with --cube).
       if (amr) write_amr_from_function(world, blk[i], stem + ".vthb", amr_m);
+      // Native MRA coefficients (.mad.h5): the function's basis, not a sample.
+      if (coeffs) write_coeffs_hdf5(world, blk[i], stem + ".mad.h5");
       const double nrm = blk[i].norm2();  // collective -- all ranks
       if (world.rank() == 0)
         print("  dumped", label, tag, i, " norm2=", nrm);
@@ -627,6 +670,7 @@ int dump_fd_point(World& world, const std::string& calc_dir,
     write_cube_file(world, rho1, mol, rho1_stem + ".cube", cube_npoints,
                     cube_pad);
   if (amr) write_amr_from_function(world, rho1, rho1_stem + ".vthb", amr_m);
+  if (coeffs) write_coeffs_hdf5(world, rho1, rho1_stem + ".mad.h5");
   const double rnorm = rho1.norm2();  // collective -- all ranks
   if (world.rank() == 0) print("  dumped", label, "rho1  norm2=", rnorm);
   return 1;
@@ -644,7 +688,7 @@ void dump_fd_states(World& world, double L, const std::string& calc_dir,
                     const std::string& out_dir, int max_orbitals,
                     const vecfuncT& gs_amo, const Molecule& mol, bool cube,
                     int cube_npoints, double cube_pad, bool htg, bool amr,
-                    int amr_m) {
+                    int amr_m, bool coeffs) {
   const std::string meta_path = calc_dir + "/response_metadata.json";
   if (!std::filesystem::exists(meta_path)) {
     if (world.rank() == 0)
@@ -693,11 +737,11 @@ void dump_fd_states(World& world, double L, const std::string& calc_dir,
         if (type == "static")
           npoints += dump_fd_point<Static, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m);
+              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
         else if (type == "full")
           npoints += dump_fd_point<Full, ClosedShell>(
               world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m);
+              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
         else if (world.rank() == 0)
           print("  [FD] skip unknown type:", type, "for", label);
       }
@@ -721,7 +765,7 @@ int main(int argc, char** argv) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--htg] [--amr] [--amr-m=N] [--fd] [--fd-calc-dir=DIR]");
+              "[--htg] [--amr] [--amr-m=N] [--coeffs] [--fd] [--fd-calc-dir=DIR]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
@@ -731,6 +775,10 @@ int main(int argc, char** argv) {
         print("  writes vtkOverlappingAMR (<stem>.vthb; function values on an");
         print("  --amr-m^3 grid/leaf box -> adaptive isosurfaces) for the ground");
         print("  MOs and (with --fd) the response orbitals + rho^(1).");
+        print("  With --coeffs (needs -DMADNESS_ENABLE_HDF5=ON, NP=1), writes each");
+        print("  function's NATIVE MRA coefficients as <stem>.mad.h5 (/meta+/keys+");
+        print("  /coeffs: per-leaf n,l,s[k^3] + cell,k,thresh) -- the exact basis");
+        print("  for offline reconstruction, not a point sample like .cube/.vthb.");
         print("  With --fd, also dumps the converged closed-shell FD response");
         print("  orbitals from --fd-calc-dir (default: the archive's directory)");
         print("  into the same out dir -> one combined ground+response analysis.");
@@ -772,11 +820,23 @@ int main(int argc, char** argv) {
       const bool amr = parser.key_exists("amr");
       const int amr_m = parser.key_exists("amr-m")
                             ? std::stoi(parser.value("amr-m")) : 8;
+      // Native MRA coefficient export (.mad.h5) via the io-hdf5 structured writer:
+      // per-leaf (n, l, s[k^3]) + header (cell, k, thresh). Needs a
+      // -DMADNESS_ENABLE_HDF5=ON build and NP=1; otherwise skipped with a notice.
+      // Covers the ground MOs and (with --fd) the response orbitals + rho^(1),
+      // matching --cube/--amr.
+      const bool coeffs = parser.key_exists("coeffs");
 #ifndef MADNESS_HAS_VTK
       if ((htg || amr) && world.rank() == 0)
         print("  [VTK] --htg/--amr requested but this binary was built without "
               "VTK; reconfigure with -DMADNESS_ENABLE_VTK=ON. Skipping .htg/.vthb "
               "(JSON/.vtk/.cube output is unaffected).");
+#endif
+#ifndef MADNESS_HAS_HDF5
+      if (coeffs && world.rank() == 0)
+        print("  [HDF5] --coeffs requested but this binary was built without "
+              "HDF5; reconfigure with -DMADNESS_ENABLE_HDF5=ON. Skipping .mad.h5 "
+              "(JSON/.vtk/.cube/.vthb output is unaffected).");
 #endif
 
       auto header = GroundState::read_archive_header(world, archive_path);
@@ -824,6 +884,7 @@ int main(int argc, char** argv) {
                           cube_npoints, cube_pad);
         }
         if (amr) write_amr_from_function(world, mos[i], stem + ".vthb", amr_m);
+        if (coeffs) write_coeffs_hdf5(world, mos[i], stem + ".mad.h5");
         const double nrm = mos[i].norm2();  // collective -- all ranks
         if (world.rank() == 0) print("  dumped mo_", i, "  norm2=", nrm);
       }
@@ -835,7 +896,7 @@ int main(int argc, char** argv) {
       if (dump_fd) {
         dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
                        gs.molecule(), cube, cube_npoints, cube_pad, htg, amr,
-                       amr_m);
+                       amr_m, coeffs);
         world.gop.fence();
       }
     }
