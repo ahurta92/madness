@@ -291,6 +291,17 @@ struct ResponseStateXY<ClosedShell> {
   }
 
   void save(World &world, const std::string &filename) const {
+#ifdef MADNESS_HAS_HDF5
+    if (hdf5_io_enabled()) {  // opt-in (env MADRESPONSE_IO_HDF5); writes <file>.h5
+      save_parallel_archive_hdf5(world, filename + ".h5", 0, [&](auto &ar) {
+        const std::size_t na = x_alpha.size();
+        ar & na;
+        for (const auto &f : x_alpha) ar & f;
+        for (const auto &f : y_alpha) ar & f;
+      });
+      return;
+    }
+#endif
     archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(
         world, filename.c_str(), 1);
     const std::size_t na = x_alpha.size();
@@ -300,9 +311,22 @@ struct ResponseStateXY<ClosedShell> {
   }
 
   static ResponseStateXY load(World &world, const std::string &filename) {
+    ResponseStateXY s;
+#ifdef MADNESS_HAS_HDF5
+    if (std::filesystem::exists(filename + ".h5")) {  // auto-detect HDF5 checkpoint
+      load_parallel_archive_hdf5(world, filename + ".h5", [&](auto &ar) {
+        std::size_t na;
+        ar & na;
+        s.x_alpha.resize(na);
+        s.y_alpha.resize(na);
+        for (auto &f : s.x_alpha) ar & f;
+        for (auto &f : s.y_alpha) ar & f;
+      });
+      return s;
+    }
+#endif
     archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(
         world, filename.c_str(), 1);
-    ResponseStateXY s;
     std::size_t na;
     ar & na;
     s.x_alpha.resize(na);

@@ -346,8 +346,11 @@ care; a full `ninja` (not just the cm targets) is the real check.
   `tests/test_state_archive_hdf5.cpp`: 3-orbital state round-trip both paths
   **bit-exact (max_err 0.0)**, `.h5` auto-detected. CMake makes `molresponse_v3` +
   `test_calc_manager_run` HDF5-aware so the opt-in path is reachable from the real
-  solver / `cm_run` / `cm_es`. Scope: ClosedShell-X only; `ResponseStateXY<ClosedShell>`
-  (dynamic-α / Full-ES, two vecfuncs — same pattern) + OpenShell are follow-ups.
+  solver / `cm_run` / `cm_es`. **Closed-shell restart surface COMPLETE:**
+  `ResponseStateXY<ClosedShell>` (dynamic-α / Full-ES, x_alpha+y_alpha) wired with the
+  same opt-in pattern + validated PASS (job 2047082, X and XY both bit-exact 0.0,
+  2026-06-29). Remaining: OpenShell X/XY (out of closed-shell scope) + cross-rank,
+  Layer B interop, Parallel-HDF5/MPI-IO.
 - **⚠ GOTCHA — runtime HDF5 ABI conflict (cost ~5 jobs to find; cm.sh now pins it):**
   `load_<arch>.sh` auto-loads module `hdf5/parallel/intel2024.0/1.14.3`, which puts an
   **Intel parallel** `libhdf5.so.310` on `LD_LIBRARY_PATH`. We BUILD against the
