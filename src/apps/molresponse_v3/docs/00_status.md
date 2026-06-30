@@ -351,6 +351,19 @@ care; a full `ninja` (not just the cm targets) is the real check.
   same opt-in pattern + validated PASS (job 2047082, X and XY both bit-exact 0.0,
   2026-06-29). Remaining: OpenShell X/XY (out of closed-shell scope) + cross-rank,
   Layer B interop, Parallel-HDF5/MPI-IO.
+- **(3) END-TO-END VALIDATED in a live FD solve — PASS** (job 2049580, xeonmax NP=1,
+  h2o static α_zz, 2026-06-30): the opt-in restart is reachable through the real
+  solver because every FD/ES/VBC site already calls `ResponseStateX/XY::save/load`
+  (`fd_save_load:115/239/328`, `es_save_load:107/368`, `vbc_save_load:57/105`), and
+  the restart DECISION is metadata-driven (`response_metadata.json` stores the archive
+  **basename**, format-agnostic) while the binary load auto-detects `.h5`. Proven with
+  `MADRESPONSE_IO_HDF5=1`: (a) checkpoints write as `.h5` only (0 `.00000`); (b) a
+  cross-protocol resume **loads** the `.h5` 1e-4 state to climb to 1e-6 (`action=
+  restart`); (c) an idempotent rerun **skips** by recognizing the `.h5` via metadata
+  (`nothing left to schedule`); (d) **α_zz = 8.532639 bit-identical to the legacy
+  path**; (e) zero crashes. No code change needed — the wiring was already correct.
+  `cm_run`/`cm_idem`/`cm_resume` drive `test_calc_manager_run` (HDF5-aware + in cm_build
+  targets); just export `MADRESPONSE_IO_HDF5=1`.
 - **⚠ GOTCHA — runtime HDF5 ABI conflict (cost ~5 jobs to find; cm.sh now pins it):**
   `load_<arch>.sh` auto-loads module `hdf5/parallel/intel2024.0/1.14.3`, which puts an
   **Intel parallel** `libhdf5.so.310` on `LD_LIBRARY_PATH`. We BUILD against the
