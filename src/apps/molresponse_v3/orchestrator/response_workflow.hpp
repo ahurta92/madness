@@ -163,15 +163,19 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
     const ExecutorSettings base = in.settings;
     fan_out = [archive, mol, fock, L_, base](
                   madness::World &sub, const std::vector<WorkItem> &items,
-                  double thresh, int node_index) {
-      set_response_protocol(sub, L_, thresh);
+                  double thresh, int gid, const std::string &log_prefix) {
+      // F2d-ii: verbose=false suppresses the redundant per-subworld GS/protocol
+      // banners (the universe already printed them once).
+      set_response_protocol(sub, L_, thresh, /*override_k=*/-1, /*verbose=*/false);
       auto gs_s = GroundState::from_archive(sub, archive, mol);
       const double t0 = madness::FunctionDefaults<3>::get_thresh();
       auto cop = madness::poperatorT(
           madness::CoulombOperatorPtr(sub, gs_s.params().lo(), 0.001 * t0));
-      gs_s.prepare(sub, 0.001 * t0, cop, fock);
+      gs_s.prepare(sub, 0.001 * t0, cop, fock, /*verbose=*/false);
       ExecutorSettings s = base;
-      s.metadata_shard = std::to_string(node_index);
+      s.metadata_shard = std::to_string(gid);  // F2: per-subworld metadata shard
+      s.log_prefix     = log_prefix;     // F2d-i: tag this subworld's per-state lines
+      s.log_group      = gid;            // F2d-i: MEMORY_HWM group= field
       ExecutorContext ctx_s(sub, gs_s, L_, fock, s);
       FdResponseExecutor exec_s(ctx_s);
       for (const auto &it : items) exec_s.run_protocol(it);

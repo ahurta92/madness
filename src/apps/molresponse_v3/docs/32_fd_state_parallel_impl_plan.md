@@ -163,6 +163,28 @@ Bring the diff for approval before coding. Pieces:
 - **Auto-selector:** `(n_occ, k, available nodes, budget) → (S, R_state)` via the doc 31
   §4 regime model; manual `--fd-subworlds` override stays.
 
+### 6a. Two levers from the 2026-06-30 h2o β-SHG bench (2 nodes×8, 16 ranks)
+
+Measured: ref(16rk)=1646s · 2 subw=809s(2.04×) · **4 subw=644s(2.56×, best)** · 16 subw=710s
+(regress). β bit-exact ≤1.1e-10 at every P. Per-state k8 wall: 16rk=63s (over-decomposed for
+5-occ h2o), 8rk=47s (spatial sweet spot), 1rk=126s (serial). The data exposes two distinct levers:
+
+1. **Scheduler work-exposure (the bigger lever).** SHG has **6 independent first-order FD states**
+   (3 axes × {ω, 2ω}) — all mutually independent — but `schedule()` emitted them as **3 + 3**
+   separate waves, so with 16 ranks only 3 states' worth of work was ever live at once (13/16
+   ranks idle in the FD phase). Wave-formation should batch *all* currently-independent states
+   into one wave to maximise exposed parallelism. Raman/`Nocc×3` nuclear derivatives expose far
+   more independent work, so they are far less work-starved — this lever matters most for small
+   property sets (α, β-SHG). This is a **scheduler** change, orthogonal to the subworld layer.
+2. **Auto-limit P to available work.** Spawning more subworlds than items-in-the-current-wave
+   wastes them (16 subw, ≤9 items/wave ⇒ 7 idle) AND shrinks ranks/state below the spatial floor
+   (1 rank/state ⇒ 2× slower per state). Rule: `P ≤ ceil(items_per_wave / 1)` AND
+   `ranks_per_subworld ≥ spatial_floor(n_occ)`. Plus a size-aware partition (round-robin gave
+   10/8/7/5 at G=4 — the long-pole subworld sets the wall). **Caveat for large systems:** higher
+   P replicates the ground state φ per subworld (memory ↑) and the spatial floor rises (favouring
+   fewer/larger subworlds) — so the optimum P *falls* with system size; couple this to F2c's
+   pre-flight memory estimate.
+
 ## 7. Risks / open points
 
 - **Metadata write race** → per-group shards merged on rank 0 (§5.3) — the only new

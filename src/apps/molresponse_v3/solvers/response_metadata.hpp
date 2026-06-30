@@ -146,14 +146,14 @@ public:
   const nlohmann::json &json() const { return j_; }
   const std::string    &path() const { return path_; }
 
-  /// F2 (doc 32 §5.3): merge the per-group FD metadata shards written by the
-  /// node-subworlds (response_metadata.group<gid>.json) into the canonical file.
-  /// FD states are DISJOINT across subworlds — each (pert, protocol, freq) lives
-  /// in exactly one subworld — so this is a conflict-free union, done through the
-  /// typed setter (never a raw write). Removes the shards after a successful
-  /// canonical save. Rank-0 only (caller guards). Idempotent: a missing shard is
-  /// skipped, so re-running after a partial pass is safe.
-  static void merge_fd_shards(const std::string &calc_dir, int n_groups) {
+  /// F2 (doc 32 §5.3): merge the per-group state metadata shards written by the
+  /// subworlds (response_metadata.group<gid>.json) into the canonical file. The
+  /// FD (and F2g VBC) states are DISJOINT across subworlds — each (pert/freq) FD
+  /// point and each VBC id lives in exactly one subworld — so this is a
+  /// conflict-free union, done through the typed setters (never a raw write).
+  /// Removes the shards after a successful canonical save. Rank-0 only (caller
+  /// guards). Idempotent: a missing shard is skipped, so re-running is safe.
+  static void merge_state_shards(const std::string &calc_dir, int n_groups) {
     auto canon = load_or_create(calc_dir + "/response_metadata.json");
     for (int g = 0; g < n_groups; ++g) {
       const std::string sp =
@@ -170,6 +170,11 @@ public:
           for (const auto &pk : pert.value().items())
             for (const auto &fk : pk.value().items())
               canon.set_fd_state(pert.key(), pk.key(), fk.key(), fk.value());
+      // F2g: VBC quadratic-source states (vbc_states/<id>/<protocol_key>).
+      if (sj.contains("vbc_states") && sj["vbc_states"].is_object())
+        for (const auto &id : sj["vbc_states"].items())
+          for (const auto &pk : id.value().items())
+            canon.set_vbc_state(id.key(), pk.key(), pk.value());
       // Protocol registry is informational; union any keys the canonical lacks.
       if (sj.contains("protocols") && sj["protocols"].is_object())
         for (const auto &p : sj["protocols"].items())

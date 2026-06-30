@@ -113,7 +113,8 @@ GroundState::read_archive_header(World& world,
 
 void GroundState::prepare(World& world, double vtol,
                            const poperatorT& coulop,
-                           const std::string& fock_json_file) {
+                           const std::string& fock_json_file,
+                           bool verbose) {
     auto target_k = FunctionDefaults<3>::get_k();
     auto thresh = FunctionDefaults<3>::get_thresh();
 
@@ -172,7 +173,7 @@ void GroundState::prepare(World& world, double vtol,
 
     prepared_ = true;
 
-    if (world.rank() == 0) {
+    if (verbose && world.rank() == 0) {   // F2d-ii: suppressed in subworlds
         print_info();
     }
 }

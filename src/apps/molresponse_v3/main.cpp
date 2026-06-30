@@ -43,8 +43,8 @@ void print_usage() {
   print("  --axes=xyz           Cartesian axes (default xyz)");
   print("  --protocol=1e-4,1e-6 truncation-threshold ladder (default 1e-4,1e-6)");
   print("  --maxiter=N          iteration budget per protocol step (default 25)");
-  print("  --fd-subworlds=G     fan FD states across G node-aligned subworlds "
-        "(0=single-World, default; needs an --archive ground state)");
+  print("  --fd-subworlds=P     fan FD/VBC states across P subworlds PER NODE "
+        "(0=single-World default; 1=node-aligned; >1=sub-node/NUMA packing)");
   print("  --dconv=X            convergence target (default 1e-4)");
   print("  --calc-dir=DIR       output dir (response_metadata.json + archives)");
   print("  --print-level=0..3   verbosity (default 1)");

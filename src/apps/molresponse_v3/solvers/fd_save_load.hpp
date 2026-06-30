@@ -96,7 +96,9 @@ void save_fd_state(madness::World &world,
                    const std::string &seed = std::string(),
                    bool accepted = false,
                    double wall_s = 0.0,     // R1b: point-solve wall time
-                   const std::string &metadata_shard = std::string()) {
+                   const std::string &metadata_shard = std::string(),
+                   const std::string &log_prefix = std::string(),  // F2d
+                   int log_group = -1) {                            // F2d
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
   // subworlds never race the canonical file; rank 0 merges them after the fence.
@@ -165,19 +167,34 @@ void save_fd_state(madness::World &world,
     meta.set_fd_state(pdesc, key, fkey, entry);
     meta.save();
 
-    madness::print("[SAVE] fd_state: pert=", pdesc,
-                   "  protocol_key=", key,
-                   "  freq=", freq,
-                   "  archive=", archive_basename,
-                   "  bsh_res=", bsh_res,
-                   "  converged=", converged,
-                   (accepted ? "  (ACCEPTED best-effort @ maxiter)" : ""));
+    // F2d: prepend the per-subworld tag (empty ⇒ unchanged, G=0 byte-identical).
+    auto save_line = [&](auto &&...a) {
+      if (log_prefix.empty()) madness::print(a...);
+      else                    madness::print(log_prefix, a...);
+    };
+    save_line("[SAVE] fd_state: pert=", pdesc,
+              "  protocol_key=", key,
+              "  freq=", freq,
+              "  archive=", archive_basename,
+              "  bsh_res=", bsh_res,
+              "  converged=", converged,
+              (accepted ? "  (ACCEPTED best-effort @ maxiter)" : ""));
     // R1b: machine-readable per-state memory high-water mark (worst task, via
     // gop.max in measure_state) at this protocol boundary — feeds the R4
     // memory-scaling model / pre-flight abort (L2). Greppable: ^MEMORY_HWM.
-    madness::print("MEMORY_HWM  kind=fd  protocol=", key,
-                   "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
-                   "  wall_s=", wall_s, "  id=", pdesc, "@", fkey);
+    // F2d: `group=<gid>` field (only in subworld mode) lets the studies/perf-model
+    // parsers attribute the line to its subworld instead of treating G copies as one.
+    // Two-branch (not trailing optional args) so G=0 stays byte-identical — a
+    // trailing empty print() arg would emit a stray separator space.
+    if (log_group >= 0)
+      madness::print("MEMORY_HWM  kind=fd  protocol=", key,
+                     "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                     "  wall_s=", wall_s, "  id=", pdesc, "@", fkey,
+                     "  group=", log_group);
+    else
+      madness::print("MEMORY_HWM  kind=fd  protocol=", key,
+                     "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                     "  wall_s=", wall_s, "  id=", pdesc, "@", fkey);
   }
   world.gop.fence();
 }

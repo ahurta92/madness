@@ -176,15 +176,22 @@ The runtime-architecture thread (cross-thread board: `madness_studies/RELEASE_ST
 - **F1 PASS** (`test_fd_subworld_fanout`): subworld fan-out α bit-identical to single-World
   (6.98e-12). Crash was a teardown bug (GS destructing after `finalize()`) — fixed by
   scoping World-bound objects in a block before `finalize()`.
-- **F2a+F2b VALIDATED** (uncommitted): gated `run()` + `--fd-subworlds=G`. Live A/B on a
-  real **3-node partition** (3 dipole FD, 1 state/node) → α match **6.37e-12 vs G=0**;
-  per-group metadata shards (`response_metadata.group<gid>.json`) merged by rank 0
-  (`merge_fd_shards`). `fd_subworlds==0` byte-identical; `n_nodes==1` short-circuits;
-  ES/VBC stay single-World; cm_unit green. Seam = `SubworldSolve` fan-out closure built
-  by the orchestrator (`from_archive` per subworld); `run()` splits each wave FD-vs-rest.
-- **NEXT:** **F2c** pre-flight memory abort (`rss≈(0.93+0.031·n_occ)·k-growth` vs budget) →
-  **F2d** tagged-stream logging (doc 32 §5.6 — the per-subworld interleave) → **F2e/F3**
-  `weak_scale_fd.sh` + auto-selector. `verify_fd_state_parallel.sh` (production A/B) TODO.
+- **F2a+F2b VALIDATED**: gated `run()` + `--fd-subworlds`. A/B on a real 3-node partition →
+  α match 6.37e-12 vs G=0; per-group metadata shards merged by rank 0 (`merge_state_shards`).
+  `fd_subworlds==0` byte-identical; `G≤1` short-circuits; ES stays single-World; cm_unit green.
+- **F2d/F2f/F2g DONE + BENCHMARKED** (uncommitted): **F2d** tagged-stream logging (empty-default
+  tag ⇒ G=0 byte-identical; suppresses redundant subworld GS/PROTOCOL banners). **F2f** per-node
+  granularity — `--fd-subworlds=P` = subworlds PER NODE (`make_subworld_pool`: node-split →
+  within-node contiguous split; NUMA via launch). **F2g** VBC fanned (fan subset = FD/NuclearFD/
+  VBC; `merge_state_shards` unions vbc_states). **2026-06-30 bench (2 nodes×8, h2o β SHG, k6→k8):**
+  ref=1646s · 2 subw=809s (2.04×) · **4 subw=644s (2.56×, BEST)** · 16 subw=710s (regress);
+  **β bit-exact ≤1.1e-10 all 27 comps incl VBC.** Per-state k8 wall: 16rk=63s (over-decomposed),
+  8rk=47s (sweet spot), 1rk=126s (serial). Two-axis S×R_state confirmed; sweet spot ~4 for h2o.
+- **NEXT:** (a) **scheduler work-exposure** — SHG's 6 indep FD (3 axes × {ω,2ω}) serialized into
+  3+3 waves → starves procs; batch all independent states per wave (Raman's Nocc×3 exposes more).
+  (b) **F2e auto-selector** — cap P ≤ items/wave AND keep ranks/state ≥ spatial floor (~8). (c) size-
+  aware partition (round-robin gave 10/8/7/5 at G=4). (d) **F2c** pre-flight mem abort (high P
+  replicates φ per subworld → OOM risk on c6h6). Bigger systems = next test axis (c6h6/naphthalene).
 
 ### Cross-cutting — core-lib debug-logging tweak
 `src/madness/chem/exchangeoperator.h` + `src/madness/mra/macrotaskq.h`: moved a
