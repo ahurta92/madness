@@ -2,8 +2,38 @@
 
 **Branch:** `feat/amr-export` (this branch owns the `dump_mra_trees --amr/--htg`
 Overlapping-AMR export).
-**Depends on:** **`io-hdf5`** — pull it before implementing (see "What to pull").
-**Status:** proposal / design note. No code here yet.
+**Depends on:** **`io-hdf5`** — merged into this branch (`4f01652ab`).
+**Status:** ✅ **IMPLEMENTED + alloc-validated (2026-06-30).** The dump side is
+done; the ParaView reader is the remaining follow-up (format frozen below).
+
+## Status update (2026-06-30) — what landed
+`dump_mra_trees --coeffs` exports each function's native multiresolution
+coefficients to `<stem>.mad.h5`, reusing the io-hdf5 structured writer (no new
+serializer, per this note). Implementation: `io-hdf5` merged (`4f01652ab`), then
+`--coeffs` added (`b8c31eb86`) — `write_coeffs_hdf5()` = `f.reconstruct()` +
+`molresponse_v3::save_function_hdf5(f, stem+".mad.h5")`, threaded through the ground
+MOs and (with `--fd`) the response orbitals + ρ⁽¹⁾, alongside `--cube/--htg/--amr`.
+Needs a `-DMADNESS_ENABLE_HDF5=ON` build and **NP=1** (the structured writer asserts
+`world.size()==1` and `k³` coeffs per node — hence the reconstruct-first).
+
+On-disk `.mad.h5` (the frozen format the reader consumes): `/meta` (`k`, `thresh`,
+`cell`, `ndim`, `tree_state`, `n_nodes`, `n_coeff_nodes`); `/keys` int64
+`[n_nodes × (3+NDIM)]` = `[level, lx, ly, lz, has_children, has_coeff]` per node;
+`/coeffs` double `[n_coeff_nodes × k^NDIM]` = the scaling-coefficient tensor per leaf
+(rows align with the `has_coeff==1` rows of `/keys`).
+
+Validated on the c2h4 fixture (`cm_20260615-000740`, NP=1): writer round-trip exact
+(err 0.0); `mo_6.mad.h5` → `/keys (1721,6)`, `/coeffs (1506, 512=8³)`, and the 1506
+leaf count matches the independent `mo_6_recon.json`. Harness:
+`madness_studies/es_bench/run_coeffs_test.sh`.
+
+**Open questions — resolved for v1:** (1) reconstructed `s` only (matches the
+structured `k³`/node layout; wavelet `d`/multiscale = future io-hdf5 extension);
+(2) reuse io-hdf5's `/keys`+`/coeffs` layout (no per-level groups; no chunking yet);
+(3) reader deferred — format supports both reconstruct-to-`vtkOverlappingAMR` (start
+here, mirror `write_amr()` in `tools/dump_mra_trees.cpp`) and a true on-demand
+evaluator; (4) store `double` as-is (lossless; gzip available later via the io-hdf5
+archive path). The sections below are the original design note, kept for context.
 
 ## Why
 The `--amr` export (`be7ebc9e4` prototype, `933261a6f` VTK 9.1 build fix) writes
