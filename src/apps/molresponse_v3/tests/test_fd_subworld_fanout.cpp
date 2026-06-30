@@ -153,6 +153,15 @@ int main(int argc, char **argv) {
   }
   universe.gop.fence();
 
+  // Teardown discipline (matches test_es_build_subworld.cpp; doc 32 §2): scope
+  // every World-bound object — GroundState (MO Functions + cached operators +
+  // v_local_), the ExecutorContexts, the subworld remnants — inside this block
+  // so they ALL destruct BEFORE finalize(). A Function/operator destructing
+  // AFTER finalize() tries to lock a torn-down runtime mutex →
+  // "RecursiveMutex::lock() failed … not an initialized mutex object"
+  // (SIGABRT, rc=134), even though the A/B comparison already PASSed.
+  bool ok = false;
+  {
   const Molecule  mol  = load_molecule(archive);
   const std::string fj = fock_json_near(archive);
 
@@ -240,7 +249,7 @@ int main(int argc, char **argv) {
   const double diff      = maxabs_diff(alpha_sub, alpha_ref);
   const bool   ref_ok    = (ref_mag > 1e-6);     // reference actually produced an α
   const bool   match     = (diff < 1e-9);
-  const bool   ok        = ref_ok && match;
+  ok                     = ref_ok && match;
   if (universe.rank() == 0) {
     print("\n=== FD subworld fan-out A/B (nodes=", G, " ranks=", universe.size(),
           " thresh=", thresh, ") ===");
@@ -254,6 +263,8 @@ int main(int argc, char **argv) {
     print("\nFD_SUBWORLD_FANOUT_TEST:", ok ? "PASS" : "FAIL");
   }
   universe.gop.fence();
+  }  // World-bound objects (gs_u, ctx_*, subworld remnants) destruct here, while
+     // the runtime is still alive — see the teardown-discipline note above.
   finalize();
   return ok ? 0 : 1;
 }

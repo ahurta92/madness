@@ -173,9 +173,18 @@ The runtime-architecture thread (cross-thread board: `madness_studies/RELEASE_ST
 - **Seams:** `calc_executor.hpp` `run()` (:903; the single-group comment at :859-867 names
   this as the 15c STATE_PARALLEL design), `ExecutorContext::world` (:131), `solve_fd_protocol`
   (:254). Knob `--fd-subworlds=G` (0 = single-World reference).
-- **NEXT:** doc 32 FD impl plan (propose-diff-first) — **F1** standalone fan-out/gather
-  proof (no solver change; A/B converged α bit-identical) → **F2** gated `run()` +
-  `--fd-subworlds` + pre-flight memory abort → **F3** `weak_scale_fd.sh` + auto-selector.
+- **F1 PASS** (`test_fd_subworld_fanout`): subworld fan-out α bit-identical to single-World
+  (6.98e-12). Crash was a teardown bug (GS destructing after `finalize()`) — fixed by
+  scoping World-bound objects in a block before `finalize()`.
+- **F2a+F2b VALIDATED** (uncommitted): gated `run()` + `--fd-subworlds=G`. Live A/B on a
+  real **3-node partition** (3 dipole FD, 1 state/node) → α match **6.37e-12 vs G=0**;
+  per-group metadata shards (`response_metadata.group<gid>.json`) merged by rank 0
+  (`merge_fd_shards`). `fd_subworlds==0` byte-identical; `n_nodes==1` short-circuits;
+  ES/VBC stay single-World; cm_unit green. Seam = `SubworldSolve` fan-out closure built
+  by the orchestrator (`from_archive` per subworld); `run()` splits each wave FD-vs-rest.
+- **NEXT:** **F2c** pre-flight memory abort (`rss≈(0.93+0.031·n_occ)·k-growth` vs budget) →
+  **F2d** tagged-stream logging (doc 32 §5.6 — the per-subworld interleave) → **F2e/F3**
+  `weak_scale_fd.sh` + auto-selector. `verify_fd_state_parallel.sh` (production A/B) TODO.
 
 ### Cross-cutting — core-lib debug-logging tweak
 `src/madness/chem/exchangeoperator.h` + `src/madness/mra/macrotaskq.h`: moved a

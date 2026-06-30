@@ -126,6 +126,32 @@ Bring the diff for approval before coding. Pieces:
    Also gates the "large" regime until multi-node-per-state lands.
 5. **A/B:** `--fd-subworlds=2` vs `0`, **converged states only**, 1 and 2 nodes → α match
    (the `verify_es_batch.sh` discipline). `--es-time`-style per-state wall for the win.
+6. **Diagnostic logging discipline (state-parallel mode).** In `fd_subworlds>0`
+   each subworld is its own World with its own rank 0, so every per-state print —
+   the `FDSolver<…>` banner / `iter` lines (`fd_solver.hpp:124`) and `[SAVE]` /
+   `MEMORY_HWM` (`fd_save_load.hpp:160,170`), all gated on `world.rank()==0` —
+   emits **G interleaved, unattributed copies** on the shared stdout (observed in
+   the F1 multi-node run). **Decision (2026-06-29): tagged single stream** is the
+   default, split by line *kind*:
+   - **Global/redundant** (`GROUND_STATE_INFO`, `PROTOCOL_SET` banner): print
+     **once** on universe rank 0; subworlds suppress (identical copies).
+   - **Per-state human detail** (`FDSolver` banner, `iter`): prefix
+     `[g{gid}/{G} {host}]` — **tag, don't silence** (per-state convergence /
+     load-balance is the thing you want to see in parallel mode).
+   - **Machine-readable** (`MEMORY_HWM`, `[SAVE]`, `PROTOCOL_*`): add a
+     `group=<gid> node=<host>` **FIELD** (not a prefix). Already one emission per
+     state (each state lives in exactly one subworld), so cardinality is
+     unchanged — the field just lets the studies / perf-model parsers attribute
+     instead of double-count.
+
+   Mechanism: an **additive `group_tag` carried on the print context, EMPTY in
+   single-World mode** → the `G=0` reference path stays **byte-for-byte
+   identical** (do-not-touch). The `group=`/`node=` field on `MEMORY_HWM` touches
+   **perf-model's profile schema** (board §contracts) — pin it in
+   `docs/operator_contracts.md` and flag perf-model before landing.
+   **Per-group log files** (`logs/group<gid>.log` — the v2 subgroup pattern,
+   sibling to the §5.3 metadata shards) are **DEFERRED**: the scaling endgame for
+   large G, where the universe stream becomes a pure orchestration spine.
 
 ## 6. F3 — weak-scale sweep + auto-selector
 

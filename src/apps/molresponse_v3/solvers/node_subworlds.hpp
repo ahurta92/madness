@@ -42,6 +42,9 @@ struct NodeSubworldInfo {
   int         subworld_rank = 0;   ///< rank within this node's subworld
   int         subworld_size = 0;   ///< ranks on this node (= ranks in subworld)
   int         n_nodes       = 0;   ///< distinct hosts in the universe
+  int         node_index    = 0;   ///< position of this host in the sorted host
+                                   ///< map — the deterministic round-robin key
+                                   ///< (identical on every rank of a node)
 };
 
 /// Create one subworld per physical node (MPI_COMM_TYPE_SHARED). All ranks on
@@ -65,6 +68,12 @@ make_node_aligned_subworld(madness::World &universe,
     info->subworld_rank = subworld->rank();
     info->subworld_size = subworld->size();
     info->n_nodes       = static_cast<int>(rph.size());
+    // Node index = position of this rank's host in the sorted host map. rph is a
+    // std::map (sorted keys), so this is identical on every rank of a given node
+    // and across nodes — the deterministic round-robin partition key (doc 32 §1).
+    int idx = 0;
+    for (const auto &kv : rph) { if (kv.first == info->hostname) break; ++idx; }
+    info->node_index = idx;
   }
   return subworld;
 }

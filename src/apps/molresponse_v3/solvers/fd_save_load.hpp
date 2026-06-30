@@ -95,7 +95,13 @@ void save_fd_state(madness::World &world,
                    bool converged,
                    const std::string &seed = std::string(),
                    bool accepted = false,
-                   double wall_s = 0.0) {   // R1b: point-solve wall time
+                   double wall_s = 0.0,     // R1b: point-solve wall time
+                   const std::string &metadata_shard = std::string()) {
+  // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
+  // per-group shard (response_metadata.group<tag>.json) so concurrent node-
+  // subworlds never race the canonical file; rank 0 merges them after the fence.
+  // "" = write the canonical file (single-World path). Per-state ARCHIVES are
+  // distinct files keyed by pert/freq and always land in the shared dir.
   MADNESS_CHECK(state.responses.size() == 1);
 
   if (world.rank() == 0) {
@@ -121,8 +127,10 @@ void save_fd_state(madness::World &world,
 
   // (2) Rank-0 metadata upsert.
   if (world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(
-        dir + "/response_metadata.json");
+    const std::string meta_path =
+        dir + "/response_metadata" +
+        (metadata_shard.empty() ? "" : ".group" + metadata_shard) + ".json";
+    auto meta = ResponseMetadata::load_or_create(meta_path);
 
     // Register the protocol if this is the first artifact at this key.
     // `index` is unknown to this writer (it's a property of the caller's

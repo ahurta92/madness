@@ -51,6 +51,7 @@
 #include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
+#include "../solvers/node_subworlds.hpp"
 #include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
 #include "../solvers/vbc_save_load.hpp"
@@ -61,6 +62,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -121,6 +123,16 @@ struct ExecutorSettings {
   // gate. Off by default (strict convergence). The finest protocol in --protocol
   // is the de-facto "final" rung; its recorded bsh_residual is the verdict.
   bool              accept_at_maxiter = false;
+  // F2 (doc 32 §5): fan independent FD states out across node-aligned subworlds.
+  // 0 = single-World reference (byte-identical). >0 = requested # of subworlds;
+  // the effective count is min(requested, n_nodes), and a single node (n_nodes==1)
+  // short-circuits to the G=0 path. FD/NuclearFD only — ES/VBC stay single-World.
+  int               fd_subworlds = 0;
+  // F2 (doc 32 §5.3): when non-empty, FD metadata writes go to a per-group shard
+  // response_metadata.group<tag>.json instead of the canonical file, so concurrent
+  // subworlds never race it; universe rank 0 merges the shards after the fence.
+  // "" = write the canonical file directly (the default / single-World path).
+  std::string       metadata_shard;
 };
 
 /// Everything an FD protocol step solve needs beyond the node itself. The
@@ -397,7 +409,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
                                /*converged=*/strict || accepted,
                                /*seed=*/seed_kind, /*accepted=*/accepted,
-                               /*wall_s=*/wall_s);
+                               /*wall_s=*/wall_s,
+                               /*metadata_shard=*/ctx.metadata_shard);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -848,6 +861,7 @@ enum class SeedStrategy { NearestConverged };
 struct CalcManagerPolicy {
   SeedStrategy seed = SeedStrategy::NearestConverged;
   int          max_iters_per_step = 25;
+  int          fd_subworlds = 0;   // F2: >0 ⇒ fan FD items across node subworlds
 };
 
 // ===========================================================================
@@ -900,7 +914,16 @@ public:
   /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
   /// and pass count. Built identically on every rank (schedule() is
   /// deterministic), so the value is rank-consistent.
-  nlohmann::json run(madness::World &world, ICalcExecutor &exec) {
+  /// F2 (doc 32 §5): inner per-subworld solve — build the ground state in `sub`
+  /// from the archive, solve exactly `items` (its owned FD subset) at `thresh`,
+  /// save to disk under the `node_index` metadata shard. Supplied by the
+  /// orchestrator (which holds the archive path). Empty ⇒ the single-World path.
+  using SubworldSolve =
+      std::function<void(madness::World &sub, const std::vector<WorkItem> &items,
+                         double thresh, int node_index)>;
+
+  nlohmann::json run(madness::World &world, ICalcExecutor &exec,
+                     SubworldSolve fan_out = {}) {
     const std::vector<double> ramp = global_ramp();
     const std::string meta_path = calc_dir_ + "/response_metadata.json";
 
@@ -960,8 +983,55 @@ public:
                        "  thresh=", wthresh, "  k=", wk,
                        "  items=", (int)wave.size());
       }
-      for (const auto &item : wave)
-        exec.run_protocol(item);
+      const bool fan_enabled = fan_out && policy_.fd_subworlds > 0;
+      if (!fan_enabled) {
+        // Single-World reference path — byte-for-byte the pre-F2 behaviour
+        // (every rank solves each wave item together, in wave order).
+        for (const auto &item : wave)
+          exec.run_protocol(item);
+      } else {
+        // F2 (doc 32 §5): split the wave into the FD subset (fan-out-eligible —
+        // coupling-free, one-per-subworld) and the non-FD remainder (ES/VBC,
+        // single-World). The two sub-phases run SEQUENTIALLY on all universe
+        // ranks — never concurrently across communicators (would deadlock).
+        std::vector<WorkItem> fd_items, rest;
+        for (const auto &it : wave)
+          ((it.node->kind == CalcKind::FD || it.node->kind == CalcKind::NuclearFD)
+               ? fd_items
+               : rest)
+              .push_back(it);
+
+        if (!fd_items.empty()) {
+          NodeSubworldInfo info;
+          auto sub = make_node_aligned_subworld(world, &info);
+          const int G = info.n_nodes;
+          if (G <= 1) {
+            // Single node ⇒ no real partition (subworld == universe). Take the
+            // literal G=0 path (no redundant GS reload). doc 32 §7 degenerate.
+            sub.reset();
+            for (const auto &it : fd_items) exec.run_protocol(it);
+          } else {
+            std::vector<WorkItem> mine;   // round-robin by node index (deterministic)
+            for (size_t i = 0; i < fd_items.size(); ++i)
+              if (static_cast<int>(i) % G == info.node_index)
+                mine.push_back(fd_items[i]);
+            // S1 pmap discipline: point the default pmap at the subworld so
+            // everything built inside is subworld-local; restore BEFORE reset.
+            madness::FunctionDefaults<3>::set_default_pmap(*sub);
+            fan_out(*sub, mine, wthresh, info.node_index);
+            sub->gop.fence();
+            madness::FunctionDefaults<3>::set_default_pmap(world);
+            sub.reset();
+          }
+          world.gop.fence();
+          // F2b: collapse the per-group FD metadata shards into the canonical
+          // file (universe rank 0; through the metadata layer). Only if sharded.
+          if (world.rank() == 0 && G > 1)
+            ResponseMetadata::merge_fd_shards(calc_dir_, G);
+          world.gop.fence();
+        }
+        for (const auto &it : rest) exec.run_protocol(it);   // ES/VBC: universe
+      }
       world.gop.fence();
       if (world.rank() == 0)
         madness::print("PROTOCOL_DONE  pass=", pass, "  protocol_index=", pidx,
