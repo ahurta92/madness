@@ -1200,68 +1200,91 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
     madness::print("=== polarizability (alpha) assembly  protocol_key=", key,
                    " ===");
 
+  const int k_now = madness::FunctionDefaults<3>::get_k();
+
   for (double w : fr) {
     Tensor<double> alpha(static_cast<long>(ax.size()),
                          static_cast<long>(ax.size()));
-    bool complete = true;
-    for (size_t i = 0; i < ax.size() && complete; ++i) {
-      // STRICT dconv gate: assemble a channel ONLY from an FD state that genuinely
-      // converged to the requested accuracy at THIS protocol. Never fall back to a
-      // coarser/partial state — that would report a property below the requested
-      // dconv and, if the fallback is coarser-k, crash inner() on a k-mismatch.
-      // `accepted` = `converged` forced true at maxiter (not a real dconv hit), so
-      // it is excluded too. Rank 0 reads the verdict; the broadcast keeps the
-      // collective load path below in lockstep across ranks.
-      int converged_int = 0;
+    // Per-ROW accuracy: the honest verdict of the state that built each direction
+    // row — tied to the SOURCE protocol it came from, NOT the reprojection k below.
+    std::vector<std::string> src_key (ax.size());
+    std::vector<int>         row_conv(ax.size(), 0);   // converged AND not accepted@maxiter
+    std::vector<int>         row_acc (ax.size(), 0);   // accepted@maxiter (converged forced true)
+    std::vector<double>      row_res (ax.size(), 0.0); // bsh residual at the source
+    bool present = true;   // does every channel have SOME usable (non-diverged) state?
+
+    for (size_t i = 0; i < ax.size() && present; ++i) {
+      const std::string chan = Perturbation::dipole(ax[i]).description();
+      const std::string fkey = ResponseMetadata::freq_key(w);
+      // Pick the SAME source the loader will use (shared best-usable helper) and
+      // read its honest accuracy, so the reported accuracy matches the state that
+      // actually builds the row. Rank 0 decides; broadcasts keep the collective
+      // load + reproject below in lockstep across ranks.
+      std::string sk; int cv = 0, ac = 0; double rs = 0.0;
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
             ctx.calc_dir + "/response_metadata.json");
-        const auto &j = meta.json();
-        const std::string chan = Perturbation::dipole(ax[i]).description();
-        const std::string fkey = ResponseMetadata::freq_key(w);
-        if (j.contains("fd_states") && j["fd_states"].contains(chan) &&
-            j["fd_states"][chan].contains(key) &&
-            j["fd_states"][chan][key].contains(fkey)) {
-          const auto &e = j["fd_states"][chan][key][fkey];
-          converged_int =
-              (e.value("converged", false) && !e.value("accepted", false)) ? 1 : 0;
+        sk = best_usable_fd_source_key(meta.json(), chan, fkey, thresh, k_now, key);
+        if (!sk.empty()) {
+          const auto &e = meta.json()["fd_states"][chan][sk][fkey];
+          ac = e.value("accepted",  false) ? 1 : 0;
+          cv = (e.value("converged", false) && !ac) ? 1 : 0;
+          rs = e.value("bsh_residual", 0.0);
         }
       }
-      world.gop.broadcast(converged_int, 0);
-      if (!converged_int) {
+      world.gop.broadcast_serializable(sk, 0);
+      world.gop.broadcast(cv, 0);
+      world.gop.broadcast(ac, 0);
+      world.gop.broadcast(rs, 0);
+
+      if (sk.empty()) {   // no usable state at all -> cannot form this row
         if (world.rank() == 0)
-          madness::print("[ALPHA] skip omega=", w, " — dipole_",
-                         beta_axis_name(ax[i]),
-                         " not converged to dconv at requested protocol ", key,
-                         " (climb/tune to reach it)");
-        complete = false;
+          madness::print("[ALPHA] omega=", w, " dir=", beta_axis_name(ax[i]),
+                         " — no usable FD state; tensor not assembled");
+        present = false;
         break;
       }
+      src_key[i] = sk; row_conv[i] = cv; row_acc[i] = ac; row_res[i] = rs;
+
       auto Xi = detail_exec::load_fd_as_xy<ClosedShell>(
           world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
-      if (!Xi) {
-        if (world.rank() == 0)
-          madness::print("[ALPHA] skip omega=", w, " — missing FD dipole_",
-                         beta_axis_name(ax[i]));
-        complete = false;
-        break;
-      }
-      for (size_t j = 0; j < ax.size(); ++j) {
-        const double aij =
+      if (!Xi) { present = false; break; }   // metadata usable but archive gone
+
+      // k-CONSISTENCY (the real fix): reproject the loaded state to the common
+      // assembly (k, thresh) so inner() is well-defined no matter which protocol
+      // the source came from. Reprojecting a coarser state UP makes it
+      // representable at k_now but adds NO accuracy — the per-row verdict recorded
+      // above stays tied to the source protocol, not k_now.
+      for (auto &fn : Xi->x_alpha) fn = madness::project(fn, k_now, thresh);
+      for (auto &fn : Xi->y_alpha) fn = madness::project(fn, k_now, thresh);
+
+      for (size_t j = 0; j < ax.size(); ++j)
+        alpha(static_cast<long>(i), static_cast<long>(j)) =
             -2.0 * (inner(Xi->x_alpha, v[ax[j]]) + inner(Xi->y_alpha, v[ax[j]]));
-        alpha(static_cast<long>(i), static_cast<long>(j)) = aij;
-      }
     }
-    if (!complete) continue;
+    if (!present) continue;   // a whole direction had NO usable state at all
+
+    bool all_conv = true; double max_res = 0.0;
+    for (size_t i = 0; i < ax.size(); ++i) {
+      all_conv = all_conv && (row_conv[i] != 0);
+      if (row_res[i] > max_res) max_res = row_res[i];
+    }
 
     if (world.rank() == 0) {
       madness::print("[ALPHA] omega=", w, "  directions=",
-                     [&]{ std::string d; for (int a : ax) d += beta_axis_name(a); return d; }());
-      for (size_t i = 0; i < ax.size(); ++i)
+                     [&]{ std::string d; for (int a : ax) d += beta_axis_name(a); return d; }(),
+                     "  converged=", all_conv, "  max_bsh_res=", max_res);
+      for (size_t i = 0; i < ax.size(); ++i) {
+        madness::print("[ALPHA]  row dir=", beta_axis_name(ax[i]),
+                       " source_protocol=", src_key[i],
+                       " converged=", (row_conv[i] != 0),
+                       (row_acc[i] ? " (ACCEPTED@maxiter)" : ""),
+                       " bsh_res=", row_res[i]);
         for (size_t j = 0; j < ax.size(); ++j)
           madness::print("[ALPHA]  alpha_", beta_axis_name(ax[i]),
                          beta_axis_name(ax[j]), " (omega=", w, ") =",
                          alpha(static_cast<long>(i), static_cast<long>(j)));
+      }
       madness::print("[ALPHA] tensor(omega=", w, ") =\n", alpha);
 
       auto meta = ResponseMetadata::load_or_create(
@@ -1278,6 +1301,19 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         mat.push_back(r);
       }
       row["alpha"] = mat;
+      // Per-row accuracy (honest: reflects each row's SOURCE protocol, not k_now).
+      nlohmann::json racc = nlohmann::json::array();
+      for (size_t i = 0; i < ax.size(); ++i) {
+        std::string dname; dname += beta_axis_name(ax[i]);
+        racc.push_back({{"direction", dname},
+                        {"source_protocol_key", src_key[i]},
+                        {"converged", row_conv[i] != 0},
+                        {"accepted",  row_acc[i]  != 0},
+                        {"bsh_residual", row_res[i]}});
+      }
+      row["row_accuracy"]     = racc;
+      row["converged"]        = all_conv;    // tensor-level: every row met dconv
+      row["max_bsh_residual"] = max_res;
       meta.add_property("alpha", key, row);
       meta.save();
     }
