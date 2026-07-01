@@ -88,9 +88,15 @@ Inc-1 + Inc-2 **LANDED + VALIDATED** (`ad60c2673`). The `--fd-tensor` gate assem
 `ResponseGroundState::g0_alpha`) instead of the per-op `compute_V0x/compute_gamma`;
 gate 0 (per-op reference) is untouched. Converged-α A/B vs the reference = rel 5.3e-6
 (h2o, Static+Full, climb→1e-6/k8; `es_bench/fd_tensor_compare.py`). `exchange_ctx`
-shape pinned in `operator_contracts.md` ("Tensor-layer exchange"). NEXT = Inc-3
-(doc 33: fuse Tx+Ty / tile `build_pair_tensor` / perf `PROFILE_BLOCK` meters →
-WorldProfile / batch-over-states). Cross-thread status on the release board.
+shape pinned in `operator_contracts.md` ("Tensor-layer exchange"). **Inc-3a/3b/3d
+LANDED** (`ab0eb2ce1`/`d7f07c29d`/`9ef1004c0`): 3a fuses Tx+Ty into one Poisson wave;
+3b tiles `build_pair_tensor` over the φ-row index (`--fd-tensor-tile=N`,
+`ConvergencePolicy.exchange_tile`, default 0=off) to bound the n² peak; 3d adds coarse
+`rs_ext_*` `PROFILE_BLOCK` meters (no-op unless `ENABLE_WORLD_PROFILE`) into
+perf-model's WorldProfile. All bit-identical (`test_exchange_ctx`: Full 1.46e-6/1.61e-6;
+tile=2 vs 0 → 6e-15; meters zero-effect). NEXT = **3c** batch-over-states
+(`compute_gamma_flat`, ES/VBC/multi-channel — cross-thread w/ parallel-runtime; the
+M=1 FD path has no state-batch win). Cross-thread status on the release board.
 
 ---
 
