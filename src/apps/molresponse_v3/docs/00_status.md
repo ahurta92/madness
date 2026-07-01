@@ -82,6 +82,16 @@ Workflow + build/run/validate harness: `cm.sh` in
 `/gpfs/scratch/ahurtado/madness_es_bench/` (its `README.md` is the command
 catalog). Run on a compute node via the `run-on-allocation` skill.
 
+**Exchange branch (`exchange`, 2026-07-01):** FD exchange **tensor layer** (doc 28)
+Inc-1 + Inc-2 **LANDED + VALIDATED** (`ad60c2673`). The `--fd-tensor` gate assembles
+θ from shared Tx/g₀ convolution tensors (g₀ cached per protocol on
+`ResponseGroundState::g0_alpha`) instead of the per-op `compute_V0x/compute_gamma`;
+gate 0 (per-op reference) is untouched. Converged-α A/B vs the reference = rel 5.3e-6
+(h2o, Static+Full, climb→1e-6/k8; `es_bench/fd_tensor_compare.py`). `exchange_ctx`
+shape pinned in `operator_contracts.md` ("Tensor-layer exchange"). NEXT = Inc-3
+(doc 33: fuse Tx+Ty / tile `build_pair_tensor` / perf `PROFILE_BLOCK` meters →
+WorldProfile / batch-over-states). Cross-thread status on the release board.
+
 ---
 
 ## Active workstreams
