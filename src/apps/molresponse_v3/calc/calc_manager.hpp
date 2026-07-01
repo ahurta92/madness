@@ -395,8 +395,19 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
 ///   else present, not converged, not diverged    -> Resume
 ///   else present, diverged                        -> Fresh
 ///   else absent                                   -> Fresh
+///
+/// HONEST-CLIMB refinement (FD family, active when max_iters > 0): a rung whose
+/// last attempt already used >= max_iters iterations without diverging is DONE
+/// for this rung -> Skip. The ladder is a guess-refinement scheme: the coarse
+/// rung's job is to produce the best seed for the next rung (which Restart-seeds
+/// from it and projects up), NOT to block the climb. `converged` stays honestly
+/// false — the property layer's per-row accuracy carries the verdict, and the
+/// consumer (cm_record/cm_check) applies the dconv policy. Re-running with a
+/// LARGER --maxiter turns the same entry back into Resume (iter < max_iters), so
+/// "continue iterating" is still available. max_iters == 0 = legacy strict
+/// behavior (Resume forever; run() then halts on no-progress).
 NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
-                          double thresh) {
+                          double thresh, int max_iters = 0) {
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
 
@@ -427,8 +438,12 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
   const std::string fkey = ResponseMetadata::freq_key(node.freq);
   if (const auto *e = detail_calc::fd_entry(meta, pert, key, fkey)) {
     if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
-    return detail_calc::entry_diverged(*e) ? NodeAction::Fresh
-                                           : NodeAction::Resume;
+    if (detail_calc::entry_diverged(*e))  return NodeAction::Fresh;
+    // Honest-climb: budget exhausted at this rung -> done here, climb (see
+    // the doc block above). `iter` is the last attempt's count (save-side).
+    if (max_iters > 0 && e->value("iter", 0) >= max_iters)
+      return NodeAction::Skip;
+    return NodeAction::Resume;
   }
   // No exact entry: a coarser-or-equal NON-diverged snapshot (converged OR a
   // partial) is a usable restart seed — a coarse partial need not be converged
@@ -509,7 +524,7 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 std::vector<std::vector<WorkItem>>
 schedule(const std::vector<CalcNode> &dag,
          const std::vector<double> &global_ramp,
-         const nlohmann::json &meta) {
+         const nlohmann::json &meta, int max_iters = 0) {
   using detail_calc::ramp_contains;
   std::vector<std::vector<WorkItem>> waves;
 
@@ -526,7 +541,7 @@ schedule(const std::vector<CalcNode> &dag,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
     if (!prerequisites_converged(*n, dag, meta, thresh))   return false;
-    const NodeAction a = reconcile_protocol(*n, meta, thresh);
+    const NodeAction a = reconcile_protocol(*n, meta, thresh, max_iters);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};
     return true;
