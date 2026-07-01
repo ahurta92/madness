@@ -416,7 +416,8 @@ namespace madness {
     static void json_write_profile(World& world,
                                    const std::vector<WorldProfileEntry>& v,
                                    double total_cpu_s, double total_wall_s,
-                                   double overhead, const std::string& path) {
+                                   double overhead, const std::string& path,
+                                   const std::string& context_json) {
         std::ofstream o(path);
         if (!o) return;
         o.setf(std::ios::scientific);
@@ -425,7 +426,7 @@ namespace madness {
           << ",\"total_cpu_s\":" << total_cpu_s
           << ",\"total_wall_s\":" << total_wall_s
           << ",\"overhead_s_per_call\":" << json_finite(overhead)
-          << ",\"context\":null,\"phases\":[";
+          << ",\"context\":" << context_json << ",\"phases\":[";
         for (unsigned int i=0; i<v.size(); ++i) {
             const WorldProfileEntry& e = v[i];
             o << (i ? "," : "") << "{\"name\":\"";
@@ -448,7 +449,8 @@ namespace madness {
     }
 #endif
 
-    void WorldProfile::dump_json(World& world, const std::string& path) {
+    void WorldProfile::dump_json(World& world, const std::string& path,
+                                 const std::string& context_json) {
 #ifdef WORLD_PROFILE_ENABLE
         for (int i=0; i<100; ++i) est_profile_overhead();   // populate overhead entry
 
@@ -471,12 +473,13 @@ namespace madness {
             json_write_profile(world, nv,
                                madness::cpu_time()  - WorldProfile::cpu_start,
                                madness::wall_time() - WorldProfile::wall_start,
-                               overhead, path);
+                               overhead, path, context_json);
         }
         world.gop.fence();
 #else
         (void) world;
         (void) path;
+        (void) context_json;
 #endif
     }
 

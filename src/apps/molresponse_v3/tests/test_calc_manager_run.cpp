@@ -38,6 +38,7 @@
 #include <fstream>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -529,9 +530,16 @@ int main(int argc, char **argv) {
   }
   // perf-model (doc 29): emit the per-phase profile when asked. COLLECTIVE (all
   // ranks); world is valid until finalize(). No-op unless built with
-  // -DENABLE_WORLD_PROFILE=ON AND env MADQC_PROFILE_JSON is set.
-  if (const char *pj = std::getenv("MADQC_PROFILE_JSON"))
-    WorldProfile::dump_json(world, pj);
+  // -DENABLE_WORLD_PROFILE=ON AND env MADQC_PROFILE_JSON is set. The context
+  // records run-time facts the offline fit cannot recover (n_threads is the
+  // wall divisor for cpu->wall; k/thresh pin the shape).
+  if (const char *pj = std::getenv("MADQC_PROFILE_JSON")) {
+    std::ostringstream ctx;
+    ctx << "{\"n_threads\":" << (ThreadPool::size() + 1)
+        << ",\"k\":" << FunctionDefaults<3>::get_k()
+        << ",\"thresh\":" << FunctionDefaults<3>::get_thresh() << "}";
+    WorldProfile::dump_json(world, pj, ctx.str());
+  }
   finalize();
   return rc;
 }
