@@ -240,7 +240,8 @@ public:
     if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
                   std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
       if (policy_.exchange_tensor && target_.gs.g0_alpha.empty())
-        target_.gs.g0_alpha = exch::build_g0(world_, target_.gs, thr * 0.1);
+        target_.gs.g0_alpha =
+            exch::build_g0(world_, target_.gs, thr * 0.1, policy_.exchange_tile);
     }
 
     for (int r = 0; r < M; ++r) {
@@ -261,7 +262,8 @@ public:
                     std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
         if (policy_.exchange_tensor) {
           theta = exch::assemble_theta_tensor(world_, target_.gs,
-                                              in.responses[r], rho);
+                                              in.responses[r], rho,
+                                              policy_.exchange_tile);
           tensor_done = true;
         }
       }

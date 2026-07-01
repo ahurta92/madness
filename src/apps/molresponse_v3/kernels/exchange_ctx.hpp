@@ -32,6 +32,7 @@
 #include <madness/mra/mra.h>
 #include <madness/mra/vmra.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -39,37 +40,47 @@ namespace exch {
 
 using vecfuncT = std::vector<madness::real_function_3d>;
 
-/// Build several pair-density tensors sharing ONE Poisson wave: for each c in
-/// `cs`, T = Poisson(b_i · c_k) (length nb*|c|, row-major [i*|c|+k]). The product
-/// bundles for all cs are concatenated, truncated, convolved in a SINGLE apply,
-/// then split back — fewer fences + better taskq load-balance than one
-/// build_pair_tensor per c. Bit-identical to per-c calls: truncate() and apply()
-/// act per-function, so concatenation changes neither the truncation nor the
-/// convolution of any individual function (Inc-3a; doc 33 §2).
+/// Build several pair-density tensors sharing Poisson waves: for each c in `cs`,
+/// T = Poisson(b_i · c_k) (length nb*|c|, row-major [i*|c|+k]). Products for all cs
+/// are fused into one apply per row-block (Inc-3a). `tile` (Inc-3b) blocks the
+/// φ-row (b) index: tile<=0 or >=nb → ONE block = the single fused wave (peak
+/// ~nb·Σ|c| functions); tile=T → ceil(nb/T) blocks, peak ~T·Σ|c|, at the cost of
+/// more waves (memory ↔ fences trade). Bit-identical across any tile: truncate()
+/// and apply() act per-function, so blocking changes neither the truncation nor
+/// the convolution of any individual function, and each result lands at the same
+/// [i*|c|+k] slot (doc 33 §2, Inc-3a/3b).
 inline std::vector<vecfuncT>
 build_pair_tensors(madness::World &world, const poperatorT &coulop,
                    const vecfuncT &b, const std::vector<const vecfuncT *> &cs,
-                   double vtol) {
-  vecfuncT prod;
-  std::vector<std::size_t> lens;
-  lens.reserve(cs.size());
-  for (const auto *c : cs) {
-    const std::size_t n0 = prod.size();
-    for (const auto &bi : b) {
-      auto pi = mul_sparse(world, bi, *c, vtol);   // bi · c_k for all k
-      prod.insert(prod.end(), pi.begin(), pi.end());
+                   double vtol, int tile = 0) {
+  const std::size_t nb = b.size();
+  std::vector<vecfuncT> out(cs.size());
+  for (std::size_t ci = 0; ci < cs.size(); ++ci)
+    out[ci] = vecfuncT(nb * cs[ci]->size());
+  const std::size_t step =
+      (tile > 0 && static_cast<std::size_t>(tile) < nb) ? static_cast<std::size_t>(tile) : nb;
+  for (std::size_t i0 = 0; i0 < nb; i0 += step) {
+    const std::size_t i1 = std::min(i0 + step, nb);
+    vecfuncT prod;
+    std::vector<std::size_t> seg_ci, seg_dest;   // per product-run: output idx, dest offset
+    for (std::size_t ci = 0; ci < cs.size(); ++ci) {
+      const std::size_t nc = cs[ci]->size();
+      for (std::size_t i = i0; i < i1; ++i) {
+        auto pi = mul_sparse(world, b[i], *cs[ci], vtol);   // b_i · c_k for all k
+        prod.insert(prod.end(), pi.begin(), pi.end());
+        seg_ci.push_back(ci);
+        seg_dest.push_back(i * nc);
+      }
     }
-    lens.push_back(prod.size() - n0);
-  }
-  madness::truncate(world, prod, vtol);
-  auto T = madness::apply(world, *coulop, prod);   // Poisson over ALL cs, ONE wave
-  madness::truncate(world, T, vtol);
-  std::vector<vecfuncT> out;
-  out.reserve(cs.size());
-  std::size_t off = 0;
-  for (const auto len : lens) {
-    out.emplace_back(T.begin() + off, T.begin() + off + len);
-    off += len;
+    madness::truncate(world, prod, vtol);
+    auto T = madness::apply(world, *coulop, prod);   // Poisson over this row-block, ONE wave
+    madness::truncate(world, T, vtol);
+    std::size_t off = 0;
+    for (std::size_t s = 0; s < seg_ci.size(); ++s) {
+      const std::size_t nc = cs[seg_ci[s]]->size();
+      for (std::size_t k = 0; k < nc; ++k) out[seg_ci[s]][seg_dest[s] + k] = T[off + k];
+      off += nc;
+    }
   }
   return out;
 }
@@ -77,8 +88,8 @@ build_pair_tensors(madness::World &world, const poperatorT &coulop,
 /// Pair-density convolution tensor T[i*nc+k] = Poisson(b_i · c_k), |b|=nb, |c|=nc.
 inline vecfuncT
 build_pair_tensor(madness::World &world, const poperatorT &coulop,
-                  const vecfuncT &b, const vecfuncT &c, double vtol) {
-  return build_pair_tensors(world, coulop, b, {&c}, vtol)[0];
+                  const vecfuncT &b, const vecfuncT &c, double vtol, int tile = 0) {
+  return build_pair_tensors(world, coulop, b, {&c}, vtol, tile)[0];
 }
 
 /// out_k = Σ_i a_i · T[i*stride + k]   (column contraction; |a|=na, |out|=stride).
@@ -111,8 +122,9 @@ contract_row(madness::World &world, const vecfuncT &a, const vecfuncT &T,
 /// g0[i*n+k] = Poisson(φ_i·φ_k). Built once per protocol (φ fixed); Inc 2 caches
 /// it on ResponseGroundState. Standalone callers build it here.
 inline vecfuncT
-build_g0(madness::World &world, const ResponseGroundState &gs, double vtol) {
-  return build_pair_tensor(world, gs.coulop, gs.amo, gs.amo, vtol);
+build_g0(madness::World &world, const ResponseGroundState &gs, double vtol,
+         int tile = 0) {
+  return build_pair_tensor(world, gs.coulop, gs.amo, gs.amo, vtol, tile);
 }
 
 // ---- per-response Class-2 context ---------------------------------------
@@ -126,10 +138,11 @@ struct ResponseExchangeCtx {
 inline ResponseExchangeCtx
 build_ctx_static_cs(madness::World &world, const ResponseGroundState &gs,
                     const ResponseStateX<ClosedShell> &state,
-                    const madness::real_function_3d &rho, double vtol) {
+                    const madness::real_function_3d &rho, double vtol,
+                    int tile = 0) {
   ResponseExchangeCtx ctx;
   ctx.J  = madness::apply(*gs.coulop, rho);
-  ctx.Tx = build_pair_tensor(world, gs.coulop, gs.amo, state.x_alpha, vtol);
+  ctx.Tx = build_pair_tensor(world, gs.coulop, gs.amo, state.x_alpha, vtol, tile);
   return ctx;
 }
 
@@ -174,13 +187,14 @@ assemble_theta_static_cs(madness::World &world, const ResponseGroundState &gs,
 inline ResponseExchangeCtx
 build_ctx_full_cs(madness::World &world, const ResponseGroundState &gs,
                   const ResponseStateXY<ClosedShell> &state,
-                  const madness::real_function_3d &rho, double vtol) {
+                  const madness::real_function_3d &rho, double vtol,
+                  int tile = 0) {
   ResponseExchangeCtx ctx;
   ctx.J  = madness::apply(*gs.coulop, rho);
-  // Inc-3a: build Tx and Ty in ONE fused Poisson wave (was two build_pair_tensor
-  // calls = two waves). Bit-identical; fewer fences + better taskq balance.
+  // Inc-3a: build Tx and Ty fused (was two build_pair_tensor calls = two waves);
+  // Inc-3b: `tile` blocks the φ-row index to bound the n² peak. Bit-identical.
   auto Ts = build_pair_tensors(world, gs.coulop, gs.amo,
-                               {&state.x_alpha, &state.y_alpha}, vtol);
+                               {&state.x_alpha, &state.y_alpha}, vtol, tile);
   ctx.Tx = std::move(Ts[0]);
   ctx.Ty = std::move(Ts[1]);
   return ctx;
@@ -258,26 +272,26 @@ assemble_theta_full_cs(madness::World &world, const ResponseGroundState &gs,
 inline ResponseStateX<ClosedShell>
 assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
                       const ResponseStateX<ClosedShell> &state,
-                      const madness::real_function_3d &rho) {
+                      const madness::real_function_3d &rho, int tile = 0) {
   const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
   // g0 is φ-only → use the per-protocol cache (Inc 2); build per-call only if cold
   // (standalone callers, e.g. test_exchange_ctx, leave gs.g0_alpha empty).
   vecfuncT g0_local;
-  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol);
+  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol, tile);
   const vecfuncT &g0 = gs.g0_alpha.empty() ? g0_local : gs.g0_alpha;
-  auto ctx = build_ctx_static_cs(world, gs, state, rho, vtol);
+  auto ctx = build_ctx_static_cs(world, gs, state, rho, vtol, tile);
   return assemble_theta_static_cs(world, gs, state, g0, ctx);
 }
 inline ResponseStateXY<ClosedShell>
 assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
                       const ResponseStateXY<ClosedShell> &state,
-                      const madness::real_function_3d &rho) {
+                      const madness::real_function_3d &rho, int tile = 0) {
   const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
   // g0 is φ-only → use the per-protocol cache (Inc 2); build per-call only if cold.
   vecfuncT g0_local;
-  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol);
+  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol, tile);
   const vecfuncT &g0 = gs.g0_alpha.empty() ? g0_local : gs.g0_alpha;
-  auto ctx = build_ctx_full_cs(world, gs, state, rho, vtol);
+  auto ctx = build_ctx_full_cs(world, gs, state, rho, vtol, tile);
   return assemble_theta_full_cs(world, gs, state, g0, ctx);
 }
 

@@ -161,6 +161,11 @@ int main(int argc, char **argv) {
       // --fd-tensor: gate the FD theta build onto the tensor-exchange layer
       // (exch::; ClosedShell Static/Full only). Default off = per-op reference.
       if (parser.key_exists("fd-tensor")) policy.exchange_tensor = true;
+      // --fd-tensor-tile=N: block the tensor-exchange Tx/Ty/g0 builds over the
+      // φ-row index to bound the n² memory peak (doc 33 Inc-3b). 0 = no tiling
+      // (default). Bit-identical to tile 0. Only meaningful with --fd-tensor.
+      if (parser.key_exists("fd-tensor-tile"))
+        policy.exchange_tile = std::stoi(parser.value("fd-tensor-tile"));
       // --explosion-guard=VAL caps the diverging-residual bail-out;
       // --no-explosion- guard disables it (test whether the guard just fires
       // early for stiff nuclear-displacement FD states).
@@ -320,6 +325,8 @@ int main(int argc, char **argv) {
               " dconv=", policy.dconv_user);
         print("  accept_at_maxiter =",
               (parser.key_exists("accept-at-maxiter") ? "ON" : "off"));
+        print("  fd_tensor  =", (policy.exchange_tensor ? "ON" : "off"),
+              "  tile =", policy.exchange_tile);
       }
 
       // ---- Analyze-only: load a converged ES bundle + print the report ----

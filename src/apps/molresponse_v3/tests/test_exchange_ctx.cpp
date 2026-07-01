@@ -18,6 +18,7 @@
 #include <madness/mra/vmra.h>
 #include <madness/world/MADworld.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
@@ -77,7 +78,7 @@ int main(int argc, char **argv) {
   // destroyed BEFORE finalize(). gs.Qa (a QProjector) holds orbital copies; if
   // gs leaves main-scope AFTER finalize(), those Function dtors throw inside a
   // destructor -> std::terminate -> SIGABRT (the rc=134 seen right after PASS).
-  bool ok_static = false, ok_full = false;
+  bool ok_static = false, ok_full = false, ok_tile = false;
   {
   FunctionDefaults<3>::set_k(8);
   FunctionDefaults<3>::set_thresh(1e-5);
@@ -173,9 +174,34 @@ int main(int argc, char **argv) {
     print("\nEXCHANGE_CTX_FULL_TEST:", ok_full ? "PASS" : "FAIL");
   }
 
+  // ===== Inc-3b: tiling the pair-tensor build must be BIT-IDENTICAL to untiled.
+  // Same products, per-function truncate/apply, same [i*nc+k] slots → only the
+  // blocking differs. Build {Tx,Ty} untiled (tile=0) vs tiled (tile=2) and require
+  // an exact match (round-off only). =====
+  {
+    auto Ts0 = exch::build_pair_tensors(universe, gs.coulop, gs.amo,
+                                        {&state.x_alpha, &fstate.y_alpha}, vtol, 0);
+    auto Tst = exch::build_pair_tensors(universe, gs.coulop, gs.amo,
+                                        {&state.x_alpha, &fstate.y_alpha}, vtol, 2);
+    universe.gop.fence();
+    double tile_max = 0.0;
+    for (std::size_t t = 0; t < Ts0.size(); ++t)
+      for (std::size_t p = 0; p < Ts0[t].size(); ++p) {
+        auto d = Ts0[t][p] - Tst[t][p];
+        tile_max = std::max(tile_max, d.norm2());
+      }
+    ok_tile = (tile_max < 1e-12);
+    if (universe.rank() == 0) {
+      print("\n=== Inc-3b tiling bit-identity (build_pair_tensors tile=2 vs tile=0, "
+            "n_occ=", n_occ, ") ===");
+      print("  max ||T_tiled − T_untiled|| =", tile_max, " (tol 1e-12; expect ~0)");
+      print("\nEXCHANGE_CTX_TILE_TEST:", ok_tile ? "PASS" : "FAIL");
+    }
+  }
+
   universe.gop.fence();
   }  // gs/state/theta_ref/theta_new/ctx/g0/rho destroyed here, before finalize()
 
   finalize();
-  return (ok_static && ok_full) ? 0 : 1;
+  return (ok_static && ok_full && ok_tile) ? 0 : 1;
 }
