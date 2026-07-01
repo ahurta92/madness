@@ -39,20 +39,46 @@ namespace exch {
 
 using vecfuncT = std::vector<madness::real_function_3d>;
 
+/// Build several pair-density tensors sharing ONE Poisson wave: for each c in
+/// `cs`, T = Poisson(b_i · c_k) (length nb*|c|, row-major [i*|c|+k]). The product
+/// bundles for all cs are concatenated, truncated, convolved in a SINGLE apply,
+/// then split back — fewer fences + better taskq load-balance than one
+/// build_pair_tensor per c. Bit-identical to per-c calls: truncate() and apply()
+/// act per-function, so concatenation changes neither the truncation nor the
+/// convolution of any individual function (Inc-3a; doc 33 §2).
+inline std::vector<vecfuncT>
+build_pair_tensors(madness::World &world, const poperatorT &coulop,
+                   const vecfuncT &b, const std::vector<const vecfuncT *> &cs,
+                   double vtol) {
+  vecfuncT prod;
+  std::vector<std::size_t> lens;
+  lens.reserve(cs.size());
+  for (const auto *c : cs) {
+    const std::size_t n0 = prod.size();
+    for (const auto &bi : b) {
+      auto pi = mul_sparse(world, bi, *c, vtol);   // bi · c_k for all k
+      prod.insert(prod.end(), pi.begin(), pi.end());
+    }
+    lens.push_back(prod.size() - n0);
+  }
+  madness::truncate(world, prod, vtol);
+  auto T = madness::apply(world, *coulop, prod);   // Poisson over ALL cs, ONE wave
+  madness::truncate(world, T, vtol);
+  std::vector<vecfuncT> out;
+  out.reserve(cs.size());
+  std::size_t off = 0;
+  for (const auto len : lens) {
+    out.emplace_back(T.begin() + off, T.begin() + off + len);
+    off += len;
+  }
+  return out;
+}
+
 /// Pair-density convolution tensor T[i*nc+k] = Poisson(b_i · c_k), |b|=nb, |c|=nc.
 inline vecfuncT
 build_pair_tensor(madness::World &world, const poperatorT &coulop,
                   const vecfuncT &b, const vecfuncT &c, double vtol) {
-  vecfuncT prod;
-  prod.reserve(b.size() * c.size());
-  for (const auto &bi : b) {
-    auto pi = mul_sparse(world, bi, c, vtol);     // bi · c_k for all k
-    prod.insert(prod.end(), pi.begin(), pi.end());
-  }
-  madness::truncate(world, prod, vtol);
-  auto T = madness::apply(world, *coulop, prod);  // Poisson over the whole bundle, ONE wave
-  madness::truncate(world, T, vtol);
-  return T;   // length nb*nc, row-major [i*nc+k]
+  return build_pair_tensors(world, coulop, b, {&c}, vtol)[0];
 }
 
 /// out_k = Σ_i a_i · T[i*stride + k]   (column contraction; |a|=na, |out|=stride).
@@ -151,8 +177,12 @@ build_ctx_full_cs(madness::World &world, const ResponseGroundState &gs,
                   const madness::real_function_3d &rho, double vtol) {
   ResponseExchangeCtx ctx;
   ctx.J  = madness::apply(*gs.coulop, rho);
-  ctx.Tx = build_pair_tensor(world, gs.coulop, gs.amo, state.x_alpha, vtol);
-  ctx.Ty = build_pair_tensor(world, gs.coulop, gs.amo, state.y_alpha, vtol);
+  // Inc-3a: build Tx and Ty in ONE fused Poisson wave (was two build_pair_tensor
+  // calls = two waves). Bit-identical; fewer fences + better taskq balance.
+  auto Ts = build_pair_tensors(world, gs.coulop, gs.amo,
+                               {&state.x_alpha, &state.y_alpha}, vtol);
+  ctx.Tx = std::move(Ts[0]);
+  ctx.Ty = std::move(Ts[1]);
   return ctx;
 }
 
