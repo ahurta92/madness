@@ -113,13 +113,15 @@ struct ExecutorSettings {
   std::string       es_warmup_cache_dir;
   // Best-effort acceptance at maxiter (FD nodes). When true, a non-diverged FD
   // solve that exhausts max_iters WITHOUT meeting the strict target is recorded
-  // converged (with an `accepted` marker + its real residual) instead of stalling.
-  // This lets a stiff channel (e.g. the cusped nuclear-displacement Raman FD)
-  // CLIMB the protocol ladder — a not-converged rung otherwise stays `Resume`,
-  // the wave signature repeats, and run() halts on "no progress" before reaching
-  // the finest protocol — and unblocks the downstream VBC/property prerequisite
-  // gate. Off by default (strict convergence). The finest protocol in --protocol
-  // is the de-facto "final" rung; its recorded bsh_residual is the verdict.
+  // converged (with an `accepted` marker + its real residual). NOTE: ladder
+  // CLIMBING no longer needs this — reconcile's honest-climb rule (a budget-
+  // exhausted rung Skips forward with `converged` honestly false; see
+  // calc_manager.hpp reconcile_protocol) is the default. This flag's remaining
+  // purpose is to FORCE `converged=true` so the downstream VBC/property
+  // prerequisite gates unblock on a stubborn channel (e.g. the cusped
+  // nuclear-displacement Raman FD). Off by default (honest verdicts). The finest
+  // protocol in --protocol is the de-facto "final" rung; its recorded
+  // bsh_residual is the verdict either way.
   bool              accept_at_maxiter = false;
 };
 
@@ -915,7 +917,9 @@ public:
       // Grow the DAG from any ES bundle converged ON DISK (idempotent and
       // restart-safe: reads roots from metadata, not in-memory run state).
       expand_converged_es(world, meta.json());
-      auto waves = schedule(dag_, ramp, meta.json());
+      // max_iters flows into reconcile so a budget-exhausted rung climbs the
+      // ladder (honest-climb) instead of Resume-looping into the no-progress halt.
+      auto waves = schedule(dag_, ramp, meta.json(), policy_.max_iters_per_step);
       if (waves.empty()) {
         if (world.rank() == 0)
           madness::print("[CALC] run: nothing left to schedule — done");

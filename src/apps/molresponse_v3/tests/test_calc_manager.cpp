@@ -60,15 +60,17 @@ void put_protocol(json &m, double thresh) {
                                              {"index", -1}};
 }
 
-// Write an fd_states entry.
+// Write an fd_states entry. `iter` = the last attempt's iteration count
+// (save-side state.iter) — drives reconcile's honest-climb rule.
 void put_fd(json &m, const std::string &pert, double thresh, double freq,
-            bool converged, bool diverged = false) {
+            bool converged, bool diverged = false, int iter = 0) {
   const std::string key = protocol_key_at(thresh);
   const std::string fk  = ResponseMetadata::freq_key(freq);
   put_protocol(m, thresh);
   m["fd_states"][pert][key][fk] = {{"freq", freq},
                                    {"converged", converged},
-                                   {"diverged", diverged}};
+                                   {"diverged", diverged},
+                                   {"iter", iter}};
 }
 
 void put_es(json &m, double thresh, bool converged, bool diverged = false) {
@@ -206,6 +208,25 @@ int main() {
     put_fd(m6, "dipole_x", 1e-4, 0.057, /*converged=*/false, /*diverged=*/true);
     EXPECT(reconcile_protocol(fd, m6, 1e-6) == NodeAction::Fresh,
            "coarser DIVERGED only -> Fresh (never seed a blown-up state)");
+
+    // ---- honest-climb: a budget-exhausted rung is DONE, the ladder climbs ----
+    // (`converged` stays false; only the reconcile verdict flips to Skip so the
+    // next rung's Restart takes over. max_iters == 0 keeps legacy semantics.)
+    json m7 = empty_meta();
+    put_fd(m7, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
+           /*iter=*/8);
+    EXPECT(reconcile_protocol(fd, m7, 1e-6, /*max_iters=*/8) == NodeAction::Skip,
+           "budget exhausted (iter >= max_iters), not diverged -> Skip (climb)");
+    EXPECT(reconcile_protocol(fd, m7, 1e-6, /*max_iters=*/25) == NodeAction::Resume,
+           "budget remains (iter < max_iters) -> Resume (continue iterating)");
+    EXPECT(reconcile_protocol(fd, m7, 1e-6) == NodeAction::Resume,
+           "max_iters unspecified (0) -> legacy Resume");
+    // A diverged state never climbs — divergence beats the exhausted-budget rule.
+    json m8 = empty_meta();
+    put_fd(m8, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true,
+           /*iter=*/8);
+    EXPECT(reconcile_protocol(fd, m8, 1e-6, /*max_iters=*/8) == NodeAction::Fresh,
+           "diverged at budget -> Fresh (divergence beats honest-climb)");
   }
 
   // ====== reconcile_protocol: ES path =========================================
