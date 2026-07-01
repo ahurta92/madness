@@ -213,6 +213,97 @@ care; a full `ninja` (not just the cm targets) is the real check.
 *(measurement-arm thread; design anchor: `docs/29_perf_model_design.md`. Append
 newest-first; the status above is inherited from trunk — do not rewrite it.)*
 
+- **2026-07-01 — fit sweep ran (job 2051068); the compute proxy was wrong, fixed.**
+  5/7 profiles (k axis clean: h2/h2o at k6 *and* k8, context confirms k=6/8). The
+  **rank axis (h2o np2/np4) failed on a SLURM slot config** — `mpirun -np>1` needs
+  `ntasks-per-node >= max NP`; was 1. **Fixed** in the sbatch (→ 4). No comm term
+  yet (still all NP=1 → bytes=0).
+  - **The honest fit exposed a model-form bug.** `coeffs·k` linear: in-sample
+    R²=0.9955 but **LOO mean |err| = 122%** (negative intercept, negative predicted
+    walls). LOO immediately flagged what R² hid.
+  - **Root cause + fix (data-backed):** `apply` is 85–92% of work and its cost
+    tracks **apply-call-count × k³** (per-box 3D convolution), NOT coefficient
+    count. Across the h2..c2h4 / k6..k8 sweep `coeffs·k` scatters **9.9×** while
+    `apply_calls·k³` collapses to **1.9×** (C ≈ 16 µs/(call·k³)). Swapped the proxy
+    in `refs/perf_model_fit.py`. New model `wall ≈ c0 + c1·(apply·k³/P) + c3·fences`
+    → **LOO 122% → 13.3%** (h2o/c2h4 to 1.6–14%; tiny h2 ~25% = fixed overhead).
+  - **Parallel efficiency:** effective threads = Σcpu/wall = **4.3–5.9 of 10**
+    (43–59%), rising with problem size — a size-dependent `threads_eff` is the next
+    refinement (and the parallel-runtime φ input).
+  - **NEXT:** (1) resubmit the slot-fixed job → the **comm/fence term** (rank axis)
+    for multi-node prediction; (2) the a-priori predictor for a NEW molecule still
+    needs **apply_calls(n_occ, k)** — a separate "how much work" model (tree size ×
+    iters) — that's the path to predicting C6H6/naphthalene before launch.
+
+- **2026-06-30 (pm) — broadened fit sweep prepped (ready to submit).**
+  `es_bench/perf_model_fit_sweep.sbatch`: 7 shapes across two new axes — **k**
+  (h2/h2o at k6 *and* k8, single fixed rung each, no climb) + **rank** (h2o at
+  NP=1/2/4, the only rows with non-zero bytes/fences). c2h4 stays k6 (n_occ
+  anchor). Reuses the WORLD_PROFILE build (`cm_build` incremental). Upgraded
+  `refs/perf_model_fit.py` to make the fit honest: compute proxy is now
+  **`coeffs·k / P`** (§9 `N·c/R`, so multi-rank rows are coherent), **drops
+  all-zero columns** (kills the R²=1 artifact), reports **in-sample R² with an
+  (over)determined warning**, and adds **leave-one-out mean |err|** (the real
+  generalization number). Manifest gained an optional 4th `geometry` column so
+  labels can differ from the molecule name (h2o_k8). Verified on job 2049760's
+  data: 3pts/3params now correctly reports "overdetermined, LOO skipped".
+  Submit: `sbatch es_bench/perf_model_fit_sweep.sbatch`.
+
+- **2026-06-30 (pm) — first SLURM sweep ran (job 2049760); context+build validated.**
+  `es_bench/perf_model_sweep.sbatch` (exclusive xeonmax node, NP=1, fixed
+  PROTOCOL=1e-4/AXES=z/MAXITER=10, 2 reps × {h2,h2o,c2h4}). **All green on the
+  infrastructure:** the context-block edits **compile** (first build incl. the
+  worldprofile core-lib change); **`context` emits non-null** `{n_threads:10,
+  k:6, thresh:1e-4}` on every run; **stability PASS** (call counts bit-identical
+  rep1↔rep2, phase_set_diff=0; cpu noise 7–13%); **`apply` = 85–87%** of work
+  across all three (the phase to model); no crashes.
+  - **The "fit" is NOT real yet — do not trust its coefficients.** 3 shapes, and
+    at NP=1 `bytes=0` so only 3 columns are active `[1, coeffs·k, fences]` → the
+    design matrix is square → residual 0 → **R²=1.0000 is an artifact
+    (interpolation, not prediction)**; the intercept even comes out negative
+    (−7.41). Need #shapes > #params **and a held-out point** before the fit means
+    anything.
+  - **Real finding: thread parallel efficiency is only 30–45%.** cpu_total/wall ⇒
+    effective threads ≈ **3.0 / 4.5 / 4.1** for h2/h2o/c2h4 (of 10 nominal) — so
+    the `cpu_max/n_threads` wall estimate overpredicts by ~2.2–3.3×. The cost
+    model must carry an **effective-parallelism (threads_eff)** term, not nominal
+    threads. This directly feeds parallel-runtime's φ/imbalance term (doc 32 §6).
+  - **NEXT (broaden so the fit is real):** (1) more shapes — molecule × k (run each
+    at a fixed single rung k6 *and* k8, not a climb, to avoid the iter-count
+    confound) → variation in both n_occ and k; (2) a **rank axis** (NP=1,2,4 on one
+    shape) → strong-scaling + populates the currently-zero comm/fence terms;
+    (3) re-fit with a held-out shape → a real R². Also still open: FD projection
+    meter (rs_projection fires only on ES), and committing the context block +
+    sweep script once you're happy.
+
+- **2026-06-30 — PM-1 validated; PM-3 consumer verified; context block applied.**
+  - **PM-1 confirmed working:** `p2.json` (Jun 23, h2o α, schema v1, 67 phases)
+    proves the env-gated rank-0 emitter emits. Ran `refs/perf_model_fit.py` against
+    it (first real breakdown): **`apply` = 89.7%** (`FunctionImpl::do_apply` — the
+    phase to model), `sync` 7.3%, `rs_exchange_gamma` 0.3%, compress/reconstruct
+    ~0 (folded inclusively into apply).
+  - **Two gaps found.** (a) **`rs_projection` only fires on ES** — `rs::project`
+    is called only from `es_solver.hpp`; the **FD (α/β) path projects inline**
+    (`static.hpp:150`, `static.hpp:297/309`, `full.hpp:204/216/384`), so the
+    `projection` phase is absent from every α/β profile. (b) **wall-est was wrong
+    (1.96 vs 4.31 s)** because `context:null` hid the run's thread count — the
+    offline fit fell back to a wrong cpu→wall divisor.
+  - **Context block APPLIED (NOT yet built — core-lib, needs full `ninja`).**
+    `WorldProfile::dump_json(world, path, context_json="null")`
+    (`worldprofile.{h,cc}`); both v3 call sites (`main.cpp`,
+    `test_calc_manager_run.cpp`) fill `{n_threads, k, thresh}` (the offline join
+    still recovers n_occ/molecule via `--geometry`/`--metadata`). Default `"null"`
+    preserves prior output exactly. Updated `refs/perf_model_fit.py` to **prefer
+    `context.n_threads`** as the cpu→wall divisor (verified: clean fallback for the
+    pre-context `p2.json`; context overrides a wrong `--threads`).
+  - **NEXT (you run on alloc):** (1) `cm_rebuild` (full ninja for the worldprofile
+    core-lib edit) + `MADQC_PROFILE_JSON=$PWD/p.r1.json cm_run h2o` ×2 → confirm
+    `context` emits + structural counters (count/nmsg/nbyte) bit-identical across
+    runs. (2) **FD projection meter** — `PROFILE_BLOCK(rs_projection)` at the FD
+    inline-Q sites above so `projection` is populated for α/β (`cm_equiv` after —
+    PROFILE_BLOCK is zero-numerics). (3) **The (k, n_occ) sweep** → `perf_model_fit.py
+    --manifest` for the actual cost-model fit (≥3 runs).
+
 - **2026-06-19 — thread bootstrapped.** Read the cross-thread board + brief +
   contracts + runtime/perf guide (`docs/parallel_runtime_guide/`, companion
   `parallel_runtime_and_performance_models.md` §9 model / §12 measurement plan).
