@@ -1319,6 +1319,38 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
                          static_cast<long>(ax.size()));
     bool complete = true;
     for (size_t i = 0; i < ax.size() && complete; ++i) {
+      // STRICT dconv gate: assemble a channel ONLY from an FD state that genuinely
+      // converged to the requested accuracy at THIS protocol. Never fall back to a
+      // coarser/partial state — that would report a property below the requested
+      // dconv and, if the fallback is coarser-k, crash inner() on a k-mismatch.
+      // `accepted` = `converged` forced true at maxiter (not a real dconv hit), so
+      // it is excluded too. Rank 0 reads the verdict; the broadcast keeps the
+      // collective load path below in lockstep across ranks.
+      int converged_int = 0;
+      if (world.rank() == 0) {
+        auto meta = ResponseMetadata::load_or_create(
+            ctx.calc_dir + "/response_metadata.json");
+        const auto &j = meta.json();
+        const std::string chan = Perturbation::dipole(ax[i]).description();
+        const std::string fkey = ResponseMetadata::freq_key(w);
+        if (j.contains("fd_states") && j["fd_states"].contains(chan) &&
+            j["fd_states"][chan].contains(key) &&
+            j["fd_states"][chan][key].contains(fkey)) {
+          const auto &e = j["fd_states"][chan][key][fkey];
+          converged_int =
+              (e.value("converged", false) && !e.value("accepted", false)) ? 1 : 0;
+        }
+      }
+      world.gop.broadcast(converged_int, 0);
+      if (!converged_int) {
+        if (world.rank() == 0)
+          madness::print("[ALPHA] skip omega=", w, " — dipole_",
+                         beta_axis_name(ax[i]),
+                         " not converged to dconv at requested protocol ", key,
+                         " (climb/tune to reach it)");
+        complete = false;
+        break;
+      }
       auto Xi = detail_exec::load_fd_as_xy<ClosedShell>(
           world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
       if (!Xi) {
