@@ -234,6 +234,15 @@ public:
     out.last_bsh_residual.assign(M, 0.0);
     out.rho_alpha_prev.resize(M);
 
+    // Inc-2: build the φ-only g0 exchange tensor ONCE per protocol (cached on the
+    // ground state) so assemble_theta_tensor doesn't rebuild it every iteration.
+    // Only for the ClosedShell Static/Full tensor path (matches the θ gate below).
+    if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                  std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+      if (policy_.exchange_tensor && target_.gs.g0_alpha.empty())
+        target_.gs.g0_alpha = exch::build_g0(world_, target_.gs, thr * 0.1);
+    }
+
     for (int r = 0; r < M; ++r) {
       // ρ (one density function per response; kept for next iter's Δρ check)
       auto rho = K::compute_density(world_, target_.gs, in.responses[r]);

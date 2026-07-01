@@ -90,6 +90,74 @@ Density factor convention: `spin_factor × y_factor`. Restricted Static =
 
 ---
 
+## Tensor-layer exchange — `exchange_ctx` (FD `--fd-tensor` path)
+
+The contract for `kernels/exchange_ctx.hpp` (doc 28; framework docs 26/27).
+This is an **alternate assembly of θ** that is bit-for-bit the *same math* as the
+per-op reference (`compute_V0x`/`compute_gamma`/`compute_E0x`) but builds the
+shared convolution tensors **once** and assembles θ as cheap contractions. It is
+the interface `parallel-runtime` distributes (the batched waves are taskq/subworld
+work) and `perf-model` meters (the named phases below). Gated behind
+`policy_.exchange_tensor` / `--fd-tensor`; **gate 0 (the per-op path) is the
+reference oracle and stays untouched.** FD ClosedShell Static + Full only;
+ES (`assemble_lambda`, +T0x) and VBC/β reuse the same layer but are not wired yet.
+
+**Unified form** (verified `exchangeoperator.cc:182-187`, doc 27 §1):
+`K[a,b](c)_k = Σ_i a_i · g(b,c)_{ik}`, with `g(b,c)_{ik} = Poisson(b_i·c_k)`
+(`a`=ket/weight, `b`=bra, `c`=apply_to). The convolution `g(b,c)` (n² Poisson) is
+the cost; the contraction `Σ_i a_i·g` is a cheap mul+reduce.
+
+**Convolution tensors** (row-major `T[i*n+k]`, `n = |φ|`):
+
+| tensor | definition | class | lifetime | v3 location |
+|---|---|---|---|---|
+| `g0` | `Poisson(φ_i·φ_k)` | 1 — φ-only ⇒ cacheable | **per protocol**, cached on `ResponseGroundState::g0_alpha` (built in `fd_solver::step` when `--fd-tensor`+empty; fresh-empty per protocol via `build_gs`) | `build_g0` |
+| `Tx` | `Poisson(φ_i·x_k)` | 2 — has response ⇒ transient | per response-iter | `build_pair_tensor` (via `build_ctx_*`) |
+| `Ty` | `Poisson(φ_i·y_k)` | 2 — transient (Full only) | per response-iter | `build_pair_tensor` (via `build_ctx_full_cs`) |
+| `J` | `Poisson(ρ)` (Coulomb/Hartree) | — | per response-iter | `build_ctx_*` |
+
+**Sharing insight** (doc 27 §4): `g(x,φ) = T_xᵀ`, so one `Tx` build serves BOTH
+the V0x ground-exchange (term 1, `contract_col`) AND the γ cross term (term 5,
+`contract_row`). Likewise `Ty` serves terms 2 and 6. Static Class-2 convs: 2n²→n²;
+Full: 4n²→2n².
+
+**Contractions** (cheap; NO convolutions):
+
+| helper | reduction | assembles |
+|---|---|---|
+| `contract_col(a, T, n)` | `out_k = Σ_i a_i·T[i*n+k]` | groundK `K[φ,φ](x)`=`col(φ,Tx)`; γ-direct `K[φ,x](φ)`=`col(x,g0)` |
+| `contract_row(a, T, n)` | `out_k = Σ_i a_i·T[k*n+i]` (transpose) | γ-cross `K[x,φ](φ)`=`row(φ,Tx)`; Full γ_X `K[y,φ](φ)`=`row(φ,Ty)` |
+
+**θ map** (must mirror the reference *exactly*):
+- Static: `θ = [V_local·x − c_xc·col(φ,Tx)] − E0x + Q( J·φ − c_xc·(col(x,g0) + row(φ,Tx)) )`
+- Full γ_X = `col(x,g0) + row(φ,Ty)`; γ_Y = `col(y,g0) + row(φ,Tx)` (X/Y V0x use Tx/Ty resp.)
+
+**Q discipline (the easiest way to break bit-identity, doc 28 §2):** `Q` (`gs.Qa`)
+applies to the **γ block ONLY**. `V0x` and `−E0x` stay un-projected; `E0x` is reused
+from the reference kernel (`Kernels<…>::compute_E0x` — call, do not modify).
+Truncate intermediates at `vtol = thresh·0.1`, final θ at `thresh`.
+
+**Interface (the batching/perf contract surface):**
+```
+build_g0(world, gs, vtol) -> vecfuncT                              // Class 1, cache on gs.g0_alpha
+build_ctx_static_cs / build_ctx_full_cs(world, gs, state, rho, vtol) -> ResponseExchangeCtx{Tx,[Ty],J}
+assemble_theta_static_cs / assemble_theta_full_cs(world, gs, state, g0, ctx) -> State
+assemble_theta_tensor(world, gs, state, rho)                       // one-call gate-1 entry; overloaded on State
+```
+
+**A/B floor:** explicit-Poisson + dot-contraction vs MADNESS's `Exchange` operator
+is the same math on a different truncation/accumulation path → agreement is
+**~1e-3 RELATIVE** on a converged channel (`verify_fd_tensor.sh`, `TOL=2e-3`,
+convergence-gated), NOT machine-eps. A larger gap on a converged channel is a real
+bug — check Q discipline / truncation order.
+
+**Perf meters** (perf-model contract — the named `PROFILE_BLOCK`s exchange exposes,
+flowing into perf-model's WorldProfile JSON; see "Performance profile schema"):
+`coulomb`, `g0_build`, `g0_contract`, `Tx_build`, `Ty_build`, `tx_contract`.
+`g0_build` reports once/protocol (≈0 per-iter when cached); the rest per response-iter.
+
+---
+
 ## RPA symmetric reduction — REMOVED (2026-06)
 
 The `ESSolverFullRPA` symmetric-reduction solver (`(A−B)(A+B)u = ω²u`,

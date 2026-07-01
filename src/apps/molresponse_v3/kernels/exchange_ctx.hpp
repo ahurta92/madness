@@ -230,7 +230,11 @@ assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
                       const ResponseStateX<ClosedShell> &state,
                       const madness::real_function_3d &rho) {
   const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
-  auto g0  = build_g0(world, gs, vtol);
+  // g0 is φ-only → use the per-protocol cache (Inc 2); build per-call only if cold
+  // (standalone callers, e.g. test_exchange_ctx, leave gs.g0_alpha empty).
+  vecfuncT g0_local;
+  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol);
+  const vecfuncT &g0 = gs.g0_alpha.empty() ? g0_local : gs.g0_alpha;
   auto ctx = build_ctx_static_cs(world, gs, state, rho, vtol);
   return assemble_theta_static_cs(world, gs, state, g0, ctx);
 }
@@ -239,7 +243,10 @@ assemble_theta_tensor(madness::World &world, const ResponseGroundState &gs,
                       const ResponseStateXY<ClosedShell> &state,
                       const madness::real_function_3d &rho) {
   const double vtol = madness::FunctionDefaults<3>::get_thresh() * 0.1;
-  auto g0  = build_g0(world, gs, vtol);
+  // g0 is φ-only → use the per-protocol cache (Inc 2); build per-call only if cold.
+  vecfuncT g0_local;
+  if (gs.g0_alpha.empty()) g0_local = build_g0(world, gs, vtol);
+  const vecfuncT &g0 = gs.g0_alpha.empty() ? g0_local : gs.g0_alpha;
   auto ctx = build_ctx_full_cs(world, gs, state, rho, vtol);
   return assemble_theta_full_cs(world, gs, state, g0, ctx);
 }
