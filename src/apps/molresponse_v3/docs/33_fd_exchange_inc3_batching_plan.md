@@ -77,22 +77,30 @@ v3-local wall-timer** in favor of core `WorldProfile` (compile flag
 `WORLD_PROFILE_ENABLE`, runtime env `MADQC_PROFILE_JSON`, zero-effect when off).
 Inc-3 adopts that: exchange's contribution is **named `PROFILE_BLOCK` meters** around
 its phases, so their CPU/comm/**call-count** attribution flows into perf-model's
-profile JSON. The meter names are exchange's slice of perf-model's pinned schema:
+profile JSON (emit already wired in `main.cpp`/`test_calc_manager_run.cpp`).
+**LANDED (3d):** coarse phase blocks — the core ops (`apply`/`multiply`/`dot`/
+`truncate`) are already PROFILE-instrumented by perf-model, so each phase block's
+*inclusive* time gives the op sub-breakdown for free; we only bracket the phases:
 
 | meter | wraps | what the cost model reads |
 |---|---|---|
-| `coulomb` | `J = Poisson(ρ)` + `J·φ` | per-iter Coulomb cost |
-| `g0_build` | `build_g0` convs | once/protocol; ≈0 per-iter when cached |
-| `g0_contract` | γ-direct `col(x/y,g0)` reductions | Class-1 contraction cost |
-| `Tx_build` / `Ty_build` | the Class-2 Poisson wave(s) | **Tx/wave count** + bytes = the n² conv coefficient |
-| `tx_contract` | `col(φ,Tx)` + `row(φ,Tx/Ty)` reductions | Class-2 contraction cost |
+| `rs_ext_g0_build` | `build_g0` | φ·φ convs, once/protocol (≈0 per-iter when cached) |
+| `rs_ext_ctx_build` | `build_ctx_{static,full}_cs` | per-iter J + Tx[/Ty] convolutions — dominant; nested `apply` count = # Poisson waves (rises with `--fd-tensor-tile`) |
+| `rs_ext_assemble` | `assemble_theta_{static,full}_cs` | per-iter contractions + E0x + Q |
 
-- **Tx/tile counts** = the call counts of the `Tx_build`/`Ty_build` blocks (and a
-  small explicit tile counter for 3b) — the board's "report Tx/tile counts" obligation.
-- Zero-effect when off (the `PROFILE_*` macros compile to nothing without the flag);
-  no numerics touched.
+- **Tx/tile counts** = the call count of `rs_ext_ctx_build` + the core `apply` count
+  nested under it (tiling raises the latter) — the board's "report Tx/tile counts".
+- Naming: `rs_ext_*` (exchange-tensor path), distinct from the reference-path
+  `rs_exchange_gamma` (`two_electron.hpp`). Follows perf-model's `rs_` convention.
+- Zero-effect when off (`PROFILE_BLOCK` compiles to nothing without
+  `WORLD_PROFILE_ENABLE`); no numerics touched (verified: `test_exchange_ctx`
+  bit-identical with the meters in).
 - Wall stays the coarse `StateMetrics.wall_s` / `PROTOCOL_START/DONE` layer
   (perf-model PM-3 joins the fine CPU/comm profile to it).
+- **Finer split deferred:** per-contraction meters (`g0_contract` vs `tx_contract`,
+  `coulomb` separate from Tx) add scope-brace clutter for little gain while the core
+  `dot`/`multiply`/`apply` entries already break down within `rs_ext_assemble`/
+  `rs_ext_ctx_build`; revisit only if the cost-model fit needs it.
 
 ## 4. A/B verification (per increment)
 - `verify_fd_tensor.sh` (gate 0 = reference, gate 1 = `--fd-tensor`), convergence-

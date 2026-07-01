@@ -151,10 +151,14 @@ is the same math on a different truncation/accumulation path → agreement is
 convergence-gated), NOT machine-eps. A larger gap on a converged channel is a real
 bug — check Q discipline / truncation order.
 
-**Perf meters** (perf-model contract — the named `PROFILE_BLOCK`s exchange exposes,
-flowing into perf-model's WorldProfile JSON; see "Performance profile schema"):
-`coulomb`, `g0_build`, `g0_contract`, `Tx_build`, `Ty_build`, `tx_contract`.
-`g0_build` reports once/protocol (≈0 per-iter when cached); the rest per response-iter.
+**Perf meters** (Inc-3d; perf-model contract — named `PROFILE_BLOCK`s in
+`exchange_ctx.hpp`, no-op unless `WORLD_PROFILE_ENABLE`, flowing into perf-model's
+WorldProfile JSON via the already-wired `dump_json` call sites; see "Performance
+profile schema"). Coarse phase blocks — the core ops (`apply`/`multiply`/`dot`/
+`truncate`, already PROFILE-instrumented) roll up *within* each via inclusive time:
+`rs_ext_g0_build` (φ·φ tensor, once/protocol), `rs_ext_ctx_build` (per-iter J +
+Tx[/Ty] convolutions — dominant; `apply` count under it = # Poisson waves, rises
+with `--fd-tensor-tile`), `rs_ext_assemble` (per-iter contractions + E0x + Q).
 
 ---
 
