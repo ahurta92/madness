@@ -94,9 +94,16 @@ LANDED** (`ab0eb2ce1`/`d7f07c29d`/`9ef1004c0`): 3a fuses Tx+Ty into one Poisson 
 `ConvergencePolicy.exchange_tile`, default 0=off) to bound the n² peak; 3d adds coarse
 `rs_ext_*` `PROFILE_BLOCK` meters (no-op unless `ENABLE_WORLD_PROFILE`) into
 perf-model's WorldProfile. All bit-identical (`test_exchange_ctx`: Full 1.46e-6/1.61e-6;
-tile=2 vs 0 → 6e-15; meters zero-effect). NEXT = **3c** batch-over-states
-(`compute_gamma_flat`, ES/VBC/multi-channel — cross-thread w/ parallel-runtime; the
-M=1 FD path has no state-batch win). Cross-thread status on the release board.
+tile=2 vs 0 → 6e-15; meters zero-effect). **Inc-3c slice 1 LANDED + VALIDATED**
+(`0872818d8`): ES bundle γ via the cached g₀ tensor — `tda_batch::compute_gamma_flat`
+(one Coulomb wave for M densities + per-root `contract_col(x_s,g0)`; TDA's only
+exchange term is φ-only ⇒ per-iter exchange convolutions M·n²→0 amortized), gated
+`--es-tensor` on `ESSolver::set_gamma_tensor` (SEPARATE from the bitwise `--es-batch`
+gate; A/B-to-floor). Alloc A/B (h2o, 3 TDA roots, climb): converged roots max
+|Δω|=4.0e-7 (tol 2e-5) and gate-1 wall 24% faster (1836s vs 2428s). Harness:
+`es_bench/verify_es_tensor.sh`. NEXT = 3c production wiring (calc_executor ES path
+sets `gamma_tensor`) + Full-ES/VBC reuse (cross-thread w/ parallel-runtime); the
+M=1 FD path has no state-batch win. Cross-thread status on the release board.
 
 ---
 
