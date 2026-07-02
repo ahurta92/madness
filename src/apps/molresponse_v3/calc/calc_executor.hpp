@@ -111,6 +111,12 @@ struct ExecutorSettings {
   // a fixed per-fixture path so the cached guess survives across fresh calc dirs
   // (cm_es makes a new timestamped calc dir each run). Setting it implies caching.
   std::string       es_warmup_cache_dir;
+  // Inc-3c tensor-layer ES γ (--es-tensor; TDA/ClosedShell only): the bundle's
+  // exchange runs off the per-protocol cached g0 tensor + per-root contractions
+  // (ESSolver::set_gamma_tensor / tda_batch::compute_gamma_flat) instead of one
+  // Exchange operator per root per iter. A/B-to-floor vs the reference (~1e-3
+  // rel in θ → ~1e-6 in a converged ω), NOT bitwise. Off by default.
+  bool              es_gamma_tensor   = false;
   // Best-effort acceptance at maxiter (FD nodes). When true, a non-diverged FD
   // solve that exhausts max_iters WITHOUT meeting the strict target is recorded
   // converged (with an `accepted` marker + its real residual) instead of stalling.
@@ -483,6 +489,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   }
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
+  solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
 
   // Single-step guard (as in solve_fd_protocol): re-prepare the ground state
   // only on an actual protocol change; otherwise just re-project the roots.

@@ -326,7 +326,8 @@ int main(int argc, char **argv) {
         print("  accept_at_maxiter =",
               (parser.key_exists("accept-at-maxiter") ? "ON" : "off"));
         print("  fd_tensor  =", (policy.exchange_tensor ? "ON" : "off"),
-              "  tile =", policy.exchange_tile);
+              "  tile =", policy.exchange_tile,
+              "  es_tensor =", (parser.key_exists("es-tensor") ? "ON" : "off"));
       }
 
       // ---- Analyze-only: load a converged ES bundle + print the report ----
@@ -372,6 +373,10 @@ int main(int argc, char **argv) {
           ctx.seed_derived_from_es_root = true;
         if (parser.key_exists("no-es-seed"))
           ctx.seed_derived_from_es_root = false;
+        // --es-tensor: Inc-3c tensor-layer ES γ (cached g0 + batched Coulomb;
+        // TDA/ClosedShell only). Separate gate from --fd-tensor (FD θ path).
+        if (parser.key_exists("es-tensor"))
+          ctx.es_gamma_tensor = true;
         // --accept-at-maxiter: accept a non-diverged FD solve that hits maxiter
         // without meeting the strict target (records converged + an `accepted`
         // marker) so a stiff channel climbs the protocol ladder and VBC
