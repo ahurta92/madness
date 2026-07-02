@@ -5,6 +5,17 @@ if(NOT TARGET MADchem)
   return()
 endif()
 
+# Optional VTK for native HyperTreeGrid (.htg) export from dump_mra_trees (--htg).
+# OFF by default so a stock build needs no VTK; turn on with -DMADNESS_ENABLE_VTK=ON
+# (point CMake at the cluster VTK via -DVTK_DIR=...). Only dump_mra_trees links it.
+option(MADNESS_ENABLE_VTK "Build dump_mra_trees with native VTK HyperTreeGrid (.htg) export" OFF)
+if(MADNESS_ENABLE_VTK)
+  find_package(VTK 9.0 REQUIRED COMPONENTS CommonCore CommonDataModel IOXML)
+  if(VTK_FOUND)
+    message(STATUS "molresponse_v3: VTK ${VTK_VERSION} found -> dump_mra_trees --htg enabled")
+  endif()
+endif()
+
 add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADresponse2;MADchem")
 # Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
 # along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
@@ -69,6 +80,13 @@ add_mad_executable(test_exchange_ctx
 add_mad_executable(dump_mra_trees
                    "tools/dump_mra_trees.cpp;GroundState.cpp"
                    "MADresponse2;MADchem")
+# Native HTG export is optional: only when -DMADNESS_ENABLE_VTK=ON found VTK.
+# Guarded by MADNESS_HAS_VTK in the source; a no-VTK build is unchanged.
+if(MADNESS_ENABLE_VTK AND VTK_FOUND)
+  target_compile_definitions(dump_mra_trees PRIVATE MADNESS_HAS_VTK)
+  target_link_libraries(dump_mra_trees PRIVATE ${VTK_LIBRARIES})
+  vtk_module_autoinit(TARGETS dump_mra_trees MODULES ${VTK_LIBRARIES})
+endif()
 # --- io-hdf5 thread: HDF5-backed I/O (opt-in; docs/30) -----------------------
 # Native MADNESS archive stays the default. No-op unless configured with
 # -DMADNESS_ENABLE_HDF5=ON, so a normal build is byte-for-byte unchanged.
@@ -94,7 +112,10 @@ if(MADNESS_ENABLE_HDF5)
   # Make the real solver binaries HDF5-aware so cm_run / madqc can use the opt-in
   # restart path in response_state.hpp. MADNESS_HAS_HDF5 only enables the path;
   # default (env MADRESPONSE_IO_HDF5 unset) still writes the legacy archive.
-  foreach(_hdf5_tgt molresponse_v3 test_calc_manager_run)
+  # dump_mra_trees joins the list so its --coeffs native-coefficient export can call
+  # save_function_hdf5 (the structured /meta+/keys+/coeffs writer in
+  # solvers/function_hdf5_io.hpp); guarded by MADNESS_HAS_HDF5 in the source.
+  foreach(_hdf5_tgt molresponse_v3 test_calc_manager_run dump_mra_trees)
     if(TARGET ${_hdf5_tgt})
       target_include_directories(${_hdf5_tgt} PRIVATE ${HDF5_INCLUDE_DIRS})
       target_link_libraries(${_hdf5_tgt} PRIVATE ${HDF5_LIBRARIES})
