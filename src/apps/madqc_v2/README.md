@@ -47,7 +47,7 @@ Select with `--wf=<name>` (aliases: `--workflow`, `-w`). Default: `scf`.
 |---------|-------|-------------|
 | `scf`   | SCF | Hartree-Fock / DFT single point (`moldft` engine) |
 | `nemo`  | SCF | HF/DFT with regularized (nuclear-cusp-free) orbitals |
-| `response` | SCF → response | Frequency-dependent polarizability / hyperpolarizability / Raman / excited states |
+| `response` | SCF → response | Frequency-dependent polarizability / hyperpolarizability / Raman / excited states — see [`RESPONSE_PROPERTIES.md`](RESPONSE_PROPERTIES.md) |
 | `mp2` / `cc2` | SCF → correlated | MP2 / CC2 correlation energies and excitations |
 | `cis`   | SCF → CIS | Configuration-interaction-singles excited states (`tdhf` engine) |
 | `oep`   | SCF → OEP | Optimized effective potential |
@@ -316,6 +316,8 @@ print("dipole =", scf["properties"]["dipole"]["vals"])
 
 ## See also
 
+- [`RESPONSE_PROPERTIES.md`](RESPONSE_PROPERTIES.md) — how to compute each response property (α, β, Raman, excited states)
+- [`../molresponse_v3/README.md`](../molresponse_v3/README.md) — the v3 response engine: status + capability matrix
 - [`WORKFLOWS.md`](WORKFLOWS.md) — how to add a new workflow
 - `madqc --print_parameters=<group>` — authoritative, always-current knob list
 - `doc/quantum.md` (repo root) — broader MADNESS quantum-chemistry overview

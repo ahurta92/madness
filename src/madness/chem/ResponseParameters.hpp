@@ -24,7 +24,6 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<int>("print_level", 3, "0: no output; 1: final energy; 2: iterations; 3: timings; 10: debug");
         initialize<bool>("kain", false, "Turn on Krylov Accelarated Inexact Newton Solver");
         initialize<double>("maxrotn", .50, "Max orbital rotation per iteration");
-        initialize<double>("maxbsh", 10, "Max bsh residual");
         initialize<size_t>("maxsub", 8, "size of iterative subspace ... set to 0 or 1 to disable");
         initialize<std::string>("xc", "hf", "XC input line");
         initialize<std::string>("hfexalg", "multiworld_row",
@@ -33,11 +32,11 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<double>("dconv", 1e-6, "density convergence");
         initialize<bool>("step_restrict", true, "Toggles step restriction");
         initialize<std::vector<std::string>>("requested_properties", {"polarizability"},
-                                             "properties to calculate (polarizability,hessian, hyperpolarizability, "
-                                             "Raman.)");
+                                             "properties to calculate: polarizability, "
+                                             "hyperpolarizability, raman");
         initialize<std::string>("engine", "v2",
-                                "response engine backend: v2 (MolresponseLib) | "
-                                "v3 (molresponse_v3, alpha only so far)",
+                                "response engine backend: v2 (MolresponseLib, production) | "
+                                "v3 (molresponse_v3: alpha, beta, single-component raman; ES experimental)",
                                 {"v2", "v3"});
         initialize<bool>("beta.shg", true,
                          "compute only SHG beta triplets (omegaB=omegaC, "
@@ -79,9 +78,6 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<size_t>("maxiter", 25, "maximum number of response iterations");
         initialize<std::string>("deriv", "abgv", "derivative method", {"abgv", "bspline", "ble"});
         initialize<std::string>("dft_deriv", "abgv", "derivative method for gga potentials", {"abgv", "bspline", "ble"});
-        initialize<bool>("first_order", false, "compute first-order response");
-        initialize<bool>("second_order", false, "compute second-order response");
-        initialize<bool>("third_order", false, "compute third-order response");
     }
 
     std::string get_tag() const override {
@@ -219,15 +215,6 @@ public:
     }
     [[nodiscard]] std::string nuclear_directions() const {
         return get<std::string>("nuclear.directions");
-    }
-    [[nodiscard]] bool first_order() const {
-        return get<bool>("first_order");
-    }
-    [[nodiscard]] bool second_order() const {
-        return get<bool>("second_order");
-    }
-    [[nodiscard]] bool third_order() const {
-        return get<bool>("third_order");
     }
 
 private:
