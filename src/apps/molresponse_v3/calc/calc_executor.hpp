@@ -992,12 +992,18 @@ private:
     return detail_calc::sorted_ramp(std::move(all));
   }
 
-  /// Stable, rank-deterministic signature of a wave (sorted id@thresh list).
+  /// Stable, rank-deterministic signature of a wave (sorted id@protocol list).
   static std::string wave_signature(const std::vector<WorkItem> &wave) {
     std::vector<std::string> parts;
     parts.reserve(wave.size());
     for (const auto &it : wave)
-      parts.push_back(it.node->id + "@" + ResponseMetadata::freq_key(it.thresh));
+      // protocol_key, NOT freq_key: freq_key's fixed-decimal format collapses
+      // 1e-6 and 1e-8 to the same string ("f0.00000"), so two consecutive
+      // LADDER rungs got identical signatures and the no-progress guard
+      // falsely halted between them (exposed by honest-climb, which makes
+      // consecutive front waves be DIFFERENT rungs of the same node).
+      parts.push_back(it.node->id + "@" +
+                      protocol_key(it.thresh, default_k_for_thresh(it.thresh)));
     std::sort(parts.begin(), parts.end());
     std::string s;
     for (const auto &p : parts) { s += p; s += ';'; }
