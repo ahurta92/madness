@@ -138,6 +138,7 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   detail_workflow::StageTimer t_build;
   CalcManager::Policy mgr_policy;
   mgr_policy.max_iters_per_step = in.settings.max_iters;
+  mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
   mgr.build(gs.molecule().natom());
   timing["plan_build"] = t_build.lap();
@@ -146,7 +147,41 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   detail_workflow::StageTimer t_solve;
   ExecutorContext ctx(world, gs, L, fock_json, in.settings);
   FdResponseExecutor exec(ctx);
-  nlohmann::json sched_diag = mgr.run(world, exec);   // R1c scheduler trace
+
+  // F2 (doc 32 §5): the per-subworld solve closure. Only built when an archive is
+  // available — GroundState's only construction path is from_archive (doc 32 §3),
+  // so the madqc in-memory-GS path can't fan out (it leaves fan_out null → the
+  // single-World path). Each node-subworld loads its own GS and solves its owned
+  // FD items, writing to its node_index metadata shard (merged by rank 0). This
+  // is exactly the F1-proven block, lifted into the live run().
+  CalcManager::SubworldSolve fan_out;
+  if (in.settings.fd_subworlds > 0 && !in.archive_file.empty()) {
+    const std::string  archive = in.archive_file;
+    const madness::Molecule mol = gs.molecule();
+    const std::string  fock = fock_json;
+    const double       L_   = L;
+    const ExecutorSettings base = in.settings;
+    fan_out = [archive, mol, fock, L_, base](
+                  madness::World &sub, const std::vector<WorkItem> &items,
+                  double thresh, int gid, const std::string &log_prefix) {
+      // F2d-ii: verbose=false suppresses the redundant per-subworld GS/protocol
+      // banners (the universe already printed them once).
+      set_response_protocol(sub, L_, thresh, /*override_k=*/-1, /*verbose=*/false);
+      auto gs_s = GroundState::from_archive(sub, archive, mol);
+      const double t0 = madness::FunctionDefaults<3>::get_thresh();
+      auto cop = madness::poperatorT(
+          madness::CoulombOperatorPtr(sub, gs_s.params().lo(), 0.001 * t0));
+      gs_s.prepare(sub, 0.001 * t0, cop, fock, /*verbose=*/false);
+      ExecutorSettings s = base;
+      s.metadata_shard = std::to_string(gid);  // F2: per-subworld metadata shard
+      s.log_prefix     = log_prefix;     // F2d-i: tag this subworld's per-state lines
+      s.log_group      = gid;            // F2d-i: MEMORY_HWM group= field
+      ExecutorContext ctx_s(sub, gs_s, L_, fock, s);
+      FdResponseExecutor exec_s(ctx_s);
+      for (const auto &it : items) exec_s.run_protocol(it);
+    };
+  }
+  nlohmann::json sched_diag = mgr.run(world, exec, fan_out);   // R1c scheduler trace
   timing["solve"] = t_solve.lap();
 
   // 3. Tier-A property assembly (off the solve path). A mixed request may want

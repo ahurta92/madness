@@ -146,6 +146,47 @@ public:
   const nlohmann::json &json() const { return j_; }
   const std::string    &path() const { return path_; }
 
+  /// F2 (doc 32 §5.3): merge the per-group state metadata shards written by the
+  /// subworlds (response_metadata.group<gid>.json) into the canonical file. The
+  /// FD (and F2g VBC) states are DISJOINT across subworlds — each (pert/freq) FD
+  /// point and each VBC id lives in exactly one subworld — so this is a
+  /// conflict-free union, done through the typed setters (never a raw write).
+  /// Removes the shards after a successful canonical save. Rank-0 only (caller
+  /// guards). Idempotent: a missing shard is skipped, so re-running is safe.
+  static void merge_state_shards(const std::string &calc_dir, int n_groups) {
+    auto canon = load_or_create(calc_dir + "/response_metadata.json");
+    for (int g = 0; g < n_groups; ++g) {
+      const std::string sp =
+          calc_dir + "/response_metadata.group" + std::to_string(g) + ".json";
+      if (!std::filesystem::exists(sp)) continue;
+      std::ifstream in(sp);
+      if (!in) continue;
+      nlohmann::json sj;
+      in >> sj;
+      // NB: iterate the lvalue member (sj["fd_states"]), NOT a .value(...)
+      // temporary — .items() on a temporary json dangles.
+      if (sj.contains("fd_states") && sj["fd_states"].is_object())
+        for (const auto &pert : sj["fd_states"].items())
+          for (const auto &pk : pert.value().items())
+            for (const auto &fk : pk.value().items())
+              canon.set_fd_state(pert.key(), pk.key(), fk.key(), fk.value());
+      // F2g: VBC quadratic-source states (vbc_states/<id>/<protocol_key>).
+      if (sj.contains("vbc_states") && sj["vbc_states"].is_object())
+        for (const auto &id : sj["vbc_states"].items())
+          for (const auto &pk : id.value().items())
+            canon.set_vbc_state(id.key(), pk.key(), pk.value());
+      // Protocol registry is informational; union any keys the canonical lacks.
+      if (sj.contains("protocols") && sj["protocols"].is_object())
+        for (const auto &p : sj["protocols"].items())
+          if (!canon.j_["protocols"].contains(p.key()))
+            canon.j_["protocols"][p.key()] = p.value();
+    }
+    canon.save();
+    for (int g = 0; g < n_groups; ++g)
+      std::filesystem::remove(
+          calc_dir + "/response_metadata.group" + std::to_string(g) + ".json");
+  }
+
   /// Canonical frequency key for fd_states / archive naming. f%.5f matches
   /// the dimensionless precision used in v2 and is enough to distinguish
   /// any physically relevant frequency we'd solve at. Doc 13.

@@ -72,7 +72,8 @@ public:
     /// SCF::make_fock_matrix().
     void prepare(World& world, double vtol,
                  const poperatorT& coulop,
-                 const std::string& fock_json_file = "");
+                 const std::string& fock_json_file = "",
+                 bool verbose = true);   // F2d-ii: false in subworlds (suppress print_info)
 
     /// Local potential: V_nuc + V_coul + V_xc (for response multiplicative term)
     const real_function_3d& V_local() const;

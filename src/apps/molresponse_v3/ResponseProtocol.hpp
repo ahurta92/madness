@@ -76,7 +76,8 @@ inline std::string protocol_key() {
 inline void set_response_protocol(World& world,
                                   double L,
                                   double thresh,
-                                  int override_k = -1) {
+                                  int override_k = -1,
+                                  bool verbose = true) {  // F2d-ii: false in subworlds
     int k = (override_k > 0) ? override_k : default_k_for_thresh(thresh);
 
     FunctionDefaults<3>::set_k(k);
@@ -92,7 +93,7 @@ inline void set_response_protocol(World& world,
     // built at the previous protocol can't be reused incorrectly.
     GaussianConvolution1DCache<double>::map.clear();
 
-    if (world.rank() == 0) {
+    if (verbose && world.rank() == 0) {
         print("PROTOCOL_SET  L=", L, "  thresh=", thresh, "  k=", k,
               (override_k > 0 ? "  (k overridden)" : ""));
     }

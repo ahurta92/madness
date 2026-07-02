@@ -27,6 +27,7 @@
 #include <madness/world/ranks_and_hosts.h>   // ranks_per_host, get_hostname
 #include <madness/world/print.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,8 +41,17 @@ struct NodeSubworldInfo {
   int         universe_rank = 0;
   int         universe_size = 0;
   int         subworld_rank = 0;   ///< rank within this node's subworld
-  int         subworld_size = 0;   ///< ranks on this node (= ranks in subworld)
+  int         subworld_size = 0;   ///< ranks in THIS subworld
   int         n_nodes       = 0;   ///< distinct hosts in the universe
+  int         node_index    = 0;   ///< position of this host in the sorted host map
+  // F2f (doc 32): sub-node granularity. groups_per_node subworlds per physical
+  // node (1 = node-aligned). subworld_index = within-node group (0..P-1). gid =
+  // GLOBAL subworld id = node_index*groups_per_node + subworld_index — the
+  // deterministic round-robin partition key. n_subworlds = n_nodes*groups_per_node.
+  int         groups_per_node = 1;
+  int         subworld_index  = 0;
+  int         gid             = 0;
+  int         n_subworlds      = 1;
 };
 
 /// Create one subworld per physical node (MPI_COMM_TYPE_SHARED). All ranks on
@@ -49,24 +59,57 @@ struct NodeSubworldInfo {
 /// the within-node ordering deterministic. Collective on `universe`. Fills
 /// `info` if non-null. The returned World must be destroyed (reset) before
 /// `finalize()` and before the universe.
+/// Create `groups_per_node` subworlds per physical node (doc 32 F2f). Composes:
+///   1. node split (MPI_COMM_TYPE_SHARED) — guarantees no subworld straddles a
+///      node, so the ground state stays node-local (one φ copy per node maximum).
+///   2. within-node CONTIGUOUS split into `groups_per_node` equal rank slices.
+/// Under a locality-ordered launch (`--map-by numa` / `--rank-by core`) the
+/// contiguous within-node slices land on NUMA domains; otherwise they are just P
+/// equal slices. groups_per_node=1 ⇒ node-aligned. Larger P trades memory (φ
+/// replicated P× per node) for more state-parallelism — the small-system regime.
+/// Assumes uniform ranks/node (the usual `--ntasks-per-node` launch); P is clamped
+/// to the within-node rank count. Collective on `universe`. The returned World
+/// must be reset() before finalize() and before the universe.
 inline std::shared_ptr<madness::World>
-make_node_aligned_subworld(madness::World &universe,
-                           NodeSubworldInfo *info = nullptr) {
+make_subworld_pool(madness::World &universe, int groups_per_node,
+                   NodeSubworldInfo *info = nullptr) {
+  if (groups_per_node < 1) groups_per_node = 1;
   SafeMPI::Intracomm node_comm = universe.mpi.comm().Split_type(
       SafeMPI::Intracomm::SHARED_SPLIT_TYPE, /*Key=*/universe.rank());
-  auto subworld = std::make_shared<madness::World>(node_comm);
+  const int wn_rank = node_comm.Get_rank();
+  const int wn_size = node_comm.Get_size();
+  const int gpn     = std::min(groups_per_node, wn_size);  // can't exceed #ranks/node
+  const int color   = (wn_rank * gpn) / wn_size;           // 0..gpn-1, contiguous
+  SafeMPI::Intracomm sub_comm = node_comm.Split(color, /*Key=*/wn_rank);
+  auto subworld = std::make_shared<madness::World>(sub_comm);
   universe.gop.fence();
 
   if (info) {
     auto rph = madness::ranks_per_host(universe);   // collective: host -> [ranks]
-    info->hostname      = madness::get_hostname();
-    info->universe_rank = universe.rank();
-    info->universe_size = universe.size();
-    info->subworld_rank = subworld->rank();
-    info->subworld_size = subworld->size();
-    info->n_nodes       = static_cast<int>(rph.size());
+    info->hostname        = madness::get_hostname();
+    info->universe_rank   = universe.rank();
+    info->universe_size   = universe.size();
+    info->subworld_rank   = subworld->rank();
+    info->subworld_size   = subworld->size();
+    info->n_nodes         = static_cast<int>(rph.size());
+    // Node index = position of this rank's host in the sorted host map. rph is a
+    // std::map (sorted keys), so this is identical on every rank — deterministic.
+    int nidx = 0;
+    for (const auto &kv : rph) { if (kv.first == info->hostname) break; ++nidx; }
+    info->node_index      = nidx;
+    info->groups_per_node = gpn;
+    info->subworld_index  = color;
+    info->gid             = nidx * gpn + color;            // global subworld id
+    info->n_subworlds     = static_cast<int>(rph.size()) * gpn;
   }
   return subworld;
+}
+
+/// One subworld per physical node — the groups_per_node=1 case of the pool.
+inline std::shared_ptr<madness::World>
+make_node_aligned_subworld(madness::World &universe,
+                           NodeSubworldInfo *info = nullptr) {
+  return make_subworld_pool(universe, 1, info);
 }
 
 /// Print (rank 0) the host -> ranks map and check the "one subworld per node"

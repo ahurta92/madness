@@ -81,10 +81,11 @@ public:
 
   FDSolver(madness::World &world, FDProblem<Type, Shell> target,
            ConvergencePolicy policy,
-           PrintLevel print_level = PrintLevel::Normal)
+           PrintLevel print_level = PrintLevel::Normal,
+           std::string log_prefix = {})
       : world_(world), target_(std::move(target)),
         policy_(policy), kain_(world, policy),
-        print_level_(print_level) {
+        print_level_(print_level), log_prefix_(std::move(log_prefix)) {
     refresh_convergence_targets();
     print_header();
   }
@@ -122,21 +123,29 @@ public:
   const ConvergencePolicy::Targets& targets() const { return targets_; }
 
 private:
-  void print_header() const {
+  // F2d (doc 32 §5.6): gated print. Centralizes the Normal/rank-0 guard and the
+  // per-subworld tag. EMPTY prefix ⇒ print(...) verbatim (G=0 byte-identical);
+  // non-empty ⇒ the "[g{gid}/{G} {host}] " tag leads each line.
+  template <class... Ts> void plog(Ts &&...a) const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
-    print("");
-    print("FDSolver<", type_name(), ", ClosedShell>  n_responses =",
+    if (log_prefix_.empty()) print(std::forward<Ts>(a)...);
+    else                     print(log_prefix_, std::forward<Ts>(a)...);
+  }
+
+  void print_header() const {
+    plog("");
+    plog("FDSolver<", type_name(), ", ClosedShell>  n_responses =",
           target_.n_responses(),
           " thresh =", madness::FunctionDefaults<3>::get_thresh(),
           " c_xc =", target_.gs.c_xc);
-    print("  policy: dconv_user =", policy_.dconv_user,
+    plog("  policy: dconv_user =", policy_.dconv_user,
           " bsh_target =", targets_.bsh_residual,
           " density_target =", targets_.density_residual);
-    print("  responses:");
+    plog("  responses:");
     for (int c = 0; c < target_.n_responses(); ++c) {
-      print("    [", c, "]  omega =", target_.responses[c].omega);
+      plog("    [", c, "]  omega =", target_.responses[c].omega);
     }
-    print("");
+    plog("");
   }
 
   static constexpr const char* type_name() {
@@ -152,13 +161,13 @@ private:
     for (double r : out.last_bsh_residual) max_res = std::max(max_res, r);
     double max_drho = 0.0;
     for (double r : out.last_density_residual) max_drho = std::max(max_drho, r);
-    print("iter", out.iter,
+    plog("iter", out.iter,
           "  max_res =", max_res, "  max_dρ =", max_drho);
     if (print_level_ >= PrintLevel::Verbose) {
       for (size_t c = 0; c < out.last_bsh_residual.size(); ++c) {
         double dr = (c < out.last_density_residual.size())
                         ? out.last_density_residual[c] : 0.0;
-        print("  ch", c, "  omega =", target_.responses[c].omega,
+        plog("  ch", c, "  omega =", target_.responses[c].omega,
               "  res =", out.last_bsh_residual[c],
               "  dρ =", dr);
       }
@@ -196,25 +205,25 @@ private:
 public:
   void print_final(const State &s, bool converged) const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
-    print("");
+    plog("");
     // Diverged-first: converged() returns true on diverged so iterate<>
     // would otherwise mislabel the exit as "Converged".
-    if (s.diverged)       print("Stopped at iter", s.iter,
+    if (s.diverged)       plog("Stopped at iter", s.iter,
                                 "(diverged — residual exceeded "
                                 "explosion guard).");
-    else if (converged)   print("Converged in", s.iter, "iters.");
-    else                  print("Stopped at iter", s.iter,
+    else if (converged)   plog("Converged in", s.iter, "iters.");
+    else                  plog("Stopped at iter", s.iter,
                                 "(max iters reached, not converged).");
     if (!s.last_bsh_residual.empty()) {
-      print("  residuals   =");
+      plog("  residuals   =");
       for (size_t c = 0; c < s.last_bsh_residual.size(); ++c) {
         double dr = (c < s.last_density_residual.size())
                         ? s.last_density_residual[c] : 0.0;
-        print("    ch", c, "  omega =", target_.responses[c].omega,
+        plog("    ch", c, "  omega =", target_.responses[c].omega,
               "  bsh =", s.last_bsh_residual[c], "  dρ =", dr);
       }
     }
-    print("");
+    plog("");
   }
 
   /// One outer iteration. Streamed-theta layout: for each response
@@ -369,6 +378,7 @@ private:
   ConvergencePolicy::Targets targets_{};
   ResponseSubspaceKain<Storage>   kain_;
   PrintLevel                 print_level_ = PrintLevel::Normal;
+  std::string                log_prefix_;   // F2d: per-subworld tag ("" = none)
   std::string                log_path_;
   bool                       log_header_written_ = false;
 };

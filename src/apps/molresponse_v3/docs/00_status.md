@@ -212,6 +212,41 @@ source persistence; in-flight kernel-naming refactor.
 - **Validation gap:** no Raman reference yet — `cm_record` reports PASS as "recorded,
   no ref". **Next:** get a molresponse_v2 Raman value for h2o to gate correctness.
 
+### WS-PR — parallel runtime / state-parallel  *(this branch: `parallel-runtime`)*
+The runtime-architecture thread (cross-thread board: `madness_studies/RELEASE_STATUS.md`).
+- **Fork RESOLVED — doc 31** (`docs/31_fd_multiworld_decomposition_decision.md`).
+  `strong_scale_es` showed G=1 strong scaling walls (18% γ-eff at 32 ranks — *expected*;
+  respect the ~5-occ/node floor). Parallelism comes from the **state** axis, not spatial.
+  Decision: **two-axis decomposition (states × space), one solve per World, FD first**
+  (FD states are coupling-free → pure fan-out/gather), first cut = one FD state per
+  node-aligned subworld, simplest-first / measurement-driven. Sub-node packing (small)
+  and multi-node-per-state (large) deferred; ES state-parallel reuses the World pool +
+  keystone allreduce (doc 24 §2) later.
+- **Proven primitives reused:** `make_node_aligned_subworld` (node_subworlds.hpp, Inc1),
+  GS ship-in under `set_default_pmap(subworld)` (S1, doc 23), keystone A/S allreduce.
+- **Seams:** `calc_executor.hpp` `run()` (:903; the single-group comment at :859-867 names
+  this as the 15c STATE_PARALLEL design), `ExecutorContext::world` (:131), `solve_fd_protocol`
+  (:254). Knob `--fd-subworlds=G` (0 = single-World reference).
+- **F1 PASS** (`test_fd_subworld_fanout`): subworld fan-out α bit-identical to single-World
+  (6.98e-12). Crash was a teardown bug (GS destructing after `finalize()`) — fixed by
+  scoping World-bound objects in a block before `finalize()`.
+- **F2a+F2b VALIDATED**: gated `run()` + `--fd-subworlds`. A/B on a real 3-node partition →
+  α match 6.37e-12 vs G=0; per-group metadata shards merged by rank 0 (`merge_state_shards`).
+  `fd_subworlds==0` byte-identical; `G≤1` short-circuits; ES stays single-World; cm_unit green.
+- **F2d/F2f/F2g DONE + BENCHMARKED** (uncommitted): **F2d** tagged-stream logging (empty-default
+  tag ⇒ G=0 byte-identical; suppresses redundant subworld GS/PROTOCOL banners). **F2f** per-node
+  granularity — `--fd-subworlds=P` = subworlds PER NODE (`make_subworld_pool`: node-split →
+  within-node contiguous split; NUMA via launch). **F2g** VBC fanned (fan subset = FD/NuclearFD/
+  VBC; `merge_state_shards` unions vbc_states). **2026-06-30 bench (2 nodes×8, h2o β SHG, k6→k8):**
+  ref=1646s · 2 subw=809s (2.04×) · **4 subw=644s (2.56×, BEST)** · 16 subw=710s (regress);
+  **β bit-exact ≤1.1e-10 all 27 comps incl VBC.** Per-state k8 wall: 16rk=63s (over-decomposed),
+  8rk=47s (sweet spot), 1rk=126s (serial). Two-axis S×R_state confirmed; sweet spot ~4 for h2o.
+- **NEXT:** (a) **scheduler work-exposure** — SHG's 6 indep FD (3 axes × {ω,2ω}) serialized into
+  3+3 waves → starves procs; batch all independent states per wave (Raman's Nocc×3 exposes more).
+  (b) **F2e auto-selector** — cap P ≤ items/wave AND keep ranks/state ≥ spatial floor (~8). (c) size-
+  aware partition (round-robin gave 10/8/7/5 at G=4). (d) **F2c** pre-flight mem abort (high P
+  replicates φ per subworld → OOM risk on c6h6). Bigger systems = next test axis (c6h6/naphthalene).
+
 ### Cross-cutting — core-lib debug-logging tweak
 `src/madness/chem/exchangeoperator.h` + `src/madness/mra/macrotaskq.h`: moved a
 `MacroTaskInfo` parser print into a verbosity-gated `set_macro_task_info`. These

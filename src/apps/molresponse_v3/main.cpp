@@ -46,6 +46,8 @@ void print_usage() {
   print("  --axes=xyz           Cartesian axes (default xyz)");
   print("  --protocol=1e-4,1e-6 truncation-threshold ladder (default 1e-4,1e-6)");
   print("  --maxiter=N          iteration budget per protocol step (default 25)");
+  print("  --fd-subworlds=P     fan FD/VBC states across P subworlds PER NODE "
+        "(0=single-World default; 1=node-aligned; >1=sub-node/NUMA packing)");
   print("  --dconv=X            convergence target (default 1e-4)");
   print("  --calc-dir=DIR       output dir (response_metadata.json + archives)");
   print("  --print-level=0..3   verbosity (default 1)");
@@ -92,6 +94,11 @@ int main(int argc, char **argv) {
       in.settings.policy = policy;
       in.settings.max_iters =
           parser.key_exists("maxiter") ? std::stoi(parser.value("maxiter")) : 25;
+      // F2 (doc 32 §5): fan independent FD states across node-aligned subworlds.
+      // 0 = single-World reference path. >0 = requested # of subworlds.
+      in.settings.fd_subworlds =
+          parser.key_exists("fd-subworlds")
+              ? std::stoi(parser.value("fd-subworlds")) : 0;
       in.settings.calc_dir = parser.key_exists("calc-dir")
                                  ? parser.value_raw("calc-dir")
                                  : std::string("molresponse_v3_calc");

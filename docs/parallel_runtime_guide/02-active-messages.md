@@ -18,16 +18,16 @@ Files: `worldam.h`/`.cc`.
 the user payload:
 
 ```
- ┌───────────────────────────── AmArg ────────────────────────────┐
+ ┌───────────────────────────── AmArg ─────────────────────────────┐
  │ header[RMI::HEADER_LEN = 64]   ← func ptr + attr (filled by RMI) │
  │ std::size_t   nbyte            ← user payload size               │
  │ std::uint64_t worldid          ← which World this targets        │
  │ std::ptrdiff_t func            ← relative handler fn pointer     │
  │ ProcessID     src              ← sender rank                     │
  │ unsigned int  flags            │
- ├──────────────────────────────────────────────────────┤
+ ├──────────────────────────────────────────────────────────────────┤
  │ user payload ... nbyte bytes ...  (buf() points here)            │
- └───────────────────────────────────────────────────┘
+ └──────────────────────────────────────────────────────────────────┘
    fixed overhead ≈ 96 bytes on a 64-bit machine; on-wire size = sizeof(AmArg)+nbyte
 ```
 

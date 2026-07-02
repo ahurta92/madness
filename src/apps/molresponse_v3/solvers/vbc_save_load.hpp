@@ -44,7 +44,13 @@ inline void save_vbc_state(madness::World &world,
                            const std::string &dir,
                            const std::string &vbc_id,
                            bool converged,
-                           double wall_s = 0.0) {   // R1b: build wall time
+                           double wall_s = 0.0,     // R1b: build wall time
+                           const std::string &metadata_shard = std::string(), // F2g
+                           const std::string &log_prefix = std::string(),     // F2d
+                           int log_group = -1) {                               // F2d
+  // F2g: in subworld mode the VBC metadata upsert goes to a per-group shard
+  // (response_metadata.group<tag>.json), merged by rank 0 after the fence — same
+  // discipline as save_fd_state. "" = canonical file (single-World path).
   if (world.rank() == 0) std::filesystem::create_directories(dir);
   world.gop.fence();
 
@@ -59,7 +65,10 @@ inline void save_vbc_state(madness::World &world,
   metrics.wall_s = wall_s;   // R1b (uniform with FD/ES)
 
   if (world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(dir + "/response_metadata.json");
+    const std::string meta_path =
+        dir + "/response_metadata" +
+        (metadata_shard.empty() ? "" : ".group" + metadata_shard) + ".json";
+    auto meta = ResponseMetadata::load_or_create(meta_path);
     if (!meta.json()["protocols"].contains(key))
       meta.set_protocol(key, thresh, k_now, /*index=*/-1);
     nlohmann::json entry = {
@@ -70,12 +79,23 @@ inline void save_vbc_state(madness::World &world,
     };
     meta.set_vbc_state(vbc_id, key, entry);
     meta.save();
-    madness::print("[SAVE] vbc_state: id=", vbc_id, "  protocol_key=", key,
-                   "  archive=", base, "  converged=", converged);
-    // R1b: uniform memory high-water mark (see fd_save_load).
-    madness::print("MEMORY_HWM  kind=vbc  protocol=", key,
-                   "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
-                   "  wall_s=", wall_s, "  id=", vbc_id);
+    // F2d: prepend the per-subworld tag (empty ⇒ unchanged, G=0 byte-identical).
+    if (log_prefix.empty())
+      madness::print("[SAVE] vbc_state: id=", vbc_id, "  protocol_key=", key,
+                     "  archive=", base, "  converged=", converged);
+    else
+      madness::print(log_prefix, "[SAVE] vbc_state: id=", vbc_id,
+                     "  protocol_key=", key, "  archive=", base,
+                     "  converged=", converged);
+    // R1b: uniform memory high-water mark (see fd_save_load). F2d group= field.
+    if (log_group >= 0)
+      madness::print("MEMORY_HWM  kind=vbc  protocol=", key,
+                     "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                     "  wall_s=", wall_s, "  id=", vbc_id, "  group=", log_group);
+    else
+      madness::print("MEMORY_HWM  kind=vbc  protocol=", key,
+                     "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
+                     "  wall_s=", wall_s, "  id=", vbc_id);
   }
   world.gop.fence();
 }

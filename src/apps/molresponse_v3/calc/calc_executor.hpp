@@ -51,6 +51,7 @@
 #include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
+#include "../solvers/node_subworlds.hpp"
 #include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
 #include "../solvers/vbc_save_load.hpp"
@@ -61,6 +62,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -129,6 +131,24 @@ struct ExecutorSettings {
   // protocol in --protocol is the de-facto "final" rung; its recorded
   // bsh_residual is the verdict either way.
   bool              accept_at_maxiter = false;
+  // F2 (doc 32 §5): fan independent states out across subworlds. This is the
+  // number of subworlds PER PHYSICAL NODE (F2f): 0 = single-World reference
+  // (byte-identical); 1 = one subworld per node (node-aligned); >1 = sub-node /
+  // NUMA packing (φ replicated P× per node, more state-parallelism — small-system
+  // regime). Total subworlds G = n_nodes × this. G≤1 short-circuits to the G=0
+  // path. Fans FD / NuclearFD / VBC (F2g); ES stays single-World.
+  int               fd_subworlds = 0;
+  // F2 (doc 32 §5.3): when non-empty, FD metadata writes go to a per-group shard
+  // response_metadata.group<tag>.json instead of the canonical file, so concurrent
+  // subworlds never race it; universe rank 0 merges the shards after the fence.
+  // "" = write the canonical file directly (the default / single-World path).
+  std::string       metadata_shard;
+  // F2d (doc 32 §5.6): per-subworld log attribution. Both are the EMPTY/-1
+  // sentinel in single-World mode ⇒ output byte-identical to the G=0 reference.
+  // Set by the fan-out closure. A non-empty log_prefix is ALSO the "I am in a
+  // subworld" signal that suppresses the redundant GS/protocol banners (F2d-ii).
+  std::string       log_prefix;     // "[g2/3 xm005] " prepended to per-state human lines
+  int               log_group = -1; // node index → MEMORY_HWM `group=` field (-1 = omit)
 };
 
 /// Everything an FD protocol step solve needs beyond the node itself. The
@@ -270,12 +290,13 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 
   // Bring FunctionDefaults<3> + the ground state to this protocol so the
   // source builders and try_load (which keys on protocol_key()) are correct.
-  set_response_protocol(world, ctx.L, thresh);
+  const bool gs_verbose = ctx.log_prefix.empty();  // F2d-ii: quiet in subworlds
+  set_response_protocol(world, ctx.L, thresh, /*override_k=*/-1, gs_verbose);
   const double t0 = FunctionDefaults<3>::get_thresh();
   {
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json, gs_verbose);
   }
 
   // Target at this protocol (rebuilt inside prepare for the ramp's single step).
@@ -343,7 +364,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     }
   }
 
-  Solver solver(world, tgt, ctx.policy, ctx.print_level);
+  Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
 
   // The protocol + ground state + target are already set up above for `thresh`.
   // iterate_protocol calls prepare() before the (single) step; re-doing the
@@ -358,11 +379,11 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
         std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
     if (changed) {
-      set_response_protocol(world, ctx.L, th);
+      set_response_protocol(world, ctx.L, th, /*override_k=*/-1, gs_verbose);
       const double new_t = FunctionDefaults<3>::get_thresh();
       auto coulop = poperatorT(
           CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
+      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json, gs_verbose);
 
       FDProblem<Type, Shell> nt;
       nt.gs = detail_exec::build_gs<Shell>(world, gs);
@@ -405,7 +426,10 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
                                /*converged=*/strict || accepted,
                                /*seed=*/seed_kind, /*accepted=*/accepted,
-                               /*wall_s=*/wall_s);
+                               /*wall_s=*/wall_s,
+                               /*metadata_shard=*/ctx.metadata_shard,
+                               /*log_prefix=*/ctx.log_prefix,
+                               /*log_group=*/ctx.log_group);
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -419,12 +443,20 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   const bool accepted = accepted_now(sf, solver);
   r.converged = strict || accepted;
   r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
-  if (world.rank() == 0)
-    madness::print("[CALC] fd solve: pert=", pert.description(), " freq=", freq,
-                   " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
-                   " converged=", r.converged,
-                   (accepted ? " (ACCEPTED best-effort @ maxiter — strict target "
-                               "NOT met; see bsh_residual)" : ""));
+  if (world.rank() == 0) {
+    const char *acc = accepted ? " (ACCEPTED best-effort @ maxiter — strict target "
+                                 "NOT met; see bsh_residual)" : "";
+    // F2d: prepend the subworld tag (empty ⇒ unchanged, G=0 byte-identical).
+    if (ctx.log_prefix.empty())
+      madness::print("[CALC] fd solve: pert=", pert.description(), " freq=", freq,
+                     " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
+                     " converged=", r.converged, acc);
+    else
+      madness::print(ctx.log_prefix,
+                     "[CALC] fd solve: pert=", pert.description(), " freq=", freq,
+                     " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
+                     " converged=", r.converged, acc);
+  }
   return r;
 }
 
@@ -721,12 +753,13 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
 
-  set_response_protocol(world, ctx.L, thresh);
+  const bool gs_verbose = ctx.log_prefix.empty();  // F2d-ii: quiet in subworlds
+  set_response_protocol(world, ctx.L, thresh, /*override_k=*/-1, gs_verbose);
   const double t0 = FunctionDefaults<3>::get_thresh();
   {
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json, gs_verbose);
   }
 
   // The two converged first-order states (X,Y) at this protocol. The
@@ -754,10 +787,18 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto vbc_src = vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op);
   const double wall_s = madness::wall_time() - step_w0;   // R1b
   save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id,
-                              /*converged=*/true, /*wall_s=*/wall_s);
+                              /*converged=*/true, /*wall_s=*/wall_s,
+                              /*metadata_shard=*/ctx.metadata_shard,  // F2g
+                              /*log_prefix=*/ctx.log_prefix,          // F2d
+                              /*log_group=*/ctx.log_group);           // F2d
 
-  if (world.rank() == 0)
-    madness::print("[CALC] solve_vbc: built", node.id, "at", protocol_key());
+  if (world.rank() == 0) {
+    if (ctx.log_prefix.empty())
+      madness::print("[CALC] solve_vbc: built", node.id, "at", protocol_key());
+    else
+      madness::print(ctx.log_prefix, "[CALC] solve_vbc: built", node.id, "at",
+                     protocol_key());
+  }
   return NodeResult{/*converged=*/true, protocol_key(), {}};
 }
 
@@ -857,6 +898,7 @@ enum class SeedStrategy { NearestConverged };
 struct CalcManagerPolicy {
   SeedStrategy seed = SeedStrategy::NearestConverged;
   int          max_iters_per_step = 25;
+  int          fd_subworlds = 0;   // F2f: subworlds PER NODE (0=off, 1=node-aligned)
 };
 
 // ===========================================================================
@@ -909,7 +951,17 @@ public:
   /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
   /// and pass count. Built identically on every rank (schedule() is
   /// deterministic), so the value is rank-consistent.
-  nlohmann::json run(madness::World &world, ICalcExecutor &exec) {
+  /// F2 (doc 32 §5): inner per-subworld solve — build the ground state in `sub`
+  /// from the archive, solve exactly `items` (its owned FD subset) at `thresh`,
+  /// save to disk under the `node_index` metadata shard. Supplied by the
+  /// orchestrator (which holds the archive path). Empty ⇒ the single-World path.
+  using SubworldSolve =
+      std::function<void(madness::World &sub, const std::vector<WorkItem> &items,
+                         double thresh, int gid,
+                         const std::string &log_prefix)>;
+
+  nlohmann::json run(madness::World &world, ICalcExecutor &exec,
+                     SubworldSolve fan_out = {}) {
     const std::vector<double> ramp = global_ramp();
     const std::string meta_path = calc_dir_ + "/response_metadata.json";
 
@@ -971,8 +1023,70 @@ public:
                        "  thresh=", wthresh, "  k=", wk,
                        "  items=", (int)wave.size());
       }
-      for (const auto &item : wave)
-        exec.run_protocol(item);
+      const bool fan_enabled = fan_out && policy_.fd_subworlds > 0;
+      if (!fan_enabled) {
+        // Single-World reference path — byte-for-byte the pre-F2 behaviour
+        // (every rank solves each wave item together, in wave order).
+        for (const auto &item : wave)
+          exec.run_protocol(item);
+      } else {
+        // F2 (doc 32 §5): split the wave into the fan-out-eligible subset (FD /
+        // NuclearFD / VBC — all independent per item) and the remainder (ES, which
+        // stays single-World). The two sub-phases run SEQUENTIALLY on all universe
+        // ranks — never concurrently across communicators (would deadlock). VBC
+        // items (F2g) read their converged FD prerequisites from the shared
+        // calc_dir; the scheduler's dependency gate guarantees those archives are
+        // already on disk from a prior pass, so there is no intra-wave race.
+        std::vector<WorkItem> fan_items, rest;
+        for (const auto &it : wave) {
+          const CalcKind k = it.node->kind;
+          ((k == CalcKind::FD || k == CalcKind::NuclearFD || k == CalcKind::VBC)
+               ? fan_items
+               : rest)
+              .push_back(it);
+        }
+
+        if (!fan_items.empty()) {
+          // F2f: groups_per_node = policy_.fd_subworlds (1 = node-aligned; larger
+          // = sub-node / NUMA packing for small systems). G = total subworlds.
+          NodeSubworldInfo info;
+          auto sub = make_subworld_pool(world, policy_.fd_subworlds, &info);
+          const int G = info.n_subworlds;
+          if (G <= 1) {
+            // One subworld total (single node, P=1) ⇒ no real partition (subworld
+            // == universe). Literal G=0 path, no redundant GS reload (doc 32 §7).
+            sub.reset();
+            for (const auto &it : fan_items) exec.run_protocol(it);
+          } else {
+            std::vector<WorkItem> mine;   // round-robin by global gid (deterministic)
+            for (size_t i = 0; i < fan_items.size(); ++i)
+              if (static_cast<int>(i) % G == info.gid)
+                mine.push_back(fan_items[i]);
+            // F2d: per-subworld log tag "[g{gid}/{G} {host}] " (doc 32 §5.6).
+            const std::string lp = "[g" + std::to_string(info.gid) + "/" +
+                                   std::to_string(G) + " " + info.hostname + "] ";
+            if (world.rank() == 0)
+              madness::print("SUBWORLD_FANOUT  pass=", pass, "  n_subworlds=", G,
+                             "  groups_per_node=", info.groups_per_node,
+                             "  fan_items=", (int)fan_items.size());
+            // S1 pmap discipline: point the default pmap at the subworld so
+            // everything built inside is subworld-local; restore BEFORE reset.
+            madness::FunctionDefaults<3>::set_default_pmap(*sub);
+            fan_out(*sub, mine, wthresh, info.gid, lp);
+            sub->gop.fence();
+            madness::FunctionDefaults<3>::set_default_pmap(world);
+            sub.reset();
+          }
+          world.gop.fence();
+          // F2b/F2g: collapse the per-group FD+VBC metadata shards into the
+          // canonical file (universe rank 0; through the metadata layer). Only
+          // when we actually sharded (G > 1).
+          if (world.rank() == 0 && G > 1)
+            ResponseMetadata::merge_state_shards(calc_dir_, G);
+          world.gop.fence();
+        }
+        for (const auto &it : rest) exec.run_protocol(it);   // ES: universe
+      }
       world.gop.fence();
       if (world.rank() == 0)
         madness::print("PROTOCOL_DONE  pass=", pass, "  protocol_index=", pidx,
