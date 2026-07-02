@@ -101,9 +101,13 @@ exchange term is φ-only ⇒ per-iter exchange convolutions M·n²→0 amortized
 `--es-tensor` on `ESSolver::set_gamma_tensor` (SEPARATE from the bitwise `--es-batch`
 gate; A/B-to-floor). Alloc A/B (h2o, 3 TDA roots, climb): converged roots max
 |Δω|=4.0e-7 (tol 2e-5) and gate-1 wall 24% faster (1836s vs 2428s). Harness:
-`es_bench/verify_es_tensor.sh`. NEXT = 3c production wiring (calc_executor ES path
-sets `gamma_tensor`) + Full-ES/VBC reuse (cross-thread w/ parallel-runtime); the
-M=1 FD path has no state-batch win. Cross-thread status on the release board.
+`es_bench/verify_es_tensor.sh`. **3c production wiring LANDED + VALIDATED** (`3410a45ec`):
+`--es-tensor` → `ExecutorSettings.es_gamma_tensor` → `solve_es_tda_closed_shell`;
+full-pipeline A/B on the alloc (cm_es h2o 3, climb, resonant-gradient) — both gates
+ES 3/3 + derived FD 3/3 PASSED, persisted ω agree to max |Δω|=1.39e-08 across all 6
+(pkey,root) pairs. NEXT = Full-ES/VBC reuse of the tensor layer (cross-thread w/
+parallel-runtime); the M=1 FD path has no state-batch win. Cross-thread status on
+the release board.
 
 ---
 
