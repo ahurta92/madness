@@ -75,10 +75,14 @@ inner(const response_space &a, const response_space &b) {
   }
 
   madness::Tensor<double> result(m_a, m_b);
-  for (long p = 0; p < n_orb; ++p) {
+  // matrix_inner is itself collective + self-synchronizing (it reduces internally),
+  // and the aT/bT views are already compressed (fenced above) and not mutated in
+  // the loop — so the per-orbital fence was redundant. Accumulate all n_orb
+  // batched inners, fence once. Same arithmetic; drops n_orb-1 global barriers
+  // per rs::inner call (called for A and S every ES iteration).
+  for (long p = 0; p < n_orb; ++p)
     result += matrix_inner(world, aT[p], bT[p]);
-    world.gop.fence();
-  }
+  world.gop.fence();
   return result;
 }
 

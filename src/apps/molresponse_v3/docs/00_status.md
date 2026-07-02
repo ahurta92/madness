@@ -108,6 +108,33 @@ Workflow + build/run/validate harness: `cm.sh` in
 `/gpfs/scratch/ahurtado/madness_es_bench/` (its `README.md` is the command
 catalog). Run on a compute node via the `run-on-allocation` skill.
 
+**Exchange branch (`exchange`, 2026-07-01):** FD exchange **tensor layer** (doc 28)
+Inc-1 + Inc-2 **LANDED + VALIDATED** (`ad60c2673`). The `--fd-tensor` gate assembles
+θ from shared Tx/g₀ convolution tensors (g₀ cached per protocol on
+`ResponseGroundState::g0_alpha`) instead of the per-op `compute_V0x/compute_gamma`;
+gate 0 (per-op reference) is untouched. Converged-α A/B vs the reference = rel 5.3e-6
+(h2o, Static+Full, climb→1e-6/k8; `es_bench/fd_tensor_compare.py`). `exchange_ctx`
+shape pinned in `operator_contracts.md` ("Tensor-layer exchange"). **Inc-3a/3b/3d
+LANDED** (`ab0eb2ce1`/`d7f07c29d`/`9ef1004c0`): 3a fuses Tx+Ty into one Poisson wave;
+3b tiles `build_pair_tensor` over the φ-row index (`--fd-tensor-tile=N`,
+`ConvergencePolicy.exchange_tile`, default 0=off) to bound the n² peak; 3d adds coarse
+`rs_ext_*` `PROFILE_BLOCK` meters (no-op unless `ENABLE_WORLD_PROFILE`) into
+perf-model's WorldProfile. All bit-identical (`test_exchange_ctx`: Full 1.46e-6/1.61e-6;
+tile=2 vs 0 → 6e-15; meters zero-effect). **Inc-3c slice 1 LANDED + VALIDATED**
+(`0872818d8`): ES bundle γ via the cached g₀ tensor — `tda_batch::compute_gamma_flat`
+(one Coulomb wave for M densities + per-root `contract_col(x_s,g0)`; TDA's only
+exchange term is φ-only ⇒ per-iter exchange convolutions M·n²→0 amortized), gated
+`--es-tensor` on `ESSolver::set_gamma_tensor` (SEPARATE from the bitwise `--es-batch`
+gate; A/B-to-floor). Alloc A/B (h2o, 3 TDA roots, climb): converged roots max
+|Δω|=4.0e-7 (tol 2e-5) and gate-1 wall 24% faster (1836s vs 2428s). Harness:
+`es_bench/verify_es_tensor.sh`. **3c production wiring LANDED + VALIDATED** (`3410a45ec`):
+`--es-tensor` → `ExecutorSettings.es_gamma_tensor` → `solve_es_tda_closed_shell`;
+full-pipeline A/B on the alloc (cm_es h2o 3, climb, resonant-gradient) — both gates
+ES 3/3 + derived FD 3/3 PASSED, persisted ω agree to max |Δω|=1.39e-08 across all 6
+(pkey,root) pairs. NEXT = Full-ES/VBC reuse of the tensor layer (cross-thread w/
+parallel-runtime); the M=1 FD path has no state-batch win. Cross-thread status on
+the release board.
+
 ---
 
 ## Active workstreams

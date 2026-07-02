@@ -58,6 +58,12 @@ add_mad_executable(test_node_phi
 add_mad_executable(test_subspace_allreduce
                    "tests/test_subspace_allreduce.cpp"
                    "MADresponse2;MADchem")
+# Inc 1 of the FD exchange tensor layer (docs 26/27/28): the tensor-layer θ
+# (build_ctx + assemble_theta; shared Tx + cached g0, dot-contracted) matches the
+# reference compute_V0x − compute_E0x + compute_gamma (Static ClosedShell).
+add_mad_executable(test_exchange_ctx
+                   "tests/test_exchange_ctx.cpp"
+                   "MADresponse2;MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees

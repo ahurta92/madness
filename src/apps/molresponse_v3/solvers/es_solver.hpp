@@ -151,6 +151,16 @@ public:
   void set_batched(bool b) { batched_ = b; }
   bool batched() const     { return batched_; }
 
+  /// Inc-3c tensor-layer γ (closed-shell TDA only): build the φ-only g0
+  /// exchange tensor once per protocol (cached on gs_; set_gs invalidates it)
+  /// and compute the bundle's γ as one Coulomb wave + per-root g0
+  /// contractions instead of M per-root Exchange-operator applies
+  /// (kernels/tda_batch.hpp compute_gamma_flat). A/B-to-floor (~1e-3 REL) vs
+  /// the reference — NOT bit-identical like set_batched — so it is a
+  /// SEPARATE gate (--es-tensor). Default OFF = per-root reference γ.
+  void set_gamma_tensor(bool b) { gamma_tensor_ = b; }
+  bool gamma_tensor() const     { return gamma_tensor_; }
+
   /// Per-phase wall-time instrumentation (diagnostic). When on, step_rotate_
   /// pieces fences at phase boundaries and prints one rank-0 line per step:
   ///   ES_TIMING iter=N gamma=.. build=.. subspace=.. rotate=.. bsh=.. total=..
@@ -402,13 +412,42 @@ public:
     // gamma pass (density + Coulomb-exchange γ) — the suspected hot phase, so
     // timed on its own. Split from the ops pass below ONLY for attribution;
     // the per-root kernel calls are independent, so results are unchanged.
-    for (int s = 0; s < M; ++s) {
-      rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
-      gamma[s]     = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[s]);
-      // Δρ vs previous iter (per slot — see note in State).
-      if (!in.rho_alpha_prev.empty()) {
-        auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
-        out.last_density_residual[s] = drho.norm2();
+    //
+    // Gate 1 (gamma_tensor_, --es-tensor; TDA/ClosedShell only): the Inc-3c
+    // tensor-layer γ — densities per root (unchanged), then g0 built once per
+    // protocol (cached on gs_; set_gs hands us a fresh GS each protocol so the
+    // empty-guard invalidates correctly) + compute_gamma_flat (one Coulomb
+    // wave + per-root g0 contractions; NO per-iter exchange convolutions).
+    // Gate 0 (default) = the per-root reference loop, untouched.
+    bool did_gamma_tensor = false;
+    if constexpr (std::is_same_v<Type, TDA> &&
+                  std::is_same_v<Shell, ClosedShell>) {
+      if (gamma_tensor_) {
+        for (int s = 0; s < M; ++s) {
+          rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
+          if (!in.rho_alpha_prev.empty()) {
+            auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
+            out.last_density_residual[s] = drho.norm2();
+          }
+        }
+        if (gs_.g0_alpha.empty())
+          gs_.g0_alpha = exch::build_g0(
+              world_, gs_, madness::FunctionDefaults<3>::get_thresh() * 0.1);
+        auto gflat = tda_batch::compute_gamma_flat(world_, gs_, out.roots,
+                                                   rho_alpha, gs_.g0_alpha);
+        for (int s = 0; s < M; ++s) gamma[s] = std::move(gflat[s]);
+        did_gamma_tensor = true;
+      }
+    }
+    if (!did_gamma_tensor) {
+      for (int s = 0; s < M; ++s) {
+        rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
+        gamma[s]     = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[s]);
+        // Δρ vs previous iter (per slot — see note in State).
+        if (!in.rho_alpha_prev.empty()) {
+          auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
+          out.last_density_residual[s] = drho.norm2();
+        }
       }
     }
     out.rho_alpha_prev = std::move(rho_alpha);
@@ -982,6 +1021,8 @@ private:
   bool                       log_header_written_ = false;
   // Stage-1 bundle batching toggle (see set_batched). Closed-shell TDA only.
   bool                       batched_ = false;
+  // Inc-3c tensor-layer γ toggle (see set_gamma_tensor). Closed-shell TDA only.
+  bool                       gamma_tensor_ = false;
   // Per-phase wall-time instrumentation toggle (see set_time_phases).
   bool                       time_phases_ = false;
 };

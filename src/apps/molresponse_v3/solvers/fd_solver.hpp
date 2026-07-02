@@ -41,6 +41,7 @@
 // the storage. Plan the Kernels API so this plugs in cleanly.
 // =========================================================================
 
+#include "../kernels/exchange_ctx.hpp"  // exch::assemble_theta_tensor (--fd-tensor gate)
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
 #include "../kernels/static.hpp"   // Kernels<Static, ClosedShell>
 #include "../kernels/tags.hpp"
@@ -233,6 +234,16 @@ public:
     out.last_bsh_residual.assign(M, 0.0);
     out.rho_alpha_prev.resize(M);
 
+    // Inc-2: build the φ-only g0 exchange tensor ONCE per protocol (cached on the
+    // ground state) so assemble_theta_tensor doesn't rebuild it every iteration.
+    // Only for the ClosedShell Static/Full tensor path (matches the θ gate below).
+    if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                  std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+      if (policy_.exchange_tensor && target_.gs.g0_alpha.empty())
+        target_.gs.g0_alpha =
+            exch::build_g0(world_, target_.gs, thr * 0.1, policy_.exchange_tile);
+    }
+
     for (int r = 0; r < M; ++r) {
       // ρ (one density function per response; kept for next iter's Δρ check)
       auto rho = K::compute_density(world_, target_.gs, in.responses[r]);
@@ -241,16 +252,32 @@ public:
         out.last_density_residual[r] = drho.norm2();
       }
 
-      // θ = V0x − E0x + γ, streamed via Storage::axpy
-      auto theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
-      {
-        auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
-        theta.axpy(world_, -1.0, E0x);                          // theta -= E0x
+      // θ = V0x − E0x + γ. Gate 1 (policy_.exchange_tensor, --fd-tensor): the
+      // fused tensor-exchange assembly (exch::, ClosedShell Static/Full only);
+      // gate 0 (default) = the per-op reference path, streamed via Storage::axpy,
+      // UNTOUCHED. doc 28 §4 Inc 1; A/B-to-thresh between the two gates.
+      typename K::State theta;
+      bool tensor_done = false;
+      if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                    std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+        if (policy_.exchange_tensor) {
+          theta = exch::assemble_theta_tensor(world_, target_.gs,
+                                              in.responses[r], rho,
+                                              policy_.exchange_tile);
+          tensor_done = true;
+        }
       }
-      {
-        auto gamma = K::compute_gamma(world_, target_.gs,
-                                      in.responses[r], rho);
-        theta.axpy(world_, +1.0, gamma);                        // theta += γ
+      if (!tensor_done) {
+        theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
+        {
+          auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
+          theta.axpy(world_, -1.0, E0x);                        // theta -= E0x
+        }
+        {
+          auto gamma = K::compute_gamma(world_, target_.gs,
+                                        in.responses[r], rho);
+          theta.axpy(world_, +1.0, gamma);                      // theta += γ
+        }
       }
       add_perturbation_source(world_, theta, target_.responses[r]); // theta += V_p
       theta.truncate_all(world_, thr);

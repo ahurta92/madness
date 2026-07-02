@@ -158,6 +158,14 @@ int main(int argc, char **argv) {
 
       ConvergencePolicy policy;
       policy.dconv_user = dconv;
+      // --fd-tensor: gate the FD theta build onto the tensor-exchange layer
+      // (exch::; ClosedShell Static/Full only). Default off = per-op reference.
+      if (parser.key_exists("fd-tensor")) policy.exchange_tensor = true;
+      // --fd-tensor-tile=N: block the tensor-exchange Tx/Ty/g0 builds over the
+      // φ-row index to bound the n² memory peak (doc 33 Inc-3b). 0 = no tiling
+      // (default). Bit-identical to tile 0. Only meaningful with --fd-tensor.
+      if (parser.key_exists("fd-tensor-tile"))
+        policy.exchange_tile = std::stoi(parser.value("fd-tensor-tile"));
       // --explosion-guard=VAL caps the diverging-residual bail-out;
       // --no-explosion- guard disables it (test whether the guard just fires
       // early for stiff nuclear-displacement FD states).
@@ -317,6 +325,9 @@ int main(int argc, char **argv) {
               " dconv=", policy.dconv_user);
         print("  accept_at_maxiter =",
               (parser.key_exists("accept-at-maxiter") ? "ON" : "off"));
+        print("  fd_tensor  =", (policy.exchange_tensor ? "ON" : "off"),
+              "  tile =", policy.exchange_tile,
+              "  es_tensor =", (parser.key_exists("es-tensor") ? "ON" : "off"));
       }
 
       // ---- Analyze-only: load a converged ES bundle + print the report ----
@@ -362,6 +373,10 @@ int main(int argc, char **argv) {
           ctx.seed_derived_from_es_root = true;
         if (parser.key_exists("no-es-seed"))
           ctx.seed_derived_from_es_root = false;
+        // --es-tensor: Inc-3c tensor-layer ES γ (cached g0 + batched Coulomb;
+        // TDA/ClosedShell only). Separate gate from --fd-tensor (FD θ path).
+        if (parser.key_exists("es-tensor"))
+          ctx.es_gamma_tensor = true;
         // --accept-at-maxiter: accept a non-diverged FD solve that hits maxiter
         // without meeting the strict target (records converged + an `accepted`
         // marker) so a stiff channel climbs the protocol ladder and VBC

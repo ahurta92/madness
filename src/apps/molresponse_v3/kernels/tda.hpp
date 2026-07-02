@@ -89,6 +89,14 @@ struct ResponseGroundState {
   // Built/applied at the protocol's k/thresh; rebuilt when the GS is re-prepared.
   std::shared_ptr<madness::Exchange<double, 3>> K0_alpha;
   std::shared_ptr<madness::Exchange<double, 3>> K0_beta;
+
+  // Cached φ-only Coulomb-convolution tensor g0[i*n+k] = Poisson(φ_i·φ_k)
+  // (n_occ² functions), built ONCE per protocol for the FD exchange-tensor path
+  // (--fd-tensor; exch::build_g0) and read by assemble_theta_tensor. Empty unless
+  // that gate is on — gate 0 / ES / VBC never populate it. Rebuilt per protocol
+  // (depends on k/thresh). NOTE: n² RESIDENT functions — a memory-for-wall-time
+  // trade (per-iter g0 rebuild → once/protocol); heavy at large n_occ (Inc-3 tiles).
+  std::vector<madness::real_function_3d>        g0_alpha;
 };
 
 

@@ -81,6 +81,20 @@ struct ConvergencePolicy {
   // from rotated pieces" layout.
   bool stream_theta = false;
 
+  // Gate the FD theta assembly onto the tensor-exchange layer
+  // (kernels/exchange_ctx.hpp): false (default) = the per-op REFERENCE path
+  // (compute_V0x − compute_E0x + compute_gamma, untouched); true = build_ctx +
+  // assemble_theta (ClosedShell Static/Full only; A/B-to-thresh vs reference).
+  // CLI: --fd-tensor (doc 28 §4 Inc 1).
+  bool exchange_tensor = false;
+
+  // Tile size for the tensor-exchange Tx/Ty/g0 builds over the φ-row index
+  // (kernels/exchange_ctx.hpp build_pair_tensors): 0 (default) = no tiling (one
+  // fused Poisson wave, peak ~n²); >0 = block the φ rows to bound the peak to
+  // ~tile·n at the cost of more waves (memory ↔ fences). Bit-identical to tile=0.
+  // Only used when exchange_tensor is on. CLI: --fd-tensor-tile=N (doc 33 Inc-3b).
+  int exchange_tile = 0;
+
   // Diverging-residual bail-out. Triggers only on a runaway residual
   // (BSH residual > guard). The legacy ES guard was 2.0 in normalised
   // units, but FD's iter-1 residual from a "x = perturbation" guess is
