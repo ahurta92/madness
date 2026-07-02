@@ -33,6 +33,7 @@
 
 #include "common_ops.hpp"   // apply_kinetic, make_bsh_operators,
                             // apply_ground_exchange, bsh_shift, poperatorT
+#include "exchange_ctx.hpp" // exch::build_g0/contract_col (tensor-layer γ, Inc-3c)
 #include "tda.hpp"          // ResponseGroundState
 #include "../solvers/response_state.hpp"  // ResponseStateX<ClosedShell>
 
@@ -114,6 +115,44 @@ inline vecfuncT bsh_apply_flat(madness::World &world,
   nx = g0.Qa(nx);
   truncate(world, nx);
   return nx;
+}
+
+/// Batched TDA γ over the bundle via the exchange tensor layer (Inc-3c; docs
+/// 26 §3 / 27 term-3 / 33). Per root s:
+///   γ_s = Q( J[ρ_s]·φ − c_xc·Σ_i x_{s,i}·g0t[i*n+k] )
+/// TDA's ONLY exchange term is K[φ,x_s](φ) (pair {bra=φ, ket=x_s}), whose
+/// convolution tensor g0 = Poisson(φ_i·φ_k) is φ-only → build ONCE per
+/// protocol (exch::build_g0, cached on ResponseGroundState::g0_alpha) and the
+/// per-root, per-iter exchange collapses to the cheap column contraction
+/// Σ_i x_{s,i}·g0[i,k]. The M Coulomb applies fuse into ONE Poisson wave.
+/// No-mixing (doc 26 §4): the convolution sees φ ONLY; roots enter solely as
+/// contraction weights — s is never a reduction index.
+/// Q/truncate mirrors two_electron::apply_gamma exactly (Q, then truncate at
+/// the default thresh). NOT bit-identical to the reference (explicit-Poisson
+/// g0 vs the Exchange operator → ~1e-3 REL floor, same as FD --fd-tensor);
+/// unlike the V0x/T0x/BSH batching above, gate it separately (--es-tensor).
+inline std::vector<State>
+compute_gamma_flat(madness::World &world, const ResponseGroundState &g0,
+                   const std::vector<State> &roots,
+                   const std::vector<madness::real_function_3d> &rho,
+                   const vecfuncT &g0t) {
+  const std::size_t M = roots.size();
+  const std::size_t n = g0.amo.size();
+  // Coulomb: J_s = Poisson(ρ_s) for ALL roots, one wave (per-function identical
+  // to the reference's per-root apply(*coulop, rho1)).
+  auto J = apply(world, *g0.coulop, rho);
+  std::vector<State> out(M);
+  for (std::size_t s = 0; s < M; ++s) {
+    auto g = mul(world, J[s], g0.amo, true);                    // J_s·φ
+    if (g0.c_xc > 0.0) {
+      auto direct = exch::contract_col(world, roots[s].x_alpha, g0t, n);
+      gaxpy(world, 1.0, g, -g0.c_xc, direct);
+    }
+    g = g0.Qa(g);
+    truncate(world, g);            // default thresh — mirrors apply_gamma
+    out[s].x_alpha = std::move(g);
+  }
+  return out;
 }
 
 } // namespace molresponse_v3::tda_batch
