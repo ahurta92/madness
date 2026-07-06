@@ -113,3 +113,7 @@ src/madness/tensor/tensor_spec.h
 src/madness/tensor/tensoriter_spec.h
 src/madness/mra/run_test_*_mpi2.cmake
 src/madness/mra/run_test_*_mpi2.cmake.in
+
+# huge GS archives do not belong in git (fixtures live on scratch)
+src/apps/*/tests/fixtures/**/mad.restartdata*
+src/apps/*/tests/fixtures/**/*.restartaodata

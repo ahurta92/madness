@@ -394,7 +394,7 @@ namespace madness {
 #ifdef WORLD_PROFILE_ENABLE
     // --- machine-readable profile emission (perf-model thread, doc 29) ---------
     // Hand-rolled JSON (no nlohmann dependency in the low-level world/ lib).
-    // Schema v1 is pinned in src/apps/molresponse_v3/docs/operator_contracts.md.
+    // Schema v1 is pinned in src/apps/molresponse/docs/operator_contracts.md.
     // Strict JSON has no NaN/Inf literals; emit 0 for any non-finite value
     // (defense-in-depth — the constructor clear() should already prevent these).
     static inline double json_finite(double x) { return std::isfinite(x) ? x : 0.0; }
