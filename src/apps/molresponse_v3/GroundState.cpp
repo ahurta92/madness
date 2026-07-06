@@ -5,7 +5,7 @@
 #include <madness/tensor/tensor_json.hpp>
 #include <madness/world/MADworld.h>
 
-#include <apps/molresponse_v2/broadcast_json.hpp>
+#include "broadcast_json.hpp"
 
 #include <filesystem>
 
