@@ -16,83 +16,83 @@ if(MADNESS_ENABLE_VTK)
   endif()
 endif()
 
-add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADresponse2;MADchem")
+add_mad_executable(molresponse_v3 "main.cpp;GroundState.cpp" "MADchem")
 # Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
 # along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
 # core is covered by test_calc_manager_run / test_run_response / test_v3_*_skeleton.
 add_mad_executable(test_v3_es_skeleton
                    "tests/test_v3_es_skeleton.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_v3_fd_skeleton
                    "tests/test_v3_fd_skeleton.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_protocol_key
                    "tests/test_protocol_key.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_response_metadata
                    "tests/test_response_metadata.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_response_property_planner
                    "tests/test_response_property_planner.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_state_metrics
                    "tests/test_state_metrics.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_calc_manager
                    "tests/test_calc_manager.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_calc_manager_run
                    "tests/test_calc_manager_run.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_run_response
                    "tests/test_run_response.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_kernel_equivalence
                    "tests/test_kernel_equivalence.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 add_mad_executable(test_step_restriction
                    "tests/test_step_restriction.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Inc 1 of the ES node-φ state-parallel design (docs/21): node-aligned subworld
 # creation (one subworld per physical node via Split_type SHARED) + map test.
 add_mad_executable(test_node_subworlds
                    "tests/test_node_subworlds.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Inc 2 (docs/21): prove ground state shipped into node-aligned subworlds is
 # ONE distributed copy per node (not per-rank replicated); de-risk cross-world copy.
 add_mad_executable(test_node_phi
                    "tests/test_node_phi.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Keystone of the persistent-subworld recompute design (docs/22 §8): assemble the
 # subspace matrix from per-node partial columns + universe allreduce (no function
 # movement), == direct universe matrix.
 add_mad_executable(test_subspace_allreduce
                    "tests/test_subspace_allreduce.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Inc 1 of the FD exchange tensor layer (docs 26/27/28): the tensor-layer θ
 # (build_ctx + assemble_theta; shared Tx + cached g0, dot-contracted) matches the
 # reference compute_V0x − compute_E0x + compute_gamma (Static ClosedShell).
 add_mad_executable(test_exchange_ctx
                    "tests/test_exchange_ctx.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # S1 of the persistent-subworld ES design (docs/23): prove the GS-dependent build
 # kernels (V0x/γ/E0x/T0x → Λ) reproduce bit-for-bit in a node-aligned subworld,
 # the one piece the φ-count + A/S-scalar proofs did not cover.
 add_mad_executable(test_es_build_subworld
                    "tests/test_es_build_subworld.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # F1 of the FD state-parallel design (docs/31,32): independent dipole FD states
 # solved one-per-node-subworld give an alpha tensor bit-identical to the single-
 # World path (pure fan-out -> solve -> filesystem gather). Needs GroundState.cpp
 # (uses a real moldft archive, unlike the synthetic-GS subworld proofs above).
 add_mad_executable(test_fd_subworld_fanout
                    "tests/test_fd_subworld_fanout.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees
                    "tools/dump_mra_trees.cpp;GroundState.cpp"
-                   "MADresponse2;MADchem")
+                   "MADchem")
 # Native HTG export is optional: only when -DMADNESS_ENABLE_VTK=ON found VTK.
 # Guarded by MADNESS_HAS_VTK in the source; a no-VTK build is unchanged.
 if(MADNESS_ENABLE_VTK AND VTK_FOUND)

@@ -1,21 +1,14 @@
 #include <WorkflowBuilders.hpp>
-#include <apps/molresponse_v2/StateParallelPlanner.hpp>
-#include <madness/chem/ResponseParameters.hpp>
 
 #include <array>
 #include <iostream>
-#include <set>
 #include <string>
-#include <vector>
 
-namespace {
-
-LinearResponseDescriptor make_dipole_state(char axis) {
-  return LinearResponseDescriptor(DipolePerturbation{axis}, {0.0, 0.1},
-                                  {1.0e-3, 1.0e-4}, true);
-}
-
-} // namespace
+// Unit test for the madqc workflow dispatch surface (name -> WorkflowKind and
+// the runnable-workflow listing). The v2 StateParallelPlanner half of this test
+// was removed with the v2 engine (M1 decoupling Stage 3); state-parallel
+// planning now lives in molresponse_v3's subworld layer (doc 32) and is
+// covered by test_fd_subworld_fanout / test_node_subworlds.
 
 int main() {
   using madness::workflow_builders::WorkflowKind;
@@ -59,130 +52,6 @@ int main() {
     if (workflow_list.find(name) == std::string::npos) {
       ok = false;
       std::cerr << "runnable_workflow_list missing '" << name << "'\n";
-    }
-  }
-
-  {
-    ResponseParameters params;
-    params.set_user_defined_value<std::string>("state_parallel", "on");
-    params.set_user_defined_value<size_t>("state_parallel_groups", 8);
-    params.set_user_defined_value<size_t>("state_parallel_min_states", 1);
-    params.set_user_defined_value<size_t>("state_parallel_point_start_protocol",
-                                          1);
-
-    const std::vector<LinearResponseDescriptor> states = {
-        make_dipole_state('x'),
-        make_dipole_state('y'),
-        make_dipole_state('z'),
-    };
-    const auto plan = StateParallelPlanner::build(params, 32, states);
-
-    if (plan.point_parallel_start_protocol_index != 1) {
-      ok = false;
-      std::cerr << "state_parallel_point_start_protocol=1 not reflected in "
-                   "planner output\n";
-    }
-    if (plan.frequency_partition_policy != "channel_series_then_point") {
-      ok = false;
-      std::cerr << "expected channel_series_then_point frequency policy for "
-                   "point_start=1\n";
-    }
-    if (plan.num_points != 6) {
-      ok = false;
-      std::cerr << "expected 6 linear response points for 3 states x 2 "
-                   "frequencies\n";
-    }
-    if (plan.effective_point_groups != 6) {
-      ok = false;
-      std::cerr << "expected effective point groups to cap at number of points "
-                   "(6)\n";
-    }
-    PointOwnershipScheduler point_scheduler(states, plan.effective_point_groups);
-    std::set<size_t> owners;
-    for (size_t state_index = 0; state_index < states.size(); ++state_index) {
-      for (size_t freq_index = 0;
-           freq_index < states[state_index].num_frequencies(); ++freq_index) {
-        owners.insert(point_scheduler.owner_group(state_index, freq_index));
-      }
-    }
-    if (owners.size() != 6) {
-      ok = false;
-      std::cerr << "expected all 6 point-owner lanes to be used\n";
-    }
-
-  }
-
-  {
-    ResponseParameters params;
-    params.set_user_defined_value<std::string>("state_parallel", "on");
-    params.set_user_defined_value<size_t>("state_parallel_groups", 8);
-    params.set_user_defined_value<size_t>("state_parallel_min_states", 1);
-    params.set_user_defined_value<size_t>("state_parallel_point_start_protocol",
-                                          0);
-
-    const std::vector<LinearResponseDescriptor> states = {
-        make_dipole_state('x'),
-        make_dipole_state('y'),
-    };
-    const auto plan = StateParallelPlanner::build(params, 32, states);
-
-    if (plan.point_parallel_start_protocol_index != 0) {
-      ok = false;
-      std::cerr << "state_parallel_point_start_protocol=0 not reflected in "
-                   "planner output\n";
-    }
-    if (plan.frequency_partition_policy != "channel_point_from_t0") {
-      ok = false;
-      std::cerr << "expected channel_point_from_t0 frequency policy for "
-                   "point_start=0\n";
-    }
-    if (plan.num_points != 4) {
-      ok = false;
-      std::cerr << "expected 4 linear response points for 2 states x 2 "
-                   "frequencies\n";
-    }
-    if (plan.effective_point_groups != 4) {
-      ok = false;
-      std::cerr << "expected point group cap to 4 points for point_start=0 "
-                   "scenario\n";
-    }
-  }
-
-  {
-    ResponseParameters params;
-    params.set_user_defined_value<std::string>("state_parallel", "on");
-    params.set_user_defined_value<size_t>("state_parallel_groups", 8);
-    params.set_user_defined_value<size_t>("state_parallel_min_states", 1);
-    params.set_user_defined_value<size_t>("state_parallel_point_start_protocol",
-                                          1);
-
-    const std::vector<LinearResponseDescriptor> states = {
-        make_dipole_state('x'),
-    };
-    const auto plan = StateParallelPlanner::build(params, 32, states);
-    if (plan.effective_point_groups != 2) {
-      ok = false;
-      std::cerr << "single-state point-group cap should be 2 for two "
-                   "frequencies\n";
-    }
-  }
-
-  {
-    LinearResponseDescriptor dedup_state(
-        DipolePerturbation{'x'},
-        {0.0, 0.1, 0.06 + 0.06, 0.1 + 0.02},
-        {1.0e-3, 1.0e-4}, true);
-
-    if (dedup_state.num_frequencies() != 3) {
-      ok = false;
-      std::cerr
-          << "frequency canonicalization should deduplicate near-identical "
-             "floating-point frequencies that map to the same filename key\n";
-    }
-
-    if (dedup_state.frequency_map.find(0.12) == dedup_state.frequency_map.end()) {
-      ok = false;
-      std::cerr << "expected canonical 0.120 frequency key in frequency_map\n";
     }
   }
 
