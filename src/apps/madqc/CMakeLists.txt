@@ -7,6 +7,12 @@ add_dependencies(applications-madness madqc)
 
 if (BUILD_TESTING)
     add_mad_executable(test_workflow_builders test_workflow_builders.cpp "MADchem")
+if (BUILD_TESTING)
+  add_test(NAME madness/test/madqc/test_workflow_builders/run
+           COMMAND test_workflow_builders)
+  set_property(TEST madness/test/madqc/test_workflow_builders/run
+               PROPERTY LABELS "unit;madqc;short" APPEND)
+endif()
     add_dependencies(applications-madness test_workflow_builders)
     add_test(NAME test_workflow_builders COMMAND test_workflow_builders)
 

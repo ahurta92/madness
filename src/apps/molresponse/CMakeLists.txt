@@ -141,3 +141,51 @@ add_dependencies(applications-madness molresponse)
 
 install(TARGETS molresponse
         DESTINATION "${MADNESS_INSTALL_BINDIR}")
+
+# --- CTest registration (M3): tiered so a bare `ctest` is fast and green on ---
+# --- any machine, and heavier tiers are opt-in by label / cache variable. ----
+if (BUILD_TESTING)
+  # Tier 1 — "unit": pure logic, no fixtures, no MPI launcher required.
+  foreach(_t test_calc_manager test_protocol_key test_response_metadata
+             test_response_property_planner test_state_metrics)
+    add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
+    set_property(TEST madness/test/molresponse/${_t}/run
+                 PROPERTY LABELS "unit;response;short" APPEND)
+  endforeach()
+
+  # Tier 2 — "response-small": self-contained solver tests (SYNTHETIC ground
+  # state; no fixture archives). Registered SERIAL on purpose: launcher choice
+  # is cluster-specific (mpirun hangs in batch on some systems) and the
+  # multi-rank coverage of these paths lives in the es_bench state-parallel
+  # gates. Serial runs still validate the numerics end-to-end.
+  foreach(_t test_exchange_ctx test_node_subworlds test_node_phi
+             test_subspace_allreduce test_es_build_subworld test_step_restriction)
+    add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
+    set_property(TEST madness/test/molresponse/${_t}/run
+                 PROPERTY LABELS "response-small;response;medium" APPEND)
+  endforeach()
+
+  # Tier 3 — "response-fixture": need a moldft ground-state archive; registered
+  # only when the fixture tree is available so CI without fixtures stays green.
+  # (test_fd_subworld_fanout is intentionally NOT here — it requires multi-rank
+  # subworlds and is covered by the state-parallel gate.)
+  set(MADNESS_RESPONSE_FIXTURE_DIR "" CACHE PATH
+      "fixture tree for response regression tests (<dir>/h2o/mad.restartdata.*)")
+  if (MADNESS_RESPONSE_FIXTURE_DIR)
+    add_test(NAME madness/test/molresponse/test_kernel_equivalence/run
+             COMMAND test_kernel_equivalence
+                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
+    add_test(NAME madness/test/molresponse/test_calc_manager_run/run
+             COMMAND test_calc_manager_run
+                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata
+                     --omega=0.0 --axes=z --protocol=1e-4 --maxiter=25
+                     --calc-dir=ctest_calc_manager_run)
+    add_test(NAME madness/test/molresponse/test_run_response/run
+             COMMAND test_run_response
+                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
+    foreach(_t test_kernel_equivalence test_calc_manager_run test_run_response)
+      set_property(TEST madness/test/molresponse/${_t}/run
+                   PROPERTY LABELS "response-fixture;response;long" APPEND)
+    endforeach()
+  endif()
+endif (BUILD_TESTING)
