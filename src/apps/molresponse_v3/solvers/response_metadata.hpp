@@ -118,6 +118,13 @@ public:
     j_["vbc_states"][vbc_id][protocol_key] = entry;
   }
 
+  /// Record the effective I/O configuration (provenance): which restart backend
+  /// wrote this run's state archives, and whether the binary had HDF5 compiled
+  /// in. Without this an HDF5 run and a native run are indistinguishable.
+  void set_io_info(const std::string &backend, bool hdf5_compiled) {
+    j_["io"] = {{"backend", backend}, {"hdf5_compiled", hdf5_compiled}};
+  }
+
   /// Append a property record to properties/<name>/<protocol_key>[]. The
   /// caller stamps it with whatever provenance is meaningful (es_root_id,
   /// fd_freq, the value, etc. — see doc 13's matching contract).

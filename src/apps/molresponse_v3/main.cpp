@@ -48,6 +48,8 @@ void print_usage() {
   print("  --maxiter=N          iteration budget per protocol step (default 25)");
   print("  --fd-subworlds=P     fan FD/VBC states across P subworlds PER NODE "
         "(0=single-World default; 1=node-aligned; >1=sub-node/NUMA packing)");
+  print("  --hdf5               opt-in HDF5-backed restart I/O "
+        "(requires -DMADNESS_ENABLE_HDF5 build; readers auto-detect .h5)");
   print("  --dconv=X            convergence target (default 1e-4)");
   print("  --calc-dir=DIR       output dir (response_metadata.json + archives)");
   print("  --print-level=0..3   verbosity (default 1)");
@@ -99,6 +101,17 @@ int main(int argc, char **argv) {
       in.settings.fd_subworlds =
           parser.key_exists("fd-subworlds")
               ? std::stoi(parser.value("fd-subworlds")) : 0;
+      if (parser.key_exists("hdf5")) {
+#ifdef MADNESS_HAS_HDF5
+        set_hdf5_io_enabled(true);
+#else
+        if (world.rank() == 0)
+          print("ERROR: --hdf5 requested but this build has no HDF5 support "
+                "(configure with -DMADNESS_ENABLE_HDF5=ON)");
+        finalize();
+        return 1;
+#endif
+      }
       in.settings.calc_dir = parser.key_exists("calc-dir")
                                  ? parser.value_raw("calc-dir")
                                  : std::string("molresponse_v3_calc");

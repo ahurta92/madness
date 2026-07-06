@@ -102,7 +102,26 @@ public:
 
     for (size_t i = 0; i < drivers_.size(); ++i) {
       auto taskDir = topDir / ("task_" + std::to_string(i));
-      drivers_[i]->execute(taskDir);
+      try {
+        drivers_[i]->execute(taskDir);
+      } catch (...) {
+        // A failing task must still leave a complete, diagnosable
+        // calc_info.json: record the failure as a task entry, persist, and
+        // rethrow so the app-level handler reports the error (madqc.cpp).
+        nlohmann::json failed;
+        failed["type"] = "task_failed";
+        failed["task_index"] = i;
+        try {
+          throw;
+        } catch (const std::exception &e) {
+          failed["error"] = e.what();
+        } catch (...) {
+          failed["error"] = "unknown exception";
+        }
+        all_["tasks"].push_back(failed);
+        write_calc_info(prefix);
+        throw;
+      }
       auto current_output = drivers_[i]->summary();
 
       /// append current output to all
@@ -114,13 +133,7 @@ public:
         all_["tasks"].push_back(current_output);
       }
 
-      // Write out aggregate results
-      {
-        std::string outputfile = prefix + ".calc_info.json";
-        std::ofstream ofs(outputfile);
-        ofs << std::setw(4) << all_;
-        ofs.close();
-      }
+      write_calc_info(prefix);
     }
   }
 
@@ -128,6 +141,20 @@ public:
   const nlohmann::json &results() const { return all_; }
 
 private:
+  /// Rank-0-only, ATOMIC (tmp+rename) aggregate write. Every rank used to
+  /// stream the file directly — N concurrent writers to one path on a shared
+  /// FS, and a crash mid-write truncated it.
+  void write_calc_info(const std::string &prefix) const {
+    if (madness::World::get_default().rank() != 0) return;
+    const std::string outputfile = prefix + ".calc_info.json";
+    const std::string tmpfile = outputfile + ".tmp";
+    {
+      std::ofstream ofs(tmpfile);
+      ofs << std::setw(4) << all_;
+    }
+    std::filesystem::rename(tmpfile, outputfile);
+  }
+
   std::vector<std::unique_ptr<Driver>> drivers_;
   nlohmann::json all_;
 };

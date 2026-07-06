@@ -360,9 +360,19 @@ inline void read_byte_dataset(const std::string& path,
 }
 }  // namespace detail_function_hdf5
 
-/// Opt-in switch for HDF5-backed restart I/O: env MADRESPONSE_IO_HDF5 set and
-/// not "0". Controls only what is WRITTEN; readers auto-detect a `.h5` file.
+/// Programmatic override for the HDF5 opt-in (deck parameter `response.hdf5`
+/// or the standalone --hdf5 flag). -1 = unset (fall back to the env var).
+inline int& hdf5_io_override() {
+  static int v = -1;
+  return v;
+}
+inline void set_hdf5_io_enabled(bool on) { hdf5_io_override() = on ? 1 : 0; }
+
+/// Opt-in switch for HDF5-backed restart I/O: deck/flag override first, else
+/// env MADRESPONSE_IO_HDF5 set and not "0". Controls only what is WRITTEN;
+/// readers auto-detect a `.h5` file.
 inline bool hdf5_io_enabled() {
+  if (hdf5_io_override() >= 0) return hdf5_io_override() == 1;
   const char* e = std::getenv("MADRESPONSE_IO_HDF5");
   return e && e[0] && e[0] != '0';
 }

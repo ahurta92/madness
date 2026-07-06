@@ -203,6 +203,46 @@ inline void write_correlation_section(std::ostream &os, const nlohmann::json &t)
 
 inline void write_response_section(std::ostream &os, const nlohmann::json &t) {
   const auto &props = t.value("properties", nlohmann::json::object());
+  // v3 shape: response_properties is an OBJECT keyed property -> protocol_key
+  // -> row(s). (The old v2 engine emitted a flat array — handled below for
+  // backward compatibility with archived calc_info files.)
+  if (props.contains("response_properties") &&
+      props["response_properties"].is_object()) {
+    for (const auto &[prop, by_key] : props["response_properties"].items()) {
+      if (!by_key.is_object()) continue;
+      for (const auto &[pkey, rows_raw] : by_key.items()) {
+        const auto rows = rows_raw.is_array()
+                              ? rows_raw
+                              : nlohmann::json::array({rows_raw});
+        for (const auto &r : rows) {
+          if (prop == "alpha" && r.contains("alpha")) {
+            const std::string dirs = r.value("directions", std::string("?"));
+            os << "    alpha[" << pkey << "](w=" << std::fixed
+               << std::setprecision(3) << r.value("omega", 0.0) << ")"
+               << (r.value("converged", false) ? "" : "  [NOT converged]")
+               << "\n";
+            const auto &m = r["alpha"];
+            for (size_t i = 0; i < m.size(); ++i) {
+              os << "      " << (i < dirs.size() ? dirs[i] : '?') << " :";
+              for (const auto &v : m[i])
+                os << std::setprecision(6) << std::setw(14) << v.get<double>();
+              os << "\n";
+            }
+          } else if (r.contains("beta")) {   // beta and raman rows
+            os << "    " << prop << "[" << pkey << "]("
+               << r.value("A", std::string("?")) << ","
+               << r.value("B", std::string("?")) << ","
+               << r.value("C", std::string("?")) << "; wB=" << std::fixed
+               << std::setprecision(3) << r.value("freq_b", 0.0)
+               << ",wC=" << r.value("freq_c", 0.0) << ") = "
+               << std::setprecision(6) << std::setw(14)
+               << r.value("beta", 0.0) << "\n";
+          }
+        }
+      }
+    }
+    os << std::defaultfloat;
+  }
   if (props.contains("response_properties") &&
       props["response_properties"].is_array()) {
     for (const auto &e : props["response_properties"]) {

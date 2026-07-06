@@ -199,6 +199,14 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   if (world.rank() == 0) {
     auto meta = ResponseMetadata::load_or_create(
         in.settings.calc_dir + "/response_metadata.json");
+    // Provenance: stamp the effective restart-I/O backend into the metadata
+    // (madqc review R3 — an HDF5 run must be distinguishable from a native one).
+#ifdef MADNESS_HAS_HDF5
+    meta.set_io_info(hdf5_io_enabled() ? "hdf5" : "native", true);
+#else
+    meta.set_io_info("native", false);
+#endif
+    meta.save();
     out.metadata = meta.json();
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];

@@ -168,6 +168,17 @@ struct molresponse_v3_lib {
     in.settings.policy.dconv_user = rp.dconv();
     in.settings.print_level =
         static_cast<PrintLevel>(std::max(0, std::min(3, rp.print_level())));
+    // Deck-level HDF5 opt-in (response.hdf5 true) — the env var
+    // MADRESPONSE_IO_HDF5 still works; the deck parameter wins when set.
+    if (rp.hdf5()) {
+#ifdef MADNESS_HAS_HDF5
+      set_hdf5_io_enabled(true);
+#else
+      throw std::runtime_error(
+          "response.hdf5 requested but this build has no HDF5 support — "
+          "configure with -DMADNESS_ENABLE_HDF5=ON");
+#endif
+    }
 
     ResponseWorkflowOutput out =
         run_response_with_ground(world, gs, L, /*fock_json=*/"", in);

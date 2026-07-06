@@ -39,6 +39,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
                                 "single-component raman; ES experimental). 'v2' was removed "
                                 "(M1) and is rejected with a migration hint.",
                                 {"v2", "v3"});
+        initialize<bool>("hdf5", false,
+                         "opt-in HDF5-backed response-state restart I/O (writes .h5 "
+                         "archives; readers auto-detect). Requires a build with "
+                         "-DMADNESS_ENABLE_HDF5=ON; closed-shell states only.");
         initialize<bool>("beta.shg", true,
                          "compute only SHG beta triplets (omegaB=omegaC, "
                          "omegaA=-(omegaB+omegaC))");
@@ -111,6 +115,9 @@ public:
     }
     [[nodiscard]] std::string engine() const {
         return get<std::string>("engine");
+    }
+    [[nodiscard]] bool hdf5() const {
+        return get<bool>("hdf5");
     }
     [[nodiscard]] bool step_restrict() const {
         return get<bool>("step_restrict");

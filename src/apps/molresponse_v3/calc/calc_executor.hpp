@@ -578,7 +578,10 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   // own process count and writes only a rank-0 JSON — it does NOT reload the
   // bundle, so it never hits the cross-np load path that caused the parked ES
   // heap-OOB (now guarded in load_es_roots). Re-enabled with that guard in place.
-  if (r.converged && ctx.print_level >= PrintLevel::Normal)
+  // Ungated (was print_level-gated): oscillator strengths / transition moments
+  // are part of the machine-readable property set — computing them and throwing
+  // them away at low print levels made the ES output incomplete (madqc review).
+  if (r.converged)
     report_es_analysis<TDA, ClosedShell>(
         world, gs, sf, ctx.print_level,
         ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
@@ -1228,6 +1231,34 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   // the whole file per (vbc, axis). `key` is constant across all rows.
   std::vector<std::pair<std::string, nlohmann::json>> rows;  // (property key, row)
 
+  // Rank-0 metadata snapshot for per-row accuracy: each beta/raman row records
+  // the honest verdict of the FD states that built it (same discipline as
+  // alpha's row_accuracy; madqc review R4). Uses the SAME source-selection
+  // helper the loader uses, so reported accuracy == the state actually loaded.
+  nlohmann::json acc_meta;
+  if (world.rank() == 0)
+    acc_meta = ResponseMetadata::load_or_create(
+                   ctx.calc_dir + "/response_metadata.json").json();
+  const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
+  const int    acc_k   = madness::FunctionDefaults<3>::get_k();
+  auto fd_acc = [&](const Perturbation &p, double f) -> nlohmann::json {
+    nlohmann::json a;   // rank-0 only: rows are assembled on rank 0
+    const std::string chan = p.description();
+    const std::string fk   = ResponseMetadata::freq_key(f);
+    const std::string sk =
+        best_usable_fd_source_key(acc_meta, chan, fk, acc_thr, acc_k, key);
+    a["input"] = chan;
+    a["freq"]  = f;
+    a["source_protocol_key"] = sk;
+    if (!sk.empty() && acc_meta["fd_states"][chan][sk].contains(fk)) {
+      const auto &e = acc_meta["fd_states"][chan][sk][fk];
+      a["converged"]    = e.value("converged", false);
+      a["accepted"]     = e.value("accepted", false);
+      a["bsh_residual"] = e.value("bsh_residual", 0.0);
+    }
+    return a;
+  };
+
   for (const auto &vr : plan.vbc) {
     const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
     const std::string vbc_id =
@@ -1264,13 +1295,25 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
                        "  C=", vr.pert_c.description(),
                        "  fB=", vr.freq_b, "  fC=", vr.freq_c,
                        "  value=", b);
-        rows.emplace_back(
-            pkey, nlohmann::json{{"A", std::string(1, beta_axis_name(a))},
-                                 {"B", vr.pert_b.description()},
-                                 {"C", vr.pert_c.description()},
-                                 {"freq_b", vr.freq_b},
-                                 {"freq_c", vr.freq_c},
-                                 {"beta", b}});
+        nlohmann::json row{{"A", std::string(1, beta_axis_name(a))},
+                           {"B", vr.pert_b.description()},
+                           {"C", vr.pert_c.description()},
+                           {"freq_b", vr.freq_b},
+                           {"freq_c", vr.freq_c},
+                           {"beta", b}};
+        // Honest per-row accuracy: the three FD inputs (A@ws, B@fB, C@fC) and
+        // the VBC state's own verdict at this protocol.
+        row["row_accuracy"] = nlohmann::json::array(
+            {fd_acc(pA, ws), fd_acc(vr.pert_b, vr.freq_b),
+             fd_acc(vr.pert_c, vr.freq_c)});
+        if (acc_meta.contains("vbc_states") &&
+            acc_meta["vbc_states"].contains(vbc_id) &&
+            acc_meta["vbc_states"][vbc_id].contains(key)) {
+          const auto &v = acc_meta["vbc_states"][vbc_id][key];
+          row["vbc_accuracy"] = {{"converged", v.value("converged", false)},
+                                 {"diverged", v.value("diverged", false)}};
+        }
+        rows.emplace_back(pkey, std::move(row));
       }
       world.gop.fence();
     }
