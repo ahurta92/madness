@@ -34,9 +34,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<std::vector<std::string>>("requested_properties", {"polarizability"},
                                              "properties to calculate: polarizability, "
                                              "hyperpolarizability, raman");
-        initialize<std::string>("engine", "v2",
-                                "response engine backend: v2 (MolresponseLib, production) | "
-                                "v3 (molresponse_v3: alpha, beta, single-component raman; ES experimental)",
+        initialize<std::string>("engine", "v3",
+                                "response engine backend: v3 (molresponse_v3 — alpha, beta, "
+                                "single-component raman; ES experimental). 'v2' was removed "
+                                "(M1) and is rejected with a migration hint.",
                                 {"v2", "v3"});
         initialize<bool>("beta.shg", true,
                          "compute only SHG beta triplets (omegaB=omegaC, "

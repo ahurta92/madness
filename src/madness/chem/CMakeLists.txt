@@ -53,7 +53,6 @@ set(MADCHEM_HEADERS
     ParameterManager.hpp
     ResponseParameters.hpp
     PathManager.hpp
-    MolresponseLib.hpp
     Applications.hpp
     Drivers.hpp
     ResultsSummary.hpp

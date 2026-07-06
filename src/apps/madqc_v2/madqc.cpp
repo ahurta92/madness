@@ -188,15 +188,23 @@ int main(int argc, char **argv) {
       // read in all parameters from the input file and the command line
       // logic and interdependent parameter follow later
       Params pm(world, parser);
-      // R3: select the v3 response engine here in the app — MADchem's
-      // WorkflowBuilders cannot reference v3 (circular lib dependency), so the
-      // response.engine=v3 knob (default v2) is consumed in madqc.cpp, mirroring
-      // add_response_workflow_drivers with ResponseApplication<molresponse_v3_lib>.
+      // The response workflow is built HERE in the app — MADchem's
+      // WorkflowBuilders cannot reference v3 (circular lib dependency), and the
+      // v2 engine was removed (M1 decoupling Stage 2). molresponse_v3 is THE
+      // response engine; `engine v2` in old decks fails loudly below.
       if (workflow_builders::workflow_kind_from_name(user_workflow) ==
-              workflow_builders::WorkflowKind::Response &&
-          pm.get<ResponseParameters>().engine() == "v3") {
+          workflow_builders::WorkflowKind::Response) {
+        const std::string engine = pm.get<ResponseParameters>().engine();
+        if (engine == "v2") {
+          if (world.rank() == 0)
+            print("ERROR: response engine 'v2' (MolresponseLib) was removed.\n"
+                  "       Delete the `engine v2` line (v3 is the default) — the\n"
+                  "       input deck is otherwise unchanged; see\n"
+                  "       molresponse_v3/MIGRATION_FROM_V2.md.");
+          throw std::runtime_error("response engine v2 removed — use v3");
+        }
         if (world.rank() == 0)
-          print("response engine : molresponse_v3 (R3)");
+          print("response engine : molresponse_v3");
         pm.get<CalculationParameters>().set_derived_value("save", true);
         auto reference =
             std::make_shared<SCFApplication<moldft_lib>>(world, pm);

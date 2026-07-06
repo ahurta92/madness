@@ -8,7 +8,6 @@
 #include <CCLib.hpp>
 #include <Drivers.hpp>
 #include <MoldftLib.hpp>
-#include <MolresponseLib.hpp>
 #include <ParameterManager.hpp>
 #include <madness/mra/funcdefaults.h>
 
@@ -72,16 +71,13 @@ inline void add_nemo_workflow_drivers(World &world, Params &pm,
   wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
 }
 
-inline void add_response_workflow_drivers(World &world, Params &pm,
-                                          qcapp::Workflow &wf) {
-  pm.get<CalculationParameters>().set_derived_value("save", true);
-
-  auto reference = std::make_shared<SCFApplication<moldft_lib>>(world, pm);
-  wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-  wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-      std::make_unique<ResponseApplication<molresponse_lib>>(world, pm,
-                                                             reference->calc())));
-}
+// NOTE (M1 decoupling, Stage 2): the response workflow no longer has a MADchem
+// driver. The v2 engine (ResponseApplication<molresponse_lib> via
+// MolresponseLib.hpp) was removed; the v3 engine lives in the APP layer
+// (madqc.cpp builds ResponseApplication<molresponse_v3_lib>) because MADchem
+// must not depend on molresponse_v3 (circular lib dependency — see
+// molresponse_v3/madqc_adapter.hpp). The Response enum + name table stay so
+// workflow_kind_from_name/runnable_workflows keep listing it.
 
 inline void add_cc2_workflow_drivers(World &world, Params &pm,
                                      qcapp::Workflow &wf) {
@@ -144,8 +140,12 @@ inline void add_workflow_drivers(World &world, Params &pm,
     add_nemo_workflow_drivers(world, pm, wf);
     break;
   case WorkflowKind::Response:
-    add_response_workflow_drivers(world, pm, wf);
-    break;
+    // App-layer workflow (engine v3 in madqc.cpp); MADchem hosts no response
+    // driver since the v2 engine's removal (M1 Stage 2).
+    throw std::runtime_error(
+        "response workflow: no MADchem driver — the v2 engine was removed; "
+        "run it through madqc (engine v3), which builds the v3 driver in the "
+        "app layer");
   case WorkflowKind::Mp2Cc2:
     add_cc2_workflow_drivers(world, pm, wf);
     break;
