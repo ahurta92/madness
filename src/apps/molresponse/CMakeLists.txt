@@ -103,7 +103,7 @@ endif()
 # --- io-hdf5 thread: HDF5-backed I/O (opt-in; docs/30) -----------------------
 # Native MADNESS archive stays the default. No-op unless configured with
 # -DMADNESS_ENABLE_HDF5=ON, so a normal build is byte-for-byte unchanged.
-option(MADNESS_ENABLE_HDF5 "Enable HDF5-backed function/checkpoint I/O in molresponse_v3 (opt-in; native archive remains the default)" OFF)
+option(MADNESS_ENABLE_HDF5 "Enable HDF5-backed function/checkpoint I/O in molresponse (opt-in; native archive remains the default)" OFF)
 if(MADNESS_ENABLE_HDF5)
   find_package(HDF5 REQUIRED COMPONENTS C)
   message(STATUS "molresponse: HDF5 enabled — ${HDF5_LIBRARIES}")
@@ -137,7 +137,7 @@ if(MADNESS_ENABLE_HDF5)
   endforeach()
 endif()
 
-add_dependencies(applications-madness molresponse_v3)
+add_dependencies(applications-madness molresponse)
 
-install(TARGETS molresponse_v3
+install(TARGETS molresponse
         DESTINATION "${MADNESS_INSTALL_BINDIR}")

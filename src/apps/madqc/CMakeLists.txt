@@ -1,6 +1,6 @@
 # src/apps/moldft
 
-# madqc also compiles molresponse_v3's GroundState.cpp so the v3 engine
+# madqc also compiles molresponse's GroundState.cpp so the v3 engine
 # (molresponse_v3_lib, included header-only via madqc_adapter.hpp) links (R3).
 add_mad_executable(madqc "madqc.cpp;../molresponse/GroundState.cpp" "MADchem")
 add_dependencies(applications-madness madqc)
