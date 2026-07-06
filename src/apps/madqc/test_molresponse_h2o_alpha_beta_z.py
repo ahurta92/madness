@@ -10,16 +10,40 @@ sys.path.append("@CMAKE_SOURCE_DIR@/bin")
 from test_utilities import cleanup, skip_on_small_machines
 
 
-def response_rows_to_map(rows):
-    mapped = {}
-    for row in rows:
-        key = (
-            row["property"],
-            tuple(row["component"]),
-            round(float(row["freqB"]), 12),
-            None if "freqC" not in row else round(float(row["freqC"]), 12),
+def response_rows_to_map(props):
+    """Flatten the v3 response_properties OBJECT (property -> protocol_key ->
+    row(s)) into comparable {key: value} pairs. Alpha rows expand per tensor
+    element; beta/raman rows are one value each. (The old v2 engine emitted a
+    flat array — v2-shaped files are rejected so a stale reference reads as a
+    shape error, not a silent pass.)"""
+    if not isinstance(props, dict):
+        raise ValueError(
+            "response_properties is not the v3 object shape — stale v2 "
+            "reference? Regenerate the .ref.json from a v3 run."
         )
-        mapped[key] = None if "value" not in row else float(row["value"])
+    mapped = {}
+    for prop, by_key in props.items():
+        for pkey, rows in by_key.items():
+            if not isinstance(rows, list):
+                rows = [rows]
+            for row in rows:
+                if "alpha" in row:  # tensor row
+                    dirs = row.get("directions", "")
+                    omega = round(float(row.get("omega", 0.0)), 12)
+                    m = row["alpha"]
+                    for i, r in enumerate(m):
+                        for j, v in enumerate(r):
+                            di = dirs[i] if i < len(dirs) else str(i)
+                            dj = dirs[j] if j < len(dirs) else str(j)
+                            mapped[(prop, pkey, di, dj, omega)] = float(v)
+                elif "beta" in row:  # beta / raman row
+                    key = (
+                        prop, pkey,
+                        row.get("A"), row.get("B"), row.get("C"),
+                        round(float(row.get("freq_b", 0.0)), 12),
+                        round(float(row.get("freq_c", 0.0)), 12),
+                    )
+                    mapped[key] = float(row["beta"])
     return mapped
 
 
