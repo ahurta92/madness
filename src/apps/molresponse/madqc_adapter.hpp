@@ -173,6 +173,9 @@ struct molresponse_v3_lib {
     // above to resolve the ground archive relative to this cwd.)
     in.settings.calc_dir = ".";
     in.settings.max_iters = static_cast<int>(rp.maxiter());
+    // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
+    // standalone --fd-subworlds flag; archive_file above makes it live).
+    in.settings.fd_subworlds = std::max(0, rp.subworlds());
     in.settings.policy.dconv_user = rp.dconv();
     in.settings.print_level =
         static_cast<PrintLevel>(std::max(0, std::min(3, rp.print_level())));
