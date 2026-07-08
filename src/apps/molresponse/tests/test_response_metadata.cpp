@@ -11,6 +11,7 @@
 //   7. freq_key formatting matches doc 13 ("f%.5f" -> "f0.05700")
 // =========================================================================
 
+#include "../solvers/gs_fingerprint.hpp"
 #include "../solvers/response_metadata.hpp"
 
 #include <unistd.h>
@@ -163,6 +164,67 @@ int main() {
     try { (void)ResponseMetadata::load_or_create(bad); }
     catch (const std::exception &) { threw = true; }
     EXPECT(threw, "unrecognized schema_version throws");
+  }
+
+  // ---- GS-archive fingerprint (restart-safety gate) -------------------------
+  std::printf("=== gs_fingerprint ===\n");
+  {
+    using molresponse_v3::gs_archive_fingerprint;
+    using molresponse_v3::gs_archive_parts;
+    using molresponse_v3::gs_fingerprint_verdict;
+    using molresponse_v3::GsGateVerdict;
+    using molresponse_v3::metadata_has_response_states;
+
+    // Fake a 2-part parallel archive: <base>.00000 + <base>.00001.
+    const std::string base = (tmp / "gs.restartdata").string();
+    { std::ofstream a(base + ".00000", std::ios::binary); a << "orbitals-A"; }
+    { std::ofstream b(base + ".00001", std::ios::binary); b << "part-two"; }
+
+    EXPECT(gs_archive_parts(base).size() == 2, "2 archive parts discovered");
+    const auto fp1 = gs_archive_fingerprint(base);
+    EXPECT(fp1.nparts == 2,               "fingerprint nparts == 2");
+    EXPECT(fp1.bytes == 18,               "fingerprint bytes == 18");
+    EXPECT(fp1.hex.size() == 16,          "fingerprint hex is 16 chars");
+    EXPECT(gs_archive_fingerprint(base).hex == fp1.hex,
+           "fingerprint is deterministic");
+
+    // A single flipped byte (phase-flip stand-in) changes the fingerprint.
+    { std::ofstream a(base + ".00000", std::ios::binary); a << "orbitals-B"; }
+    const auto fp2 = gs_archive_fingerprint(base);
+    EXPECT(fp2.hex != fp1.hex, "changed archive bytes -> changed fingerprint");
+
+    // Missing archive throws.
+    bool threw = false;
+    try { (void)gs_archive_fingerprint((tmp / "nope").string()); }
+    catch (const std::exception &) { threw = true; }
+    EXPECT(threw, "missing archive throws");
+
+    // Verdicts against metadata: fresh dir -> FreshDir; states without a
+    // stamp -> MissingStamp; stamped -> Match / Mismatch.
+    const std::string gpath = (tmp / "gs_meta.json").string();
+    auto m = ResponseMetadata::load_or_create(gpath);
+    EXPECT(!metadata_has_response_states(m.json()), "fresh dir has no states");
+    EXPECT(gs_fingerprint_verdict(m.json(), fp1.hex) == GsGateVerdict::FreshDir,
+           "fresh dir -> FreshDir");
+
+    m.set_fd_state("dipole_z", "1e-06_k8", "f0.00000", {{"status", "Converged"}});
+    EXPECT(metadata_has_response_states(m.json()), "fd_state counts as states");
+    EXPECT(gs_fingerprint_verdict(m.json(), fp1.hex) == GsGateVerdict::MissingStamp,
+           "states without stamp -> MissingStamp");
+
+    m.set_ground_state(base, fp1.hex, fp1.bytes, fp1.nparts);
+    EXPECT(gs_fingerprint_verdict(m.json(), fp1.hex) == GsGateVerdict::Match,
+           "matching stamp -> Match");
+    EXPECT(gs_fingerprint_verdict(m.json(), fp2.hex) == GsGateVerdict::Mismatch,
+           "different archive -> Mismatch");
+
+    // The stamp round-trips through save/load like every other block.
+    m.save();
+    auto m2 = ResponseMetadata::load_or_create(gpath);
+    EXPECT(m2.ground_state_fingerprint() == fp1.hex,
+           "ground_state stamp survives save/reload");
+    EXPECT(m2.json()["ground_state"]["nparts"] == 2,
+           "ground_state block carries nparts");
   }
 
   std::filesystem::remove_all(tmp);

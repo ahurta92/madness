@@ -155,8 +155,12 @@ struct molresponse_v3_lib {
       add(r);
     }
 
-    // 3. Build the workflow input + settings; run the archive-free core.
+    // 3. Build the workflow input + settings; run the core with the ground
+    //    state already loaded. archive_file is still passed through: the GS
+    //    fingerprint gate hashes it (restart safety), and the F2 subworld
+    //    fan-out needs it to load per-subworld ground states.
     ResponseWorkflowInput in;
+    in.archive_file = archive;
     in.protocols = protocol;
     in.plan = merge_plans(plans);
     // excited.tda=false → Full (X,Y) ES bundle (default TDA).

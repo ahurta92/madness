@@ -39,6 +39,7 @@
 #include <madness/external/nlohmann_json/json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -123,6 +124,26 @@ public:
   /// in. Without this an HDF5 run and a native run are indistinguishable.
   void set_io_info(const std::string &backend, bool hdf5_compiled) {
     j_["io"] = {{"backend", backend}, {"hdf5_compiled", hdf5_compiled}};
+  }
+
+  /// Stamp the ground-state archive identity this calc dir's response states
+  /// were built against (restart safety — the GS fingerprint gate). `hex` is
+  /// the FNV-1a-64 of the archive part bytes; a later run with a different
+  /// archive (regenerated orbitals => possible phase flips) must not reuse
+  /// the cached response vectors.
+  void set_ground_state(const std::string &archive, const std::string &hex,
+                        std::uint64_t bytes, int nparts) {
+    j_["ground_state"] = {{"archive", archive},
+                          {"fnv1a64", hex},
+                          {"bytes", bytes},
+                          {"nparts", nparts}};
+  }
+
+  /// The stamped GS fingerprint, or "" if this metadata predates the stamp.
+  std::string ground_state_fingerprint() const {
+    if (j_.contains("ground_state") && j_["ground_state"].is_object())
+      return j_["ground_state"].value("fnv1a64", "");
+    return {};
   }
 
   /// Append a property record to properties/<name>/<protocol_key>[]. The
