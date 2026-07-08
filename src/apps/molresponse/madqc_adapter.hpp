@@ -32,6 +32,7 @@
 #include <madness/chem/ResponseParameters.hpp>
 #include <madness/chem/SCF.h>
 #include <madness/external/nlohmann_json/json.hpp>
+#include <madness/world/worldprofile.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -193,6 +194,18 @@ struct molresponse_v3_lib {
 
     ResponseWorkflowOutput out =
         run_response_with_ground(world, gs, L, /*fock_json=*/"", in);
+
+    // perf-model (doc 29): emit the per-phase profile when asked — same
+    // contract as the standalone binary (molresponse/main.cpp), so madqc-driven
+    // runs are profileable too. COLLECTIVE (all ranks). No-op unless built with
+    // -DENABLE_WORLD_PROFILE=ON AND env MADQC_PROFILE_JSON is set.
+    if (const char *pj = std::getenv("MADQC_PROFILE_JSON")) {
+      std::ostringstream pctx;
+      pctx << "{\"n_threads\":" << (ThreadPool::size() + 1)
+           << ",\"k\":" << FunctionDefaults<3>::get_k()
+           << ",\"thresh\":" << FunctionDefaults<3>::get_thresh() << "}";
+      WorldProfile::dump_json(world, pj, pctx.str());
+    }
 
     // 4. Map Output → Results. Stash v3 timing/diagnostics under metadata so
     //    they ride into the workflow's calc_info.json.
