@@ -472,6 +472,26 @@ care; a full `ninja` (not just the cm targets) is the real check.
 *(measurement-arm thread; design anchor: `docs/29_perf_model_design.md`. Append
 newest-first; the status above is inherited from trunk — do not rewrite it.)*
 
+- **2026-07-01 (pm) — slot-fixed sweep (job 2051561): FD meter ✓, rank axis = sync catastrophe.**
+  7/7 profiles (rank axis runs now). **FD projection meter validated:** the
+  `projection` phase appears in **all** FD breakdowns (was ES-only); small as
+  expected (≤0.3%). **Rank axis result (important):** splitting a *single small*
+  FD state (h2o, n_occ=5, k6) across ranks is catastrophic — NP=1 wall 60s →
+  **NP=2 ~1900s / NP=4 ~1730s (~30×), 77–80% in fences** (millions of msgs, GBs).
+  This **quantitatively confirms parallel-runtime doc-31**: parallelism must come
+  from the *state* axis, not spatial single-state. So the comm/sync cost model
+  belongs on the **state axis (subworlds)**, and the NP=1 compute model must NOT
+  be pooled with these sync-bound points — doing so blew the fit up (LOO 1057%,
+  negative fence coef). The good result stands: **NP=1 `apply·k³` compute model,
+  LOO 13%.** ⚠ `total_wall_s` looks **over-accounted at NP>1** (the two multi-rank
+  walls sum > whole-job time — likely spin-wait, no ENABLE_NEVER_SPIN); intrinsic
+  sync%/msg counts are trustworthy, absolute wall needs a re-check.
+  - **NEXT:** (1) split the fit — compute model on P==1 rows only; report multi-rank
+    as a separate parallel-regime diagnostic (don't blend). (2) verify the NP>1
+    `total_wall_s` accounting (spin vs real). (3) the meaningful multi-rank scaling
+    is **state-parallel** (parallel-runtime `--fd-subworlds`), not single-state
+    spatial — calibrate the comm/sync model there.
+
 - **2026-07-01 — fit sweep ran (job 2051068); the compute proxy was wrong, fixed.**
   5/7 profiles (k axis clean: h2/h2o at k6 *and* k8, context confirms k=6/8). The
   **rank axis (h2o np2/np4) failed on a SLURM slot config** — `mpirun -np>1` needs
