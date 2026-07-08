@@ -118,7 +118,11 @@ struct molresponse_v3_lib {
       r.frequencies = freqs;
       add(r);
     }
-    if (wants("hyperpolarizability")) {
+    // `quadratic true` is the legacy (v2-era) spelling of "compute beta" —
+    // honor it alongside requested_properties so old decks keep their
+    // hyperpolarizability instead of silently dropping it (M3 golden regen
+    // caught this: the alpha+beta deck produced alpha-only output).
+    if (wants("hyperpolarizability") || rp.quadratic()) {
       ResponsePropertyRequest r;
       r.kind = ResponsePropertyKind::Hyperpolarizability;
       r.beta_process = rp.beta_or() ? BetaProcess::OR : BetaProcess::SHG;
