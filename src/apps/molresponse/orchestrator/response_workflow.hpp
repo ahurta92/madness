@@ -214,6 +214,18 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
           "(details printed by rank 0; see [GS-FINGERPRINT])", 0);
   }
 
+  // 2a''. F2 restart safety: sweep in any metadata shards stranded by an
+  // interrupted subworld run, BEFORE reconcile reads the canonical file —
+  // otherwise finished states would be invisible and silently re-solved.
+  // (The stranded shards belong to the same GS the gate above just verified.)
+  if (world.rank() == 0) {
+    const int n = ResponseMetadata::merge_stale_state_shards(in.settings.calc_dir);
+    if (n > 0)
+      madness::print("SHARD_SWEEP  merged", n,
+                     "stale metadata shard(s) from an interrupted run");
+  }
+  world.gop.fence();
+
   // 2b. Drive the calc manager (the solve).
   detail_workflow::StageTimer t_solve;
   ExecutorContext ctx(world, gs, L, fock_json, in.settings);

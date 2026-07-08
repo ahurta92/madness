@@ -227,6 +227,54 @@ int main() {
            "ground_state block carries nparts");
   }
 
+  // ---- stale shard sweep (F2 restart safety) --------------------------------
+  std::printf("=== merge_stale_state_shards ===\n");
+  {
+    const auto cdir = tmp / "shard_calc";
+    std::filesystem::create_directories(cdir);
+
+    // Canonical with one FD state; two stranded shards (as an interrupted
+    // 3-subworld run would leave them — note g2 wrote nothing and left none).
+    {
+      auto c = ResponseMetadata::load_or_create(
+          (cdir / "response_metadata.json").string());
+      c.set_fd_state("dipole_x", "1e-04_k6", "f0.00000", {{"status", "Converged"}});
+      c.save();
+      auto s0 = ResponseMetadata::load_or_create(
+          (cdir / "response_metadata.group0.json").string());
+      s0.set_fd_state("dipole_y", "1e-04_k6", "f0.00000", {{"status", "Converged"}});
+      s0.set_protocol("1e-04_k6", 1e-4, 6, 0);
+      s0.save();
+      auto s1 = ResponseMetadata::load_or_create(
+          (cdir / "response_metadata.group1.json").string());
+      s1.set_fd_state("dipole_z", "1e-04_k6", "f0.00000", {{"status", "Running"}});
+      s1.set_vbc_state("vbc_zz", "1e-04_k6", {{"status", "Converged"}});
+      s1.save();
+      // Decoys the sweep must NOT eat: non-numeric gid, and a foreign json.
+      std::ofstream((cdir / "response_metadata.groupX.json").string())
+          << "{\"schema_version\":1}";
+      std::ofstream((cdir / "other.json").string()) << "{}";
+    }
+
+    const int merged =
+        ResponseMetadata::merge_stale_state_shards(cdir.string());
+    EXPECT(merged == 2, "two stranded shards merged");
+    auto c = ResponseMetadata::load_or_create(
+        (cdir / "response_metadata.json").string());
+    const auto &fd = c.json()["fd_states"];
+    EXPECT(fd.contains("dipole_x") && fd.contains("dipole_y") &&
+           fd.contains("dipole_z"), "canonical holds pre-existing + both shards");
+    EXPECT(c.json()["vbc_states"].contains("vbc_zz"), "shard vbc_states merged");
+    EXPECT(c.json()["protocols"].contains("1e-04_k6"), "shard protocol unioned");
+    EXPECT(!std::filesystem::exists(cdir / "response_metadata.group0.json") &&
+           !std::filesystem::exists(cdir / "response_metadata.group1.json"),
+           "merged shards removed");
+    EXPECT(std::filesystem::exists(cdir / "response_metadata.groupX.json"),
+           "non-shard decoy untouched");
+    EXPECT(ResponseMetadata::merge_stale_state_shards(cdir.string()) == 0,
+           "second sweep is a no-op (idempotent)");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);

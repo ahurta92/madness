@@ -183,36 +183,51 @@ public:
   /// guards). Idempotent: a missing shard is skipped, so re-running is safe.
   static void merge_state_shards(const std::string &calc_dir, int n_groups) {
     auto canon = load_or_create(calc_dir + "/response_metadata.json");
-    for (int g = 0; g < n_groups; ++g) {
-      const std::string sp =
-          calc_dir + "/response_metadata.group" + std::to_string(g) + ".json";
-      if (!std::filesystem::exists(sp)) continue;
-      std::ifstream in(sp);
-      if (!in) continue;
-      nlohmann::json sj;
-      in >> sj;
-      // NB: iterate the lvalue member (sj["fd_states"]), NOT a .value(...)
-      // temporary — .items() on a temporary json dangles.
-      if (sj.contains("fd_states") && sj["fd_states"].is_object())
-        for (const auto &pert : sj["fd_states"].items())
-          for (const auto &pk : pert.value().items())
-            for (const auto &fk : pk.value().items())
-              canon.set_fd_state(pert.key(), pk.key(), fk.key(), fk.value());
-      // F2g: VBC quadratic-source states (vbc_states/<id>/<protocol_key>).
-      if (sj.contains("vbc_states") && sj["vbc_states"].is_object())
-        for (const auto &id : sj["vbc_states"].items())
-          for (const auto &pk : id.value().items())
-            canon.set_vbc_state(id.key(), pk.key(), pk.value());
-      // Protocol registry is informational; union any keys the canonical lacks.
-      if (sj.contains("protocols") && sj["protocols"].is_object())
-        for (const auto &p : sj["protocols"].items())
-          if (!canon.j_["protocols"].contains(p.key()))
-            canon.j_["protocols"][p.key()] = p.value();
-    }
+    for (int g = 0; g < n_groups; ++g)
+      merge_shard_into(canon, calc_dir + "/response_metadata.group" +
+                                  std::to_string(g) + ".json");
     canon.save();
     for (int g = 0; g < n_groups; ++g)
       std::filesystem::remove(
           calc_dir + "/response_metadata.group" + std::to_string(g) + ".json");
+  }
+
+  /// F2 restart safety: merge any per-group shards STRANDED by an interrupted
+  /// run. The normal path (merge_state_shards above) collapses shards right
+  /// after each fan-out wave — but a kill between fan-out and merge leaves
+  /// response_metadata.group<g>.json files behind, and a restart reading only
+  /// the canonical file would silently re-solve states that are already on
+  /// disk. Discovers shards by name (the interrupted run's G is unknown and
+  /// may differ from this run's), merges through the same typed-setter union,
+  /// and removes them. Returns the number of shards merged; 0 = nothing to
+  /// do. Rank-0 only (caller guards); idempotent.
+  static int merge_stale_state_shards(const std::string &calc_dir) {
+    namespace fs = std::filesystem;
+    const std::string prefix = "response_metadata.group";
+    const std::string suffix = ".json";
+    std::vector<std::string> shards;
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(calc_dir, ec)) {
+      if (ec || !e.is_regular_file()) continue;
+      const std::string name = e.path().filename().string();
+      if (name.size() <= prefix.size() + suffix.size()) continue;
+      if (name.compare(0, prefix.size(), prefix) != 0) continue;
+      if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+        continue;
+      const std::string gid =
+          name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+      if (gid.empty() ||
+          gid.find_first_not_of("0123456789") != std::string::npos)
+        continue;  // not a shard (e.g. a stray .json.tmp or foreign file)
+      shards.push_back(e.path().string());
+    }
+    if (shards.empty()) return 0;
+    std::sort(shards.begin(), shards.end());
+    auto canon = load_or_create(calc_dir + "/response_metadata.json");
+    for (const auto &sp : shards) merge_shard_into(canon, sp);
+    canon.save();
+    for (const auto &sp : shards) fs::remove(sp);
+    return static_cast<int>(shards.size());
   }
 
   /// Canonical frequency key for fd_states / archive naming. f%.5f matches
@@ -225,6 +240,35 @@ public:
   }
 
 private:
+  /// The single shard->canonical union both merge entries share. FD and VBC
+  /// states are DISJOINT across subworlds, so this is conflict-free; done
+  /// through the typed setters (never a raw write). Missing/unreadable shard
+  /// files are skipped (idempotence).
+  static void merge_shard_into(ResponseMetadata &canon, const std::string &sp) {
+    if (!std::filesystem::exists(sp)) return;
+    std::ifstream in(sp);
+    if (!in) return;
+    nlohmann::json sj;
+    in >> sj;
+    // NB: iterate the lvalue member (sj["fd_states"]), NOT a .value(...)
+    // temporary — .items() on a temporary json dangles.
+    if (sj.contains("fd_states") && sj["fd_states"].is_object())
+      for (const auto &pert : sj["fd_states"].items())
+        for (const auto &pk : pert.value().items())
+          for (const auto &fk : pk.value().items())
+            canon.set_fd_state(pert.key(), pk.key(), fk.key(), fk.value());
+    // F2g: VBC quadratic-source states (vbc_states/<id>/<protocol_key>).
+    if (sj.contains("vbc_states") && sj["vbc_states"].is_object())
+      for (const auto &id : sj["vbc_states"].items())
+        for (const auto &pk : id.value().items())
+          canon.set_vbc_state(id.key(), pk.key(), pk.value());
+    // Protocol registry is informational; union any keys the canonical lacks.
+    if (sj.contains("protocols") && sj["protocols"].is_object())
+      for (const auto &p : sj["protocols"].items())
+        if (!canon.j_["protocols"].contains(p.key()))
+          canon.j_["protocols"][p.key()] = p.value();
+  }
+
   nlohmann::json j_;
   std::string    path_;
 };
