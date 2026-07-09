@@ -74,8 +74,19 @@ inline std::shared_ptr<madness::World>
 make_subworld_pool(madness::World &universe, int groups_per_node,
                    NodeSubworldInfo *info = nullptr) {
   if (groups_per_node < 1) groups_per_node = 1;
-  SafeMPI::Intracomm node_comm = universe.mpi.comm().Split_type(
-      SafeMPI::Intracomm::SHARED_SPLIT_TYPE, /*Key=*/universe.rank());
+  // Node grouping by HOSTNAME, not Split_type(SHARED): under srun --mpi=pmix
+  // on Seawulf the SHARED split returns SINGLETON comms (PMIx doesn't publish
+  // locality), which silently disabled fan-out — 2 ranks on one node came
+  // back wn_size=1 => gpn=1 => n_subworlds=1 (gate 2082328). ranks_per_host
+  // is collective and hostname-based, so it sees node topology regardless of
+  // launcher; rph is a std::map (sorted keys), so the node index — and thus
+  // every color below — is identical on every rank.
+  const auto rph = madness::ranks_per_host(universe);   // collective: host -> [ranks]
+  const std::string host = madness::get_hostname();
+  int nidx = 0;
+  for (const auto &kv : rph) { if (kv.first == host) break; ++nidx; }
+  SafeMPI::Intracomm node_comm =
+      universe.mpi.comm().Split(/*Color=*/nidx, /*Key=*/universe.rank());
   const int wn_rank = node_comm.Get_rank();
   const int wn_size = node_comm.Get_size();
   const int gpn     = std::min(groups_per_node, wn_size);  // can't exceed #ranks/node
@@ -85,17 +96,12 @@ make_subworld_pool(madness::World &universe, int groups_per_node,
   universe.gop.fence();
 
   if (info) {
-    auto rph = madness::ranks_per_host(universe);   // collective: host -> [ranks]
-    info->hostname        = madness::get_hostname();
+    info->hostname        = host;
     info->universe_rank   = universe.rank();
     info->universe_size   = universe.size();
     info->subworld_rank   = subworld->rank();
     info->subworld_size   = subworld->size();
     info->n_nodes         = static_cast<int>(rph.size());
-    // Node index = position of this rank's host in the sorted host map. rph is a
-    // std::map (sorted keys), so this is identical on every rank — deterministic.
-    int nidx = 0;
-    for (const auto &kv : rph) { if (kv.first == info->hostname) break; ++nidx; }
     info->node_index      = nidx;
     info->groups_per_node = gpn;
     info->subworld_index  = color;
