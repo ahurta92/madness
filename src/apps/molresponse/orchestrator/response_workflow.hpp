@@ -238,6 +238,11 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   // FD items, writing to its node_index metadata shard (merged by rank 0). This
   // is exactly the F1-proven block, lifted into the live run().
   CalcManager::SubworldSolve fan_out;
+  if (in.settings.fd_subworlds > 0 && in.archive_file.empty() &&
+      world.rank() == 0)
+    madness::print("F2: fd_subworlds =", in.settings.fd_subworlds,
+                   "requested but no archive_file — staying single-World "
+                   "(subworlds reload the ground state from the archive)");
   if (in.settings.fd_subworlds > 0 && !in.archive_file.empty()) {
     const std::string  archive = in.archive_file;
     const madness::Molecule mol = gs.molecule();

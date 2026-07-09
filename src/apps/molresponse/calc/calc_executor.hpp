@@ -1058,6 +1058,10 @@ public:
           if (G <= 1) {
             // One subworld total (single node, P=1) ⇒ no real partition (subworld
             // == universe). Literal G=0 path, no redundant GS reload (doc 32 §7).
+            if (world.rank() == 0)
+              madness::print("SUBWORLD_FANOUT skipped: n_subworlds=", G,
+                             " (nodes=", info.n_nodes, " groups_per_node=",
+                             info.groups_per_node, ") — universe path");
             sub.reset();
             for (const auto &it : fan_items) exec.run_protocol(it);
           } else {

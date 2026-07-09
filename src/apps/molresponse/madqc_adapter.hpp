@@ -177,6 +177,9 @@ struct molresponse_v3_lib {
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
     // standalone --fd-subworlds flag; archive_file above makes it live).
     in.settings.fd_subworlds = std::max(0, rp.subworlds());
+    if (world.rank() == 0 && in.settings.fd_subworlds > 0)
+      print("response: deck subworlds =", in.settings.fd_subworlds,
+            "(F2 state-parallel fan-out requested)");
     in.settings.policy.dconv_user = rp.dconv();
     in.settings.print_level =
         static_cast<PrintLevel>(std::max(0, std::min(3, rp.print_level())));
