@@ -5,10 +5,39 @@
 #include <madness/chem/PathManager.hpp>
 #include <madness/chem/Results.h>
 #include <filesystem>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
 #include <system_error>
+#include <type_traits>
 
 namespace madness {
 enum class NextAction { Ok, ReloadOnly, Restart, Redo };
+
+class SCF; // forward decl for StepContext::reference
+
+/// Typed artifacts handed from one workflow step to the next, threaded through
+/// Workflow::run and Driver::execute (madqc ARCHITECTURE_ROADMAP change 1).
+///
+/// This replaces the cwd/mad.in side channels for downstream geometry + archive
+/// discovery. The build-time shared_ptr capture of the ground-state reference
+/// remains a supported compatibility path — a producer that can expose a live
+/// SCF publishes it here (`reference`), and a consumer prefers it when present.
+///
+/// Producers set fields in publish_to_context(); consumers read them in
+/// consume_context(). Everything is optional: an unset field means "no upstream
+/// value — fall back to the build-time / input value".
+struct StepContext {
+  /// The molecule the next step should use (possibly optimized/displaced).
+  std::optional<Molecule> molecule;
+  /// Live ground-state reference engine, if an upstream SCF step exposed one.
+  std::shared_ptr<SCF> reference;
+  /// Named archive/output paths (absolute), e.g. "restartdata" -> path.
+  std::map<std::string, std::filesystem::path> archives;
+  /// Free-form JSON for artifacts not yet first-class.
+  nlohmann::json blob = nlohmann::json::object();
+};
 
 // Scoped CWD: changes the current directory to the given one, and restores when
 // the object goes out of scope
@@ -31,6 +60,15 @@ public:
 
   // run: write all outputs under the given directory
   virtual void run(const std::filesystem::path &workdir) = 0;
+
+  /// Consume artifacts published by an upstream step. Called BEFORE run().
+  /// Default no-op; override to read the shared StepContext (e.g. a response
+  /// step preferring the upstream ground-state reference / geometry).
+  virtual void consume_context(const StepContext & /*ctx*/) {}
+
+  /// Publish this step's typed outputs into the shared StepContext for
+  /// downstream steps. Called AFTER run(). Default no-op.
+  virtual void publish_to_context(StepContext & /*ctx*/) {}
 
   // optional hook to return a JSON fragment of this app's main results
   [[nodiscard]] virtual nlohmann::json results() const = 0;
@@ -264,6 +302,36 @@ public:
   // std::shared_ptr<SCFApplicationT> scf_app =
   // std::dynamic_pointer_cast<SCFApplicationT>(reference_.shared_from_this());
 
+  /// Publish this SCF step's typed outputs for downstream steps: the live
+  /// engine (only when it is an SCF — nemo's Calc is Nemo and stays on the
+  /// build-time capture path), the converged molecule, and the restartdata
+  /// archive path. See StepContext / ARCHITECTURE_ROADMAP change 1.
+  void publish_to_context(StepContext &ctx) override {
+    if constexpr (std::is_same_v<Calc, SCF>) {
+      ctx.reference = calc(); // shared_ptr<SCF>
+    }
+    if (results_.contains("molecule")) {
+      try {
+        Molecule m;
+        m.from_json(results_["molecule"]);
+        ctx.molecule = std::move(m);
+      } catch (...) {
+        // leave ctx.molecule unset -> downstream falls back to input geometry
+      }
+    }
+    // Record the restartdata archive location (absolute) so a downstream step
+    // can restart from this ground state without relying on the cwd.
+    try {
+      const auto &cp = params_.get<CalculationParameters>();
+      const std::filesystem::path dir =
+          calc()->work_dir.empty() ? std::filesystem::current_path()
+                                    : std::filesystem::path(calc()->work_dir);
+      ctx.archives["restartdata"] = dir / (cp.prefix() + ".restartdata");
+    } catch (...) {
+      // best-effort; absence just means downstream restart discovery falls back
+    }
+  }
+
   nlohmann::json results() const override { return results_; }
 
 private:
@@ -323,6 +391,17 @@ public:
       std::cout << "Response Parameters:" << std::endl;
       params_.get<ResponseParameters>().print("response");
     }
+  }
+
+  /// Prefer the ground-state reference published by the upstream SCF step over
+  /// the one captured at build time. Also adopt an upstream (optimized/
+  /// displaced) geometry so response runs AT the geometry the chain computed.
+  /// (ARCHITECTURE_ROADMAP change 1 acceptance.)
+  void consume_context(const StepContext &ctx) override {
+    if (ctx.reference)
+      reference_ = ctx.reference;
+    if (ctx.molecule)
+      params_.get<Molecule>() = *ctx.molecule;
   }
 
   /**

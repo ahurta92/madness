@@ -32,8 +32,11 @@ class Driver {
   /**
    * @brief Execute the driver, writing outputs under the given directory.
    * @param workdir Base directory for this driver's outputs.
+   * @param ctx     Shared StepContext threaded task-to-task; a driver reads
+   *                artifacts published by upstream steps and publishes its own.
    */
-  virtual void execute(const std::filesystem::path& workdir) = 0;
+  virtual void execute(const std::filesystem::path& workdir,
+                       madness::StepContext& ctx) = 0;
 
   /**
    * @brief Return a JSON summary of results produced by this driver.
@@ -53,13 +56,17 @@ class SinglePointDriver : public Driver {
     app_->print_parameters(world);
   }
 
-  void execute(const std::filesystem::path& workdir) override {
+  void execute(const std::filesystem::path& workdir,
+               madness::StepContext& ctx) override {
     // Create workdir for this application
     std::filesystem::create_directories(workdir);
 
-    // Delegate to the Application
+    // Read upstream artifacts (no-op unless the app overrides), run, then
+    // publish this step's artifacts for downstream steps.
+    app_->consume_context(ctx);
     app_->run(workdir);
     result_ = app_->results();
+    app_->publish_to_context(ctx);
   }
 
   nlohmann::json summary() const override {
@@ -102,10 +109,14 @@ public:
     all_ = nlohmann::json::object();
     all_["tasks"] = nlohmann::json::array();
 
+    // One StepContext threaded through the whole chain: each driver reads what
+    // upstream steps published and publishes its own artifacts (roadmap 1).
+    madness::StepContext ctx;
+
     for (size_t i = 0; i < drivers_.size(); ++i) {
       auto taskDir = topDir / ("task_" + std::to_string(i));
       try {
-        drivers_[i]->execute(taskDir);
+        drivers_[i]->execute(taskDir, ctx);
       } catch (...) {
         // A failing task must still leave a complete, diagnosable
         // calc_info.json: record the failure as a task entry, persist, and
