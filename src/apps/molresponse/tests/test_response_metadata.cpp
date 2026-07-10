@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -273,6 +274,39 @@ int main() {
            "non-shard decoy untouched");
     EXPECT(ResponseMetadata::merge_stale_state_shards(cdir.string()) == 0,
            "second sweep is a no-op (idempotent)");
+  }
+
+  // ---- kill-mid-save simulation: stranded truncated tmp -------------------
+  // A writer killed between opening <path>.tmp and the rename leaves a
+  // truncated tmp behind. It must not affect reads (the good file is intact),
+  // and the next save must replace it and install atomically.
+  std::printf("=== stranded truncated tmp ===\n");
+  {
+    const auto cdir = tmp / "atomic";
+    std::filesystem::create_directories(cdir);
+    const std::string mpath = (cdir / "response_metadata.json").string();
+    {
+      auto m = ResponseMetadata::load_or_create(mpath);
+      m.set_protocol("1e-06_k8", 1e-6, 8, 0);
+      m.save();
+    }
+    {  // simulate the kill: garbage where the tmp lives
+      std::ofstream junk(mpath + ".tmp");
+      junk << "{\"schema_version\": 1, \"proto";  // truncated JSON
+    }
+    {
+      auto m = ResponseMetadata::load_or_create(mpath);   // reads the GOOD file
+      EXPECT(m.json()["protocols"].contains("1e-06_k8"),
+             "stranded tmp does not shadow the good index");
+      m.set_protocol("1e-07_k10", 1e-7, 10, 1);
+      m.save();                                            // replaces the tmp
+    }
+    EXPECT(!std::filesystem::exists(mpath + ".tmp"),
+           "re-save consumed/replaced the stranded tmp");
+    auto m = ResponseMetadata::load_or_create(mpath);
+    EXPECT(m.json()["protocols"].contains("1e-06_k8") &&
+           m.json()["protocols"].contains("1e-07_k10"),
+           "index intact after kill-simulated save cycle");
   }
 
   std::filesystem::remove_all(tmp);

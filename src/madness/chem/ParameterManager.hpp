@@ -65,6 +65,45 @@ struct OptimizationParameters : public QCCalculationParametersBase {
   }
 };
 
+/// Deck-level `io` block (roadmap change 5): run-wide I/O configuration.
+/// `backend` selects the restart-archive family every task that persists
+/// MRA state writes (today: response; moldft & friends as they adopt it) —
+/// it generalizes the response-only `response.hdf5` knob, which is kept as
+/// a working alias. Future parallel-HDF5 knobs (collective I/O, per-dataset
+/// compression) belong in this block, not per-task.
+struct IOParameters : public QCCalculationParametersBase {
+  static constexpr const char *tag = "io";
+  IOParameters(const IOParameters &other) = default;
+
+  IOParameters(World &world, const commandlineparser &parser)
+      : IOParameters() {
+    read_input_and_commandline_options(world, parser, tag);
+  }
+  IOParameters() {
+    initialize<std::string>(
+        "backend", "native",
+        "restart-archive backend for tasks that support it: native "
+        "(MADNESS parallel archives) or hdf5 (single .h5 blobs; requires a "
+        "-DMADNESS_ENABLE_HDF5=ON build)",
+        {"native", "hdf5"});
+  }
+
+  std::string get_tag() const override { return std::string(tag); }
+
+  using QCCalculationParametersBase::read_input_and_commandline_options;
+
+  void print() const {
+    madness::print("------------IO Parameters---------------");
+    madness::print("Backend: ", get<std::string>("backend"));
+    madness::print("-------------------------------------------");
+  }
+
+  [[nodiscard]] std::string backend() const {
+    return get<std::string>("backend");
+  }
+  [[nodiscard]] bool hdf5() const { return backend() == "hdf5"; }
+};
+
 template <typename... Groups> class ParameterManager {
   std::tuple<Groups...> groups_;
   commandlineparser parser_;
@@ -195,4 +234,5 @@ private:
 using Params =
     ParameterManager<CalculationParameters, ResponseParameters,
                      Nemo::NemoCalculationParameters, OptimizationParameters,
-                     OEP_Parameters, CCParameters, TDHFParameters, Molecule>;
+                     OEP_Parameters, CCParameters, TDHFParameters, Molecule,
+                     IOParameters>;

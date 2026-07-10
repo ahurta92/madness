@@ -66,7 +66,20 @@ Property matching is then a string compare inside one file.
           "type": "full", "shell": "closed_shell",
           "converged": true, "iter": 8,
           "bsh_residual": 1.2e-7,
-          "archive": "dipole_x__1e-06_k8__f0.05700"
+          "archive": "dipole_x__1e-06_k8__f0.05700",
+          "backend": "native",                 // io-hdf5 2026-07-10: which file
+                                               // family holds `archive` —
+                                               // "native" (<archive>.00000...)
+                                               // or "hdf5" (<archive>.h5).
+                                               // Loaders open THIS backend;
+                                               // absent (legacy) => existence-
+                                               // based auto-detect fallback.
+          "writer_nproc": 1                    // #procs that wrote it. Native
+                                               // nio=1 archives are np-locked;
+                                               // loaders refuse a native np
+                                               // mismatch. hdf5 blobs are
+                                               // np-portable (guard skipped).
+                                               // Absent/0 = legacy (no check).
         }
       }
     }
@@ -75,6 +88,10 @@ Property matching is then a string compare inside one file.
   "excited_states": {
     "1e-06_k8": {                              // protocol_key
       "type": "tda", "shell": "closed_shell", "n_roots": 2,
+      "backend": "native",                     // same contract as fd_states;
+                                               // also recorded in the bundle's
+                                               // roots.json (loader's truth),
+                                               // alongside its writer_nproc
       "bundle_dir": "es_bundle__1e-06_k8",
       "converged": true,
       "slot_permutation": [0, 1],

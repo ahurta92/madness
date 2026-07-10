@@ -188,6 +188,25 @@ int main(int argc, char **argv) {
       // read in all parameters from the input file and the command line
       // logic and interdependent parameter follow later
       Params pm(world, parser);
+
+      // Deck-level `io` block (roadmap change 5): run-wide restart-backend
+      // selection. `io backend hdf5` turns the HDF5 opt-in on for every task
+      // that supports it; the response-only `response.hdf5 true` keeps
+      // working as an alias (applied here and re-checked in the response
+      // adapter). The effective config is stamped into calc_info for ALL
+      // tasks via Workflow::set_provenance below.
+      const bool deck_io_hdf5 =
+          pm.get<IOParameters>().hdf5() || pm.get<ResponseParameters>().hdf5();
+      if (deck_io_hdf5) {
+#ifdef MADNESS_HAS_HDF5
+        molresponse_v3::set_hdf5_io_enabled(true);
+#else
+        throw std::runtime_error(
+            "io backend hdf5 (or response.hdf5) requested but this build has "
+            "no HDF5 support — configure with -DMADNESS_ENABLE_HDF5=ON");
+#endif
+      }
+
       // The response workflow is built HERE in the app — MADchem's
       // WorkflowBuilders cannot reference v3 (circular lib dependency), and the
       // v2 engine was removed (M1 decoupling Stage 2). molresponse_v3 is THE
@@ -215,6 +234,19 @@ int main(int argc, char **argv) {
       } else {
         workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf);
       }
+
+      // io provenance for ALL tasks (today only response writes MRA restart
+      // state, but the stamp is run-level: an HDF5 run and a native run must
+      // be distinguishable from any task's calc_info).
+#ifdef MADNESS_HAS_HDF5
+      wf.set_provenance(
+          "io", {{"backend",
+                  molresponse_v3::hdf5_io_enabled() ? "hdf5" : "native"},
+                 {"hdf5_compiled", true}});
+#else
+      wf.set_provenance("io",
+                        {{"backend", "native"}, {"hdf5_compiled", false}});
+#endif
 
       std::string prefix = pm.prefix();
       wf.run(prefix);
