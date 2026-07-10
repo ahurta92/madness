@@ -274,52 +274,75 @@ load_es_roots(madness::World &world, const std::string &dir) {
   std::vector<double> drho_residual_recorded;
   std::vector<int> stable_index_recorded;
 
+  // Rank 0 decides the load status; the status is broadcast BEFORE anyone
+  // throws so a bad/missing/mismatched roots.json fails COLLECTIVELY. A
+  // rank-0-only throw here would leave every other rank blocked in the
+  // broadcasts below (multi-rank hang) — same discipline as the np-guard
+  // further down.
+  std::string load_error;
   if (world.rank() == 0) {
-    std::ifstream in(dir + "/roots.json");
-    if (!in) {
-      throw std::runtime_error("load_es_roots: cannot open " + dir +
-                               "/roots.json");
-    }
-    nlohmann::json j;
-    in >> j;
+    try {
+      std::ifstream in(dir + "/roots.json");
+      if (!in) {
+        throw std::runtime_error("load_es_roots: cannot open " + dir +
+                                 "/roots.json");
+      }
+      nlohmann::json j;
+      in >> j;
 
-    const std::string saved_type  = j.value("type",  std::string{});
-    const std::string saved_shell = j.value("shell", std::string{});
-    const std::string want_type   = detail_save_load::type_tag<Type>();
-    const std::string want_shell  = detail_save_load::shell_tag<Shell>();
-    if (saved_type != want_type || saved_shell != want_shell) {
-      throw std::runtime_error(
-          "load_es_roots: saved type/shell = " + saved_type + "/" +
-          saved_shell + ", requested = " + want_type + "/" + want_shell);
-    }
+      const std::string saved_type  = j.value("type",  std::string{});
+      const std::string saved_shell = j.value("shell", std::string{});
+      const std::string want_type   = detail_save_load::type_tag<Type>();
+      const std::string want_shell  = detail_save_load::shell_tag<Shell>();
+      if (saved_type != want_type || saved_shell != want_shell) {
+        throw std::runtime_error(
+            "load_es_roots: saved type/shell = " + saved_type + "/" +
+            saved_shell + ", requested = " + want_type + "/" + want_shell);
+      }
 
-    n_roots      = j.value("n_roots", 0);
-    iter_at_save = j.value("iter", 0);
-    writer_nproc = j.value("writer_nproc", 0);   // 0 = legacy bundle (no count)
-    MADNESS_CHECK(n_roots > 0);
-    if (!j.contains("roots") || !j["roots"].is_array() ||
-        static_cast<int>(j["roots"].size()) != n_roots) {
-      throw std::runtime_error(
-          "load_es_roots: roots[] array missing or wrong length in " +
-          dir + "/roots.json");
-    }
+      n_roots      = j.value("n_roots", 0);
+      iter_at_save = j.value("iter", 0);
+      writer_nproc = j.value("writer_nproc", 0);   // 0 = legacy bundle (no count)
+      if (n_roots <= 0) {
+        throw std::runtime_error("load_es_roots: n_roots <= 0 in " + dir +
+                                 "/roots.json");
+      }
+      if (!j.contains("roots") || !j["roots"].is_array() ||
+          static_cast<int>(j["roots"].size()) != n_roots) {
+        throw std::runtime_error(
+            "load_es_roots: roots[] array missing or wrong length in " +
+            dir + "/roots.json");
+      }
 
-    omega_recorded         = madness::Tensor<double>(n_roots);
-    bsh_residual_recorded  .assign(n_roots, 0.0);
-    drho_residual_recorded .assign(n_roots, 0.0);
-    stable_index_recorded  .assign(n_roots, 0);
-    for (int s = 0; s < n_roots; ++s) {
-      const auto &e = j["roots"][s];
-      const int slot = e.value("slot", -1);
-      MADNESS_CHECK(slot == s);
-      omega_recorded(s)         = e.value("omega", 0.0);
-      bsh_residual_recorded[s]  = e.value("bsh_residual", 0.0);
-      drho_residual_recorded[s] = e.value("density_residual", 0.0);
-      // Stable identity: legacy files predate it — fall back to slot so
-      // the loaded bundle still carries a well-formed identity vector.
-      stable_index_recorded[s]  = e.value("stable_index", s);
+      omega_recorded         = madness::Tensor<double>(n_roots);
+      bsh_residual_recorded  .assign(n_roots, 0.0);
+      drho_residual_recorded .assign(n_roots, 0.0);
+      stable_index_recorded  .assign(n_roots, 0);
+      for (int s = 0; s < n_roots; ++s) {
+        const auto &e = j["roots"][s];
+        const int slot = e.value("slot", -1);
+        if (slot != s) {
+          throw std::runtime_error(
+              "load_es_roots: roots[" + std::to_string(s) +
+              "].slot = " + std::to_string(slot) + " (expected " +
+              std::to_string(s) + ") in " + dir + "/roots.json");
+        }
+        omega_recorded(s)         = e.value("omega", 0.0);
+        bsh_residual_recorded[s]  = e.value("bsh_residual", 0.0);
+        drho_residual_recorded[s] = e.value("density_residual", 0.0);
+        // Stable identity: legacy files predate it — fall back to slot so
+        // the loaded bundle still carries a well-formed identity vector.
+        stable_index_recorded[s]  = e.value("stable_index", s);
+      }
+    } catch (const std::exception &e) {
+      load_error = e.what();
+    } catch (...) {
+      load_error = "load_es_roots: unknown error reading " + dir +
+                   "/roots.json";
     }
   }
+  world.gop.broadcast_serializable(load_error, 0);
+  if (!load_error.empty()) throw std::runtime_error(load_error);
 
   // Broadcast the metadata to every rank.
   world.gop.broadcast(n_roots, 0);

@@ -224,11 +224,11 @@ solid_harmonics(World &world, int n) {
     result[std::vector<int>{l + 1, l + 1}] =
         sqrt(pow(2, kronecker(l, 0) * (2 * l) / (2 * l + 1))) *
         (x * result[std::vector<int>{l, l}] -
-         (1 - kronecker(l, 0) * y * result[std::vector<int>{l, -l}]));
+         (1 - kronecker(l, 0)) * y * result[std::vector<int>{l, -l}]);
     result[std::vector<int>{l + 1, -l - 1}] =
         sqrt(pow(2, kronecker(l, 0) * (2 * l) / (2 * l + 1))) *
         (y * result[std::vector<int>{l, l}] +
-         (1 - kronecker(l, 0) * x * result[std::vector<int>{l, -l}]));
+         (1 - kronecker(l, 0)) * x * result[std::vector<int>{l, -l}]);
 
     // Recursion needs out-of-range neighbors as zero placeholders.
     result[std::vector<int>{l + 1, l + 2}] = zero;
@@ -297,17 +297,26 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
 
   long count = 0;
   for (long i = 0; i < n_occ && count < num_roots; ++i) {
+    long h = 0;
     for (const auto &kv : solids) {
       if (count >= num_roots) break;
       const real_function_3d &harmonic = kv.second;
       // Single-excitation trial: one occupied position non-zero.
       RealResponseState state = RealResponseState::allocate(
           world, n_occ, /*n_beta=*/0, /*include_y=*/false);
-      const long pos = count % n_occ;
-      const long orb_idx = n_occ - (count % n_occ) - 1;
+      // Cover the (orbital × harmonic) grid without repeats: harmonics
+      // advance fastest; each outer pass shifts the orbital pairing by
+      // one, so a (harmonic, orbital) pair never repeats (i < n_occ ⇒
+      // distinct orbital per harmonic per pass). The previous
+      // `count % n_occ` ignored `i` and repeated candidates verbatim
+      // whenever solids.size() was a multiple of n_occ — exact duplicate
+      // trials → zero vectors after Gram-Schmidt → singular overlap.
+      const long pos = (h + i) % n_occ;
+      const long orb_idx = n_occ - pos - 1;
       state.x_alpha[pos] = harmonic * orbitals[orb_idx];
       X.push_back(std::move(state));
       ++count;
+      ++h;
     }
   }
 

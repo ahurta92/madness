@@ -165,6 +165,21 @@ build_initial_guess_tda_closed_shell(
     s.roots[r].x_alpha = guess[r].x_alpha;
   }
   s.iter = 0;
+
+  // Reject a degenerate bundle LOUDLY before it reaches the solver: a
+  // duplicate/linearly-dependent trial survives Gram-Schmidt as a ~zero
+  // vector and feeds a singular overlap S into rs::diagonalize (rank-
+  // deficient subspace, garbage omega). norm2 is collective — all ranks.
+  for (long r = 0; r < n_roots; ++r) {
+    const double nr = madness::norm2(world, s.roots[r].x_alpha);
+    if (nr < 1.0e-6) {
+      throw std::runtime_error(
+          "build_initial_guess_tda_closed_shell: guess root " +
+          std::to_string(r) + " has norm " + std::to_string(nr) +
+          " after orthonormalization — degenerate/duplicate trial bundle "
+          "(need " + std::to_string(n_roots) + " independent trials).");
+    }
+  }
   return s;
 }
 
@@ -190,6 +205,8 @@ build_initial_guess_tda_open_shell(
       break;
   }
 
+  MADNESS_CHECK(static_cast<long>(guess.size()) >= n_roots);
+
   ESSolver<TDA, OpenShell>::State s;
   s.roots.resize(n_roots);
   for (long r = 0; r < n_roots; ++r) {
@@ -197,6 +214,21 @@ build_initial_guess_tda_open_shell(
     s.roots[r].x_beta  = guess[r].x_beta;
   }
   s.iter = 0;
+
+  // Same degenerate-bundle guard as the closed-shell adapter (collective).
+  for (long r = 0; r < n_roots; ++r) {
+    const double na = madness::norm2(world, s.roots[r].x_alpha);
+    const double nb = s.roots[r].x_beta.empty()
+                          ? 0.0 : madness::norm2(world, s.roots[r].x_beta);
+    if (std::sqrt(na * na + nb * nb) < 1.0e-6) {
+      throw std::runtime_error(
+          "build_initial_guess_tda_open_shell: guess root " +
+          std::to_string(r) +
+          " is ~zero after orthonormalization — degenerate/duplicate "
+          "trial bundle (need " + std::to_string(n_roots) +
+          " independent trials).");
+    }
+  }
   return s;
 }
 
