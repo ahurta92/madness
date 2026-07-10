@@ -168,14 +168,19 @@ void GroundState::prepare(World& world, double vtol,
     auto target_k = FunctionDefaults<3>::get_k();
     auto thresh = FunctionDefaults<3>::get_thresh();
 
-    // Re-project orbitals if k changed from what they currently are
-    if (current_k_ != target_k) {
+    // Reload pristine MOs when the orbitals we hold cannot represent the
+    // target protocol: a k change (projection needs the original-k source),
+    // OR a TIGHTER thresh than the orbitals currently carry — re-truncating
+    // an already-truncated function cannot restore the discarded precision,
+    // so a thresh-only climb without the reload silently drags the coarse
+    // rung's error into the fine rung (review io finding, verified).
+    const bool need_pristine =
+        (current_k_ != target_k) ||
+        (current_thresh_ >= 0.0 && thresh < current_thresh_);
+    if (need_pristine) {
         // Reload pristine MOs at original_k_ from the archive, then project to
-        // target. The reload runs on every protocol climb, restoring the
-        // invariant that scf_->amo is at original_k_ before the reproject below
-        // (an in-place projection would otherwise leave it at a coarser k and a
-        // later climb back up would not conform). GroundState is only built via
-        // from_archive, so the checkpoint to reload from always exists.
+        // target. GroundState is only built via from_archive, so the
+        // checkpoint to reload from always exists.
         scf_->load_mos(world);
         if (original_k_ != target_k) {
             reconstruct(world, scf_->amo);
@@ -201,6 +206,7 @@ void GroundState::prepare(World& world, double vtol,
             truncate(world, scf_->bmo, thresh);
         }
     }
+    current_thresh_ = thresh;
 
     // Build QProjectors from current orbitals
     q_alpha_ = QProjector<double, 3>(scf_->get_amo());
