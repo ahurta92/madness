@@ -948,8 +948,12 @@ public:
   /// pass: each pass reloads the aggregate metadata, re-schedules (so actions
   /// reflect current disk), runs the first non-empty wave, fences, then
   /// expands any newly-converged ES bundle into concrete DerivedFD nodes.
-  /// Terminates when the schedule is empty (all Skip) or the same wave repeats
-  /// with no progress (a node that cannot converge does not spin the loop).
+  /// Terminates when the schedule is empty (all Skip). A wave that repeats
+  /// with no progress is QUARANTINED (its nodes leave the schedule; trace
+  /// records a stall_event) and the loop continues with independent work —
+  /// stop_reason is 'complete_with_stalled' + diag.stalled_nodes when
+  /// anything was quarantined, so a stuck node neither spins the loop nor
+  /// starves unrelated perturbation channels (review fix).
   /// Returns the R1c scheduler trace (doc 16 L3) -> Output.diagnostics: the
   /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
   /// and pass count. Built identically on every rank (schedule() is
@@ -973,6 +977,7 @@ public:
     int pass = 0;
 
     std::string last_sig;
+    std::set<std::string> stalled_ids;   // quarantined no-progress nodes
     for (;;) {
       world.gop.fence();
       auto meta = ResponseMetadata::load_or_create(meta_path);
@@ -982,20 +987,57 @@ public:
       // max_iters flows into reconcile so a budget-exhausted rung climbs the
       // ladder (honest-climb) instead of Resume-looping into the no-progress halt.
       auto waves = schedule(dag_, ramp, meta.json(), policy_.max_iters_per_step);
+      // Review fix (confirmed HIGH — front-wave starvation): quarantine nodes
+      // that stopped making progress instead of halting the WHOLE run. Only
+      // the front wave ever executes, so a deterministically-stuck node (e.g.
+      // a diverging ES bundle) used to starve every independent item queued
+      // in later waves. Stalled nodes are excluded from scheduling, recorded
+      // in the trace, and reported honestly in stop_reason at the end.
+      for (auto &w : waves) {
+        w.erase(std::remove_if(w.begin(), w.end(),
+                               [&](const WorkItem &it) {
+                                 return stalled_ids.count(it.node->id) > 0;
+                               }),
+                w.end());
+      }
+      waves.erase(std::remove_if(waves.begin(), waves.end(),
+                                 [](const auto &w) { return w.empty(); }),
+                  waves.end());
       if (waves.empty()) {
-        if (world.rank() == 0)
-          madness::print("[CALC] run: nothing left to schedule — done");
-        diag["stop_reason"] = "complete";
+        if (stalled_ids.empty()) {
+          if (world.rank() == 0)
+            madness::print("[CALC] run: nothing left to schedule — done");
+          diag["stop_reason"] = "complete";
+        } else {
+          if (world.rank() == 0) {
+            madness::print("[CALC] run: all remaining work is STALLED —",
+                           (int)stalled_ids.size(),
+                           "node(s) made no progress and were quarantined:");
+            for (const auto &id : stalled_ids) madness::print("    stalled:", id);
+          }
+          diag["stop_reason"] = "complete_with_stalled";
+          diag["stalled_nodes"] = stalled_ids;
+        }
         break;
       }
 
       const std::string sig = wave_signature(waves.front());
       if (sig == last_sig) {
+        // No progress on this wave: quarantine its nodes and try the rest of
+        // the schedule. The run only stops when nothing unquarantined remains.
         if (world.rank() == 0)
           madness::print("[CALC] run: no progress on wave {", sig,
-                         "} — stopping (unconverged or unhandled nodes)");
-        diag["stop_reason"] = "no_progress";
-        break;
+                         "} — quarantining", (int)waves.front().size(),
+                         "node(s) and continuing with independent work");
+        nlohmann::json srec = {{"pass", pass}, {"wave", sig},
+                               {"quarantined", nlohmann::json::array()}};
+        for (const auto &it : waves.front()) {
+          stalled_ids.insert(it.node->id);
+          srec["quarantined"].push_back(it.node->id);
+        }
+        diag["stall_events"].push_back(std::move(srec));
+        last_sig.clear();   // the next front wave gets a fresh 2-pass window
+        continue;
       }
       last_sig = sig;
 
