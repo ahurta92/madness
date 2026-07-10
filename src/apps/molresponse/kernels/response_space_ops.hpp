@@ -146,7 +146,13 @@ inline DiagonalizeResult
 diagonalize(const madness::Tensor<double> &A_in,
             const madness::Tensor<double> &S_in,
             double thresh_degenerate = -1.0,
-            double cluster_factor    = 100.0) {
+            double cluster_factor    = 100.0,
+            madness::World *world_ptr = nullptr) {
+  // world_ptr: the world whose ranks are calling this (sygvp broadcasts on
+  // it). nullptr keeps the legacy World::get_default() — WRONG inside a
+  // subworld (kernels review: cross-communicator broadcast is a hang/cross-
+  // talk landmine). Subworld-capable callers MUST pass their world; new call
+  // sites should always pass it explicitly.
   using madness::Slice;
   using madness::_;
 
@@ -190,7 +196,8 @@ diagonalize(const madness::Tensor<double> &A_in,
 
   // ---- 2b. Generalized eigenproblem -------------------------------------
   madness::Tensor<double> U_small, evals;
-  madness::sygvp(madness::World::get_default(), A, S, 1, U_small, evals);
+  madness::sygvp(world_ptr ? *world_ptr : madness::World::get_default(),
+                 A, S, 1, U_small, evals);
 
   const long nmo = A.dim(0);
 

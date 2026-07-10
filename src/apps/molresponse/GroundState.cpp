@@ -7,7 +7,10 @@
 
 #include "broadcast_json.hpp"
 
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <vector>
 
 namespace molresponse_v3 {
 
@@ -53,17 +56,64 @@ GroundState GroundState::from_archive(World& world,
     // SCF::load_mos's archive lookup).
     params.get_parameter("prefix").set_user_defined_value(prefix);
 
-    // For open-shell: infer nopen from nmo_alpha and total electrons.
     if (world.rank() == 0) {
         print("ARCHIVE_HEADER: spin_restricted=", header.spin_restricted,
               " nmo_alpha=", header.nmo_alpha, " L=", header.L,
               " k=", header.k, " xc=", header.xc);
     }
-    if (!header.spin_restricted) {
-        int nelec = static_cast<int>(molecule.total_nuclear_charge());
-        int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
-        if (nopen < 0) nopen = 0;
-        params.set_user_defined_value("nopen", nopen);
+
+    // Electron bookkeeping (review io finding): set_derived_values computes
+    // nalpha/nbeta from Z + charge + nopen, and SCF::load_mos reads EXACTLY
+    // param.nmo_alpha() orbitals — with the neutral default a charged species
+    // silently DROPS its HOMO (anion) or mis-derives nopen. The archive side
+    // knows the truth: closed shell nelec = 2*nmo_alpha exactly; open shell
+    // takes nalpha/nbeta from the moldft calc_info.json sibling.
+    const double Z = molecule.total_nuclear_charge();
+    if (header.spin_restricted) {
+        const double charge = Z - 2.0 * static_cast<double>(header.nmo_alpha);
+        params.set_user_defined_value("charge", charge);
+        if (world.rank() == 0 && std::abs(charge) > 1e-6)
+            print("ARCHIVE_HEADER: inferred total charge =", charge,
+                  " (nelec =", 2 * header.nmo_alpha, ")");
+    } else {
+        // rank 0 reads the sibling calc_info.json; broadcast (na, nb, found).
+        long na = -1, nb = -1;
+        if (world.rank() == 0) {
+            const auto ci = std::filesystem::path(prefix + ".calc_info.json");
+            std::ifstream in(ci);
+            if (in) {
+                try {
+                    nlohmann::json j;
+                    in >> j;
+                    na = j.value("calcinfo_nalpha", -1);
+                    nb = j.value("calcinfo_nbeta", -1);
+                } catch (const std::exception &) { na = nb = -1; }
+            }
+        }
+        std::vector<long> nab{na, nb};
+        world.gop.broadcast_serializable(nab, 0);
+        na = nab[0]; nb = nab[1];
+        if (na > 0 && nb >= 0) {
+            const double charge = Z - static_cast<double>(na + nb);
+            params.set_user_defined_value("charge", charge);
+            params.set_user_defined_value("nopen", static_cast<int>(na - nb));
+            if (world.rank() == 0)
+                print("ARCHIVE_HEADER: open-shell from calc_info: nalpha=", na,
+                      " nbeta=", nb, " nopen=", na - nb,
+                      " inferred charge=", charge);
+        } else {
+            // Legacy fallback: neutral assumption (pre-fix behavior), loudly.
+            int nelec = static_cast<int>(Z);
+            int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
+            if (nopen < 0) nopen = 0;
+            params.set_user_defined_value("nopen", nopen);
+            if (world.rank() == 0)
+                print("ARCHIVE_HEADER: WARNING — no ", prefix,
+                      ".calc_info.json next to the archive; ASSUMING NEUTRAL "
+                      "(nopen=", nopen, "). A charged open-shell restart needs "
+                      "that file (moldft writes it) or the loaded orbital set "
+                      "will be wrong.");
+        }
     }
 
     // Step 3: Construct SCF (calls set_derived_values internally)

@@ -1253,6 +1253,13 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
   if (plan.vbc.empty()) return;
+  // Same ClosedShell-only reader constraint as assemble_alpha — refuse loudly.
+  if (!gs.is_spin_restricted()) {
+    if (world.rank() == 0)
+      print("[ASSEMBLE] open-shell beta/raman assembly is not implemented — "
+            "SKIPPED (ClosedShell-only readers; see REVIEW_FINDINGS).");
+    return;
+  }
 
   set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
@@ -1387,6 +1394,18 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
   using namespace madness;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
+
+  // Review finding (confirmed HIGH): the assembly readers below are hardcoded
+  // to the ClosedShell archive layout; an open-shell state deserializes
+  // MISALIGNED (crash or garbage alpha). The open-shell SOLVES are fine and
+  // saved — refuse the assembly loudly instead of fabricating numbers.
+  if (!gs.is_spin_restricted()) {
+    if (world.rank() == 0)
+      print("[ASSEMBLE] open-shell property assembly is not implemented yet — "
+            "response states are solved and saved, but alpha assembly is "
+            "SKIPPED (ClosedShell-only readers; see REVIEW_FINDINGS).");
+    return;
+  }
 
   // Dipole directions + frequencies present in the plan.
   std::set<int>    axes;
