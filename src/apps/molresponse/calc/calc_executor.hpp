@@ -1023,18 +1023,20 @@ public:
           if (n.kind != CalcKind::VBC || n.protocols.empty()) continue;
           const std::string top = protocol_key_at(n.protocols.back());
           const auto &j = meta.json();
-          const bool ok = j.contains("vbc_states") &&
-                          j["vbc_states"].contains(n.id) &&
-                          j["vbc_states"][n.id].contains(top) &&
-                          j["vbc_states"][n.id][top].value("converged", false);
-          if (ok) continue;
-          dropped.push_back(
-              {{"id", n.id},
-               {"top_protocol_key", top},
-               {"reason", stalled_ids.count(n.id)
-                              ? "stalled (quarantined by the no-progress guard)"
-                              : "prerequisites never converged (gated out of "
-                                "every wave)"}});
+          const bool has_entry = j.contains("vbc_states") &&
+                                 j["vbc_states"].contains(n.id) &&
+                                 j["vbc_states"][n.id].contains(top);
+          if (has_entry && j["vbc_states"][n.id][top].value("converged", false))
+            continue;
+          const char *reason =
+              stalled_ids.count(n.id)
+                  ? "stalled (quarantined by the no-progress guard)"
+                  : has_entry
+                        ? "built at the top rung but not converged"
+                        : "prerequisites never converged (gated out of every wave)";
+          dropped.push_back({{"id", n.id},
+                             {"top_protocol_key", top},
+                             {"reason", reason}});
         }
         // Dropped VBC ⇒ the beta/raman rows it feeds cannot be assembled.
         // Record the audit in the metadata (rank 0, through the layer) even
