@@ -151,6 +151,64 @@ int main() {
            "add_property appended (now 2 records)");
   }
 
+  // ---- property-row identity: same identity replaces, not appends ----------
+  std::printf("=== property identity upsert ===\n");
+  {
+    auto m = ResponseMetadata::load_or_create(path);
+    // Re-assemble the es_root_0000 row (restart flow): value changes, identity
+    // (es_root_id, fd_freq) does not -> REPLACE in place, still 2 records.
+    m.add_property("resonant_raman", "1e-06_k8",
+                   {{"es_root_id", "es_root_0000"},
+                    {"fd_freq",    0.468},
+                    {"value",      42.0}});
+    // Alpha identity is (omega, directions); beta/raman is (A,B,C,freq_b,freq_c).
+    m.add_property("alpha", "1e-06_k8",
+                   {{"omega", 0.0}, {"directions", "z"}, {"converged", false}});
+    m.add_property("alpha", "1e-06_k8",
+                   {{"omega", 0.0}, {"directions", "z"}, {"converged", true}});
+    m.add_property("alpha", "1e-06_k8",
+                   {{"omega", 0.057}, {"directions", "z"}, {"converged", true}});
+    // Same identity at a DIFFERENT protocol appends (history across protocols).
+    m.add_property("alpha", "1e-04_k6",
+                   {{"omega", 0.0}, {"directions", "z"}, {"converged", true}});
+    m.save();
+
+    auto m2 = ResponseMetadata::load_or_create(path);
+    const auto &rr = m2.json()["properties"]["resonant_raman"]["1e-06_k8"];
+    EXPECT(rr.size() == 2, "same-identity raman row replaced (still 2)");
+    bool found = false;
+    for (const auto &r : rr)
+      if (r.value("es_root_id", std::string()) == "es_root_0000") {
+        EXPECT(r.value("value", -1.0) == 42.0, "replaced row carries new value");
+        found = true;
+      }
+    EXPECT(found, "es_root_0000 row present after upsert");
+    const auto &al = m2.json()["properties"]["alpha"]["1e-06_k8"];
+    EXPECT(al.size() == 2, "alpha: 2 identities (omega 0.0 and 0.057)");
+    EXPECT(al[0].value("converged", false) == true,
+           "alpha omega=0 row replaced by the converged re-run");
+    EXPECT(m2.json()["properties"]["alpha"]["1e-04_k6"].size() == 1,
+           "different protocol_key keeps its own history");
+  }
+
+  // ---- run_summary/dropped_work (full-replace upsert) -----------------------
+  std::printf("=== dropped_work ===\n");
+  {
+    auto m = ResponseMetadata::load_or_create(path);
+    m.set_dropped_work(nlohmann::json::array(
+        {{{"id", "vbc:dipole_z__dipole_z@0.057_0.057"},
+          {"reason", "prerequisites never converged"}}}));
+    m.save();
+    auto m2 = ResponseMetadata::load_or_create(path);
+    EXPECT(m2.json()["run_summary"]["dropped_work"].size() == 1,
+           "dropped_work recorded");
+    m2.set_dropped_work(nlohmann::json::array());
+    m2.save();
+    auto m3 = ResponseMetadata::load_or_create(path);
+    EXPECT(m3.json()["run_summary"]["dropped_work"].empty(),
+           "a completing run clears dropped_work");
+  }
+
   // ---- schema_version mismatch is rejected ---------------------------------
   std::printf("=== schema_version guard ===\n");
   {

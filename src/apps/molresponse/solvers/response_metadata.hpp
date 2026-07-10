@@ -146,15 +146,50 @@ public:
     return {};
   }
 
-  /// Append a property record to properties/<name>/<protocol_key>[]. The
+  /// Upsert a property record into properties/<name>/<protocol_key>[]. The
   /// caller stamps it with whatever provenance is meaningful (es_root_id,
   /// fd_freq, the value, etc. — see doc 13's matching contract).
+  ///
+  /// Identity contract (review fix — append-only rows made restarts accumulate
+  /// duplicate/stale rows): a record's identity within (name, protocol_key) is
+  /// the tuple of its identity fields (see property_identity). A re-run that
+  /// re-assembles the same row REPLACES the old one; rows with different
+  /// identities append; history across DIFFERENT protocols is preserved by the
+  /// protocol_key level. Records carrying none of the identity fields keep the
+  /// legacy append behaviour.
   void add_property(const std::string &name,
                     const std::string &protocol_key,
                     const nlohmann::json &record) {
     auto &arr = j_["properties"][name][protocol_key];
     if (!arr.is_array()) arr = nlohmann::json::array();
+    const nlohmann::json id = property_identity(record);
+    if (!id.empty())
+      for (auto &existing : arr)
+        if (property_identity(existing) == id) { existing = record; return; }
     arr.push_back(record);
+  }
+
+  /// The identity fields of a property record: alpha rows key on
+  /// (omega, directions); beta/raman rows on (A, B, C, freq_b, freq_c);
+  /// ES-derived rows on (es_root_id, fd_freq). Doubles round-trip exactly
+  /// through nlohmann::json, so equality on re-assembled rows is exact.
+  static nlohmann::json property_identity(const nlohmann::json &record) {
+    static constexpr const char *keys[] = {"omega",  "directions", "A",
+                                           "B",      "C",          "freq_b",
+                                           "freq_c", "es_root_id", "fd_freq"};
+    nlohmann::json id = nlohmann::json::object();
+    for (const char *k : keys)
+      if (record.contains(k)) id[k] = record[k];
+    return id;
+  }
+
+  /// Record planned work the run ended WITHOUT executing (review fix: honest-
+  /// climb + hard VBC prerequisite gates could silently drop beta/raman work
+  /// while stop_reason claimed 'complete'). Full-replace upsert: run() writes
+  /// the current list on every exit, so a later run that completes the work
+  /// clears it (empty array = nothing dropped).
+  void set_dropped_work(const nlohmann::json &items) {
+    j_["run_summary"]["dropped_work"] = items;
   }
 
   /// Atomic write. Throws on filesystem error.
