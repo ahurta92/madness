@@ -28,6 +28,10 @@ endif()
     add_scripted_tests(test_mp2_helium.py madqc "verylong;applications")
     add_scripted_tests(test_lrcc2_helium.py madqc "verylong;applications")
     add_scripted_tests(test_molresponse_h2o_alpha_beta_z.py madqc "verylong;applications")
+    # Phase-0 driver-hardening gate (raman thread): SCF restart + corrupt-
+    # checkpoint recovery. Heavier (3 sequential madqc runs); enable + run on
+    # an allocation once the raman build is validated.
+    # add_scripted_tests(test_moldft_restart_e2e.py madqc "long;applications")
     # DISABLED (R-1, M1 Stage 3): full-tensor per-atom Raman is a v2-only
     # capability; v3 is single-component (see FEATURE_STATUS.md). The v2
     # reference tensor is archived: madness_studies/refs/raman_v2_h2o_full_tensor.json

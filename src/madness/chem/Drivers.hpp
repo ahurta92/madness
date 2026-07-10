@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <madness/external/nlohmann_json/json.hpp>
 #include <memory>
+#include <stdexcept>
+#include <system_error>
 #include <vector>
 
 #include <madness/chem/Applications.hpp>  // Interface for SCFApplication / ResponseApplication
@@ -144,15 +146,42 @@ private:
   /// Rank-0-only, ATOMIC (tmp+rename) aggregate write. Every rank used to
   /// stream the file directly — N concurrent writers to one path on a shared
   /// FS, and a crash mid-write truncated it.
+  ///
+  /// Two additional hazards handled here (raman thread brief, defect 2):
+  ///  (a) an unchecked ofstream means an ENOSPC-truncated tmp still SUCCEEDS
+  ///      the rename and replaces a good calc_info.json — so we verify the
+  ///      stream and the rename before committing, and drop the tmp on failure;
+  ///  (b) a rank-0-only filesystem failure would unwind only rank 0 while the
+  ///      other ranks march into the next driver's collectives → a hang that
+  ///      burns the whole allocation. We broadcast an ok/fail flag so every
+  ///      rank throws together (or none does).
   void write_calc_info(const std::string &prefix) const {
-    if (madness::World::get_default().rank() != 0) return;
-    const std::string outputfile = prefix + ".calc_info.json";
-    const std::string tmpfile = outputfile + ".tmp";
-    {
-      std::ofstream ofs(tmpfile);
-      ofs << std::setw(4) << all_;
+    auto &world = madness::World::get_default();
+    int ok = 1;
+    if (world.rank() == 0) {
+      const std::string outputfile = prefix + ".calc_info.json";
+      const std::string tmpfile = outputfile + ".tmp";
+      {
+        std::ofstream ofs(tmpfile);
+        ofs << std::setw(4) << all_;
+        ofs.flush();
+        if (!ofs) ok = 0;
+      }
+      if (ok) {
+        std::error_code ec;
+        std::filesystem::rename(tmpfile, outputfile, ec);
+        if (ec) ok = 0;
+      }
+      if (!ok) {
+        std::error_code ec;
+        std::filesystem::remove(tmpfile, ec);
+      }
     }
-    std::filesystem::rename(tmpfile, outputfile);
+    world.gop.broadcast(&ok, 1, 0);
+    if (!ok)
+      throw std::runtime_error(
+          "write_calc_info: failed to persist " + prefix +
+          ".calc_info.json (disk full or filesystem error)");
   }
 
   std::vector<std::unique_ptr<Driver>> drivers_;

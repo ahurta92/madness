@@ -4,6 +4,8 @@
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/PathManager.hpp>
 #include <madness/chem/Results.h>
+#include <filesystem>
+#include <system_error>
 
 namespace madness {
 enum class NextAction { Ok, ReloadOnly, Restart, Redo };
@@ -127,8 +129,12 @@ public:
       nlohmann::json j;
       NextAction action;
       if (has_results(ckpt)) {
-        j = read_results(ckpt); // which results are we readin
         try {
+          // Parse INSIDE the try: a truncated/corrupt checkpoint (e.g. a
+          // process killed mid-write) makes read_results throw, and that
+          // throw must degrade to Redo rather than escaping past this catch
+          // and bricking the restart.
+          j = read_results(ckpt); // which results are we reading
           auto &[scf_r, properties, convergence, optr] = scf_results;
           scf_r.from_json(j["scf"]);
           properties.from_json(j["properties"]);
@@ -137,6 +143,7 @@ public:
 
         } catch (...) {
           print("Failed to parse checkpoint file: ", ckpt);
+          j = nlohmann::json(); // drop any partially-parsed data
           scf_results = empty_results;
           action = madness::NextAction::Redo;
         }
@@ -153,6 +160,19 @@ public:
                 "molecule; ignoring checkpoint and recomputing.");
         scf_results = empty_results;
         action = madness::NextAction::Redo;
+      }
+      // If we are restarting from an existing archive, the SCF engine must be
+      // told to load its MOs from <prefix>.restartdata. This flag has to be set
+      // on params_ BEFORE the engine is constructed — set_calc_workdir() below
+      // builds the SCF (via calc()->initialize_(), which freezes params into
+      // mad.in), so a flag set afterwards (as the old moldft_lib::run did, on a
+      // discarded local copy) never reaches the constructor and "Restart"
+      // silently recomputed from scratch. (raman thread brief, defect 3)
+      if (action == madness::NextAction::Restart) {
+        params_.get<CalculationParameters>().set_user_defined_value("restart",
+                                                                    true);
+        if (world_.rank() == 0)
+          print("Restart requested: loading MOs from restartdata archive");
       }
       world_.gop.fence();
       set_calc_workdir(pm.dir());
@@ -188,7 +208,10 @@ public:
 
       if (action == madness::NextAction::Restart ||
           action == madness::NextAction::Redo) {
-        scf_results = lib_.run(world_, params_, madness::NextAction::Restart);
+        // Restart vs Redo is now carried by the 'restart' flag set on params_
+        // above (Restart => load restartdata; Redo => fresh). Pass the real
+        // action through rather than a hardcoded Restart.
+        scf_results = lib_.run(world_, params_, action);
       } else {
         lib_.calc(world_, params_); // just set up the calc without running
       }
@@ -210,12 +233,30 @@ public:
       results_["convergence_info"] = results_["convergence"];
       results_["metadata"] = {{"mpi_size", world_.size()}};
 
-      // write the checkpoint file
+      // write the checkpoint file atomically (tmp write + rename) so a crash
+      // or ENOSPC mid-write cannot truncate a previously-good checkpoint and
+      // brick the next restart. See defect-1 in the raman thread brief.
       if (world_.rank() == 0) {
-        std::ofstream ofs(ckpt);
-        ofs << results_.dump(4);
-        ofs.close();
-        print("Written checkpoint file: ", ckpt);
+        const std::string tmp = ckpt + ".tmp";
+        bool ok = true;
+        {
+          std::ofstream ofs(tmp);
+          ofs << results_.dump(4);
+          ofs.flush();
+          ok = static_cast<bool>(ofs);
+        }
+        if (ok) {
+          std::error_code ec;
+          std::filesystem::rename(tmp, ckpt, ec);
+          if (ec) ok = false;
+        }
+        if (ok) {
+          print("Written checkpoint file: ", ckpt);
+        } else {
+          std::error_code ec;
+          std::filesystem::remove(tmp, ec);
+          print("ERROR: failed to write checkpoint file (disk full?): ", ckpt);
+        }
       }
     }
   }
@@ -696,7 +737,6 @@ struct moldft_lib {
   // params get's changed by SCF constructor
   SCFResultsTuple run(World &world, const Params &params,
                       const NextAction next_action_) {
-    auto moldft_params = params.get<CalculationParameters>();
     const auto &molecule = params.get<Molecule>();
     const auto &params_copy = params;
 
@@ -712,11 +752,10 @@ struct moldft_lib {
       return last_results_;
     }
 
-    if (NextAction::Restart == next_action_) {
-      // Handle restart logic
-      auto cr = std::get<2>(last_results_);
-      moldft_params.set_user_defined_value("restart", true);
-    }
+    // NOTE: for NextAction::Restart, the SCF engine is already told to load
+    // MOs from restartdata by the caller (SCFApplication::run sets the
+    // 'restart' flag on params_ BEFORE the engine is constructed). Setting it
+    // here on a local copy was dead code — the engine was already built.
     auto scf = calc(world, params_copy);
     // redirect any log files into outdir if needed…
     // Warm and fuzzy for the user
