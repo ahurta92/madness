@@ -249,7 +249,21 @@ private:
     std::ifstream in(sp);
     if (!in) return;
     nlohmann::json sj;
-    in >> sj;
+    // Shards are written atomically (save() tmp+rename), so a parse failure
+    // means external damage — quarantine it (keep the evidence, unblock every
+    // future startup) rather than throwing the whole run down.
+    try {
+      in >> sj;
+    } catch (const std::exception &) {
+      in.close();
+      std::error_code ec;
+      std::filesystem::rename(sp, sp + ".corrupt", ec);
+      std::fprintf(stderr,
+                   "ResponseMetadata: shard %s unparsable — quarantined as "
+                   "%s.corrupt (its states will be re-solved)\n",
+                   sp.c_str(), sp.c_str());
+      return;
+    }
     // NB: iterate the lvalue member (sj["fd_states"]), NOT a .value(...)
     // temporary — .items() on a temporary json dangles.
     if (sj.contains("fd_states") && sj["fd_states"].is_object())

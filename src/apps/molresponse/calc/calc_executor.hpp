@@ -1078,18 +1078,57 @@ public:
                              "  fan_items=", (int)fan_items.size());
             // S1 pmap discipline: point the default pmap at the subworld so
             // everything built inside is subworld-local; restore BEFORE reset.
+            // Exception safety: a subworld-local throw must NOT skip the pmap
+            // restore or the universe fence below — the failing ranks would
+            // reach the driver's top-level catch and finalize while every
+            // other rank blocks in the fence forever. Catch, restore, fence,
+            // then agree collectively and abort together. (A throw that leaves
+            // SIBLING ranks of the same subworld inside a subworld collective
+            // is inherently unrecoverable in MPI — this handles the
+            // synchronized-failure cases: archive open, shard save, guards.)
+            std::string fan_err;
             madness::FunctionDefaults<3>::set_default_pmap(*sub);
-            fan_out(*sub, mine, wthresh, info.gid, lp);
-            sub->gop.fence();
+            try {
+              fan_out(*sub, mine, wthresh, info.gid, lp);
+              sub->gop.fence();
+            } catch (const std::exception &e) {
+              fan_err = e.what();
+            } catch (...) {
+              fan_err = "unknown exception in subworld fan-out";
+            }
             madness::FunctionDefaults<3>::set_default_pmap(world);
             sub.reset();
+            if (!fan_err.empty())
+              madness::print("[FANOUT-ERROR] universe rank", world.rank(),
+                             "(gid", info.gid, "):", fan_err);
+            int fan_bad = fan_err.empty() ? 0 : 1;
+            world.gop.max(fan_bad);
+            if (fan_bad) {
+              world.gop.fence();
+              MADNESS_EXCEPTION(
+                  "subworld fan-out failed on at least one subworld "
+                  "(see [FANOUT-ERROR]); aborting collectively", 0);
+            }
           }
           world.gop.fence();
           // F2b/F2g: collapse the per-group FD+VBC metadata shards into the
           // canonical file (universe rank 0; through the metadata layer). Only
-          // when we actually sharded (G > 1).
-          if (world.rank() == 0 && G > 1)
-            ResponseMetadata::merge_state_shards(calc_dir_, G);
+          // when we actually sharded (G > 1). The merge itself can throw
+          // (corrupt shard, ENOSPC) — that must be collective too, not a
+          // rank-0-only unwind that strands everyone else at the fence.
+          int merge_bad = 0;
+          if (world.rank() == 0 && G > 1) {
+            try {
+              ResponseMetadata::merge_state_shards(calc_dir_, G);
+            } catch (const std::exception &e) {
+              merge_bad = 1;
+              madness::print("[SHARD-MERGE-ERROR]", e.what());
+            }
+          }
+          world.gop.max(merge_bad);
+          if (merge_bad)
+            MADNESS_EXCEPTION("per-wave shard merge failed on rank 0 "
+                              "(see [SHARD-MERGE-ERROR])", 0);
           world.gop.fence();
         }
         for (const auto &it : rest) exec.run_protocol(it);   // ES: universe

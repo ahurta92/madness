@@ -89,7 +89,14 @@ make_subworld_pool(madness::World &universe, int groups_per_node,
       universe.mpi.comm().Split(/*Color=*/nidx, /*Key=*/universe.rank());
   const int wn_rank = node_comm.Get_rank();
   const int wn_size = node_comm.Get_size();
-  const int gpn     = std::min(groups_per_node, wn_size);  // can't exceed #ranks/node
+  // The clamp must be UNIVERSE-uniform: with uneven ranks-per-node a per-node
+  // min gives different nodes different gpn — and gid = nidx*gpn + color then
+  // COLLIDES across nodes (two subworlds solving the same items and writing
+  // the same archives/shards) while other items go unowned. Clamp to the
+  // smallest node's rank count instead (collective).
+  int min_wn = wn_size;
+  universe.gop.min(min_wn);
+  const int gpn     = std::min(groups_per_node, min_wn);   // uniform on every rank
   const int color   = (wn_rank * gpn) / wn_size;           // 0..gpn-1, contiguous
   SafeMPI::Intracomm sub_comm = node_comm.Split(color, /*Key=*/wn_rank);
   auto subworld = std::make_shared<madness::World>(sub_comm);

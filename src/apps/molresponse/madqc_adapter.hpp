@@ -195,8 +195,12 @@ struct molresponse_v3_lib {
 #endif
     }
 
+    // Pass the RESOLVED fock path through (review finding: "" here made every
+    // per-rung re-prepare and every subworld GS reload RECOMPUTE the Fock
+    // instead of loading moldft's per-protocol entries — silently diverging
+    // from the standalone CLI path this adapter is supposed to match).
     ResponseWorkflowOutput out =
-        run_response_with_ground(world, gs, L, /*fock_json=*/"", in);
+        run_response_with_ground(world, gs, L, fock_json, in);
 
     // perf-model (doc 29): emit the per-phase profile when asked — same
     // contract as the standalone binary (molresponse/main.cpp), so madqc-driven

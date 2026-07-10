@@ -156,9 +156,13 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   if (!in.archive_file.empty()) {
     const std::string meta_path =
         in.settings.calc_dir + "/response_metadata.json";
-    // 0 = match/proceed, 1 = stamped fresh, 2 = warned+restamped, 3 = abort
+    // 0 = match/proceed, 1 = stamped fresh, 2 = warned+restamped, 3 = abort,
+    // 4 = rank-0 error (unreadable archive / corrupt or newer-schema metadata /
+    //     ENOSPC on stamp save). Everything inside the rank-0 block can throw,
+    //     and a rank-0-only unwind BEFORE the broadcast strands the other ranks
+    //     in it — so catch, encode as gate=4, and abort collectively.
     int gate = 0;
-    if (world.rank() == 0) {
+    if (world.rank() == 0) try {
       const GsFingerprint fp = gs_archive_fingerprint(in.archive_file);
       auto meta = ResponseMetadata::load_or_create(meta_path);
       const std::string stored = meta.ground_state_fingerprint();
@@ -206,23 +210,45 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
         meta.set_ground_state(in.archive_file, fp.hex, fp.bytes, fp.nparts);
         meta.save();
       }
+    } catch (const std::exception &e) {
+      gate = 4;
+      madness::print("[GS-FINGERPRINT] ERROR during gate on rank 0:", e.what());
     }
     world.gop.broadcast_serializable(gate, 0);
     if (gate == 3)
       MADNESS_EXCEPTION(
           "GS-archive fingerprint mismatch — refusing to reuse restart state "
           "(details printed by rank 0; see [GS-FINGERPRINT])", 0);
+    if (gate == 4)
+      MADNESS_EXCEPTION(
+          "GS-fingerprint gate failed on rank 0 (unreadable archive, corrupt "
+          "or newer-schema metadata, or stamp-save error — see "
+          "[GS-FINGERPRINT] ERROR); aborting collectively", 0);
   }
 
   // 2a''. F2 restart safety: sweep in any metadata shards stranded by an
   // interrupted subworld run, BEFORE reconcile reads the canonical file —
   // otherwise finished states would be invisible and silently re-solved.
   // (The stranded shards belong to the same GS the gate above just verified.)
-  if (world.rank() == 0) {
-    const int n = ResponseMetadata::merge_stale_state_shards(in.settings.calc_dir);
-    if (n > 0)
-      madness::print("SHARD_SWEEP  merged", n,
-                     "stale metadata shard(s) from an interrupted run");
+  // Same collective-error discipline as the gate: a rank-0 throw here
+  // (corrupt shard, ENOSPC on the canonical save) must not strand the other
+  // ranks at the fence.
+  {
+    int sweep_bad = 0;
+    if (world.rank() == 0) try {
+      const int n =
+          ResponseMetadata::merge_stale_state_shards(in.settings.calc_dir);
+      if (n > 0)
+        madness::print("SHARD_SWEEP  merged", n,
+                       "stale metadata shard(s) from an interrupted run");
+    } catch (const std::exception &e) {
+      sweep_bad = 1;
+      madness::print("[SHARD-SWEEP-ERROR]", e.what());
+    }
+    world.gop.max(sweep_bad);
+    if (sweep_bad)
+      MADNESS_EXCEPTION("stale-shard sweep failed on rank 0 "
+                        "(see [SHARD-SWEEP-ERROR]); aborting collectively", 0);
   }
   world.gop.fence();
 
