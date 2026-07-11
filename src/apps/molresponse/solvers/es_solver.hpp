@@ -495,7 +495,8 @@ public:
     auto S_mat = rs::metric(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
-                                       policy_.cluster_unmix_factor);
+                                       policy_.cluster_unmix_factor,
+                                       &world_);  // subworld-safe sygvp
     auto &omega_new = diag_result.omega;
     auto &U         = diag_result.U;
     out.omega = omega_new;
@@ -666,7 +667,8 @@ public:
     auto S_mat = rs::metric(out.roots, out.roots);
     auto diag_result = rs::diagonalize(A, S_mat,
                                        /*thresh_degenerate=*/-1.0,
-                                       policy_.cluster_unmix_factor);
+                                       policy_.cluster_unmix_factor,
+                                       &world_);  // subworld-safe sygvp
     auto &omega_new = diag_result.omega;
     auto &U         = diag_result.U;
     out.omega = omega_new;
@@ -811,7 +813,8 @@ public:
     auto A     = rs::inner(act_roots, lambda);
     auto S_mat = rs::metric(act_roots, act_roots);
     auto dr    = rs::diagonalize(A, S_mat, /*thresh_degenerate=*/-1.0,
-                                 policy_.cluster_unmix_factor);
+                                 policy_.cluster_unmix_factor,
+                                 &world_);  // subworld-safe sygvp
     auto &omega_act = dr.omega;
     auto &U         = dr.U;
     print_rot_slots(out.iter, dr);

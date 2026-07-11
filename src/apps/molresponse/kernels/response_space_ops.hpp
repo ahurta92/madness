@@ -308,7 +308,7 @@ diagonalize(const madness::Tensor<double> &A_in,
       }
       evals           = std::move(evals_full);
       omega_ascending = std::move(asc_full);
-      if (madness::World::get_default().rank() == 0) {
+      if ((world_ptr ? *world_ptr : madness::World::get_default()).rank() == 0) {
         madness::print("[DIAG] WARNING: rank-deficient subspace overlap —",
                        num_sv, "of", size_l,
                        "slots dropped from the eigenproblem; their omega is a",
