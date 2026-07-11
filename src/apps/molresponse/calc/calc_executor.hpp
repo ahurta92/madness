@@ -91,10 +91,17 @@ struct ExecutorSettings {
   // in-between frequencies (not just a single root's vector).
   bool              seed_derived_from_es_root = false;
   // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
-  // closed-shell path (random guess, 10 warmup iters, 2x oversample, KAIN).
+  // closed-shell path (random guess, 10 warmup iters, oversampled warmup, KAIN).
   ESGuessMode       es_guess              = ESGuessMode::SolidHarmonics;  // sweep-validated default
   int               es_tda_warmup_iters   = 10;
-  double            es_warmup_oversample  = 2.0;
+  // Warmup oversampling: keep the lowest n_roots of ceil(factor*n_roots)
+  // partially-converged warmup trials. 2.0 proved too thin at the cut line:
+  // h2o TDA 4 roots kept a 0.4197 au trial over the true 4th state at
+  // 0.4096 au (2.4% vs Dalton d-aug-cc-pVQZ; job 2083837), while the same
+  // deck at 6 roots (12 trials) resolved all six to 0.02% (job 2084010).
+  // 3.0 gives the cut line a full extra rank of margin; cost is warmup-only
+  // (coarse rung, es_tda_warmup_iters iters).
+  double            es_warmup_oversample  = 3.0;
   int               es_kain_maxsub        = 8;
   double            es_maxrotn            = 0.5;
   // Delay KAIN onset in the MAIN ES solve by this many iters (pure BSH +
