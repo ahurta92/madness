@@ -83,6 +83,15 @@ public:
    */
   void addDriver(std::unique_ptr<Driver> driver) { drivers_.push_back(std::move(driver)); }
 
+  /// Run-level provenance stamped into EVERY calc_info write (e.g. the
+  /// effective restart-I/O configuration — roadmap change 5: io provenance
+  /// for all tasks, not just response). Recorded here and re-applied at the
+  /// top of run() (which resets the aggregate), so it is present even in the
+  /// partial calc_info a failed task leaves behind.
+  void set_provenance(const std::string &key, nlohmann::json value) {
+    provenance_[key] = std::move(value);
+  }
+
   void print_parameters(World &world) const {
     for (const auto &d : drivers_)
       d->print_parameters(world);
@@ -98,6 +107,7 @@ public:
     std::filesystem::path topDir = prefix;
     std::filesystem::create_directories(topDir);
     all_ = nlohmann::json::object();
+    for (const auto &kv : provenance_.items()) all_[kv.key()] = kv.value();
     all_["tasks"] = nlohmann::json::array();
 
     for (size_t i = 0; i < drivers_.size(); ++i) {
@@ -157,6 +167,7 @@ private:
 
   std::vector<std::unique_ptr<Driver>> drivers_;
   nlohmann::json all_;
+  nlohmann::json provenance_ = nlohmann::json::object();
 };
 
 } // namespace qcapp

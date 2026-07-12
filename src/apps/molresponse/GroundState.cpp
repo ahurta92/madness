@@ -10,6 +10,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -132,12 +133,27 @@ GroundState GroundState::from_archive(World& world,
 GroundState::ArchiveHeader
 GroundState::read_archive_header(World& world,
                                   const std::string& archive_path) {
+    // NB: this parse MIRRORS SCF::save_mos / load_mos's field order
+    // (madness/chem/SCF.cc, archive version 4) — it re-reads the header
+    // because SCF::load_mos offers no header-only entry point. If moldft's
+    // restartdata format drifts, update BOTH in lockstep; the guard below
+    // turns silent field-order drift into an actionable error. The header
+    // values are broadcast by the parallel archive, so the throw is
+    // collective.
     ArchiveHeader h;
     archive::ParallelInputArchive<archive::BinaryFstreamInputArchive>
         ar(world, archive_path.c_str());
 
     ar & h.version;
-    MADNESS_CHECK(h.version == 4);
+    if (h.version != 4) {
+        throw std::runtime_error(
+            "GroundState::read_archive_header: " + archive_path +
+            " has archive version " + std::to_string(h.version) +
+            ", but this reader mirrors moldft's version-4 layout "
+            "(SCF::save_mos, madness/chem/SCF.cc). Regenerate the ground-state "
+            "archive with a matching moldft, or update read_archive_header to "
+            "the new field order.");
+    }
     ar & h.energy;
     ar & h.spin_restricted;
     ar & h.L;

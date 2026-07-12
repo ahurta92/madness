@@ -45,6 +45,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -157,7 +158,9 @@ public:
     arr.push_back(record);
   }
 
-  /// Atomic write. Throws on filesystem error.
+  /// Atomic write. Throws on filesystem error — INCLUDING a failed write or
+  /// close (ENOSPC etc.): an unchecked stream would let the rename install a
+  /// truncated tmp over a good index. The bad tmp is removed on failure.
   void save() const {
     const std::string tmp = path_ + ".tmp";
     {
@@ -165,6 +168,14 @@ public:
       if (!out) throw std::runtime_error(
           "ResponseMetadata: cannot open for write: " + tmp);
       out << j_.dump(2) << "\n";
+      out.close();
+      if (out.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        throw std::runtime_error(
+            "ResponseMetadata: write to " + tmp +
+            " failed (disk full?) — keeping the previous " + path_);
+      }
     }
     std::filesystem::rename(tmp, path_);
   }

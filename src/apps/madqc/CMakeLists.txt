@@ -5,6 +5,18 @@
 add_mad_executable(madqc "madqc.cpp;../molresponse/GroundState.cpp" "MADchem")
 add_dependencies(applications-madness madqc)
 
+# io-hdf5 thread: make madqc HDF5-aware so the deck opt-in (`io backend hdf5`
+# / the `response.hdf5` alias) works through the madqc driver. The option is
+# declared in ../molresponse/CMakeLists.txt (processed before this dir), and
+# this mirrors its per-target wiring — without the define, madqc's TU compiles
+# the no-HDF5 branch and throws on the opt-in even in an HDF5 build.
+if(MADNESS_ENABLE_HDF5)
+  find_package(HDF5 REQUIRED COMPONENTS C)
+  target_include_directories(madqc PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(madqc PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(madqc PRIVATE MADNESS_HAS_HDF5)
+endif()
+
 if (BUILD_TESTING)
     add_mad_executable(test_workflow_builders test_workflow_builders.cpp "MADchem")
 if (BUILD_TESTING)

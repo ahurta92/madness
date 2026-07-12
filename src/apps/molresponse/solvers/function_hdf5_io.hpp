@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -338,7 +339,12 @@ inline void write_byte_dataset(const std::string& path,
   H5Dclose(ds);
   if (plist >= 0) H5Pclose(plist);
   H5Sclose(sp);
-  H5Fclose(file);
+  // Close status matters: HDF5 buffers metadata until close, so a failed
+  // close means the file on disk may be incomplete. Callers rename a tmp
+  // over the real name only after this returns cleanly.
+  herr_t cst = H5Fclose(file);
+  MADNESS_CHECK_THROW(cst >= 0,
+      "write_byte_dataset: H5Fclose failed (flush error — file incomplete?)");
 }
 inline void read_byte_dataset(const std::string& path,
                               std::vector<unsigned char>& buf) {
@@ -390,8 +396,16 @@ void save_parallel_archive_hdf5(World& world, const std::string& path,
     cb(par);  // 2067: thread-parallel serialize + MPI_Gatherv to rank 0's buf
     par.flush();
   }
-  if (world.rank() == 0)
-    detail_function_hdf5::write_byte_dataset(path, buf, deflate_level);
+  if (world.rank() == 0) {
+    // Atomic install (tmp + rename), same contract as the JSON indexes: the
+    // auto-detect/metadata-preferred .h5 must never be a truncated in-place
+    // write — a kill mid-save would otherwise brick restart despite valid
+    // data. write_byte_dataset throws on any failed write/close, so the
+    // rename only installs a fully flushed file.
+    const std::string tmp = path + ".tmp";
+    detail_function_hdf5::write_byte_dataset(tmp, buf, deflate_level);
+    std::filesystem::rename(tmp, path);
+  }
   world.gop.fence();
 }
 
