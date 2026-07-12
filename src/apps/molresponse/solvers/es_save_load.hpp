@@ -284,11 +284,12 @@ load_es_roots(madness::World &world, const std::string &dir) {
   std::vector<double> drho_residual_recorded;
   std::vector<int> stable_index_recorded;
 
-  // Rank-0 parses + validates; failures land in `err` and are re-thrown on
-  // EVERY rank after the broadcast (a rank-0-only throw before the
-  // broadcasts deadlocks any caller that catches — the ES warm-cache path
-  // does). The np-guard below already follows this discipline.
-  std::string err;
+  // Rank 0 decides the load status; the status is broadcast BEFORE anyone
+  // throws so a bad/missing/mismatched roots.json fails COLLECTIVELY. A
+  // rank-0-only throw here would leave every other rank blocked in the
+  // broadcasts below (multi-rank hang) — same discipline as the np-guard
+  // further down.
+  std::string load_error;
   if (world.rank() == 0) {
     try {
       std::ifstream in(dir + "/roots.json");
@@ -344,12 +345,15 @@ load_es_roots(madness::World &world, const std::string &dir) {
         // the loaded bundle still carries a well-formed identity vector.
         stable_index_recorded[s]  = e.value("stable_index", s);
       }
-    } catch (const std::exception &ex) {
-      err = ex.what();
+    } catch (const std::exception &e) {
+      load_error = e.what();
+    } catch (...) {
+      load_error = "load_es_roots: unknown error reading " + dir +
+                   "/roots.json";
     }
   }
-  world.gop.broadcast_serializable(err, 0);
-  if (!err.empty()) throw std::runtime_error(err);  // collective throw
+  world.gop.broadcast_serializable(load_error, 0);
+  if (!load_error.empty()) throw std::runtime_error(load_error);  // collective
 
   // Broadcast the metadata to every rank.
   world.gop.broadcast(n_roots, 0);

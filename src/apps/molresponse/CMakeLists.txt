@@ -60,6 +60,12 @@ add_mad_executable(test_step_restriction
 add_mad_executable(test_fd_kfallback_load
                    "tests/test_fd_kfallback_load.cpp"
                    "MADchem")
+# Slot-identity contract of rs::diagonalize (dominance order, phase fix,
+# rank-deficient dim padding) — guards against re-introducing the
+# ascending-omega re-sort that caused the coarse-rung slot churn.
+add_mad_executable(test_diagonalize_slots
+                   "tests/test_diagonalize_slots.cpp"
+                   "MADchem")
 # Inc 1 of the ES node-φ state-parallel design (docs/21): node-aligned subworld
 # creation (one subworld per physical node via Split_type SHARED) + map test.
 add_mad_executable(test_node_subworlds
@@ -154,7 +160,8 @@ install(TARGETS molresponse
 if (BUILD_TESTING)
   # Tier 1 — "unit": pure logic, no fixtures, no MPI launcher required.
   foreach(_t test_calc_manager test_protocol_key test_response_metadata
-             test_response_property_planner test_state_metrics)
+             test_response_property_planner test_state_metrics
+             test_diagonalize_slots)
     add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
     set_property(TEST madness/test/molresponse/${_t}/run
                  PROPERTY LABELS "unit;response;short" APPEND)

@@ -59,7 +59,11 @@ struct ConvergencePolicy {
   // loosely-constrained degenerate direction long after omega + density are
   // settled, so ES convergence is gated on density + |Δω| (NOT ||Δx||; see
   // ESSolver::es_root_converged). omega target = omega_residual_factor * dconv.
-  double omega_residual_factor   = 1.0;
+  // Rides at the same ~5× headroom as bsh/density (see the note above): at a
+  // rung where thresh == dconv the |Δω| floor is the truncation noise ~thresh,
+  // so a factor of 1.0 makes the gate EQUAL the noise floor — it can never
+  // pass at the coarse rung (the 1e-4/k6 0-of-4 stall).
+  double omega_residual_factor   = 5.0;
 
   // Cluster-unmix threshold factor in rs::diagonalize. The legacy
   // path uses 100·thresh for TDA (loose) and 10·thresh for Full/RPA
@@ -92,7 +96,8 @@ struct ConvergencePolicy {
   // (kernels/exchange_ctx.hpp build_pair_tensors): 0 (default) = no tiling (one
   // fused Poisson wave, peak ~n²); >0 = block the φ rows to bound the peak to
   // ~tile·n at the cost of more waves (memory ↔ fences). Bit-identical to tile=0.
-  // Only used when exchange_tensor is on. CLI: --fd-tensor-tile=N (doc 33 Inc-3b).
+  // Used when exchange_tensor is on (FD) and by ESSolver's --es-tensor g0 build.
+  // CLI: --fd-tensor-tile=N (doc 33 Inc-3b).
   int exchange_tile = 0;
 
   // Diverging-residual bail-out. Triggers only on a runaway residual

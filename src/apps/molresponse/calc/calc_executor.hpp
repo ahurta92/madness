@@ -91,10 +91,24 @@ struct ExecutorSettings {
   // in-between frequencies (not just a single root's vector).
   bool              seed_derived_from_es_root = false;
   // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
-  // closed-shell path (random guess, 10 warmup iters, 2x oversample, KAIN).
+  // closed-shell path (random guess, 10 warmup iters, oversampled warmup, KAIN).
   ESGuessMode       es_guess              = ESGuessMode::SolidHarmonics;  // sweep-validated default
   int               es_tda_warmup_iters   = 10;
-  double            es_warmup_oversample  = 2.0;
+  // Warmup oversampling: keep the lowest n_roots of ceil(factor*n_roots)
+  // partially-converged warmup trials. 3.0 (was 2.0) because on the PRODUCTION
+  // ladder (moldft climbing to 1e-6/k8) the extra cut-line margin lets the
+  // downselect keep h2o's true 4th state 0.4097 au and match Dalton
+  // d-aug-cc-pVQZ to 0.03% (ladder job 2084168), vs a 2.4% missing-state error
+  // at 2.0 (job 2083837, which reported the 5th state 0.420 in its place).
+  // KNOWN LIMITATION (follow-up): the underlying cause is the TDA warmup
+  // MISORDERING the near-degenerate 0.40/0.41 cluster at the coarse rung — a
+  // 1e-4/k6-only run still misorders it (the true 4th sits just above the
+  // 4-root cut) and does not fully tighten that root in 25 iters. Oversampling
+  // only buys margin, it can't fix an ordering inversion at the cut; the real
+  // fix is an energy-ordered guess (ESGuessMode::VirtualAO, the NWChem
+  // CIS-diagonal path) or more warmup iters. Cost of 3.0 is warmup-only
+  // (coarse rung, es_tda_warmup_iters iters).
+  double            es_warmup_oversample  = 3.0;
   int               es_kain_maxsub        = 8;
   double            es_maxrotn            = 0.5;
   // Delay KAIN onset in the MAIN ES solve by this many iters (pure BSH +
