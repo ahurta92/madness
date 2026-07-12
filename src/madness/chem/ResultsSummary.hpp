@@ -319,8 +319,16 @@ inline void write_results_summary(std::ostream &os,
     const std::string type = t.value("type", std::string());
     const std::string model = t.value("model", std::string());
 
+    // A failed task is recorded in two shapes: the Workflow driver emits
+    // {"type":"task_failed","error":...} while other paths set
+    // {"status":"failed","error":...}. Recognize both (raman brief defect 4).
+    const bool failed =
+        (t.value("status", std::string()) == "failed") || (type == "task_failed");
+
     std::string title;
-    if (type == "response")
+    if (failed)
+      title = "TASK  (FAILED)";
+    else if (type == "response")
       title = "RESPONSE";
     else if (model == "scf" || t.contains("scf_eigenvalues_a"))
       title = "SCF  (model = " + (model.empty() ? "scf" : model) + ")";
@@ -334,9 +342,11 @@ inline void write_results_summary(std::ostream &os,
     os << "\n  Task " << i++ << " : " << title << "\n";
     os << "  " << rule('-') << "\n";
 
-    if (t.value("status", std::string()) == "failed") {
-      os << "    *** FAILED: " << t.value("error", std::string("(no detail)"))
-         << "\n";
+    if (failed) {
+      os << "    *** FAILED";
+      if (t.contains("task_index"))
+        os << " (task " << t["task_index"] << ")";
+      os << ": " << t.value("error", std::string("(no detail)")) << "\n";
       continue;
     }
 

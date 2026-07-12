@@ -40,6 +40,10 @@ endif()
     add_scripted_tests(test_mp2_helium.py madqc "verylong;applications")
     add_scripted_tests(test_lrcc2_helium.py madqc "verylong;applications")
     add_scripted_tests(test_molresponse_h2o_alpha_beta_z.py madqc "verylong;applications")
+    # Phase-0 driver-hardening gate (raman thread): SCF restart + corrupt-
+    # checkpoint recovery. Heavier (3 sequential madqc runs); enable + run on
+    # an allocation once the raman build is validated.
+    # add_scripted_tests(test_moldft_restart_e2e.py madqc "long;applications")
     # RE-ENABLED (R-1 close-out, 2026-07-10 vbc gate 2083856): rescoped to
     # molresponse_v3 — alpha xyz + static beta + SINGLE-COMPONENT raman
     # (atom 0, z) via requested_properties; reference regenerated from a v3 run
