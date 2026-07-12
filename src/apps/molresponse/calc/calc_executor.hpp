@@ -276,8 +276,9 @@ void reproject_state(State &st, int k, double thresh) {
 /// Solve (pert, freq) at a single protocol `thresh`. `action` is the reconcile
 /// verdict: Fresh starts from the perturbation guess (never loads, so a
 /// diverged archive can't poison the solve); Restart/Resume load the nearest
-/// converged-or-partial seed via try_load_fd_state and re-project it in the
-/// first prepare(). Saves the result (+ metrics) through save_fd_state.
+/// converged-or-partial seed via try_load_fd_state (which re-projects a
+/// coarser source to the active key). Saves the result (+ metrics) through
+/// save_fd_state.
 template <typename Type, typename Shell>
 NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                          double freq, double thresh, NodeAction action,
@@ -953,7 +954,13 @@ public:
   /// records a stall_event) and the loop continues with independent work —
   /// stop_reason is 'complete_with_stalled' + diag.stalled_nodes when
   /// anything was quarantined, so a stuck node neither spins the loop nor
-  /// starves unrelated perturbation channels (review fix).
+  /// starves unrelated perturbation channels (review fix). On exit the plan
+  /// is audited against the metadata: planned VBC nodes that never converged
+  /// at their top rung (gated out by unconverged prerequisites, or stalled)
+  /// are reported via stop_reason 'complete_with_dropped_beta' (or
+  /// '..._stalled_and_dropped_beta') + diag.dropped_beta, and recorded under
+  /// run_summary/dropped_work in the metadata — a run with silently dropped
+  /// beta/raman work is never labelled plain 'complete' (review fix).
   /// Returns the R1c scheduler trace (doc 16 L3) -> Output.diagnostics: the
   /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
   /// and pass count. Built identically on every rank (schedule() is
@@ -1004,19 +1011,69 @@ public:
                                  [](const auto &w) { return w.empty(); }),
                   waves.end());
       if (waves.empty()) {
-        if (stalled_ids.empty()) {
+        // Review fix (confirmed MEDIUM — silent beta drop): an empty schedule
+        // does NOT mean every planned node executed. Honest-climb can walk a
+        // stubborn FD prerequisite up the whole ladder unconverged; the
+        // dependent VBC node is then gated out of every wave (gated nodes are
+        // invisible to schedule()), and the beta/raman it feeds is dropped
+        // without a trace. Audit the plan against the on-disk metadata: any
+        // VBC node without a converged entry at its top rung never delivered.
+        nlohmann::json dropped = nlohmann::json::array();
+        for (const auto &n : dag_) {
+          if (n.kind != CalcKind::VBC || n.protocols.empty()) continue;
+          const std::string top = protocol_key_at(n.protocols.back());
+          const auto &j = meta.json();
+          const bool has_entry = j.contains("vbc_states") &&
+                                 j["vbc_states"].contains(n.id) &&
+                                 j["vbc_states"][n.id].contains(top);
+          if (has_entry && j["vbc_states"][n.id][top].value("converged", false))
+            continue;
+          const char *reason =
+              stalled_ids.count(n.id)
+                  ? "stalled (quarantined by the no-progress guard)"
+                  : has_entry
+                        ? "built at the top rung but not converged"
+                        : "prerequisites never converged (gated out of every wave)";
+          dropped.push_back({{"id", n.id},
+                             {"top_protocol_key", top},
+                             {"reason", reason}});
+        }
+        // Dropped VBC ⇒ the beta/raman rows it feeds cannot be assembled.
+        // Record the audit in the metadata (rank 0, through the layer) even
+        // when empty, so a later completing run CLEARS a stale drop list.
+        if (world.rank() == 0) {
+          auto meta_out = ResponseMetadata::load_or_create(meta_path);
+          meta_out.set_dropped_work(dropped);
+          meta_out.save();
+        }
+
+        if (stalled_ids.empty() && dropped.empty()) {
           if (world.rank() == 0)
             madness::print("[CALC] run: nothing left to schedule — done");
           diag["stop_reason"] = "complete";
         } else {
-          if (world.rank() == 0) {
+          if (world.rank() == 0 && !stalled_ids.empty()) {
             madness::print("[CALC] run: all remaining work is STALLED —",
                            (int)stalled_ids.size(),
                            "node(s) made no progress and were quarantined:");
             for (const auto &id : stalled_ids) madness::print("    stalled:", id);
           }
-          diag["stop_reason"] = "complete_with_stalled";
-          diag["stalled_nodes"] = stalled_ids;
+          if (world.rank() == 0 && !dropped.empty()) {
+            madness::print("[CALC] run: WARNING —", (int)dropped.size(),
+                           "planned VBC/beta node(s) were never solved "
+                           "(beta/raman rows will be missing):");
+            for (const auto &d : dropped)
+              madness::print("    dropped:", d.value("id", std::string("?")),
+                             "—", d.value("reason", std::string("?")));
+          }
+          if (dropped.empty())
+            diag["stop_reason"] = "complete_with_stalled";
+          else if (stalled_ids.empty())
+            diag["stop_reason"] = "complete_with_dropped_beta";
+          else
+            diag["stop_reason"] = "complete_with_stalled_and_dropped_beta";
+          if (!stalled_ids.empty()) diag["stalled_nodes"] = stalled_ids;
+          if (!dropped.empty())     diag["dropped_beta"]  = dropped;
         }
         break;
       }
@@ -1344,8 +1401,13 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
     a["source_protocol_key"] = sk;
     if (!sk.empty() && acc_meta["fd_states"][chan][sk].contains(fk)) {
       const auto &e = acc_meta["fd_states"][chan][sk][fk];
-      a["converged"]    = e.value("converged", false);
-      a["accepted"]     = e.value("accepted", false);
+      // Same semantics as alpha's row_accuracy (review fix): `converged` is the
+      // honest STRICT verdict — an accepted-at-maxiter source (metadata
+      // converged forced true to unblock the VBC gate) reports converged=false
+      // + accepted=true here, never a silently over-stated accuracy claim.
+      const bool acc = e.value("accepted", false);
+      a["converged"]    = e.value("converged", false) && !acc;
+      a["accepted"]     = acc;
       a["bsh_residual"] = e.value("bsh_residual", 0.0);
     }
     return a;
@@ -1528,13 +1590,10 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
           world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
       if (!Xi) { present = false; break; }   // metadata usable but archive gone
 
-      // k-CONSISTENCY (the real fix): reproject the loaded state to the common
-      // assembly (k, thresh) so inner() is well-defined no matter which protocol
-      // the source came from. Reprojecting a coarser state UP makes it
-      // representable at k_now but adds NO accuracy — the per-row verdict recorded
-      // above stays tied to the source protocol, not k_now.
-      for (auto &fn : Xi->x_alpha) fn = madness::project(fn, k_now, thresh);
-      for (auto &fn : Xi->y_alpha) fn = madness::project(fn, k_now, thresh);
+      // k-CONSISTENCY: try_load_fd_state re-projects any coarser source to the
+      // active (k, thresh) inside the loader, so Xi is at k_now here — inner()
+      // below is well-defined no matter which protocol the source came from.
+      // The per-row verdict recorded above stays tied to the source protocol.
 
       for (size_t j = 0; j < ax.size(); ++j)
         alpha(static_cast<long>(i), static_cast<long>(j)) =

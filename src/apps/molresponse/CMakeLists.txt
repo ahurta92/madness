@@ -53,6 +53,13 @@ add_mad_executable(test_kernel_equivalence
 add_mad_executable(test_step_restriction
                    "tests/test_step_restriction.cpp"
                    "MADchem")
+# k-CONSISTENCY regression (review fix, confirmed HIGH): try_load_fd_state must
+# re-project a coarser-rung source to the active (k, thresh) inside the loader,
+# so beta assembly can never contract mixed-k functions ("functions have
+# different k" abort). Synthetic state, no ground-state fixture needed.
+add_mad_executable(test_fd_kfallback_load
+                   "tests/test_fd_kfallback_load.cpp"
+                   "MADchem")
 # Inc 1 of the ES node-φ state-parallel design (docs/21): node-aligned subworld
 # creation (one subworld per physical node via Split_type SHARED) + map test.
 add_mad_executable(test_node_subworlds
@@ -159,7 +166,8 @@ if (BUILD_TESTING)
   # multi-rank coverage of these paths lives in the es_bench state-parallel
   # gates. Serial runs still validate the numerics end-to-end.
   foreach(_t test_exchange_ctx test_node_subworlds test_node_phi
-             test_subspace_allreduce test_es_build_subworld test_step_restriction)
+             test_subspace_allreduce test_es_build_subworld test_step_restriction
+             test_fd_kfallback_load)
     add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
     set_property(TEST madness/test/molresponse/${_t}/run
                  PROPERTY LABELS "response-small;response;medium" APPEND)

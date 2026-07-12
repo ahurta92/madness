@@ -163,6 +163,34 @@ hard-coded. The computed property is recorded under
 `properties/<name>/<protocol_key>/` with both the `es_root_id` and the
 `fd_freq` used, so the provenance (which protocol, which root) is explicit.
 
+### Property-row identity (upsert on re-assembly)
+
+`add_property` is an **upsert, not an append** (review fix: append-only rows
+made every restart accumulate duplicate/stale rows). A row's identity within
+`(name, protocol_key)` is the tuple of its identity fields, whichever are
+present on the record:
+
+- alpha rows: `(omega, directions)`
+- beta / raman rows: `(A, B, C, freq_b, freq_c)`
+- ES-derived rows: `(es_root_id, fd_freq)`
+
+Re-assembling the same row (same identity, same protocol) **replaces** the old
+record; distinct identities append; history across **different** protocols is
+naturally preserved by the `protocol_key` level. A record carrying none of the
+identity fields keeps append semantics. See
+`ResponseMetadata::property_identity`.
+
+### run_summary / dropped_work
+
+`CalcManager::run()` audits the plan against the metadata on exit: any planned
+VBC node without a converged entry at its top rung is recorded under
+`run_summary/dropped_work` (full-replace upsert via
+`ResponseMetadata::set_dropped_work` — a later run that completes the work
+clears the list) and reflected in the scheduler `stop_reason`
+(`complete_with_dropped_beta` / `complete_with_stalled_and_dropped_beta`). The
+madqc `.out` summary prints any non-`complete` stop_reason with the stalled /
+dropped node ids.
+
 ## Implementation increments
 
 - **13a — protocol_key:** add the two functions to `ResponseProtocol.hpp`;

@@ -268,6 +268,24 @@ inline void write_response_section(std::ostream &os, const nlohmann::json &t) {
     os << std::defaultfloat;
   }
 
+  // Scheduler outcome (v3): surface a non-clean stop_reason so a run that
+  // quarantined stalled nodes or silently-dropped planned beta/raman work is
+  // never mistaken for a complete one when skimming the .out summary.
+  if (t.contains("metadata") && t["metadata"].contains("v3_diagnostics")) {
+    const auto &d = t["metadata"]["v3_diagnostics"];
+    const std::string sr = d.value("stop_reason", std::string());
+    if (!sr.empty() && sr != "complete") {
+      os << "    *** scheduler stop_reason: " << sr << "\n";
+      if (d.contains("stalled_nodes"))
+        for (const auto &id : d["stalled_nodes"])
+          os << "        stalled : " << id.get<std::string>() << "\n";
+      if (d.contains("dropped_beta"))
+        for (const auto &e : d["dropped_beta"])
+          os << "        dropped : " << e.value("id", std::string("?"))
+             << "  (" << e.value("reason", std::string("?")) << ")\n";
+    }
+  }
+
   // Vibrational frequencies, if a Raman/vibrational analysis is present.
   if (props.contains("vibrational_analysis") &&
       props["vibrational_analysis"].contains("frequencies")) {

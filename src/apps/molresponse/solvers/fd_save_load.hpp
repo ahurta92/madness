@@ -333,10 +333,13 @@ load_fd_state(madness::World &world,
   return s;
 }
 
-/// Result of try_load_fd_state. When `exact == false`, the caller is
-/// responsible for re-projecting `state` to the active (k, thresh) — the
-/// natural place is the first `prepare(...)` call inside iterate_protocol,
-/// which already does this for every step.
+/// Result of try_load_fd_state. The loader itself re-projects a non-exact
+/// (coarser-rung) source to the ACTIVE (k, thresh) before returning, so every
+/// consumer — restart seeding, the VBC build, alpha/beta property assembly —
+/// receives functions at the active key and inner() is always well-defined
+/// (mixing k is a hard MADNESS abort). `exact` / `source_protocol_key` remain
+/// the honest provenance record: re-projecting a coarser state UP makes it
+/// representable at the active k but adds NO accuracy.
 template <typename Type, typename Shell>
 struct FDRestartResult {
   typename FDSolver<Type, Shell>::State state;
@@ -423,6 +426,17 @@ try_load_fd_state(madness::World &world,
   r.state.diverged = false;
   r.source_protocol_key = source_key;
   r.exact = (source_key == active_key);
+
+  // k-CONSISTENCY (review fix, confirmed HIGH): a coarser-rung archive comes
+  // off disk at its SAVED k, not the active one. Re-project HERE — collective,
+  // all ranks — so the contract "loader returns active-key functions" holds
+  // for every consumer at once (assemble_beta used to contract a coarse
+  // fallback straight into inner() and abort with "functions have different k").
+  if (!r.exact) {
+    for (auto *blk : r.state.responses[0].blocks())
+      for (auto &fn : *blk) fn = madness::project(fn, active_k, active_thresh);
+    world.gop.fence();
+  }
 
   if (world.rank() == 0) {
     madness::print("[LOAD] try_load_fd_state: pert=", pdesc,

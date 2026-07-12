@@ -109,6 +109,9 @@ inline void save_vbc_state(madness::World &world,
 
 /// Load a VBC source built at the ACTIVE protocol (exact key) for the contraction.
 /// Returns nullopt if no converged vbc_states/<id>/<active-key> entry exists.
+/// NOTE: exact-key-only by design — unlike try_load_fd_state there is no
+/// coarser-rung fallback, so the returned functions are always at the active
+/// (k, thresh) and need no re-projection (k-consistency contract).
 template <class Shell>
 inline std::optional<ResponseStateXY<Shell>>
 load_vbc(madness::World &world, const std::string &dir, const std::string &vbc_id) {
