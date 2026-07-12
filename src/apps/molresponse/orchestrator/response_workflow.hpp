@@ -163,6 +163,12 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
     //     in it — so catch, encode as gate=4, and abort collectively.
     int gate = 0;
     if (world.rank() == 0) try {
+      // The gate stamps the metadata BEFORE mgr.run creates anything, so the
+      // calc dir may not exist yet (standalone runs point calc_dir at a fresh
+      // subdir; the madqc path happens to run in an existing cwd). Create it
+      // first — otherwise the stamp save() fails to open its .tmp and the
+      // collective error path aborts a perfectly good run.
+      std::filesystem::create_directories(in.settings.calc_dir);
       const GsFingerprint fp = gs_archive_fingerprint(in.archive_file);
       auto meta = ResponseMetadata::load_or_create(meta_path);
       const std::string stored = meta.ground_state_fingerprint();
