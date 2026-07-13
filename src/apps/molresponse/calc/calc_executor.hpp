@@ -1531,6 +1531,21 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
           row["vbc_accuracy"] = {{"converged", v.value("converged", false)},
                                  {"diverged", v.value("diverged", false)}};
         }
+        // Aggregate row verdict (review MED): mirror alpha's row-level
+        // converged/max_bsh_residual so the .out summary and the website viewer
+        // get ONE honest flag per beta/raman row instead of only the per-leg
+        // sub-structures. The row is converged iff all three FD legs met the
+        // strict target (VBC itself is non-iterative, so its always-true
+        // verdict adds no signal — the FD legs carry the real accuracy).
+        {
+          bool all_conv = true; double max_res = 0.0;
+          for (const auto &leg : row["row_accuracy"]) {
+            all_conv = all_conv && leg.value("converged", false);
+            max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
+          }
+          row["converged"]        = all_conv;
+          row["max_bsh_residual"] = max_res;
+        }
         rows.emplace_back(pkey, std::move(row));
       }
       world.gop.fence();
