@@ -42,6 +42,8 @@
 #include <madness/world/MADworld.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -80,12 +82,31 @@ inline void check_writer_nproc(madness::World &world, IoBackend backend,
                                const std::string &archive) {
   if (io_backend_np_portable(backend)) return;
   if (writer_nproc != 0 && writer_nproc != static_cast<int>(world.size())) {
+    // Escape hatch (mirrors MADRESPONSE_ALLOW_GS_MISMATCH): bypass the guard
+    // so the cross-np read can be observed empirically. This is ALSO the F2
+    // subworld case — a subworld writes with writer_nproc = subworld size, the
+    // universe assembles at a different size — where the underlying archive is
+    // a single nio=1 file that MAY be np-portable (parallel_archive stores nio
+    // in-file and the reader reconstructs). Whether that read is safe is under
+    // multi-node test; until confirmed, the guard stays on by default.
+    const char *ov = std::getenv("MADRESPONSE_ALLOW_NP_MISMATCH");
+    if (ov && ov[0] == '1') {
+      if (world.rank() == 0)
+        std::fprintf(stderr,
+            "[NP-GUARD] OVERRIDE (MADRESPONSE_ALLOW_NP_MISMATCH=1): %s archive "
+            "%s writer_nproc=%d != world.size=%d — proceeding; results are only "
+            "trustworthy if this native archive is genuinely np-portable.\n",
+            who, archive.c_str(), writer_nproc, static_cast<int>(world.size()));
+      return;
+    }
     throw std::runtime_error(
         std::string(who) + ": archive " + archive + " was written with " +
         std::to_string(writer_nproc) + " process(es) but is being loaded with " +
         std::to_string(world.size()) +
         " — cross-process-count restart of native parallel archives is "
-        "unsupported. Re-run with " + std::to_string(writer_nproc) +
+        "unsupported (set MADRESPONSE_ALLOW_NP_MISMATCH=1 to override if you "
+        "know the archive is portable). Re-run with " +
+        std::to_string(writer_nproc) +
         " rank(s), or delete the archive to recompute it.");
   }
 }
