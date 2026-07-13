@@ -6,6 +6,8 @@
 #include <madness/chem/oep.h>
 #include <madness/mra/QCCalculationParametersBase.h>
 
+#include <type_traits>
+
 using namespace madness;
 using path = std::filesystem::path;
 
@@ -192,8 +194,13 @@ private:
           // exactly as initFromText gets them through the file+CLI parser.
           // Without this, JSON-format decks silently ignored CLI overrides
           // (review MED). Applies to defaults too when the tag is absent.
-          std::get<Groups>(groups_).read_commandline_options(world_, parser_,
-                                                             Groups::tag);
+          // Only the QCCalculationParametersBase-derived groups have the
+          // override machinery — Molecule (also in the tuple) does not, so
+          // guard with if constexpr.
+          if constexpr (std::is_base_of_v<QCCalculationParametersBase, Groups>) {
+            std::get<Groups>(groups_).read_commandline_options(world_, parser_,
+                                                               Groups::tag);
+          }
         }(),
         ...);
 
