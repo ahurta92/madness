@@ -1165,8 +1165,30 @@ public:
         if (!fan_items.empty()) {
           // F2f: groups_per_node = policy_.fd_subworlds (1 = node-aligned; larger
           // = sub-node / NUMA packing for small systems). G = total subworlds.
+          // Guard the pool construction with the same collective-error discipline
+          // as the fan_out() call below (review: it was unprotected). This
+          // converts a SYMMETRIC/post-collective failure — World ctor, bad_alloc,
+          // a Split all ranks fail — into a clean collective abort instead of a
+          // hang. (An ASYMMETRIC throw inside make_subworld_pool's own internal
+          // collectives — ranks_per_host gather/broadcast, Split, gop.fence — is
+          // inherently unrecoverable in MPI: the non-throwing ranks are already
+          // blocked inside those collectives and never reach the max() below.)
           NodeSubworldInfo info;
-          auto sub = make_subworld_pool(world, policy_.fd_subworlds, &info);
+          std::shared_ptr<madness::World> sub;
+          std::string pool_err;
+          try {
+            sub = make_subworld_pool(world, policy_.fd_subworlds, &info);
+          } catch (const std::exception &e) { pool_err = e.what(); }
+            catch (...) { pool_err = "unknown exception in make_subworld_pool"; }
+          int pool_bad = pool_err.empty() ? 0 : 1;
+          world.gop.max(pool_bad);
+          if (pool_bad) {
+            if (!pool_err.empty())
+              madness::print("[SUBWORLD-POOL-ERROR] universe rank", world.rank(),
+                             ":", pool_err);
+            MADNESS_EXCEPTION("subworld pool construction failed (see "
+                              "[SUBWORLD-POOL-ERROR]); aborting collectively", 0);
+          }
           const int G = info.n_subworlds;
           if (G <= 1) {
             // One subworld total (single node, P=1) ⇒ no real partition (subworld

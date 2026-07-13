@@ -396,16 +396,25 @@ void save_parallel_archive_hdf5(World& world, const std::string& path,
     cb(par);  // 2067: thread-parallel serialize + MPI_Gatherv to rank 0's buf
     par.flush();
   }
+  // Rank 0 writes; the H5 throw must become a COLLECTIVE failure (broadcast the
+  // error before anyone throws) — a rank-0-only unwind here skips the fence
+  // below while every other rank blocks in it forever (review io HIGH).
+  std::string save_err;
   if (world.rank() == 0) {
     // Atomic install (tmp + rename), same contract as the JSON indexes: the
     // auto-detect/metadata-preferred .h5 must never be a truncated in-place
     // write — a kill mid-save would otherwise brick restart despite valid
     // data. write_byte_dataset throws on any failed write/close, so the
     // rename only installs a fully flushed file.
-    const std::string tmp = path + ".tmp";
-    detail_function_hdf5::write_byte_dataset(tmp, buf, deflate_level);
-    std::filesystem::rename(tmp, path);
+    try {
+      const std::string tmp = path + ".tmp";
+      detail_function_hdf5::write_byte_dataset(tmp, buf, deflate_level);
+      std::filesystem::rename(tmp, path);
+    } catch (const std::exception& e) { save_err = e.what(); }
+      catch (...) { save_err = "save_parallel_archive_hdf5: unknown error for " + path; }
   }
+  world.gop.broadcast_serializable(save_err, 0);
+  if (!save_err.empty()) throw std::runtime_error(save_err);  // collective
   world.gop.fence();
 }
 
@@ -414,7 +423,17 @@ void save_parallel_archive_hdf5(World& world, const std::string& path,
 template <class LoadCb>
 void load_parallel_archive_hdf5(World& world, const std::string& path, LoadCb&& cb) {
   std::vector<unsigned char> buf;  // only the io-node (rank 0) needs the bytes
-  if (world.rank() == 0) detail_function_hdf5::read_byte_dataset(path, buf);
+  // Rank 0 reads; a failed H5 read must fail COLLECTIVELY — the throw used to
+  // fire on rank 0 alone, before the collective cb(par) deserialize every
+  // other rank enters unconditionally, hanging them forever (review io HIGH).
+  std::string load_err;
+  if (world.rank() == 0) {
+    try { detail_function_hdf5::read_byte_dataset(path, buf); }
+    catch (const std::exception& e) { load_err = e.what(); }
+    catch (...) { load_err = "load_parallel_archive_hdf5: unknown error for " + path; }
+  }
+  world.gop.broadcast_serializable(load_err, 0);
+  if (!load_err.empty()) throw std::runtime_error(load_err);  // collective
   archive::VectorInputArchive var(buf);
   archive::ParallelInputArchive<archive::VectorInputArchive> par(world, var, 1);
   cb(par);  // 2328

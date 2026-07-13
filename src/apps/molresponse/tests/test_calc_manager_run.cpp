@@ -176,7 +176,7 @@ int main(int argc, char **argv) {
         policy.explosion_guard = std::stod(parser.value("explosion-guard"));
       if (parser.key_exists("no-explosion-guard"))
         policy.explosion_guard = 1.0e30;
-      // --step-restrict=orbital|state  (default per-orbital).
+      // --step-restrict=orbital|state  (default per-state; see ConvergencePolicy).
       if (parser.key_exists("step-restrict") &&
           parser.value("step-restrict") == "state")
         policy.step_restrict_mode =

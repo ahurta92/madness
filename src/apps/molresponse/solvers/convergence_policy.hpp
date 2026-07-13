@@ -166,14 +166,15 @@ struct ConvergencePolicy {
   double maxrotn = 0.5;
 
   // Step-restriction granularity:
-  //   PerOrbital — clamp each response function independently (default; the
-  //                legacy SCF::do_step_restriction behaviour). A single runaway
+  //   PerOrbital — clamp each response function independently (the legacy
+  //                SCF::do_step_restriction behaviour). A single runaway
   //                orbital is damped without touching the well-behaved ones.
-  //   PerState   — measure ||v_new - v_old|| over the WHOLE flattened state (all
-  //                functions of a root / channel) and scale the ENTIRE vector by
-  //                one factor maxrotn/||diff||. Damps a coherent rotation of the
-  //                whole state (useful when a near-degenerate root rotates as a
-  //                block rather than one orbital running away).
+  //   PerState   — (DEFAULT, set in ca2c21dfc) measure ||v_new - v_old|| over
+  //                the WHOLE flattened state (all functions of a root / channel)
+  //                and scale the ENTIRE vector by one factor maxrotn/||diff||.
+  //                Damps a coherent rotation of the whole state (useful when a
+  //                near-degenerate root rotates as a block rather than one
+  //                orbital running away).
   enum class StepRestrictMode { PerOrbital, PerState };
   StepRestrictMode step_restrict_mode = StepRestrictMode::PerState;
 
