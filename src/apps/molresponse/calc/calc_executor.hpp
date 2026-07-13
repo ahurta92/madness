@@ -1055,6 +1055,11 @@ public:
                                  j["vbc_states"][n.id].contains(top);
           if (has_entry && j["vbc_states"][n.id][top].value("converged", false))
             continue;
+          // NB: solve_vbc is one-shot and always saves converged=true, so a
+          // present VBC entry is caught by the `continue` above — the
+          // "built ... not converged" arm is currently unreachable for VBC and
+          // kept only as defensive coverage if VBC ever gains partial saves
+          // (review LOW).
           const char *reason =
               stalled_ids.count(n.id)
                   ? "stalled (quarantined by the no-progress guard)"
@@ -1293,6 +1298,15 @@ public:
             MADNESS_EXCEPTION("per-wave shard merge failed on rank 0 "
                               "(see [SHARD-MERGE-ERROR])", 0);
           world.gop.fence();
+        } else if (policy_.fd_subworlds > 0 && !rest.empty() &&
+                   world.rank() == 0) {
+          // Review MED: this wave is ES-only (ES is deliberately excluded from
+          // fan-out — it stays single-World), so the requested `subworlds` had
+          // no effect on it. Say so, or the knob looks silently ignored.
+          madness::print("SUBWORLD_FANOUT skipped: wave is ES-only (",
+                         (int)rest.size(),
+                         "item(s)); ES runs single-World, `subworlds` applies "
+                         "only to FD/VBC waves");
         }
         for (const auto &it : rest) exec.run_protocol(it);   // ES: universe
       }

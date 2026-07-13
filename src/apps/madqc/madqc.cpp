@@ -195,9 +195,16 @@ int main(int argc, char **argv) {
       // working as an alias (applied here and re-checked in the response
       // adapter). The effective config is stamped into calc_info for ALL
       // tasks via Workflow::set_provenance below.
+      // HDF5 restart I/O is a molresponse-only path today, so only honor the
+      // deck flag (and stamp the provenance below) for the response workflow —
+      // a stray `response.hdf5`/`io backend hdf5` in a cc2/cis/oep/moldft deck
+      // must NOT flip the global flag or mis-stamp backend=hdf5 (review LOW).
+      const bool is_response_wf =
+          workflow_builders::workflow_kind_from_name(user_workflow) ==
+          workflow_builders::WorkflowKind::Response;
       const bool deck_io_hdf5 =
           pm.get<IOParameters>().hdf5() || pm.get<ResponseParameters>().hdf5();
-      if (deck_io_hdf5) {
+      if (deck_io_hdf5 && is_response_wf) {
 #ifdef MADNESS_HAS_HDF5
         molresponse_v3::set_hdf5_io_enabled(true);
 #else
@@ -205,6 +212,10 @@ int main(int argc, char **argv) {
             "io backend hdf5 (or response.hdf5) requested but this build has "
             "no HDF5 support — configure with -DMADNESS_ENABLE_HDF5=ON");
 #endif
+      } else if (deck_io_hdf5 && !is_response_wf && world.rank() == 0) {
+        print("NOTE: `io backend hdf5` / `response.hdf5` only affects the "
+              "response workflow's MRA restart I/O — ignored for --wf=",
+              user_workflow);
       }
 
       // The response workflow is built HERE in the app — MADchem's

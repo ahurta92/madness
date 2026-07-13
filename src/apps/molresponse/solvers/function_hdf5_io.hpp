@@ -150,6 +150,9 @@ void save_function_hdf5(const Function<T, NDIM>& f, const std::string& path) {
   static_assert(std::is_same<T, double>::value,
                 "function_hdf5_io Layer A is double-only for now (complex = follow-up)");
   namespace h = detail_function_hdf5;
+  h::H5ErrorScope h5guard;  // review MED: the structured path lacked this — a
+                            // failed H5 call can recurse in the default handler
+                            // and SIGSEGV; install the non-recursive handler.
 
   const auto impl = f.get_impl();
   World& world = impl->world;
@@ -223,6 +226,8 @@ Function<T, NDIM> load_function_hdf5(World& world, const std::string& path) {
   static_assert(std::is_same<T, double>::value,
                 "function_hdf5_io Layer A is double-only for now (complex = follow-up)");
   namespace h = detail_function_hdf5;
+  h::H5ErrorScope h5guard;  // review MED: non-recursive H5 error handler (as
+                            // the blob path has) so a failed read can't SIGSEGV.
   MADNESS_CHECK(world.size() == 1);
 
   hid_t file = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);

@@ -186,12 +186,14 @@ private:
     (
         [&] {
           if (j.contains(Groups::tag)) {
-            // if (world_.rank() == 0) {
-            //   // madness::print("Group: ", Groups::tag,
-            //   //                " JSON: ", j.at(Groups::tag).dump(4));
-            // }
             std::get<Groups>(groups_).from_json(j.at(Groups::tag));
           }
+          // Layer command-line overrides (--group=key=val) ON TOP of the JSON,
+          // exactly as initFromText gets them through the file+CLI parser.
+          // Without this, JSON-format decks silently ignored CLI overrides
+          // (review MED). Applies to defaults too when the tag is absent.
+          std::get<Groups>(groups_).read_commandline_options(world_, parser_,
+                                                             Groups::tag);
         }(),
         ...);
 

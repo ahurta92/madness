@@ -463,6 +463,17 @@ void write_amr(World& world, Function<double, 3> f, const std::string& path,
   const int nlev = int(Lmax - Lmin + 1);
   std::vector<int> per_level(nlev, 0);
   for (const auto& b : blocks) per_level[b.n - Lmin]++;
+  // Review MED: the rebase guarantees a populated level 0 (Lmin), but an
+  // INTERIOR level can still be empty if the leaf depths have a gap — that can
+  // trip the same vtkXMLUniformGridAMRReader metadata path as an empty level 0.
+  // Warn here; the full fix (compact to only populated levels with the correct
+  // per-level refinement ratio) needs ParaView validation and belongs to the
+  // viz/pymra thread.
+  for (int lev = 1; lev + 1 < nlev; ++lev)
+    if (per_level[lev] == 0)
+      print("[--amr] WARNING: interior AMR level", lev, "(MADNESS n =",
+            Lmin + lev, ") has NO leaf boxes; the .vthb may fail to load in "
+            "some readers. Report to the viz thread if ParaView rejects it.");
 
   vtkNew<vtkOverlappingAMR> amr;
   amr->Initialize(nlev, per_level.data());

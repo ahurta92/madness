@@ -268,6 +268,14 @@ public:
       results_["scf_total_energy"] = results_["scf"]["scf_total_energy"];
       results_["scf_eigenvalues_a"] = results_["scf"]["scf_eigenvalues_a"];
       results_["scf_fock_a"] = results_["scf"]["scf_fock_a"];
+      // Open-shell: mirror the beta channel too (review MED — SCFResults emits
+      // scf_eigenvalues_b/scf_fock_b in the nested object, but only the alpha
+      // channel was surfaced at top level, so the .out summary never showed
+      // beta). Guarded on presence: closed-shell runs omit them.
+      if (results_["scf"].contains("scf_eigenvalues_b"))
+        results_["scf_eigenvalues_b"] = results_["scf"]["scf_eigenvalues_b"];
+      if (results_["scf"].contains("scf_fock_b"))
+        results_["scf_fock_b"] = results_["scf"]["scf_fock_b"];
       results_["convergence_info"] = results_["convergence"];
       results_["metadata"] = {{"mpi_size", world_.size()}};
 
