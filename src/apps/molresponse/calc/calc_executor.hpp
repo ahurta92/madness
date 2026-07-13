@@ -539,6 +539,18 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
   solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
+  // Review HIGH: the locked step variant (lock_converged, the production
+  // default) uses the per-root REFERENCE γ path and ignores gamma_tensor_, so
+  // --es-tensor is a silent no-op unless --no-lock-converged is also set. Warn
+  // loudly rather than let a user believe the untiled-crash mitigation is
+  // active when it is not. (Teaching the locked variant to use the tensor path
+  // is tracked as a follow-up.)
+  if (ctx.es_gamma_tensor && ctx.es_lock_converged && world.rank() == 0)
+    madness::print(
+        "[ES-TENSOR] WARNING: --es-tensor was requested but lock_converged is "
+        "on (the default) — the locked step uses the REFERENCE gamma path, so "
+        "the tensor (Inc-3c) path is NOT active. Pass --no-lock-converged to "
+        "actually use --es-tensor (e.g. to avoid the untiled n_occ>=34 crash).");
 
   // Single-step guard (as in solve_fd_protocol): re-prepare the ground state
   // only on an actual protocol change; otherwise just re-project the roots.
