@@ -177,9 +177,28 @@ struct molresponse_v3_lib {
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
     // standalone --fd-subworlds flag; archive_file above makes it live).
     in.settings.fd_subworlds = std::max(0, rp.subworlds());
-    if (world.rank() == 0 && in.settings.fd_subworlds > 0)
+    if (world.rank() == 0 && in.settings.fd_subworlds > 0) {
       print("response: deck subworlds =", in.settings.fd_subworlds,
             "(F2 state-parallel fan-out requested)");
+      // Review io HIGH (early warning, not a hard gate): on a MULTI-NODE run
+      // the subworlds write native archives at subworld-rank-count, but
+      // property assembly reloads them at universe scale — the native np-guard
+      // then aborts AFTER the full solve. Warn up front so the user isn't
+      // surprised late; the HDF5 backend gathers to one client and reloads at
+      // any np. (Single-node subworlds, where writer==reader np, are fine.)
+#ifdef MADNESS_HAS_HDF5
+      const bool hdf5_on = hdf5_io_enabled();
+#else
+      const bool hdf5_on = false;
+#endif
+      if (!hdf5_on)
+        print("response: WARNING — subworlds with the NATIVE backend will hit "
+              "the cross-np archive guard at property assembly on a multi-node "
+              "run (states saved per-subworld, reloaded at universe scale). Use "
+              "`response { io { backend hdf5 } }` for multi-node subworld runs, "
+              "or set MADRESPONSE_ALLOW_NP_MISMATCH=1 if the archives are known "
+              "portable. Single-node subworld runs are unaffected.");
+    }
     in.settings.policy.dconv_user = rp.dconv();
     in.settings.print_level =
         static_cast<PrintLevel>(std::max(0, std::min(3, rp.print_level())));
