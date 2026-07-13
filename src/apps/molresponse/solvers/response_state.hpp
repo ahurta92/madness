@@ -131,12 +131,35 @@ inline IoBackend save_state(World &world, const std::string &filename,
     return IoBackend::Hdf5;
   }
 #endif
+  // Atomic native write (review io HIGH): the native default path used to
+  // stream directly into <filename>.00000 in truncate mode, so a kill mid-save
+  // left a truncated archive that BinaryFstreamInputArchive reads back SILENTLY
+  // SHORT (its ifstream sets no exceptions() and nothing checks fail()). Write
+  // to a .tmp basename, then rank-0 renames the part file(s) into place — same
+  // tmp+rename contract the HDF5 branch already had. (nio is 1 here, so a
+  // single <base>.tmp.00000; the glob-rename stays correct if nio ever grows.)
   {
     archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(
-        world, filename.c_str(), 1);
+        world, (filename + ".tmp").c_str(), 1);
     cb(ar);
   }
-  if (world.rank() == 0) remove_h5_twin_rank0(filename);
+  world.gop.fence();
+  if (world.rank() == 0) {
+    namespace fs = std::filesystem;
+    const fs::path fp(filename);
+    const fs::path dir = fp.has_parent_path() ? fp.parent_path() : fs::path(".");
+    const std::string base = fp.filename().string();
+    const std::string tmp_prefix = base + ".tmp";   // parts are "<base>.tmp.NNNNN"
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(dir, ec)) {
+      if (ec) break;
+      const std::string n = e.path().filename().string();
+      if (n.rfind(tmp_prefix, 0) != 0) continue;    // not one of our tmp parts
+      const std::string suffix = n.substr(tmp_prefix.size());  // ".NNNNN" (or "")
+      fs::rename(e.path(), dir / (base + suffix));
+    }
+    remove_h5_twin_rank0(filename);
+  }
   world.gop.fence();
   return IoBackend::Native;
 }
