@@ -1,6 +1,9 @@
-build*
-vscode_build*
-cmake-build-debug*
+# Trailing slash: match build DIRECTORIES only, so source files like
+# solvers/build_response_ground_state.hpp are never silently excluded
+# (that gap dropped the header from the response-release slice → PR #704 CI fail).
+build*/
+vscode_build*/
+cmake-build-debug*/
 .history*
 *-workspace
 */__pycache__/
