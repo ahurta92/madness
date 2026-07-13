@@ -998,6 +998,7 @@ public:
     int pass = 0;
 
     std::string last_sig;
+    std::string last_progress;           // fingerprint of the saved solve state
     std::set<std::string> stalled_ids;   // quarantined no-progress nodes
     for (;;) {
       world.gop.fence();
@@ -1093,12 +1094,26 @@ public:
       }
 
       const std::string sig = wave_signature(waves.front());
-      if (sig == last_sig) {
+      // Progress fingerprint: the saved solve state. ONLY the front wave runs
+      // each pass, so if the front wave repeats (sig == last_sig) AND the saved
+      // state is byte-identical to the previous pass, the last attempt changed
+      // NOTHING → genuinely stuck → quarantine. If the state changed (a Resume
+      // that advanced iter/residual), it is still converging — give it another
+      // pass. Fixes the false-quarantine of a multi-pass ES/VBC Resume (and the
+      // legacy max_iters==0 "Resume forever" FD mode), whose reconcile branches
+      // don't honest-climb the schedule shape the way the FD/max_iters branch
+      // does, so the bare id@protocol signature repeats even mid-convergence.
+      const auto &mj = meta.json();
+      std::string progress;
+      for (const char *k : {"fd_states", "excited_states", "vbc_states"})
+        if (mj.contains(k)) progress += mj[k].dump();
+      if (sig == last_sig && progress == last_progress) {
         // No progress on this wave: quarantine its nodes and try the rest of
         // the schedule. The run only stops when nothing unquarantined remains.
         if (world.rank() == 0)
           madness::print("[CALC] run: no progress on wave {", sig,
-                         "} — quarantining", (int)waves.front().size(),
+                         "} (saved state unchanged) — quarantining",
+                         (int)waves.front().size(),
                          "node(s) and continuing with independent work");
         nlohmann::json srec = {{"pass", pass}, {"wave", sig},
                                {"quarantined", nlohmann::json::array()}};
@@ -1107,10 +1122,11 @@ public:
           srec["quarantined"].push_back(it.node->id);
         }
         diag["stall_events"].push_back(std::move(srec));
-        last_sig.clear();   // the next front wave gets a fresh 2-pass window
+        last_sig.clear(); last_progress.clear();  // fresh window for the next wave
         continue;
       }
       last_sig = sig;
+      last_progress = progress;
 
       // R1c: record this wave (id/thresh/action per item) + protocol markers.
       // A wave is one protocol level, so wthresh = the front item's threshold.
