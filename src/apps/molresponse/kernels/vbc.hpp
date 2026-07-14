@@ -67,7 +67,7 @@ compute_g(madness::World &world, const ResponseGroundState &g0,
   // matching the original v2 compute_g. NOT projected -- the caller (compute_vbc_i)
   // applies Qa where the response-density terms need it and leaves the Fock-matrix
   // term unprojected.
-  auto J  = apply(*g0.coulop, rho);
+  auto J  = g0.response_local_potential(rho);  // Coulomb (+ f_xc·rho for DFT/hybrid)
   auto gx = two_electron::apply_gamma_raw(world, J, phix,
       {{Aleft, Aright}, {Bleft, Bright}}, g0.c_xc, g0.lo);
   auto gy = two_electron::apply_gamma_raw(world, J, phiy,
