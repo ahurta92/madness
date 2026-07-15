@@ -35,6 +35,7 @@
 #include <madness/tensor/tensor.h>
 
 #include <array>
+#include <cmath>
 
 namespace molresponse_v3::tpa {
 
@@ -67,7 +68,18 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
     for (int b = 0; b < 3; ++b)
       S(a, b) = beta::beta_abc<ClosedShell>(world, g0, mu_resp[a], vbc_b[b],
                                             mu_resp[b], Xf, mu_op[a]);
-  return S;
+
+  // Degenerate TPA (two identical photons) => S_ab must be symmetric; the raw
+  // beta_abc role split (A vs the B-in-VBC channel) computes ONE ordering, so
+  // symmetrize to the physical S_ab = <0|mu_a|p><p|mu_b|f> + (a<->b). Validated
+  // against Dalton, whose S is symmetric (upper triangle only). NOTE (open): the
+  // DIAGONAL/totally-symmetric channel still mismatches Dalton in sign/magnitude
+  // — a residue-form issue (VC_op=0 trace terms), tracked in TPA_SCOPING.md §2.
+  Tensor<double> Ssym(3L, 3L);
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b)
+      Ssym(a, b) = 0.5 * (S(a, b) + S(b, a));
+  return Ssym;
 }
 
 /// Rotationally-invariant two-photon strength for parallel linear polarization:
@@ -81,7 +93,47 @@ delta_parallel(const madness::Tensor<double> &S) {
     for (int b = 0; b < 3; ++b)
       d += 2.0 * S(a, a) * S(b, b) + 2.0 * S(a, b) * S(a, b) +
            2.0 * S(a, b) * S(b, a);
-  return d;
+  // 1/30 = the isotropic average over molecular orientations (Monson–McClain,
+  // JCP 53:29 1970). Without it delta is ~30x too large. Matches Dalton's
+  // two_photon_strengths (D = 2*Df + 4*Dg for the symmetric tensor).
+  return d / 30.0;
+}
+
+/// Full Monson–McClain two-photon observables from the S tensor, matching
+/// Dalton QRSMO (rspvec.F:2803-2821). `omega_ex` = excitation energy (a.u.);
+/// both photons are at omega_ex/2. sigma in GM assumes Dalton's 0.1 eV FWHM.
+struct Observables {
+  double Df, Dg, D_linear, D_circular, R, sigma_linear_gm, sigma_circular_gm;
+};
+
+inline Observables
+observables(const madness::Tensor<double> &S, double omega_ex) {
+  double df = 0.0, dg = 0.0;
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) {
+      df += S(i, i) * S(j, j);   // Df = sum_ij S_ii S_jj / 30
+      dg += S(i, j) * S(i, j);   // Dg = sum_ij S_ij^2   / 30
+    }
+  Observables o;
+  o.Df = df / 30.0;
+  o.Dg = dg / 30.0;
+  o.D_linear   =  2.0 * o.Df + 4.0 * o.Dg;
+  o.D_circular = -2.0 * o.Df + 6.0 * o.Dg;
+  const double den = o.Df + 2.0 * o.Dg;
+  o.R = (den != 0.0) ? (-o.Df + 3.0 * o.Dg) / den : 0.0;
+  // a.u. -> GM (Dalton AU_TO_GM, rspvec.F:1795-6): 8*pi^2 * alpha * a0[pm]^5 /
+  // (c[cm/s] * FWHM[au]); FWHM = 0.1 eV baked in. Numerically ~2.170.
+  constexpr double PI      = 3.14159265358979324;
+  constexpr double ALPHA   = 7.2973525693e-3;   // fine-structure constant
+  constexpr double A0_PM   = 52.9177210903;     // Bohr radius in pm
+  constexpr double C_CMS   = 2.99792458e10;     // speed of light, cm/s
+  constexpr double FWHM_AU = 0.0036749326;      // 0.1 eV in a.u.
+  const double AU_TO_GM = 8.0 * PI * PI * ALPHA * std::pow(A0_PM, 5.0) /
+                          (C_CMS * FWHM_AU);
+  const double ph2 = (0.5 * omega_ex) * (0.5 * omega_ex);
+  o.sigma_linear_gm   = o.D_linear   * ph2 * AU_TO_GM;
+  o.sigma_circular_gm = o.D_circular * ph2 * AU_TO_GM;
+  return o;
 }
 
 } // namespace molresponse_v3::tpa

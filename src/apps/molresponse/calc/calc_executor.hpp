@@ -1625,6 +1625,11 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     print("\n=== TPA assembly  protocol_key=", key, "  n_roots=", nroots, " ===");
 
   std::vector<nlohmann::json> rows;
+  // rank-0 table data (S tensor + observables per root) for the Dalton-style print.
+  std::vector<int>                     tbl_f;
+  std::vector<double>                  tbl_w;
+  std::vector<madness::Tensor<double>> tbl_S;
+  std::vector<tpa::Observables>        tbl_o;
   for (long f = 0; f < nroots; ++f) {
     const double wf = state.omega(f);
     const double wf_half = 0.5 * wf;
@@ -1651,10 +1656,9 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     }
 
     auto S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op);
-    const double dpar = tpa::delta_parallel(S);
+    const auto obs = tpa::observables(S, wf);
 
     if (world.rank() == 0) {
-      print("[TPA] root", f, " omega_f=", wf, " delta_par=", dpar);
       nlohmann::json Sj = nlohmann::json::array();
       for (int a = 0; a < 3; ++a) {
         nlohmann::json ra = nlohmann::json::array();
@@ -1663,10 +1667,53 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       }
       rows.push_back({{"es_root_id", static_cast<int>(f)},
                       {"omega", wf},
+                      {"omega_ev", wf * 27.211386245988},
                       {"S", Sj},
-                      {"delta_parallel", dpar}});
+                      {"Df", obs.Df}, {"Dg", obs.Dg},
+                      {"D_linear", obs.D_linear}, {"D_circular", obs.D_circular},
+                      {"R", obs.R},
+                      {"sigma_linear_gm", obs.sigma_linear_gm},
+                      {"sigma_circular_gm", obs.sigma_circular_gm},
+                      {"delta_parallel", obs.D_linear}});
+      tbl_f.push_back(static_cast<int>(f)); tbl_w.push_back(wf);
+      tbl_S.push_back(S); tbl_o.push_back(obs);
     }
     world.gop.fence();
+  }
+
+  // Dalton-style output (matches rspvec.F QRSMO): tensor S table + the
+  // Monson-McClain Df/Dg/D(lin,circ)/sigma/R summary. No point-group symmetry
+  // in MRA, so one manifold (no Sym column). Diffable against Dalton .out.
+  if (world.rank() == 0 && !tbl_f.empty()) {
+    const double H2EV = 27.211386245988;
+    printf("\n                  +--------------------------------+\n");
+    printf("                  | Two-photon transition tensor S |\n");
+    printf("                  +--------------------------------+\n");
+    printf("     -----------------------------------------------------------------\n");
+    printf("      No  Energy(eV)     Sxx     Syy     Szz     Sxy     Sxz     Syz\n");
+    printf("     -----------------------------------------------------------------\n");
+    for (size_t r = 0; r < tbl_f.size(); ++r)
+      printf("     %3d   %8.2f  %8.3f%8.3f%8.3f%8.3f%8.3f%8.3f\n",
+             tbl_f[r] + 1, tbl_w[r] * H2EV, tbl_S[r](0, 0), tbl_S[r](1, 1),
+             tbl_S[r](2, 2), tbl_S[r](0, 1), tbl_S[r](0, 2), tbl_S[r](1, 2));
+    printf("     -----------------------------------------------------------------\n");
+    printf("\n     D = 2*Df+4*Dg (Linear);  D = -2*Df+6*Dg (Circular)\n");
+    printf("     Df = sum_ij S_ii*S_jj /30;   Dg = sum_ij S_ij^2 /30\n");
+    printf("     sigma = D*(E/2)^2*AU_TO_GM (GM, 0.1 eV FWHM);  R = (-Df+3Dg)/(Df+2Dg)\n");
+    printf("\n                   +-----------------------------------+\n");
+    printf("                   |   Two-photon absorption summary   |\n");
+    printf("                   +-----------------------------------+\n");
+    printf("      No Energy(eV) Polarization      Df         Dg          D        sigma      R\n");
+    printf("     ---------------------------------------------------------------------------------\n");
+    for (size_t r = 0; r < tbl_f.size(); ++r) {
+      const auto &o = tbl_o[r];
+      printf("     %3d %8.2f  Linear    %10.3E %10.3E %10.3E %10.3E %6.2f\n",
+             tbl_f[r] + 1, tbl_w[r] * H2EV, o.Df, o.Dg, o.D_linear, o.sigma_linear_gm, o.R);
+      printf("     %3d %8.2f  Circular  %10.3E %10.3E %10.3E %10.3E %6.2f\n",
+             tbl_f[r] + 1, tbl_w[r] * H2EV, o.Df, o.Dg, o.D_circular, o.sigma_circular_gm, o.R);
+    }
+    printf("     ---------------------------------------------------------------------------------\n");
+    fflush(stdout);
   }
 
   if (world.rank() == 0 && !rows.empty()) {
