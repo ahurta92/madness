@@ -45,24 +45,34 @@ namespace molresponse_v3::tpa {
 ///   mu_resp   — the dipole response mu_a at omega_f/2, per Cartesian axis a.
 ///   mu_op     — the raw dipole operators (MomentFunctor), per axis.
 /// No electronic solve: pure contraction via beta_abc + compute_vbc.
-inline madness::Tensor<double>
-tpa_moment(madness::World &world, const ResponseGroundState &g0,
-           const ResponseStateXY<ClosedShell> &Xf,
-           const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
-           const std::array<madness::real_function_3d, 3> &mu_op) {
-  using namespace madness;
-
-  // Homogeneous C-channel: VC_op = 0 (a valid zero function of the right shape).
-  real_function_3d zero_op = copy(mu_op[0]);
+/// The three residue VBC quadratic sources for one excited state f (C = X_f
+/// homogeneous, VC_op = 0), one per B-axis. This is the TPA "second-order
+/// perturbation vector" — the analogue of beta's VBC source. assemble_tpa saves
+/// these to disk (mirroring beta/Raman vbc_states) for reuse + inspection.
+inline std::array<ResponseStateXY<ClosedShell>, 3>
+tpa_sources(madness::World &world, const ResponseGroundState &g0,
+            const ResponseStateXY<ClosedShell> &Xf,
+            const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
+            const std::array<madness::real_function_3d, 3> &mu_op) {
+  madness::real_function_3d zero_op = madness::copy(mu_op[0]);  // VC_op = 0
   zero_op.scale(0.0);
-
-  // VBC source depends only on the B(=mu_b) / C(=X_f) pair, not on A — build the
-  // three (one per B-axis) once and reuse across A.
   std::array<ResponseStateXY<ClosedShell>, 3> vbc_b;
   for (int b = 0; b < 3; ++b)
     vbc_b[b] = vbc::compute_vbc<ClosedShell>(world, g0, mu_resp[b], Xf,
                                              mu_op[b], zero_op);
+  return vbc_b;
+}
 
+/// Contract PRE-BUILT sources into the 3x3 S tensor (symmetrized). Kept separate
+/// from tpa_sources so assemble_tpa can build the sources once, save them, then
+/// contract — the same build->save->contract shape as the beta path.
+inline madness::Tensor<double>
+tpa_moment(madness::World &world, const ResponseGroundState &g0,
+           const ResponseStateXY<ClosedShell> &Xf,
+           const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
+           const std::array<madness::real_function_3d, 3> &mu_op,
+           const std::array<ResponseStateXY<ClosedShell>, 3> &vbc_b) {
+  using namespace madness;
   Tensor<double> S(3L, 3L);
   for (int a = 0; a < 3; ++a)
     for (int b = 0; b < 3; ++b)
@@ -72,14 +82,22 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
   // Degenerate TPA (two identical photons) => S_ab must be symmetric; the raw
   // beta_abc role split (A vs the B-in-VBC channel) computes ONE ordering, so
   // symmetrize to the physical S_ab = <0|mu_a|p><p|mu_b|f> + (a<->b). Validated
-  // against Dalton, whose S is symmetric (upper triangle only). NOTE (open): the
-  // DIAGONAL/totally-symmetric channel still mismatches Dalton in sign/magnitude
-  // — a residue-form issue (VC_op=0 trace terms), tracked in TPA_SCOPING.md §2.
+  // against Dalton, whose S is symmetric (upper triangle only).
   Tensor<double> Ssym(3L, 3L);
   for (int a = 0; a < 3; ++a)
     for (int b = 0; b < 3; ++b)
       Ssym(a, b) = 0.5 * (S(a, b) + S(b, a));
   return Ssym;
+}
+
+/// Convenience: build sources + contract in one call (no save).
+inline madness::Tensor<double>
+tpa_moment(madness::World &world, const ResponseGroundState &g0,
+           const ResponseStateXY<ClosedShell> &Xf,
+           const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
+           const std::array<madness::real_function_3d, 3> &mu_op) {
+  return tpa_moment(world, g0, Xf, mu_resp, mu_op,
+                    tpa_sources(world, g0, Xf, mu_resp, mu_op));
 }
 
 /// Rotationally-invariant two-photon strength for parallel linear polarization:

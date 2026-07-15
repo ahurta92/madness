@@ -1655,7 +1655,18 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       continue;
     }
 
-    auto S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op);
+    // Build the 3 residue 2nd-order sources (the TPA analogue of beta's VBC
+    // quadratic source), SAVE them to disk (mirrors beta/Raman vbc_states —
+    // reusable + inspectable/isosurface-able), then contract with them.
+    auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
+    std::vector<std::string> src_files;
+    for (int b = 0; b < 3; ++b) {
+      const std::string src = ctx.calc_dir + "/tpa_src__root" +
+          std::to_string(f) + "__" + std::string(1, "xyz"[b]) + "__" + key;
+      vbc_b[b].save(world, src);
+      src_files.push_back(std::filesystem::path(src).filename().string());
+    }
+    auto S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
     const auto obs = tpa::observables(S, wf);
 
     if (world.rank() == 0) {
@@ -1668,6 +1679,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       rows.push_back({{"es_root_id", static_cast<int>(f)},
                       {"omega", wf},
                       {"omega_ev", wf * 27.211386245988},
+                      {"source_files", src_files},
+                      {"writer_nproc", static_cast<int>(world.size())},
                       {"S", Sj},
                       {"Df", obs.Df}, {"Dg", obs.Dg},
                       {"D_linear", obs.D_linear}, {"D_circular", obs.D_circular},
