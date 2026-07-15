@@ -438,6 +438,11 @@ int main(int argc, char **argv) {
         else if (es_roots == 0)
           assemble_alpha(ctx, plan, protocol.back());
 
+        // --tpa: two-photon-absorption assembly after the ES bundle + derived
+        // dipole FD at omega_f/2 converge (validates kernels/tpa.hpp vs Dalton).
+        if (es_roots > 0 && parser.key_exists("tpa"))
+          assemble_tpa(ctx, plan, protocol.back());
+
         // ---- Validate at the top protocol ----------------------------------
         const std::string top_key = protocol_key_at(protocol.back());
         if (world.rank() == 0) {

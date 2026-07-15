@@ -40,6 +40,7 @@
 #include "../kernels/full.hpp"
 #include "../kernels/static.hpp"
 #include "../kernels/tags.hpp"
+#include "../kernels/tpa.hpp"
 #include "../solvers/build_response_ground_state.hpp"
 #include "../solvers/convergence_policy.hpp"
 #include "../solvers/fd_problem.hpp"
@@ -1570,6 +1571,108 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
     auto meta = ResponseMetadata::load_or_create(
         ctx.calc_dir + "/response_metadata.json");
     for (const auto &[pk, row] : rows) meta.add_property(pk, key, row);
+    meta.save();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// assemble_tpa — Tier-B two-photon-absorption assembly (post-solve, off the
+// critical path; mirrors assemble_beta). Needs a converged ES bundle + the
+// derived dipole FD at omega_f/2 (both produced by the resonant/ES plan). For
+// each root f: load X_f + the three mu_a responses at omega_f/2, contract via
+// tpa::tpa_moment (the beta-residue with a homogeneous C-channel), record the
+// S tensor + delta^|| under properties/tpa. ClosedShell/TDA only.
+// The residue form is a CANDIDATE validated against refs/dalton_tpa.json.
+// ---------------------------------------------------------------------------
+inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
+                         double thresh) {
+  using namespace madness;
+  World &world = ctx.world;
+  GroundState &gs = ctx.gs;
+  if (plan.es.empty()) return;
+  if (!gs.is_spin_restricted()) {
+    if (world.rank() == 0)
+      print("[TPA] open-shell TPA not implemented — SKIPPED (ClosedShell only).");
+    return;
+  }
+
+  set_response_protocol(world, ctx.L, thresh);
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop = poperatorT(
+        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+  const double c_xc = gs.hf_exchange_coefficient();
+  const double lo   = gs.params().lo();
+  auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
+  const std::string key = protocol_key();
+
+  auto es = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
+  if (!es) {
+    if (world.rank() == 0)
+      print("[TPA] no TDA ES bundle under", ctx.calc_dir, "— SKIPPED");
+    return;
+  }
+  auto &state = es->state;
+  const long nroots = state.omega.dim(0);
+
+  std::array<real_function_3d, 3> mu_op{dipole_operator(world, 0),
+                                        dipole_operator(world, 1),
+                                        dipole_operator(world, 2)};
+
+  if (world.rank() == 0)
+    print("\n=== TPA assembly  protocol_key=", key, "  n_roots=", nroots, " ===");
+
+  std::vector<nlohmann::json> rows;
+  for (long f = 0; f < nroots; ++f) {
+    const double wf = state.omega(f);
+    const double wf_half = 0.5 * wf;
+
+    // X_f wrapped as XY (TDA: no de-excitation, y = 0).
+    ResponseStateXY<ClosedShell> Xf;
+    Xf.x_alpha = state.roots[f].x_alpha;
+    Xf.y_alpha = copy(world, Xf.x_alpha);
+    scale(world, Xf.y_alpha, 0.0);
+
+    std::array<ResponseStateXY<ClosedShell>, 3> mu_resp;
+    bool ok = true;
+    for (int a = 0; a < 3; ++a) {
+      auto r = detail_exec::load_fd_as_xy<ClosedShell>(
+          world, ctx.calc_dir, Perturbation::dipole(a), wf_half);
+      if (!r) { ok = false; break; }
+      mu_resp[a] = std::move(*r);
+    }
+    if (!ok) {
+      if (world.rank() == 0)
+        print("[TPA] root", f, " omega_f=", wf,
+              " — missing dipole FD @", wf_half, " — skip");
+      continue;
+    }
+
+    auto S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op);
+    const double dpar = tpa::delta_parallel(S);
+
+    if (world.rank() == 0) {
+      print("[TPA] root", f, " omega_f=", wf, " delta_par=", dpar);
+      nlohmann::json Sj = nlohmann::json::array();
+      for (int a = 0; a < 3; ++a) {
+        nlohmann::json ra = nlohmann::json::array();
+        for (int b = 0; b < 3; ++b) ra.push_back(S(a, b));
+        Sj.push_back(ra);
+      }
+      rows.push_back({{"es_root_id", static_cast<int>(f)},
+                      {"omega", wf},
+                      {"S", Sj},
+                      {"delta_parallel", dpar}});
+    }
+    world.gop.fence();
+  }
+
+  if (world.rank() == 0 && !rows.empty()) {
+    auto meta = ResponseMetadata::load_or_create(
+        ctx.calc_dir + "/response_metadata.json");
+    for (auto &row : rows) meta.add_property("tpa", key, row);
     meta.save();
   }
 }
