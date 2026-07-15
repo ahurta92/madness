@@ -818,7 +818,10 @@ void dump_es_roots(World& world, double L, const std::string& calc_dir,
     const int nr = static_cast<int>(state.roots.size());
     for (int f = 0; f < nr; ++f) {
       const auto& root = state.roots[f];
-      const std::string label = "es_" + key + "__root_" + std::to_string(f);
+      // Name to pymra.web's field contract: es_<state>__<protocol>_<comp>
+      // (web.py _RE_ES). Comp suffixes _x<i>/_tdens are appended below, matching
+      // the FD path's fd_<pert>_<dir>__<protocol>__f<omega>_<comp> convention.
+      const std::string label = "es_" + std::to_string(f) + "__" + key;
       const std::size_t no =
           (max_orbitals >= 0)
               ? std::min<std::size_t>(root.x_alpha.size(),
