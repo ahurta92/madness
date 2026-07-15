@@ -1584,6 +1584,32 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
 // S tensor + delta^|| under properties/tpa. ClosedShell/TDA only.
 // The residue form is a CANDIDATE validated against refs/dalton_tpa.json.
 // ---------------------------------------------------------------------------
+/// Load the ES bundle of EsType and return per-root (omega, X_f as XY). Full
+/// (RPA) carries the real de-excitation Y; TDA sets Y=0. Templated so the
+/// EsType Storage (X-only vs X,Y) is handled at compile time.
+template <typename EsType>
+inline bool load_tpa_es_xy(madness::World &world, const std::string &calc_dir,
+                           std::vector<double> &omega_out,
+                           std::vector<ResponseStateXY<ClosedShell>> &Xf_out) {
+  auto es = try_load_es_bundle<EsType, ClosedShell>(world, calc_dir);
+  if (!es) return false;
+  auto &state = es->state;
+  const long nr = state.omega.dim(0);
+  for (long f = 0; f < nr; ++f) {
+    omega_out.push_back(state.omega(f));
+    ResponseStateXY<ClosedShell> Xf;
+    Xf.x_alpha = state.roots[f].x_alpha;
+    if constexpr (std::is_same_v<EsType, Full>) {
+      Xf.y_alpha = state.roots[f].y_alpha;               // RPA de-excitation
+    } else {
+      Xf.y_alpha = madness::copy(world, Xf.x_alpha);      // TDA: y = 0
+      madness::scale(world, Xf.y_alpha, 0.0);
+    }
+    Xf_out.push_back(std::move(Xf));
+  }
+  return true;
+}
+
 inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
                          double thresh) {
   using namespace madness;
@@ -1608,14 +1634,31 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
   const std::string key = protocol_key();
 
-  auto es = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
-  if (!es) {
+  // Dispatch on the ES method recorded in the bundle metadata (tda vs full/RPA).
+  // Dalton's TPA reference is full RPA; --es-full gives the matching v3 bundle.
+  int es_full = 0;
+  if (world.rank() == 0) {
+    auto meta = ResponseMetadata::load_or_create(
+        ctx.calc_dir + "/response_metadata.json");
+    const auto &j = meta.json();
+    if (j.contains("excited_states") && j["excited_states"].contains(key))
+      es_full = (j["excited_states"][key].value("type", "tda") == "full") ? 1 : 0;
+  }
+  world.gop.broadcast(es_full, 0);
+
+  std::vector<double> omegas;
+  std::vector<ResponseStateXY<ClosedShell>> Xfs;
+  const bool loaded =
+      es_full ? load_tpa_es_xy<Full>(world, ctx.calc_dir, omegas, Xfs)
+              : load_tpa_es_xy<TDA>(world, ctx.calc_dir, omegas, Xfs);
+  if (!loaded) {
     if (world.rank() == 0)
-      print("[TPA] no TDA ES bundle under", ctx.calc_dir, "— SKIPPED");
+      print("[TPA] no ES bundle under", ctx.calc_dir, "— SKIPPED");
     return;
   }
-  auto &state = es->state;
-  const long nroots = state.omega.dim(0);
+  const long nroots = static_cast<long>(omegas.size());
+  if (world.rank() == 0)
+    print("[TPA] ES method:", es_full ? "Full (RPA)" : "TDA");
 
   std::array<real_function_3d, 3> mu_op{dipole_operator(world, 0),
                                         dipole_operator(world, 1),
@@ -1631,14 +1674,9 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   std::vector<madness::Tensor<double>> tbl_S;
   std::vector<tpa::Observables>        tbl_o;
   for (long f = 0; f < nroots; ++f) {
-    const double wf = state.omega(f);
+    const double wf = omegas[f];
     const double wf_half = 0.5 * wf;
-
-    // X_f wrapped as XY (TDA: no de-excitation, y = 0).
-    ResponseStateXY<ClosedShell> Xf;
-    Xf.x_alpha = state.roots[f].x_alpha;
-    Xf.y_alpha = copy(world, Xf.x_alpha);
-    scale(world, Xf.y_alpha, 0.0);
+    const ResponseStateXY<ClosedShell> &Xf = Xfs[f];   // real Y for RPA, 0 for TDA
 
     std::array<ResponseStateXY<ClosedShell>, 3> mu_resp;
     bool ok = true;
