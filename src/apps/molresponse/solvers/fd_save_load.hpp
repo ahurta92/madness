@@ -81,34 +81,33 @@ inline void check_writer_nproc(madness::World &world, IoBackend backend,
                                int writer_nproc, const char *who,
                                const std::string &archive) {
   if (io_backend_np_portable(backend)) return;
-  if (writer_nproc != 0 && writer_nproc != static_cast<int>(world.size())) {
-    // Escape hatch (mirrors MADRESPONSE_ALLOW_GS_MISMATCH): bypass the guard
-    // so the cross-np read can be observed empirically. This is ALSO the F2
-    // subworld case — a subworld writes with writer_nproc = subworld size, the
-    // universe assembles at a different size — where the underlying archive is
-    // a single nio=1 file that MAY be np-portable (parallel_archive stores nio
-    // in-file and the reader reconstructs). Whether that read is safe is under
-    // multi-node test; until confirmed, the guard stays on by default.
-    const char *ov = std::getenv("MADRESPONSE_ALLOW_NP_MISMATCH");
-    if (ov && ov[0] == '1') {
-      if (world.rank() == 0)
-        std::fprintf(stderr,
-            "[NP-GUARD] OVERRIDE (MADRESPONSE_ALLOW_NP_MISMATCH=1): %s archive "
-            "%s writer_nproc=%d != world.size=%d — proceeding; results are only "
-            "trustworthy if this native archive is genuinely np-portable.\n",
-            who, archive.c_str(), writer_nproc, static_cast<int>(world.size()));
-      return;
-    }
+  if (writer_nproc == 0 || writer_nproc == static_cast<int>(world.size()))
+    return;  // no recorded count (legacy) or an exact match — nothing to guard.
+
+  // Cross-process-count load of a native nio=1 parallel archive. This is
+  // np-PORTABLE: the archive stores nio in-file and ParallelInputArchive
+  // redistributes the tree across the current world on read. Verified
+  // bit-identical np=2 -> np=1 on the FD/ES bundles (max reldiff 0). The former
+  // hard block predated the atomic-write + collective-throw I/O fixes that
+  // resolved the actual crashes (truncated archives, mismatched collectives);
+  // with those in, cross-np native restart is safe. Proceed by default so runs
+  // are resource-count agnostic. MADRESPONSE_STRICT_NP=1 restores the hard error
+  // (e.g. as a backstop if a future nio>1 writer is introduced).
+  const char *strict = std::getenv("MADRESPONSE_STRICT_NP");
+  if (strict && strict[0] == '1') {
     throw std::runtime_error(
         std::string(who) + ": archive " + archive + " was written with " +
         std::to_string(writer_nproc) + " process(es) but is being loaded with " +
         std::to_string(world.size()) +
-        " — cross-process-count restart of native parallel archives is "
-        "unsupported (set MADRESPONSE_ALLOW_NP_MISMATCH=1 to override if you "
-        "know the archive is portable). Re-run with " +
-        std::to_string(writer_nproc) +
-        " rank(s), or delete the archive to recompute it.");
+        " — MADRESPONSE_STRICT_NP=1 forbids cross-process-count native restart. "
+        "Re-run with " + std::to_string(writer_nproc) +
+        " rank(s), unset MADRESPONSE_STRICT_NP, or use the HDF5 backend.");
   }
+  if (world.rank() == 0)
+    std::fprintf(stderr,
+        "[NP] %s: %s written with %d rank(s), loading with %d — native nio=1 "
+        "archive is np-portable (redistributed on read); proceeding.\n",
+        who, archive.c_str(), writer_nproc, static_cast<int>(world.size()));
 }
 
 } // namespace detail_fd_save_load

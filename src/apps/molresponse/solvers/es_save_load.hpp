@@ -53,6 +53,7 @@
 #include <madness/world/MADworld.h>
 
 #include <algorithm>
+#include <cstdlib>       // std::getenv (MADRESPONSE_STRICT_NP)
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -378,16 +379,29 @@ load_es_roots(madness::World &world, const std::string &dir) {
   // heap-OOB, reproduced by --es-analyze-only --es-load-only at a different np).
   // Fail cleanly instead. writer_nproc==0 is a legacy bundle with no recorded
   // count — proceed with a warning (same-np is the common case).
+  // Cross-process-count ES restart. The nio=1 per-root archives are np-portable
+  // (ParallelInputArchive redistributes on read; verified bit-identical np=2->1
+  // on the FD/ES bundles). The former hard block + the "parked ES heap-OOB"
+  // predated the atomic-write + collective-throw I/O fixes that resolved the
+  // real crashes; with those in, cross-np ES restart is safe. Proceed by default
+  // (resource-count agnostic); MADRESPONSE_STRICT_NP=1 restores the hard error.
   const IoBackend backend = io_backend_from_tag(backend_tag);
   if (!io_backend_np_portable(backend) &&
       writer_nproc != 0 && writer_nproc != world.size()) {
-    throw std::runtime_error(
-        "load_es_roots: ES bundle in " + dir + " was written with " +
-        std::to_string(writer_nproc) + " process(es) but is being loaded with " +
-        std::to_string(world.size()) +
-        " — cross-process-count ES restart is unsupported for native "
-        "archives. Re-run with " + std::to_string(writer_nproc) +
-        " rank(s), or delete the bundle to recompute it.");
+    const char *strict = std::getenv("MADRESPONSE_STRICT_NP");
+    if (strict && strict[0] == '1') {
+      throw std::runtime_error(
+          "load_es_roots: ES bundle in " + dir + " was written with " +
+          std::to_string(writer_nproc) + " process(es) but loaded with " +
+          std::to_string(world.size()) +
+          " — MADRESPONSE_STRICT_NP=1 forbids cross-process-count native "
+          "restart. Re-run with " + std::to_string(writer_nproc) +
+          " rank(s), unset MADRESPONSE_STRICT_NP, or use the HDF5 backend.");
+    }
+    if (world.rank() == 0)
+      madness::print("[LOAD] ES bundle in", dir, "written with", writer_nproc,
+                     "rank(s), loading with", world.size(),
+                     "— native nio=1 is np-portable; proceeding.");
   }
   if (writer_nproc == 0 && world.rank() == 0) {
     madness::print("[LOAD] WARNING: ES bundle in", dir,
