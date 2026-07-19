@@ -182,8 +182,11 @@ int main(int argc, char** argv) {
                 D.begin() + static_cast<ptrdiff_t>(i * n_ao),
                 D.begin() + static_cast<ptrdiff_t>((i + 1) * n_ao));
 
-            auto ffunctor = std::shared_ptr<DaltonResponseFunctor>(
-                new DaltonResponseFunctor(molden.basis, std::move(D_col_i)));
+            // Declare as base type so FunctionFactory::functor() picks the
+            // shared_ptr<FunctionFunctorInterface> overload, not the generic
+            // template callable overload (which would try op(coord) on the ptr).
+            std::shared_ptr<madness::FunctionFunctorInterface<double, 3>> ffunctor =
+                std::make_shared<DaltonResponseFunctor>(molden.basis, std::move(D_col_i));
 
             Function<double, 3> fn =
                 FunctionFactory<double, 3>(world)
