@@ -148,6 +148,26 @@ if(MADNESS_ENABLE_HDF5)
       target_compile_definitions(${_hdf5_tgt} PRIVATE MADNESS_HAS_HDF5)
     endif()
   endforeach()
+  # dalton-cis-seed thread: converter that turns pymra per-occ-orbital .mad.h5
+  # response functions into a TDA excited-state seed bundle (save_es_roots,
+  # converged=false) the ES node Resumes from. HDF5-only (uses load_function_hdf5).
+  add_mad_executable(seed_es_from_hdf5 "tools/seed_es_from_hdf5.cpp;GroundState.cpp" "MADchem")
+  target_include_directories(seed_es_from_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(seed_es_from_hdf5 PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(seed_es_from_hdf5 PRIVATE MADNESS_HAS_HDF5)
+  # dalton-cis-seed (b): overlap-based pinning — identify which converged ES root
+  # matches the operator-selected seed by |<seed|root>| (character, not energy).
+  add_mad_executable(es_overlap "tools/es_overlap.cpp;GroundState.cpp" "MADchem")
+  target_include_directories(es_overlap PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(es_overlap PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(es_overlap PRIVATE MADNESS_HAS_HDF5)
+  # dalton-cis-seed (c): native DALTON reader — reads RSPVEC + molden.inp directly,
+  # projects x_i onto MRA, and emits the ES seed bundle without a Python/HDF5 intermediate.
+  # Does not call load_function_hdf5; MADNESS_HAS_HDF5 needed for response_state.hpp HDF5 path.
+  add_mad_executable(seed_from_dalton "tools/seed_from_dalton.cpp;GroundState.cpp" "MADchem")
+  target_include_directories(seed_from_dalton PRIVATE ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(seed_from_dalton PRIVATE ${HDF5_LIBRARIES})
+  target_compile_definitions(seed_from_dalton PRIVATE MADNESS_HAS_HDF5)
 endif()
 
 add_dependencies(applications-madness molresponse)
