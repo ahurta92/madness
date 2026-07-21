@@ -153,6 +153,19 @@ struct DaltonSphericalShell {
         n_ao = n_ao_table[l];
         norms.resize(static_cast<size_t>(n_ao));
 
+        // Molden contraction coefficients multiply UNIT-NORMALIZED primitives,
+        // whose norm depends on the exponent: N(a) ∝ (2a/pi)^{3/4} (4a)^{l/2}.
+        // Fold that a-dependence into the coefficients BEFORE contracting —
+        // otherwise every contracted shell (nprim>1) has wrong RELATIVE
+        // primitive weights, which the per-component renormalization below
+        // cannot repair (it only fixes the overall scale). This bug broke MO
+        // orthonormality at the 0.3 level on aug-cc-pVXZ water (caught by
+        // tpa_from_dalton's C^T·S·C import-fidelity check, 2026-07-21); the
+        // constant (2l-1)!!-type factor is per-shell and absorbed by norms[].
+        for (size_t p = 0; p < exponents.size(); ++p)
+            raw_coeffs[p] *= std::pow(2.0 * exponents[p] / M_PI, 0.75) *
+                             std::pow(4.0 * exponents[p], 0.5 * l);
+
         if (l == 0) {
             GtoHarmonic h = {{1.0, 0, 0, 0}};
             double ov = combo_overlap(exponents, raw_coeffs, h, h);

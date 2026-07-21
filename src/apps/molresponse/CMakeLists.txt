@@ -106,6 +106,14 @@ add_mad_executable(test_fd_subworld_fanout
 add_mad_executable(dump_mra_trees
                    "tools/dump_mra_trees.cpp;GroundState.cpp"
                    "MADchem")
+# tpa_from_dalton: contraction-only 2PA harness — reads DALTON's own converged
+# vectors (RSPVEC: EXCITLAB X_f + DIPLEN N^A(w_f/2); molden.inp: occupied MOs),
+# projects them to MRA, and passes them through tpa_sources/tpa_moment with ZERO
+# solves. Equation-vs-vector discriminator against DALTON's printed S tensors
+# (TPA_SCOPING.md §5k). No HDF5 needed (text molden + Fortran-binary RSPVEC).
+add_mad_executable(tpa_from_dalton
+                   "tools/tpa_from_dalton.cpp;GroundState.cpp"
+                   "MADchem")
 # Native HTG export is optional: only when -DMADNESS_ENABLE_VTK=ON found VTK.
 # Guarded by MADNESS_HAS_VTK in the source; a no-VTK build is unchanged.
 if(MADNESS_ENABLE_VTK AND VTK_FOUND)
