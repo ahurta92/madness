@@ -402,6 +402,23 @@ int main(int argc, char **argv) {
           ctx.es_maxrotn = std::stod(parser.value("maxrotn"));
         if (parser.key_exists("es-guess"))
           ctx.es_guess = parse_es_guess_mode(parser.value("es-guess"));
+        // --tpa-residue [--tpa-prefactor=X]: corrected single-residue 2PA
+        // contraction (kernels/tpa.hpp tpa_moment_residue) instead of the
+        // legacy beta-reuse candidate.
+        if (parser.key_exists("tpa-residue")) ctx.tpa_residue = true;
+        if (parser.key_exists("tpa-prefactor"))
+          ctx.tpa_prefactor = std::stod(parser.value("tpa-prefactor"));
+        if (parser.key_exists("tpa-decompose")) ctx.tpa_decompose = true;
+        if (parser.key_exists("tpa-diag-only")) ctx.tpa_diag_only = true;
+        // --tpa-roots=0,2 : per-root filter (parallel verification; read-only)
+        if (parser.key_exists("tpa-roots")) {
+          std::stringstream rss(parser.value("tpa-roots"));
+          std::string rtok;
+          while (std::getline(rss, rtok, ','))
+            if (!rtok.empty()) ctx.tpa_roots.push_back(std::stoi(rtok));
+          // concurrent per-root processes share one calc dir: no persistence
+          ResponseMetadata::read_only() = true;
+        }
           // accepts: random | solid[_harmonics] | virtual[_ao]
         if (parser.key_exists("lock-converged"))
           ctx.es_lock_converged = true;

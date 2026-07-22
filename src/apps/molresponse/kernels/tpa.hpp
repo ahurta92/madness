@@ -100,6 +100,225 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
                     tpa_sources(world, g0, Xf, mu_resp, mu_op));
 }
 
+/// SINGLE-RESIDUE 2PA moment (Parker JCTC 2018 / DALTON QRSMO), the corrected
+/// channel assignment (TPA_SCOPING §5l-m). The residue of beta is taken in the
+/// A channel (omega_sigma = omega_B+omega_C -> omega_f), so:
+///   * V^{bc} is built from the TWO PHOTON RESPONSES N^b, N^c (both at
+///     omega_f/2) WITH their dipole operators — the exact quadratic RHS beta
+///     uses (Eq. 19 / compute_vbc);
+///   * the A-channel response is REPLACED by the eigenvector X_f, so the
+///     mu_A property terms (beta's b2/b3) drop — the contraction is the bare
+///     paired metric inner (beta's b1 only):
+///       S_bc = prefactor * ( <x_f|V^{bc}.x> + <y_f|V^{bc}.y> )
+///   * normalization: the formula assumes the Parker/TDHF convention
+///     X^t X - Y^t Y = 1 over spin-adapted vectors == 0.5 over our spatial
+///     functions. Our ES solver normalizes the SPATIAL metric to 1, so its
+///     eigenvectors carry sqrt(2) vs that convention -> fold C_N into
+///     `prefactor` (pinned empirically via tools/tpa_from_dalton).
+/// S is symmetric by construction (compute_vbc symmetrizes the (B,C)+(C,B)
+/// halves), so only 6 V^{bc} builds per root.
+inline madness::Tensor<double>
+tpa_moment_residue(madness::World &world, const ResponseGroundState &g0,
+                   const ResponseStateXY<ClosedShell> &Xf,
+                   const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
+                   const std::array<madness::real_function_3d, 3> &mu_op,
+                   double prefactor = 1.0) {
+  using namespace madness;
+  Tensor<double> S(3L, 3L);
+  for (int b = 0; b < 3; ++b) {
+    for (int c = b; c < 3; ++c) {
+      const double t0 = wall_time();
+      if (world.rank() == 0) {
+        printf("  [TPA residue] pair %c%c (%d/6): building V^{bc} "
+               "(2 orderings x 3 two-electron builds)...\n",
+               "xyz"[b], "xyz"[c], b * (5 - b) / 2 + c + 1);
+        fflush(stdout);
+      }
+      auto V = vbc::compute_vbc<ClosedShell>(
+          world, g0, mu_resp[static_cast<size_t>(b)],
+          mu_resp[static_cast<size_t>(c)], mu_op[static_cast<size_t>(b)],
+          mu_op[static_cast<size_t>(c)]);
+      const double mx = inner(Xf.x_alpha, V.x_alpha);
+      const double my = inner(Xf.y_alpha, V.y_alpha);
+      // Diagnostic: both metric pairings. C_N derivation (TPA_SCOPING §5m)
+      // forces + if the ES solver's y-sign convention matches the FD one that
+      // validated beta's b1; the M− column decides that empirically (the
+      // ~6% √2-vs-measured residual is exactly y-pairing sized).
+      if (world.rank() == 0)
+        printf("  [TPA residue] pair %c%c (%d/6): M+ = %+.6f   M- = %+.6f   "
+               "(x-part %+.6f, y-part %+.6f)   [%.1f s]\n",
+               "xyz"[b], "xyz"[c], b * (5 - b) / 2 + c + 1, mx + my, mx - my,
+               mx, my, wall_time() - t0);
+               fflush(stdout);
+      S(b, c) = prefactor * (mx + my);
+      S(c, b) = S(b, c);
+    }
+  }
+  return S;
+}
+
+/// ONE-ELECTRON part of the single-residue contraction: the mu-operator terms
+/// of V^{bc} only (compute_vbc_i's fb = -Q(v*c) and fphi = c*<phi|v|phi>,
+/// both orderings) — no two-electron builds, so this costs inner products.
+/// Validated against DALTON's A2B/A2C/X2 families (<=1.3% on every d-aug-QZ
+/// ledger element). Production 2PA is S = C_N*(S_1e + S_E3corr), C_N=sqrt(2)
+/// (verified 6/6 vs DALTON 2026-07-22, verify_e3_k6.py).
+inline madness::Tensor<double>
+tpa_moment_residue_1e(madness::World &world, const ResponseGroundState &g0,
+                      const ResponseStateXY<ClosedShell> &Xf,
+                      const std::array<ResponseStateXY<ClosedShell>, 3> &mu_resp,
+                      const std::array<madness::real_function_3d, 3> &mu_op,
+                      double prefactor = 1.0) {
+  using namespace madness;
+  const vecfuncT &phi = g0.amo;
+  std::array<Tensor<double>, 3> mv;   // <phi_i | mu_a | phi_j>
+  for (int a = 0; a < 3; ++a)
+    mv[a] = matrix_inner(world, phi, mul(world, mu_op[a], phi, true));
+  // one ordered half: v = mu_b acting on the C-state (mirrors compute_vbc_i)
+  auto half = [&](int b, int c) {
+    const auto &cx = mu_resp[static_cast<size_t>(c)].x_alpha;
+    const auto &cy = mu_resp[static_cast<size_t>(c)].y_alpha;
+    const auto &v = mu_op[static_cast<size_t>(b)];
+    vecfuncT vx = g0.Qa(mul(world, v, cx, true)); scale(world, vx, -1.0);
+    vecfuncT vy = g0.Qa(mul(world, v, cy, true)); scale(world, vy, -1.0);
+    gaxpy(world, 1.0, vx, 1.0, transform(world, cx, mv[b], true));
+    gaxpy(world, 1.0, vy, 1.0, transform(world, cy, mv[b], true));
+    return inner(Xf.x_alpha, vx) + inner(Xf.y_alpha, vy);
+  };
+  Tensor<double> S(3L, 3L);
+  for (int b = 0; b < 3; ++b)
+    for (int c = b; c < 3; ++c)
+      S(b, c) = S(c, b) = prefactor * (half(b, c) + half(c, b));
+  return S;
+}
+
+/// CORRECTED two-electron E[3] part of the TPA single residue (TPA_SCOPING
+/// §5q — block-level derivation from DALTON Q3FOCK/C3FCKO with the
+/// (x,y)<->(Z,-Y) dictionary and VECB = -swap(N+) [ANTSYM=-1, DIPLEN]).
+/// Returns the DALTON-units per-element scalar (== DALTON 'E3 CONTRIBUTION TO
+/// SMOM' for this pair; the sqrt(2) is INCLUDED). Add to the UNCHANGED
+/// one-electron content. Exactly symmetric under B<->C (analytic proof at the
+/// integral level; assert numerically). Three term families:
+///   T1: G[D12], D12 = |yb><yf| + |xf><xb| - |zetaD><phi|,
+///       zetaD_i = sum_j phi_j (<x^b_j|x^f_i> + <y^f_j|y^b_i>)   [b-f SAME-block]
+///   T2: gamma_B (standard channel) against {x^f, y^c, occ-transfers}
+///   T3: gamma_F (TRANSPOSED channel — the eigenvector's own kernel, missing
+///       from compute_vbc) against {y^b, y^c, occ-transfers}
+inline double
+tpa_e3_residue(madness::World &world, const ResponseGroundState &g0,
+               const ResponseStateXY<ClosedShell> &B,
+               const ResponseStateXY<ClosedShell> &C,
+               const ResponseStateXY<ClosedShell> &F) {
+  using namespace madness;
+  const vecfuncT &phi = g0.amo;
+  const vecfuncT &xb = B.x_alpha, &yb = B.y_alpha;
+  const vecfuncT &xc = C.x_alpha, &yc = C.y_alpha;
+  const vecfuncT &xf = F.x_alpha, &yf = F.y_alpha;
+  const double cxc = g0.c_xc, lo = g0.lo;
+
+  // occ-space transfer functions (transform(w, v, M)_i = sum_j v_j M(j,i))
+  auto zetaD = transform(world, phi,
+                         matrix_inner(world, xb, xf) +
+                             matrix_inner(world, yf, yb), true);
+  vecfuncT nzetaD = copy(world, zetaD);
+  scale(world, nzetaD, -1.0);
+  auto z_xfxc = transform(world, phi, matrix_inner(world, xf, xc), true);
+  auto z_yfyc = transform(world, phi, matrix_inner(world, yf, yc), true);
+  auto z_ybxc = transform(world, phi, matrix_inner(world, yb, xc), true);
+  auto z_xbyc = transform(world, phi, matrix_inner(world, xb, yc), true);
+
+  // T1: G[D12] = 2J[rho12] - K[D12], D12 = |yb><yf| + |xf><xb| - |zetaD><phi|
+  const double t1s = wall_time();
+  real_function_3d rho12 = common_ops::dot(world, yb, yf);
+  rho12 += common_ops::dot(world, xf, xb);
+  rho12 += common_ops::dot(world, phi, nzetaD);
+  rho12.scale(2.0);
+  rho12.truncate();
+  auto J12 = apply(*g0.coulop, rho12);
+  auto t1x = two_electron::apply_gamma_raw(
+      world, J12, phi, {{yf, yb}, {xb, xf}, {phi, nzetaD}}, cxc, lo);
+  auto t1y = two_electron::apply_gamma_raw(
+      world, J12, phi, {{yb, yf}, {xf, xb}, {nzetaD, phi}}, cxc, lo);
+  const double T1 = inner(xc, t1x) + inner(yc, t1y);
+
+  // T2: gamma_B, standard channel (same pairs as vbc's gbc call)
+  const double t2s = wall_time();
+  real_function_3d rhoB = common_ops::dot(world, phi, xb);
+  rhoB += common_ops::dot(world, phi, yb);
+  rhoB.scale(2.0);
+  rhoB.truncate();
+  auto JB = apply(*g0.coulop, rhoB);
+  auto gB = [&](const vecfuncT &t) {
+    return two_electron::apply_gamma_raw(world, JB, t, {{xb, phi}, {phi, yb}},
+                                         cxc, lo);
+  };
+  const double T2 = -inner(z_xfxc, gB(phi))    // 2a
+                    + inner(xc, gB(xf))        // 2b
+                    + inner(yf, gB(yc))        // 2c
+                    - inner(phi, gB(z_yfyc));  // 2d
+
+  // T3: gamma_F, TRANSPOSED channel (the eigenvector's kernel)
+  real_function_3d rhoF = common_ops::dot(world, phi, xf);
+  rhoF += common_ops::dot(world, phi, yf);
+  rhoF.scale(2.0);
+  rhoF.truncate();
+  auto JF = apply(*g0.coulop, rhoF);
+  auto gFt = [&](const vecfuncT &t) {
+    return two_electron::apply_gamma_raw(world, JF, t, {{phi, xf}, {yf, phi}},
+                                         cxc, lo);
+  };
+  const double t3s = wall_time();
+  const double T3 = +inner(xc, gFt(yb))        // 3a
+                    - inner(z_ybxc, gFt(phi))  // 3b
+                    + inner(xb, gFt(yc))       // 3c
+                    - inner(phi, gFt(z_xbyc)); // 3d
+
+  if (world.rank() == 0)
+    printf("      [e3corr timing] T1(G[D12]) %.1fs  T2(gammaB) %.1fs  "
+           "T3(gammaF) %.1fs   [T1=%+.5f T2=%+.5f T3=%+.5f]\n",
+           t2s - t1s, t3s - t2s, wall_time() - t3s, T1, T2, T3);
+           fflush(stdout);
+  // Global minus: DALTON contracts with VECB = -swap(N^B) for antisymmetric
+  // (DIPLEN) operators (ANTSYM=-1, rspprp.F:543); our N^B carries the opposite
+  // overall sign. Verified k6 2026-07-22: without it all six ledger elements
+  // give E3 ratio -1.00 (spread 0.966..1.003), with it +1.00; 1e unaffected.
+  return -std::sqrt(2.0) * (T1 + T2 + T3);
+}
+
+/// Two-array variant for convention probes: V^{bc} built from respB[b] and
+/// respC[c] (e.g. respC = the (x<->y)-swapped responses, testing the -omega /
+/// adjoint form of one E3 channel that DALTON's T3DRV uses — TPA_SCOPING §5n:
+/// the one-electron terms match Dalton but E3(N+,N+) does not; the candidate
+/// correct object is E3(N+,N-)). Result symmetrized over (b,c).
+inline madness::Tensor<double>
+tpa_moment_residue_bc(madness::World &world, const ResponseGroundState &g0,
+                      const ResponseStateXY<ClosedShell> &Xf,
+                      const std::array<ResponseStateXY<ClosedShell>, 3> &respB,
+                      const std::array<ResponseStateXY<ClosedShell>, 3> &respC,
+                      const std::array<madness::real_function_3d, 3> &opB,
+                      const std::array<madness::real_function_3d, 3> &opC,
+                      double prefactor = 1.0) {
+  using namespace madness;
+  Tensor<double> S(3L, 3L);
+  for (int b = 0; b < 3; ++b) {
+    for (int c = 0; c < 3; ++c) {
+      auto V = vbc::compute_vbc<ClosedShell>(
+          world, g0, respB[static_cast<size_t>(b)],
+          respC[static_cast<size_t>(c)], opB[static_cast<size_t>(b)],
+          opC[static_cast<size_t>(c)]);
+      const double m =
+          inner(Xf.x_alpha, V.x_alpha) + inner(Xf.y_alpha, V.y_alpha);
+      S(b, c) = prefactor * m;
+    }
+  }
+  // symmetrize (degenerate photons)
+  Tensor<double> Ssym(3L, 3L);
+  for (int b = 0; b < 3; ++b)
+    for (int c = 0; c < 3; ++c)
+      Ssym(b, c) = 0.5 * (S(b, c) + S(c, b));
+  return Ssym;
+}
+
 /// Rotationally-invariant two-photon strength for parallel linear polarization:
 ///   delta^|| = Sum_ab ( F S_aa S_bb + G S_ab S_ab + H S_ab S_ba ), F=G=H=2.
 /// (Real S here — TDA, undamped, off-resonance.) This is what Dalton's

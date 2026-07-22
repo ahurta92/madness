@@ -94,6 +94,26 @@ struct ExecutorSettings {
   // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
   // closed-shell path (random guess, 10 warmup iters, oversampled warmup, KAIN).
   ESGuessMode       es_guess              = ESGuessMode::SolidHarmonics;  // sweep-validated default
+  // --tpa-residue: contract the 2PA moment with the corrected single-residue
+  // form (tpa::tpa_moment_residue — X_f in the residue slot against V^{bc}
+  // built from the two photon responses) instead of the legacy beta-reuse
+  // candidate. --tpa-prefactor scales the residue moment (normalization C_N).
+  bool              tpa_residue           = false;
+  double            tpa_prefactor         = 1.0;
+  // --tpa-decompose: also compute the zero-operator (pure two-electron E3)
+  // variant of the residue and print the per-element E3/1e split + the
+  // phase- and normalization-invariant fraction f = E3/total (compare vs the
+  // patched-DALTON 'E3 CONTRIBUTION TO SMOM' ledger, TPA_SCOPING §5n).
+  bool              tpa_decompose         = false;
+  // --tpa-diag-only: print the cross-code diagnostics (norms, transition
+  // dipoles, alpha(w/2)) from the loaded states and SKIP the contraction and
+  // all metadata writes — a fast read-only pass over a converged calc dir.
+  bool              tpa_diag_only         = false;
+  // --tpa-roots=0,2 : restrict the TPA loop to these root indices (0-based).
+  // Enables poor-man's macrotasking: N independent single-rank processes, one
+  // per root, on one node. When set, the metadata/property write is SKIPPED
+  // (read-only pass) so concurrent per-root processes cannot race.
+  std::vector<int>  tpa_roots;
   int               es_tda_warmup_iters   = 10;
   // Warmup oversampling: keep the lowest n_roots of ceil(factor*n_roots)
   // partially-converged warmup trials. 3.0 (was 2.0) because on the PRODUCTION
@@ -1648,9 +1668,13 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
 
   std::vector<double> omegas;
   std::vector<ResponseStateXY<ClosedShell>> Xfs;
+  const double t_es0 = madness::wall_time();
   const bool loaded =
       es_full ? load_tpa_es_xy<Full>(world, ctx.calc_dir, omegas, Xfs)
               : load_tpa_es_xy<TDA>(world, ctx.calc_dir, omegas, Xfs);
+  if (world.rank() == 0)
+    printf("[TPA timing] ES bundle load: %.1f s\n", madness::wall_time() - t_es0);
+    fflush(stdout);
   if (!loaded) {
     if (world.rank() == 0)
       print("[TPA] no ES bundle under", ctx.calc_dir, "— SKIPPED");
@@ -1674,18 +1698,27 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   std::vector<madness::Tensor<double>> tbl_S;
   std::vector<tpa::Observables>        tbl_o;
   for (long f = 0; f < nroots; ++f) {
+    if (!ctx.tpa_roots.empty() &&
+        std::find(ctx.tpa_roots.begin(), ctx.tpa_roots.end(),
+                  static_cast<int>(f)) == ctx.tpa_roots.end())
+      continue;   // --tpa-roots filter (parallel per-root verification)
     const double wf = omegas[f];
     const double wf_half = 0.5 * wf;
     const ResponseStateXY<ClosedShell> &Xf = Xfs[f];   // real Y for RPA, 0 for TDA
 
     std::array<ResponseStateXY<ClosedShell>, 3> mu_resp;
     bool ok = true;
+    const double t_fd0 = madness::wall_time();
     for (int a = 0; a < 3; ++a) {
       auto r = detail_exec::load_fd_as_xy<ClosedShell>(
           world, ctx.calc_dir, Perturbation::dipole(a), wf_half);
       if (!r) { ok = false; break; }
       mu_resp[a] = std::move(*r);
     }
+    if (world.rank() == 0)
+      printf("[TPA timing] root %ld/%ld: 3 FD loads @ w=%.5f: %.1f s\n",
+             f + 1, nroots, wf_half, madness::wall_time() - t_fd0);
+             fflush(stdout);
     if (!ok) {
       if (world.rank() == 0)
         print("[TPA] root", f, " omega_f=", wf,
@@ -1693,18 +1726,145 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       continue;
     }
 
-    // Build the 3 residue 2nd-order sources (the TPA analogue of beta's VBC
-    // quadratic source), SAVE them to disk (mirrors beta/Raman vbc_states —
-    // reusable + inspectable/isosurface-able), then contract with them.
-    auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
-    std::vector<std::string> src_files;
-    for (int b = 0; b < 3; ++b) {
-      const std::string src = ctx.calc_dir + "/tpa_src__root" +
-          std::to_string(f) + "__" + std::string(1, "xyz"[b]) + "__" + key;
-      vbc_b[b].save(world, src);
-      src_files.push_back(std::filesystem::path(src).filename().string());
+    // ---- cross-code diagnostics (PrintLevel >= Normal or --tpa-diag-only):
+    // vector norms, transition dipoles/oscillators, and alpha(omega_f/2) from
+    // the SAME loaded states the contraction uses — line-for-line comparable
+    // with the patched-DALTON QRSMONORM + QRLRVE output (TPA_SCOPING §5n/§5o).
+    if (static_cast<int>(ctx.print_level) >= 1 || ctx.tpa_diag_only) {
+      const double xx = inner(Xf.x_alpha, Xf.x_alpha);
+      const double yy = inner(Xf.y_alpha, Xf.y_alpha);
+      if (world.rank() == 0)
+        printf("  [TPA diag] root %ld  omega=%.8f (%.3f eV)\n"
+               "    Xf norms: |x|=%.10f  |y|=%.10f  x2-y2=%.10f "
+               "(DALTON C(EXCI): Z2-Y2=0.5 => ours/DALTON = sqrt2)\n",
+               f, wf, wf * 27.211386245988, std::sqrt(xx), std::sqrt(yy),
+               xx - yy);
+      std::array<vecfuncT, 3> mu_amo;
+      for (int a = 0; a < 3; ++a) mu_amo[a] = mul(world, mu_op[a], g0.amo, true);
+      // transition dipole + oscillator (Parker-normalized: M = -sqrt2 * t)
+      for (int a = 0; a < 3; ++a) {
+        const double t = inner(mu_amo[a], Xf.x_alpha) + inner(mu_amo[a], Xf.y_alpha);
+        if (world.rank() == 0 && std::abs(t) > 1e-6)
+          printf("    transition dipole %c: t=%+.8f  M=-sqrt2*t=%+.8f  "
+                 "osc=(2/3)w*2t^2=%.6f\n",
+                 "xyz"[a], t, -std::sqrt(2.0) * t,
+                 (2.0 / 3.0) * wf * 2.0 * t * t);
+      }
+      // alpha(omega_f/2) full 3x3 from the loaded FD states (validated formula)
+      for (int a = 0; a < 3; ++a) {
+        const double nx = inner(mu_resp[a].x_alpha, mu_resp[a].x_alpha);
+        const double ny = inner(mu_resp[a].y_alpha, mu_resp[a].y_alpha);
+        if (world.rank() == 0)
+          printf("    N^%c(w/2) norms: |x|=%.10f  |y|=%.10f\n", "xyz"[a],
+                 std::sqrt(nx), std::sqrt(ny));
+      }
+      if (world.rank() == 0) printf("    alpha(w=%.6f):", wf_half);
+      for (int a = 0; a < 3; ++a) {
+        const double al = -2.0 * (inner(mu_resp[a].x_alpha, mu_amo[a]) +
+                                  inner(mu_resp[a].y_alpha, mu_amo[a]));
+        if (world.rank() == 0) printf("  %c%c=%.6f", "xyz"[a], "xyz"[a], al);
+      }
+      if (world.rank() == 0) printf("   (DALTON: QRLRVE <<A;A>> at same w)\n");
     }
-    auto S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
+    if (ctx.tpa_diag_only) continue;   // diagnostics only — no contraction,
+                                       // no metadata writes (read-only pass)
+
+    madness::Tensor<double> S;
+    std::vector<std::string> src_files;
+    if (ctx.tpa_residue) {
+      // PRODUCTION composition (TPA_SCOPING §5m + §5q, verified 6/6 vs DALTON
+      // d-aug-QZ 2026-07-22 via verify_e3_k6.py):
+      //   S = C_N * ( S_1e + S_E3corr ),   C_N = sqrt(2)
+      // S_1e: mu-operator terms of V^{bc} only (tpa_moment_residue_1e; cheap).
+      // S_E3corr: corrected two-electron composition (tpa_e3_residue; DALTON
+      // units WITH the sqrt2 — divided out here so C_N is applied exactly
+      // once and ctx.tpa_prefactor stays a pure A/B knob on top).
+      // BOTH orderings are computed off-diagonal: the composition is
+      // analytically b<->c symmetric, so the asymmetry is a built-in
+      // correctness assertion (DALTON's E3 shows the same invariance).
+      if (world.rank() == 0) {
+        print("[TPA] contraction: single-residue, S = sqrt2*(1e + E3corr),"
+              " prefactor =", ctx.tpa_prefactor);
+        fflush(stdout);
+      }
+      const auto S_1e =
+          tpa::tpa_moment_residue_1e(world, g0, Xf, mu_resp, mu_op, 1.0);
+      madness::Tensor<double> S_e3c(3L, 3L);
+      double max_asym = 0.0;
+      for (int b3 = 0; b3 < 3; ++b3) {
+        for (int c3 = b3; c3 < 3; ++c3) {
+          if (world.rank() == 0) {
+            printf("  [TPA e3corr] root %ld pair %c%c%s ...\n", f,
+                   "xyz"[b3], "xyz"[c3],
+                   (b3 != c3 ? " (both orderings)" : ""));
+            fflush(stdout);
+          }
+          const double ebc = tpa::tpa_e3_residue(
+              world, g0, mu_resp[static_cast<size_t>(b3)],
+              mu_resp[static_cast<size_t>(c3)], Xf);
+          double e = ebc;
+          if (b3 != c3) {
+            const double ecb = tpa::tpa_e3_residue(
+                world, g0, mu_resp[static_cast<size_t>(c3)],
+                mu_resp[static_cast<size_t>(b3)], Xf);
+            max_asym = std::max(max_asym, std::abs(ebc - ecb));
+            e = 0.5 * (ebc + ecb);
+          }
+          S_e3c(b3, c3) = S_e3c(c3, b3) = e / std::sqrt(2.0);
+        }
+      }
+      S = madness::copy(S_1e);
+      S += S_e3c;
+      S.scale(std::sqrt(2.0) * ctx.tpa_prefactor);
+      if (world.rank() == 0)
+        printf("  [TPA] root %ld assembled: S = sqrt2*(1e + E3corr)   "
+               "b<->c max asym = %.2e\n", f, max_asym);
+      if (ctx.tpa_decompose) {
+        // A/B diagnostics vs the LEGACY vbc-based contraction (old E3
+        // composition, kept for comparison): table stays in prefactor-1
+        // "ours" units so verify_e3_k6.py's x sqrt(2) recovers DALTON.
+        auto S_full = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, mu_op,
+                                              1.0);
+        real_function_3d zop = madness::copy(mu_op[0]); zop.scale(0.0);
+        std::array<real_function_3d, 3> zops{zop, madness::copy(zop),
+                                             madness::copy(zop)};
+        auto S_e3 = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, zops,
+                                            1.0);
+        if (world.rank() == 0) {
+          double max_1e_dev = 0.0;   // direct 1e vs (legacy full - legacy E3)
+          for (int b3 = 0; b3 < 3; ++b3)
+            for (int c3 = 0; c3 < 3; ++c3)
+              max_1e_dev = std::max(
+                  max_1e_dev, std::abs(S_1e(b3, c3) - (S_full(b3, c3) -
+                                                       S_e3(b3, c3))));
+          printf("  [TPA decompose] root %ld (E3old, E3corr, 1e, total)   "
+                 "b<->c max asym = %.2e   1e direct-vs-derived max dev = %.2e\n",
+                 f, max_asym, max_1e_dev);
+          const char *nm[6] = {"xx", "yy", "zz", "xy", "xz", "yz"};
+          const int ii[6] = {0, 1, 2, 0, 0, 1}, jj[6] = {0, 1, 2, 1, 2, 2};
+          for (int e = 0; e < 6; ++e) {
+            const double tot = S_full(ii[e], jj[e]), e3 = S_e3(ii[e], jj[e]);
+            printf("    %s: E3=%+.6f  E3corr=%+.6f  1e=%+.6f  tot=%+.6f  "
+                   "totcorr=%+.6f\n",
+                   nm[e], e3, S_e3c(ii[e], jj[e]), tot - e3, tot,
+                   tot - e3 + S_e3c(ii[e], jj[e]));
+                   fflush(stdout);
+          }
+        }
+      }
+    } else {
+      // Legacy candidate: build the 3 axis sources (the TPA analogue of beta's
+      // VBC quadratic source), SAVE them to disk (mirrors beta/Raman
+      // vbc_states — reusable + inspectable/isosurface-able), then contract.
+      auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
+      for (int b = 0; b < 3; ++b) {
+        const std::string src = ctx.calc_dir + "/tpa_src__root" +
+            std::to_string(f) + "__" + std::string(1, "xyz"[b]) + "__" + key;
+        vbc_b[b].save(world, src);
+        src_files.push_back(std::filesystem::path(src).filename().string());
+      }
+      S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
+    }
     const auto obs = tpa::observables(S, wf);
 
     if (world.rank() == 0) {
@@ -1767,7 +1927,9 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     fflush(stdout);
   }
 
-  if (world.rank() == 0 && !rows.empty()) {
+  // Root-filtered runs are read-only (concurrent per-root processes must not
+  // race on the metadata file); full runs record properties/tpa as before.
+  if (world.rank() == 0 && !rows.empty() && ctx.tpa_roots.empty()) {
     auto meta = ResponseMetadata::load_or_create(
         ctx.calc_dir + "/response_metadata.json");
     for (auto &row : rows) meta.add_property("tpa", key, row);

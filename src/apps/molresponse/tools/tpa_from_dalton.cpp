@@ -165,6 +165,12 @@ int main(int argc, char **argv) {
       parser.key_exists("scale-na") ? std::stod(parser.value("scale-na")) : 1.0;
   const double yfx = parser.key_exists("yflip-xf") ? -1.0 : 1.0;
   const double yfn = parser.key_exists("yflip-na") ? -1.0 : 1.0;
+  // --residue: use the corrected single-residue contraction (X_f in the A slot
+  // against V^{bc} built from the two photon responses; beta's b1 term only)
+  // instead of the legacy candidate. --prefactor scales the residue moment.
+  const bool residue = parser.key_exists("residue");
+  const double prefac =
+      parser.key_exists("prefactor") ? std::stod(parser.value("prefactor")) : 1.0;
   const double H2EV = 27.211386245988;
 
   {
@@ -200,6 +206,9 @@ int main(int argc, char **argv) {
     print("  thresh =", thresh, " k =", default_k_for_thresh(thresh), " lo =", lo);
     print("  scale_xf =", scale_xf, " scale_na =", scale_na,
           " yflip_xf =", (yfx < 0), " yflip_na =", (yfn < 0));
+    print("  contraction =", residue ? "RESIDUE (X_f | V^{bc}[N,N]), b1-only"
+                                     : "legacy candidate (beta_abc, C=X_f)",
+          " prefactor =", prefac);
 
     // ---- MRA setup + ground state ------------------------------------------
     Tensor<double> cell(3L, 2L);
@@ -311,8 +320,33 @@ int main(int argc, char **argv) {
       printf("\n");
 
       // ---- the contraction (zero solves) ----
-      auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
-      auto S     = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
+      Tensor<double> S;
+      if (parser.key_exists("decompose")) {
+        // Term-class decomposition of the residue: S_E3 = the pure two-electron
+        // part (V^{bc} with ZERO one-electron operators) and S_1e = full - E3
+        // (the mu one-electron/property content of V). The correct residue's
+        // term weights (Dalton QRSMO: E[3] - B[2] - 2 A[2]) can then be solved
+        // per element from Dalton's reference: Dalton = a*S_E3 + b*S_1e.
+        real_function_3d zop = copy(mu_op[0]); zop.scale(0.0);
+        std::array<real_function_3d, 3> zops{zop, copy(zop), copy(zop)};
+        auto S_e3   = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, zops, 1.0);
+        auto S_full = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, mu_op, 1.0);
+        if (world.rank() == 0) {
+          printf("  DECOMPOSE root %d (Sxx Syy Szz Sxy Sxz Syz):\n", rsel);
+          printf("    S_E3  : %9.4f %9.4f %9.4f %9.4f %9.4f %9.4f\n",
+                 S_e3(0,0), S_e3(1,1), S_e3(2,2), S_e3(0,1), S_e3(0,2), S_e3(1,2));
+          printf("    S_1e  : %9.4f %9.4f %9.4f %9.4f %9.4f %9.4f\n",
+                 S_full(0,0)-S_e3(0,0), S_full(1,1)-S_e3(1,1),
+                 S_full(2,2)-S_e3(2,2), S_full(0,1)-S_e3(0,1),
+                 S_full(0,2)-S_e3(0,2), S_full(1,2)-S_e3(1,2));
+        }
+        S = S_full;
+      } else if (residue) {
+        S = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, mu_op, prefac);
+      } else {
+        auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
+        S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
+      }
       const auto obs = tpa::observables(S, wf);
       tbl_f.push_back(rsel); tbl_w.push_back(wf);
       tbl_S.push_back(S);    tbl_o.push_back(obs);
