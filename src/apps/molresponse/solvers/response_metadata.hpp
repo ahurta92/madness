@@ -46,6 +46,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unistd.h>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -193,11 +194,21 @@ public:
     j_["run_summary"]["dropped_work"] = items;
   }
 
+  /// Process-wide read-only switch. Concurrent per-root verification
+  /// processes (--tpa-roots) share one calc dir; with this set every save()
+  /// is a no-op so siblings cannot race on the index (in-memory mutations
+  /// like the derived-FD expansion still happen and are read back normally).
+  static bool &read_only() { static bool ro = false; return ro; }
+
   /// Atomic write. Throws on filesystem error — INCLUDING a failed write or
   /// close (ENOSPC etc.): an unchecked stream would let the rename install a
   /// truncated tmp over a good index. The bad tmp is removed on failure.
   void save() const {
-    const std::string tmp = path_ + ".tmp";
+    if (read_only()) return;
+    // pid-unique tmp: with a fixed name, concurrent writers rename each
+    // other's tmp away and the loser dies on ENOENT (seen 2026-07-22 with
+    // 4 per-root TPA processes).
+    const std::string tmp = path_ + ".tmp." + std::to_string(::getpid());
     {
       std::ofstream out(tmp);
       if (!out) throw std::runtime_error(
