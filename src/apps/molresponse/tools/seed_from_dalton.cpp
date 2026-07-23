@@ -31,6 +31,7 @@
 
 #include <cmath>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -85,11 +86,13 @@ int main(int argc, char** argv) {
     }
 
     if (!parser.key_exists("rspvec") || !parser.key_exists("molden") ||
-        !parser.key_exists("n-occ")  || !parser.key_exists("root")   ||
-        !parser.key_exists("omega")  || !parser.key_exists("calc-dir")) {
+        !parser.key_exists("n-occ")  || !parser.key_exists("calc-dir") ||
+        !(parser.key_exists("root") || parser.key_exists("roots")) ||
+        !(parser.key_exists("omega") || parser.key_exists("omegas"))) {
         if (world.rank() == 0) {
             print("Usage: seed_from_dalton --rspvec=RSPVEC --molden=molden.inp "
                   "--n-occ=N --root=IDX --omega=<au> --calc-dir=DIR");
+            print("  multi-root: --roots=0,1,2 --omegas=w0,w1,w2 (one N-root bundle)");
             print("  [--thresh=1e-4] [--scale=<sqrt2>]");
         }
         finalize();
@@ -100,8 +103,29 @@ int main(int argc, char** argv) {
     const std::string molden_path = parser.value_raw("molden");
     const std::string calc_dir   = parser.value_raw("calc-dir");
     const int         n_occ      = std::stoi(parser.value("n-occ"));
-    const int         root_idx   = std::stoi(parser.value("root"));
-    const double      omega      = std::stod(parser.value("omega"));
+    // Multi-root: --roots=0,1,2 --omegas=w0,w1,w2 build ONE N-root seed
+    // bundle (what a production --es-roots=N solve warm-starts from).
+    // --root/--omega remain as the single-root spelling.
+    std::vector<int>    root_list;
+    std::vector<double> omega_list;
+    {
+        std::stringstream rs(parser.key_exists("roots") ? parser.value("roots")
+                                                        : parser.value("root"));
+        std::stringstream os(parser.key_exists("omegas")
+                                 ? parser.value("omegas")
+                                 : parser.value("omega"));
+        std::string t;
+        while (std::getline(rs, t, ','))
+            if (!t.empty()) root_list.push_back(std::stoi(t));
+        while (std::getline(os, t, ','))
+            if (!t.empty()) omega_list.push_back(std::stod(t));
+    }
+    if (root_list.empty() || root_list.size() != omega_list.size()) {
+        if (world.rank() == 0)
+            print("ERROR: --roots and --omegas must be same-length CSV lists.");
+        finalize();
+        return 2;
+    }
     const double      thresh     =
         parser.key_exists("thresh") ? std::stod(parser.value("thresh")) : 1e-4;
     const double      scale      =
@@ -115,14 +139,15 @@ int main(int argc, char** argv) {
     {
         // Read RSPVEC
         auto [info, entries] = read_rspvec(rspvec_path);
-        if (root_idx < 0 || root_idx >= static_cast<int>(entries.size())) {
-            if (world.rank() == 0)
-                print("ERROR: root index", root_idx, "out of range (file has",
-                      static_cast<int>(entries.size()), "entries).");
-            finalize();
-            return 2;
+        for (int ri : root_list) {
+            if (ri < 0 || ri >= static_cast<int>(entries.size())) {
+                if (world.rank() == 0)
+                    print("ERROR: root index", ri, "out of range (file has",
+                          static_cast<int>(entries.size()), "entries).");
+                finalize();
+                return 2;
+            }
         }
-        const auto& entry = entries[static_cast<size_t>(root_idx)];
 
         // Read Molden
         DaltonMoldenResult molden = read_molden(molden_path);
@@ -137,6 +162,22 @@ int main(int argc, char** argv) {
             return 2;
         }
 
+        // Set MADNESS cell and discretization parameters BEFORE projecting
+        Tensor<double> cell(3L, 2L);
+        for (int i = 0; i < 3; i++) { cell(i, 0) = -200.0; cell(i, 1) = 200.0; }
+        FunctionDefaults<3>::set_cell(cell);
+        FunctionDefaults<3>::set_k(k);
+        FunctionDefaults<3>::set_thresh(thresh);
+
+        // One N-root State: per root, split the RSPVEC entry, build
+        // D = C_vir @ X.T and project one Function per occupied orbital.
+        ESSolver<TDA, ClosedShell>::State s;
+        const size_t NR = root_list.size();
+        s.omega = Tensor<double>(static_cast<long>(NR));
+        std::vector<double> xnorms;
+        for (size_t rr = 0; rr < NR; ++rr) {
+        const auto& entry = entries[static_cast<size_t>(root_list[rr])];
+
         // Split RSPVEC entry into X (and optional Y)
         auto [X_flat, Y_flat] = split_ov(entry.vec, n_occ, n_vir);
         // X_flat: n_occ*n_vir, row-major (occ outer, vir inner)
@@ -145,7 +186,9 @@ int main(int argc, char** argv) {
         double xnorm2 = 0.0;
         for (double v : X_flat) xnorm2 += v * v;
         if (world.rank() == 0 && std::abs(xnorm2 - 0.5) > 0.05)
-            print("WARNING: ||X||^2 =", xnorm2, "(expected ~0.5 for TDA)");
+            print("WARNING: root", root_list[rr], "||X||^2 =", xnorm2,
+                  "(expected ~0.5 for TDA)");
+        xnorms.push_back(xnorm2);
 
         // Compute D = C_vir @ X.T: D[mu, i] = sum_a C[mu, n_occ+a] * X[i, a]
         // D is n_ao x n_occ; stored column-major (D_col_i = D[0..n_ao-1, i]).
@@ -167,13 +210,6 @@ int main(int argc, char** argv) {
                 D[static_cast<size_t>(mu + n_ao * i)] = val;
             }
         }
-
-        // Set MADNESS cell and discretization parameters BEFORE projecting
-        Tensor<double> cell(3L, 2L);
-        for (int i = 0; i < 3; i++) { cell(i, 0) = -200.0; cell(i, 1) = 200.0; }
-        FunctionDefaults<3>::set_cell(cell);
-        FunctionDefaults<3>::set_k(k);
-        FunctionDefaults<3>::set_thresh(thresh);
 
         // Project one Function<double,3> per occupied orbital
         ResponseStateX<ClosedShell> root;
@@ -198,35 +234,32 @@ int main(int argc, char** argv) {
             root.x_alpha.push_back(fn);
         }
 
-        // Assemble solver state
-        ESSolver<TDA, ClosedShell>::State s;
         s.roots.push_back(std::move(root));
-        s.omega = Tensor<double>(1L);
-        s.omega(0L) = omega;
+        s.omega(static_cast<long>(rr)) = omega_list[rr];
+        }  // per-root loop
+
         s.iter = 0;
-        s.last_bsh_residual     = std::vector<double>(1, 1.0);
-        s.last_density_residual = std::vector<double>(1, 1.0);
-        s.last_omega_residual   = std::vector<double>(1, 1.0);
+        s.last_bsh_residual     = std::vector<double>(NR, 1.0);
+        s.last_density_residual = std::vector<double>(NR, 1.0);
+        s.last_omega_residual   = std::vector<double>(NR, 1.0);
 
         save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
 
         if (world.rank() == 0) {
-            print("seed_from_dalton: wrote", n_occ, "orbital functions");
+            print("seed_from_dalton: wrote", static_cast<int>(NR),
+                  "root(s) x", n_occ, "orbital functions");
             print("  rspvec    =", rspvec_path);
             print("  molden    =", molden_path);
-            print("  root      =", root_idx,
-                  "  lab1 =", std::string(entry.lab1),
-                  "  freq1(au) =", entry.freq1);
-            print("  omega(au) =", omega,
-                  "  ||X||^2 =", xnorm2,
-                  "  scale =", scale);
+            for (size_t rr = 0; rr < NR; ++rr)
+                print("  root", root_list[rr], ": omega(au) =", omega_list[rr],
+                      "  ||X||^2 =", xnorms[rr], "  scale =", scale);
             print("  n_occ =", n_occ, "  n_vir =", n_vir,
                   "  n_ao =", n_ao, "  n_mo =", n_mo);
             print("  protocol_key =", key, "  k =", k, "  thresh =", thresh);
             print("  bundle    =", bundle);
             print("  Run (NP=1): test_calc_manager_run --archive=<gs> --calc-dir=",
-                  calc_dir, " --es-roots=1 --protocol=", thresh,
-                  " -> ES node Resumes from seed.");
+                  calc_dir, " --es-roots=", static_cast<int>(NR),
+                  " --protocol=", thresh, " -> ES node Resumes from seed.");
         }
     }  // all Function/State objects destruct here, before finalize()
 
