@@ -169,14 +169,17 @@ if(MADNESS_ENABLE_HDF5)
   target_include_directories(es_overlap PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(es_overlap PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(es_overlap PRIVATE MADNESS_HAS_HDF5)
-  # dalton-cis-seed (c): native DALTON reader — reads RSPVEC + molden.inp directly,
-  # projects x_i onto MRA, and emits the ES seed bundle without a Python/HDF5 intermediate.
-  # Does not call load_function_hdf5; MADNESS_HAS_HDF5 needed for response_state.hpp HDF5 path.
-  add_mad_executable(seed_from_dalton "tools/seed_from_dalton.cpp;GroundState.cpp" "MADchem")
-  target_include_directories(seed_from_dalton PRIVATE ${HDF5_INCLUDE_DIRS})
-  target_link_libraries(seed_from_dalton PRIVATE ${HDF5_LIBRARIES})
-  target_compile_definitions(seed_from_dalton PRIVATE MADNESS_HAS_HDF5)
 endif()
+
+# dalton-cis-seed (c): native DALTON reader — reads RSPVEC + molden.inp directly,
+# projects x_i onto MRA, and emits the ES seed bundle without a Python/HDF5
+# intermediate. Writes the NATIVE save_es_roots bundle (converged=false) that the
+# ES node Resumes from — no HDF5 at runtime, and every HDF5 path in
+# response_state.hpp is #ifdef MADNESS_HAS_HDF5 guarded, so this compiles in a
+# plain (non-HDF5) build. Kept OUT of the MADNESS_ENABLE_HDF5 block so it is
+# always available (enabling HDF5 here drags parallel-HDF5's Intel-MPI include
+# path in and breaks the xeonmax toolchain — see es_bench MPI notes).
+add_mad_executable(seed_from_dalton "tools/seed_from_dalton.cpp;GroundState.cpp" "MADchem")
 
 add_dependencies(applications-madness molresponse)
 
