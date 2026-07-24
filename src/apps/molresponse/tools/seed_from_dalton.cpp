@@ -93,7 +93,9 @@ int main(int argc, char** argv) {
             print("Usage: seed_from_dalton --rspvec=RSPVEC --molden=molden.inp "
                   "--n-occ=N --root=IDX --omega=<au> --calc-dir=DIR");
             print("  multi-root: --roots=0,1,2 --omegas=w0,w1,w2 (one N-root bundle)");
-            print("  [--thresh=1e-4] [--scale=<sqrt2>]");
+            print("  [--full] (write Full X,Y bundle for --es-full/RPA solve; "
+                  "default TDA X-only) [--yflip] (flip Y sign) "
+                  "[--thresh=1e-4] [--scale=<sqrt2>]");
         }
         finalize();
         return 2;
@@ -169,90 +171,123 @@ int main(int argc, char** argv) {
         FunctionDefaults<3>::set_k(k);
         FunctionDefaults<3>::set_thresh(thresh);
 
-        // One N-root State: per root, split the RSPVEC entry, build
-        // D = C_vir @ X.T and project one Function per occupied orbital.
-        ESSolver<TDA, ClosedShell>::State s;
-        const size_t NR = root_list.size();
-        s.omega = Tensor<double>(static_cast<long>(NR));
-        std::vector<double> xnorms;
-        for (size_t rr = 0; rr < NR; ++rr) {
-        const auto& entry = entries[static_cast<size_t>(root_list[rr])];
+        using vecfuncT = std::vector<madness::real_function_3d>;
 
-        // Split RSPVEC entry into X (and optional Y)
-        auto [X_flat, Y_flat] = split_ov(entry.vec, n_occ, n_vir);
-        // X_flat: n_occ*n_vir, row-major (occ outer, vir inner)
+        // --full: write a Full (X,Y) bundle the RPA/--es-full solve resumes
+        // from (default: TDA, X-only). DALTON stores the RPA de-excitation
+        // block as Y_ai; our y_alpha follows the eigenvector dictionary
+        // y_i = -sum_a Y_ai phi_a, so the projected Y block is NEGATED by
+        // default. --yflip toggles that sign for the convention check (the RPA
+        // metric ||X||^2-||Y||^2 is sign-independent; the discriminator is
+        // whether the seeded Full solve converges to the intended root).
+        const bool full   = parser.key_exists("full");
+        const double ysign = parser.key_exists("yflip") ? +1.0 : -1.0;
 
-        // Check TDA norm: ||X||^2 should be ~0.5
-        double xnorm2 = 0.0;
-        for (double v : X_flat) xnorm2 += v * v;
-        if (world.rank() == 0 && std::abs(xnorm2 - 0.5) > 0.05)
-            print("WARNING: root", root_list[rr], "||X||^2 =", xnorm2,
-                  "(expected ~0.5 for TDA)");
-        xnorms.push_back(xnorm2);
-
-        // Compute D = C_vir @ X.T: D[mu, i] = sum_a C[mu, n_occ+a] * X[i, a]
-        // D is n_ao x n_occ; stored column-major (D_col_i = D[0..n_ao-1, i]).
-        // mo_coeffs is column-major: C[mu + n_ao*mo_idx]
-        std::vector<double> D(static_cast<size_t>(n_ao * n_occ), 0.0);
-        for (int mu = 0; mu < n_ao; mu++) {
-            for (int i = 0; i < n_occ; i++) {
-                double val = 0.0;
-                for (int a = 0; a < n_vir; a++) {
-                    // C[mu, n_occ+a] = mo_coeffs[mu + n_ao*(n_occ+a)]
-                    double c_vir = molden.mo_coeffs[
-                        static_cast<size_t>(mu + n_ao * (n_occ + a))];
-                    // X[i, a] = X_flat[i*n_vir + a]
-                    double x_ia = X_flat[
-                        static_cast<size_t>(i * n_vir + a)];
-                    val += c_vir * x_ia;
+        // Project one occ-vir block (flat, row-major occ-outer) into n_occ
+        // Functions: D = C_vir @ blk^T, one Function per occupied column,
+        // scaled by sgn*scale.
+        auto project_block = [&](const std::vector<double>& blk,
+                                 double sgn) -> vecfuncT {
+            std::vector<double> D(static_cast<size_t>(n_ao * n_occ), 0.0);
+            for (int mu = 0; mu < n_ao; mu++)
+                for (int i = 0; i < n_occ; i++) {
+                    double val = 0.0;
+                    for (int a = 0; a < n_vir; a++)
+                        val += molden.mo_coeffs[
+                                   static_cast<size_t>(mu + n_ao * (n_occ + a))]
+                             * blk[static_cast<size_t>(i * n_vir + a)];
+                    D[static_cast<size_t>(mu + n_ao * i)] = val;
                 }
-                // D[mu, i] = val -> column i at position mu
-                D[static_cast<size_t>(mu + n_ao * i)] = val;
+            vecfuncT out;
+            for (int i = 0; i < n_occ; i++) {
+                std::vector<double> D_col_i(
+                    D.begin() + static_cast<ptrdiff_t>(i * n_ao),
+                    D.begin() + static_cast<ptrdiff_t>((i + 1) * n_ao));
+                // base-type ptr so functor() picks the interface overload
+                std::shared_ptr<madness::FunctionFunctorInterface<double, 3>> ff =
+                    std::make_shared<DaltonResponseFunctor>(molden.basis,
+                                                            std::move(D_col_i));
+                Function<double, 3> fn = FunctionFactory<double, 3>(world)
+                                             .functor(ff)
+                                             .thresh(thresh)
+                                             .truncate_on_project();
+                const double s2 = sgn * scale;
+                if (s2 != 1.0) fn.scale(s2);
+                out.push_back(fn);
+            }
+            return out;
+        };
+
+        const size_t NR = root_list.size();
+        std::vector<vecfuncT> all_x(NR), all_y(NR);
+        std::vector<double> xnorms(NR, 0.0), ynorms(NR, 0.0);
+        for (size_t rr = 0; rr < NR; ++rr) {
+            const auto& entry = entries[static_cast<size_t>(root_list[rr])];
+            auto [X_flat, Y_flat] = split_ov(entry.vec, n_occ, n_vir);
+            for (double v : X_flat) xnorms[rr] += v * v;
+            for (double v : Y_flat) ynorms[rr] += v * v;
+            all_x[rr] = project_block(X_flat, +1.0);
+            if (full) {
+                if (!Y_flat.empty()) {
+                    all_y[rr] = project_block(Y_flat, ysign);
+                } else {   // CIS/TDA file (no Y block): promote with Y = 0
+                    all_y[rr] = madness::copy(world, all_x[rr]);
+                    madness::scale(world, all_y[rr], 0.0);
+                }
             }
         }
 
-        // Project one Function<double,3> per occupied orbital
-        ResponseStateX<ClosedShell> root;
-        for (int i = 0; i < n_occ; i++) {
-            std::vector<double> D_col_i(
-                D.begin() + static_cast<ptrdiff_t>(i * n_ao),
-                D.begin() + static_cast<ptrdiff_t>((i + 1) * n_ao));
-
-            // Declare as base type so FunctionFactory::functor() picks the
-            // shared_ptr<FunctionFunctorInterface> overload, not the generic
-            // template callable overload (which would try op(coord) on the ptr).
-            std::shared_ptr<madness::FunctionFunctorInterface<double, 3>> ffunctor =
-                std::make_shared<DaltonResponseFunctor>(molden.basis, std::move(D_col_i));
-
-            Function<double, 3> fn =
-                FunctionFactory<double, 3>(world)
-                    .functor(ffunctor)
-                    .thresh(thresh)
-                    .truncate_on_project();
-
-            if (scale != 1.0) fn.scale(scale);
-            root.x_alpha.push_back(fn);
+        // Common State fields (identical shape for TDA and Full; only the root
+        // element type differs: ResponseStateX vs ResponseStateXY).
+        auto set_common = [&](auto& s) {
+            s.omega = Tensor<double>(static_cast<long>(NR));
+            for (size_t rr = 0; rr < NR; ++rr)
+                s.omega(static_cast<long>(rr)) = omega_list[rr];
+            s.iter = 0;
+            s.last_bsh_residual     = std::vector<double>(NR, 1.0);
+            s.last_density_residual = std::vector<double>(NR, 1.0);
+            s.last_omega_residual   = std::vector<double>(NR, 1.0);
+        };
+        if (full) {
+            ESSolver<Full, ClosedShell>::State s;
+            for (size_t rr = 0; rr < NR; ++rr) {
+                ResponseStateXY<ClosedShell> root;
+                root.x_alpha = all_x[rr];
+                root.y_alpha = all_y[rr];
+                s.roots.push_back(std::move(root));
+            }
+            set_common(s);
+            save_es_roots<Full, ClosedShell>(world, s, bundle, /*converged=*/false);
+        } else {
+            ESSolver<TDA, ClosedShell>::State s;
+            for (size_t rr = 0; rr < NR; ++rr) {
+                ResponseStateX<ClosedShell> root;
+                root.x_alpha = all_x[rr];
+                s.roots.push_back(std::move(root));
+            }
+            set_common(s);
+            save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
         }
-
-        s.roots.push_back(std::move(root));
-        s.omega(static_cast<long>(rr)) = omega_list[rr];
-        }  // per-root loop
-
-        s.iter = 0;
-        s.last_bsh_residual     = std::vector<double>(NR, 1.0);
-        s.last_density_residual = std::vector<double>(NR, 1.0);
-        s.last_omega_residual   = std::vector<double>(NR, 1.0);
-
-        save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
 
         if (world.rank() == 0) {
             print("seed_from_dalton: wrote", static_cast<int>(NR),
-                  "root(s) x", n_occ, "orbital functions");
+                  "root(s) x", n_occ, "orbital functions   type =",
+                  full ? "full (X,Y)" : "tda (X)");
             print("  rspvec    =", rspvec_path);
             print("  molden    =", molden_path);
-            for (size_t rr = 0; rr < NR; ++rr)
-                print("  root", root_list[rr], ": omega(au) =", omega_list[rr],
-                      "  ||X||^2 =", xnorms[rr], "  scale =", scale);
+            for (size_t rr = 0; rr < NR; ++rr) {
+                if (full)
+                    print("  root", root_list[rr], ": omega(au) =",
+                          omega_list[rr], "  ||X||^2 =", xnorms[rr],
+                          "  ||Y||^2 =", ynorms[rr], "  ||X||^2-||Y||^2 =",
+                          xnorms[rr] - ynorms[rr],
+                          "  (RPA metric ~0.5)   ysign =", ysign,
+                          "  scale =", scale);
+                else
+                    print("  root", root_list[rr], ": omega(au) =",
+                          omega_list[rr], "  ||X||^2 =", xnorms[rr],
+                          "  scale =", scale);
+            }
             print("  n_occ =", n_occ, "  n_vir =", n_vir,
                   "  n_ao =", n_ao, "  n_mo =", n_mo);
             print("  protocol_key =", key, "  k =", k, "  thresh =", thresh);
