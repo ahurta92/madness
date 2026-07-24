@@ -473,7 +473,7 @@ compute_overlap_matrix(World &world, ResponseType type,
 /// Used to assemble the full F0 = T + V_local - c_xc·K0 acting on response
 /// functions; needed for the SUBSPACE matrix in ES (NOT for the BSH driver
 /// where T is absorbed into the Helmholtz Green's function).
-/// Direct port of molresponse_v2/ResponseKernels.hpp:apply_kinetic_flat.
+/// Ported from the (removed) v2 kernels' apply_kinetic_flat.
 inline vector_real_function_3d apply_kinetic(World &world,
                                              const vector_real_function_3d &v) {
   if (v.empty())
