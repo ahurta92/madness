@@ -181,6 +181,11 @@ endif()
 # path in and breaks the xeonmax toolchain — see es_bench MPI notes).
 add_mad_executable(seed_from_dalton "tools/seed_from_dalton.cpp;GroundState.cpp" "MADchem")
 
+# dalton-cis-seed (GS): project the occupied DALTON/molden MOs and write a
+# moldft version-4 .restartdata (native path only, no HDF5). Ground-state analogue
+# of seed_from_dalton; moldft --restart resumes from it (SCF::load_mos).
+add_mad_executable(seed_moldft_from_dalton "tools/seed_moldft_from_dalton.cpp;GroundState.cpp" "MADchem")
+
 add_dependencies(applications-madness molresponse)
 
 install(TARGETS molresponse
