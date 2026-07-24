@@ -2,9 +2,9 @@
 #define MOLRESPONSE_V3_ESSOLVERGUESS_HPP
 
 #include "GroundState.hpp"
-#include "ResponseFunctions.hpp"
-#include "ResponseKernel.hpp"          // for orthonormalize_bundle, ResponseType
-#include "kernels/common_ops.hpp"      // apply_exchange (K for the virtual-AO Fock)
+#include "kernels/common_ops.hpp"         // apply_exchange (K for the virtual-AO Fock)
+#include "kernels/response_space_ops.hpp" // rs::orthonormalize (identity metric for TDA)
+#include "solvers/response_state.hpp"     // ResponseStateX<Shell>
 
 #include <madness/chem/molecularbasis.h>     // AtomicBasisSet (VirtualAO guess)
 #include <madness/chem/molecular_functors.h> // madchem::AtomicBasisFunctor
@@ -89,7 +89,7 @@ inline void add_random_noise(World &world, vector_real_function_3d &v,
 ///   3. Multiply by sum-of-Gaussians envelope localized at each atom.
 ///   4. Q-project to remove occupied-space components.
 ///   5. Orthonormalize across the N roots.
-inline std::vector<RealResponseState>
+inline std::vector<ResponseStateX<ClosedShell>>
 make_initial_guess_tda_rhf(World &world, GroundState &gs, long num_roots,
                            double envelope_exponent = 0.01,
                            double random_magnitude = 1.0e3) {
@@ -101,10 +101,9 @@ make_initial_guess_tda_rhf(World &world, GroundState &gs, long num_roots,
   // randomness comes from add_random_noise).
   auto envelope = build_atom_envelope(world, gs.molecule(), envelope_exponent);
 
-  std::vector<RealResponseState> X(num_roots);
+  std::vector<ResponseStateX<ClosedShell>> X(num_roots);
   for (long s = 0; s < num_roots; s++) {
-    X[s] = RealResponseState::allocate(world, n_alpha, /*n_beta=*/0,
-                                       /*include_y=*/false);
+    X[s].x_alpha = zero_functions<double, 3>(world, n_alpha);
     // Step 1+2: noise into each x_alpha[i]
     add_random_noise(world, X[s].x_alpha, random_magnitude);
     // Step 3: localize at atoms
@@ -119,7 +118,7 @@ make_initial_guess_tda_rhf(World &world, GroundState &gs, long num_roots,
   }
 
   // Step 5: Gram-Schmidt across roots (TDA metric is identity)
-  orthonormalize_bundle(world, ResponseType::TDA, X);
+  rs::orthonormalize(world, X);
 
   return X;
 }
@@ -130,10 +129,10 @@ make_initial_guess_tda_rhf(World &world, GroundState &gs, long num_roots,
 /// response channels per state — n_alpha α-functions and n_beta
 /// β-functions each. Each spin channel gets independent random noise,
 /// is multiplied by the atom envelope, Q-projected against the
-/// corresponding ground orbitals, and finally `orthonormalize_bundle`
+/// corresponding ground orbitals, and finally `rs::orthonormalize`
 /// orthogonalizes across roots using the combined (α + β) inner
 /// product.
-inline std::vector<RealResponseState>
+inline std::vector<ResponseStateX<OpenShell>>
 make_initial_guess_tda_uhf(World &world, GroundState &gs, long num_roots,
                            double envelope_exponent = 0.01,
                            double random_magnitude = 1.0e3) {
@@ -144,10 +143,10 @@ make_initial_guess_tda_uhf(World &world, GroundState &gs, long num_roots,
 
   auto envelope = build_atom_envelope(world, gs.molecule(), envelope_exponent);
 
-  std::vector<RealResponseState> X(num_roots);
+  std::vector<ResponseStateX<OpenShell>> X(num_roots);
   for (long s = 0; s < num_roots; s++) {
-    X[s] = RealResponseState::allocate(world, n_alpha, n_beta,
-                                       /*include_y=*/false);
+    X[s].x_alpha = zero_functions<double, 3>(world, n_alpha);
+    X[s].x_beta  = zero_functions<double, 3>(world, n_beta);
     add_random_noise(world, X[s].x_alpha, random_magnitude);
     add_random_noise(world, X[s].x_beta,  random_magnitude);
     for (auto &f : X[s].x_alpha) f = envelope * f;
@@ -162,10 +161,10 @@ make_initial_guess_tda_uhf(World &world, GroundState &gs, long num_roots,
     state.x_beta  = Qb(state.x_beta);
   }
 
-  // Gram-Schmidt across roots — orthonormalize_bundle uses both α and β
-  // inner-product contributions, matching the OpenShell-TDA subspace
-  // metric in ESSolver<TDA, OpenShell>.
-  orthonormalize_bundle(world, ResponseType::TDA, X);
+  // Gram-Schmidt across roots — rs::orthonormalize sums the α and β
+  // inner-product contributions (ResponseStateX<OpenShell> metric),
+  // matching the OpenShell-TDA subspace metric in ESSolver<TDA, OpenShell>.
+  rs::orthonormalize(world, X);
 
   return X;
 }
@@ -271,7 +270,7 @@ solid_harmonics(World &world, int n) {
 ///
 /// Returns `num_roots` states (or fewer if not enough harmonic-orbital
 /// pairs are available, which only happens for very large num_roots).
-inline std::vector<RealResponseState>
+inline std::vector<ResponseStateX<ClosedShell>>
 create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
   MADNESS_CHECK(gs.is_spin_restricted());
   const long n_occ = gs.num_alpha();
@@ -292,7 +291,7 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
   }
 
   const auto &orbitals = gs.orbitals_alpha();
-  std::vector<RealResponseState> X;
+  std::vector<ResponseStateX<ClosedShell>> X;
   X.reserve(num_roots);
 
   long count = 0;
@@ -302,8 +301,8 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
       if (count >= num_roots) break;
       const real_function_3d &harmonic = kv.second;
       // Single-excitation trial: one occupied position non-zero.
-      RealResponseState state = RealResponseState::allocate(
-          world, n_occ, /*n_beta=*/0, /*include_y=*/false);
+      ResponseStateX<ClosedShell> state;
+      state.x_alpha = zero_functions<double, 3>(world, n_occ);
       // Cover the (orbital × harmonic) grid without repeats: harmonics
       // advance fastest; each outer pass shifts the orbital pairing by
       // one, so a (harmonic, orbital) pair never repeats (i < n_occ ⇒
@@ -333,7 +332,7 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
   }
 
   // Gram-Schmidt across roots (TDA metric is identity).
-  orthonormalize_bundle(world, ResponseType::TDA, X);
+  rs::orthonormalize(world, X);
 
   return X;
 }
@@ -351,7 +350,7 @@ create_solid_harmonics_guess(World &world, GroundState &gs, long num_roots) {
 /// Total candidate count is `#harmonics × (n_alpha + n_beta)` ≥
 /// `num_roots`; the L heuristic uses `(n_alpha + n_beta)` in place of
 /// `n_occ`.
-inline std::vector<RealResponseState>
+inline std::vector<ResponseStateX<OpenShell>>
 create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) {
   MADNESS_CHECK(!gs.is_spin_restricted());
   const long n_a = gs.num_alpha();
@@ -384,7 +383,7 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
   const auto &bmo = gs.orbitals_beta();
   const long n_occ_max = std::max(n_a, n_b);
 
-  std::vector<RealResponseState> X;
+  std::vector<ResponseStateX<OpenShell>> X;
   X.reserve(num_roots);
 
   long count = 0;
@@ -397,8 +396,9 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
       const long n_this = (spin == 0) ? n_a : n_b;
       if (orb_iter >= n_this) continue;
 
-      RealResponseState state = RealResponseState::allocate(
-          world, n_a, n_b, /*include_y=*/false);
+      ResponseStateX<OpenShell> state;
+      state.x_alpha = zero_functions<double, 3>(world, n_a);
+      state.x_beta  = zero_functions<double, 3>(world, n_b);
       const long pos     = orb_iter;
       const long orb_idx = n_this - 1 - orb_iter;
       if (spin == 0) {
@@ -426,9 +426,9 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
     truncate(world, state.x_beta,  thresh);
   }
 
-  // Gram-Schmidt across roots — orthonormalize_bundle uses combined α+β
-  // metric, matching ESSolver<TDA, OpenShell>.
-  orthonormalize_bundle(world, ResponseType::TDA, X);
+  // Gram-Schmidt across roots — rs::orthonormalize uses the combined α+β
+  // metric (ResponseStateX<OpenShell>), matching ESSolver<TDA, OpenShell>.
+  rs::orthonormalize(world, X);
 
   return X;
 }
@@ -454,7 +454,7 @@ create_solid_harmonics_guess_uhf(World &world, GroundState &gs, long num_roots) 
 ///      trial = φ_a in occupied slot i (the v3 x_alpha[n_occ] shape).
 ///   8. Q-project + Gram-Schmidt across roots.
 /// May return fewer than `num_roots` if the basis is too small (caller tops up).
-inline std::vector<RealResponseState>
+inline std::vector<ResponseStateX<ClosedShell>>
 create_virtual_ao_guess(World &world, GroundState &gs, long num_roots,
                         const std::string &basis_name = "aug-cc-pvdz") {
   MADNESS_CHECK(gs.is_spin_restricted());
@@ -522,18 +522,18 @@ create_virtual_ao_guess(World &world, GroundState &gs, long num_roots,
             [](const Exc &p, const Exc &q) { return p.de < q.de; });
   const long n_take = std::min<long>(num_roots, static_cast<long>(exc.size()));
 
-  std::vector<RealResponseState> X;
+  std::vector<ResponseStateX<ClosedShell>> X;
   X.reserve(n_take);
   for (long t = 0; t < n_take; ++t) {
-    RealResponseState s =
-        RealResponseState::allocate(world, n_occ, /*n_beta=*/0, /*include_y=*/false);
+    ResponseStateX<ClosedShell> s;
+    s.x_alpha = zero_functions<double, 3>(world, n_occ);
     s.x_alpha[exc[t].i] = copy(phi_a[exc[t].a]);
     X.push_back(std::move(s));
   }
 
   // 8. Q-project + Gram-Schmidt across roots.
   for (auto &s : X) s.x_alpha = Q(s.x_alpha);
-  orthonormalize_bundle(world, ResponseType::TDA, X);
+  rs::orthonormalize(world, X);
 
   if (world.rank() == 0)
     print("ES guess (VirtualAO): basis=", basis_name, " nbf=", nbf,
