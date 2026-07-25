@@ -36,6 +36,7 @@
 #include <madness/world/parallel_archive.h>
 #include <madness/chem/molecule.h>
 
+#include <cctype>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -72,13 +73,18 @@ public:
 };
 
 // Minimal symbol -> atomic number for the elements in the current study set.
+// DALTON molden labels duplicate atoms with an index suffix (H1, H2, O, ...),
+// so strip trailing non-alphabetic characters to recover the element.
 int symbol_to_Z(const std::string& s) {
+    std::string elem;
+    for (char c : s) { if (std::isalpha(static_cast<unsigned char>(c))) elem += c; else break; }
     static const std::vector<std::pair<std::string, int>> tab = {
         {"H", 1}, {"He", 2}, {"Li", 3}, {"Be", 4}, {"B", 5}, {"C", 6},
         {"N", 7}, {"O", 8}, {"F", 9}, {"Ne", 10}, {"Na", 11}, {"Mg", 12},
         {"Al", 13}, {"Si", 14}, {"P", 15}, {"S", 16}, {"Cl", 17}, {"Ar", 18}};
-    for (const auto& [sym, z] : tab) if (sym == s) return z;
-    throw std::runtime_error("seed_moldft_from_dalton: unknown element symbol '" + s + "'");
+    for (const auto& [sym, z] : tab) if (sym == elem) return z;
+    throw std::runtime_error("seed_moldft_from_dalton: unknown element symbol '" + s +
+                             "' (parsed element '" + elem + "')");
 }
 
 }  // namespace
@@ -155,13 +161,33 @@ int main(int argc, char** argv) {
                               .functor(ff).thresh(thresh).truncate_on_project());
         }
 
-        // Orbital energies / occupations from the molden (occ should be 2.0 for
-        // closed-shell occupied); canonical localize sets = 0.
+        // DALTON MOs are orthonormal in the GTO metric, but independent MRA
+        // projection leaves small mutual overlaps. moldft's .restartdata path
+        // (SCF::load_mos) assumes an orthonormal set and does NOT re-orthonormalize
+        // on load (a normal moldft save already writes one), so without this the
+        // first density is invalid and the SCF collapses (a -106.9 Ha variational
+        // collapse was observed on water without it). Symmetric (Löwdin)
+        // orthonormalization cleans the set while preserving orbital character.
+        double max_offdiag = 0.0;
+        {
+            Tensor<double> S = matrix_inner(world, amo, amo, true);
+            for (int i = 0; i < n_occ; i++)
+                for (int j = 0; j < n_occ; j++)
+                    if (i != j) max_offdiag = std::max(max_offdiag, std::abs(S(i, j)));
+        }
+        amo = orthonormalize_symmetric(amo);
+
+        // Orbital energies from the molden; occupations follow moldft's
+        // ALPHA-occupation convention: aocc = 1.0 per occupied spatial orbital
+        // (SCF::make_density uses aocc, then spin_restricted DOUBLES the density,
+        // SCF.cc:522-527). The molden's chemist-convention occ=2.0 would double
+        // the density -> 20 electrons, 2x every energy term, variational collapse
+        // (observed -106.9 Ha on water before this fix).
         Tensor<double> aeps(static_cast<long>(n_occ)), aocc(static_cast<long>(n_occ));
         double smo_norm_dev = 0.0;
         for (int i = 0; i < n_occ; i++) {
             aeps(i) = (i < static_cast<int>(molden.mo_energies.size())) ? molden.mo_energies[i] : 0.0;
-            aocc(i) = (i < static_cast<int>(molden.mo_occ.size())) ? molden.mo_occ[i] : 2.0;
+            aocc(i) = 1.0;   // moldft doubles for spin_restricted closed shell
             smo_norm_dev = std::max(smo_norm_dev, std::abs(amo[i].norm2() - 1.0));
         }
         std::vector<int> aset(static_cast<size_t>(n_occ), 0);
@@ -186,8 +212,8 @@ int main(int argc, char** argv) {
             print("  L =", L, "  k =", k, "  thresh =", thresh, "  xc =", xc,
                   "  localize =", loc, "  energy =", energy);
             print("  atoms    =", static_cast<int>(molden.atom_symbols.size()),
-                  "  |proj MO norm - 1| max =", smo_norm_dev,
-                  "(MADNESS re-orthonormalizes on restart)");
+                  "  max |S_ij| (i!=j) pre-orthonormalization =", max_offdiag,
+                  "  |proj MO norm - 1| max (post) =", smo_norm_dev);
             print("  Run:  moldft  (input with `restart 1`, `prefix ", out_prefix,
                   "`, `l ", L, "`, `xc ", xc, "`) -> SCF resumes from seed.");
         }
