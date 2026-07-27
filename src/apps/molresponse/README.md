@@ -2,8 +2,8 @@
 
 A unified MADNESS solver for **molecular response properties** — linear and
 non-linear — built on multiresolution analysis (MRA). It is the response engine
-behind `madqc --wf=response` (opt in with `engine v3`), and is designed to scale
-to larger systems and to export research-quality, MRA-fidelity data.
+behind `madqc --wf=response` (the default and only engine), and is designed to
+scale to larger systems and to export research-quality, MRA-fidelity data.
 
 > **Status snapshot (2026-06): active development.** The solver core, the
 > orchestration seam, observability, and madqc integration are in place and
@@ -66,20 +66,19 @@ mpirun -n <N> molresponse_v3 --archive=<path>
 
 ## Relationship to the other response codes
 
-- **`molresponse_v2`** — the current **production** path (`MolresponseLib.hpp`)
-  and the **parity reference**: v3 is validated against v2 (same input →
-  matching `calc_info.json` values) at every increment. v2 remains the default;
-  v3 is opt-in via `engine v3`.
+- **`molresponse_v2`** (`MolresponseLib.hpp`) was v3's predecessor and parity
+  reference: during development v3 was validated against v2 (same input →
+  matching `calc_info.json` values) at every increment. **v2 has since been
+  removed** — v3 is now the sole response engine and the default for
+  `madqc --wf=response`; a deck that still carries `engine v2` errors out.
 - **`molresponse_legacy`** — frozen reference for legacy excited-state behavior.
-- v3 still reuses a few working v2 utilities during development; those
-  dependencies shrink as v3 matures.
 
-v3's result object (`ResponseWorkflowOutput`) is a strict **superset** of v2's
-`Results` — it adds first-class `timing`, `diagnostics`, and `exports`.
+v3's result object (`ResponseWorkflowOutput`) is a strict **superset** of the
+old v2 `Results` — it adds first-class `timing`, `diagnostics`, and `exports`.
 
-Switching an existing v2 deck to v3 is a one-line `engine v3` opt-in — see
-[`MIGRATION_FROM_V2.md`](MIGRATION_FROM_V2.md) for what changes (and what to keep
-on v2 for now).
+Migrating an existing v2 deck to v3 is a one-line edit — delete the `engine v2`
+line (v3 is the default; the rest of the deck is unchanged). See
+[`MIGRATION_FROM_V2.md`](MIGRATION_FROM_V2.md).
 
 ## Architecture & design docs
 

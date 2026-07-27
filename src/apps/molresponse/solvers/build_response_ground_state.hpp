@@ -129,15 +129,14 @@ build_es_problem_full(madness::World &world, GroundState &gs, int n_roots,
 
 // ----- Initial-guess adapters ------------------------------------------
 
-/// Adapt the legacy ESSolverGuess output (vector<RealResponseState>)
-/// into the new per-root storage (vector<ResponseStateX<ClosedShell>>).
-/// Trial-function shape is selected by `mode`; see ESGuessMode docs in
-/// ESSolverGuess.hpp.
+/// Assemble the ESSolverGuess output (vector<ResponseStateX<ClosedShell>>)
+/// into the solver's per-root State. Trial-function shape is selected by
+/// `mode`; see ESGuessMode docs in ESSolverGuess.hpp.
 inline ESSolver<TDA, ClosedShell>::State
 build_initial_guess_tda_closed_shell(
     madness::World &world, GroundState &gs, long n_roots,
     ESGuessMode mode = ESGuessMode::SolidHarmonics) {
-  std::vector<RealResponseState> guess;
+  std::vector<ResponseStateX<ClosedShell>> guess;
   switch (mode) {
     case ESGuessMode::Random:
       guess = make_initial_guess_tda_rhf(world, gs, n_roots);
@@ -183,12 +182,12 @@ build_initial_guess_tda_closed_shell(
   return s;
 }
 
-/// Adapter for OpenShell TDA — both α and β response components populated.
+/// OpenShell TDA — both α and β response components populated.
 inline ESSolver<TDA, OpenShell>::State
 build_initial_guess_tda_open_shell(
     madness::World &world, GroundState &gs, long n_roots,
     ESGuessMode mode = ESGuessMode::SolidHarmonics) {
-  std::vector<RealResponseState> guess;
+  std::vector<ResponseStateX<OpenShell>> guess;
   switch (mode) {
     case ESGuessMode::Random:
       guess = make_initial_guess_tda_uhf(world, gs, n_roots);

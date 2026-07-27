@@ -75,13 +75,13 @@ iterations for near-degenerate roots (`ExcitedResponse.cpp:1122`
 | Operation | Formula | Notes | v3 location |
 |---|---|---|---|
 | response density | `ρ = 2 · Σ_p φ_p (x_p + y_p)` | factor 2 = spin; `(x+y)` folds X,Y | `Kernels<Full,ClosedShell>::compute_density` (full.hpp:44) |
-| Coulomb-exchange `γ` | `γ_X = J[ρ]φ − c_xc(K[φ,x]φ + K[y,φ]φ)` | **cross-channel** K[y,φ] couples X↔Y | `compute_gamma` (full.hpp); legacy `ResponseKernel.hpp:113` |
+| Coulomb-exchange `γ` | `γ_X = J[ρ]φ − c_xc(K[φ,x]φ + K[y,φ]φ)` | **cross-channel** K[y,φ] couples X↔Y | `compute_gamma` (full.hpp) |
 | `V0·x` | `V_local·x − c_xc K[φ,φ]·x` | acts on X and Y independently | `compute_V0x` |
 | `E0·x` (off-diag) | `F_offdiag · x` | diag ε absorbed into BSH | `compute_E0x` |
 | `E0·x` (full) | `F · x` | full Fock; for Λ assembly | `compute_E0x_full` |
 | `T0·x` | `−½∇²·x` | kinetic | `compute_T0x` |
-| **θ** (BSH driver) | `θ = V0x − E0x + γ` | FD adds `+ V_p` source | `assemble_theta` (assembly.hpp); legacy `ResponseKernel.hpp:271` |
-| **Λ** (subspace) | `Λ = T0x + V0x − E0x_full + γ` | full Fock (not off-diag) | `assemble_lambda` (assembly.hpp); legacy `ResponseKernel.hpp:397` |
+| **θ** (BSH driver) | `θ = V0x − E0x + γ` | FD adds `+ V_p` source | `assemble_theta` (assembly.hpp) |
+| **Λ** (subspace) | `Λ = T0x + V0x − E0x_full + γ` | full Fock (not off-diag) | `assemble_lambda` (assembly.hpp) |
 | BSH apply | `x_new = Q(BSH(ω)·(−2(θ + shift·x)))` | paired ±ω for Full (X:+ω, Y:−ω) | `bsh_apply` |
 
 Density factor convention: `spin_factor × y_factor`. Restricted Static =
