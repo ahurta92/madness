@@ -19,7 +19,7 @@
 //
 // OPT-IN: compiled only when MADNESS_HAS_HDF5 is defined (the io-hdf5 thread's
 // -DMADNESS_ENABLE_HDF5=ON path). The native archive remains the default; this
-// header is a no-op in a normal build. See docs/30_io_hdf5_survey_and_plan.md.
+// header is a no-op in a normal build. See madqc/HDF5_IO.md.
 //
 // On-disk layout (<stem>.mad.h5):
 //   /meta   attrs: schema, k, thresh, ndim, tree_state, initial_level,

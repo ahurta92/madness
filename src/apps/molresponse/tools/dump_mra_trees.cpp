@@ -550,7 +550,7 @@ inline void write_amr_from_function(World&, const Function<double, 3>&,
 // per leaf. Unlike --amr (which point-SAMPLES each leaf onto an m^3 grid), this is the
 // function's native multiresolution basis, so a reader can reconstruct the MADNESS
 // expansion exactly at any point/zoom. "Don't roll a new serializer"
-// (native_mra_reader_proposal.md): we write through the same writer io-hdf5 built.
+// we write through the same writer io-hdf5 built.
 //
 // The structured writer is double-only and MADNESS_CHECKs world.size()==1 (the local
 // container == the whole tree only at NP=1) and t.size()==k^3 per coeff node (so the
