@@ -9,6 +9,7 @@ cmake-build-debug*/
 */__pycache__/
 slurm-logs/
 molresponse_testdata/
+*.cache*
 
 # Compiled Object files
 *.slo
