@@ -3,8 +3,8 @@
 How a molresponse solve decides it is done, what the reported residual means for
 the property, and the knobs that control it. Companion to
 [`polarizability.md`](polarizability.md) and [`excited_states.md`](excited_states.md);
-the derivations are in the release report (`madness-workspace/reports/2026-09-09_release_report`,
-section "Numerical analysis").
+the derivations are written up separately, in
+`madness-workspace/notes/2026-09-16_numerical_analysis_residual_property.tex`.
 
 ## Gates
 
