@@ -109,18 +109,24 @@ class ConvergenceResults : public ResultsBase {
 public:
   double converged_for_thresh = 1.e10;
   double converged_for_dconv = 1.e10;
+  int iterations = -1;              // SCF iterations actually run (-1 = not recorded)
+  std::string status = "unknown";   // "converged" | "unconverged" | "unknown"  (spec §4.1; #763 names pending)
   ConvergenceResults() = default;
 
   /// construct from JSON
   explicit ConvergenceResults(const nlohmann::json &j) {
     converged_for_thresh = j.value("converged_for_thresh", 1.e10);
     converged_for_dconv = j.value("converged_for_dconv", 1.e10);
+    iterations = j.value("iterations", -1);
+    status = j.value("status", std::string("unknown"));
   }
 
   /// assignment operator from JSON
   ConvergenceResults &operator=(const nlohmann::json &j) {
     converged_for_thresh = j.value("converged_for_thresh", 1.e10);
     converged_for_dconv = j.value("converged_for_dconv", 1.e10);
+    iterations = j.value("iterations", -1);
+    status = j.value("status", std::string("unknown"));
     return *this;
   }
 
@@ -140,11 +146,15 @@ public:
     nlohmann::json j;
     j["converged_for_thresh"] = converged_for_thresh;
     j["converged_for_dconv"] = converged_for_dconv;
+    j["iterations"] = iterations;
+    j["status"] = status;
     return j;
   }
   void from_json(const nlohmann::json &j) override {
     converged_for_thresh = j.value("converged_for_thresh", 1.e10);
     converged_for_dconv = j.value("converged_for_dconv", 1.e10);
+    iterations = j.value("iterations", -1);
+    status = j.value("status", std::string("unknown"));
   }
 };
 
@@ -431,6 +441,10 @@ public:
   // empirical dispersion (DFT-D3) contribution already contained in
   // scf_total_energy; 0.0 when no correction was applied
   double scf_dispersion_correction_energy = 0.0;
+  std::string xc = "hf";        // functional the SCF ran with (deck `dft.xc`)
+  nlohmann::json precision;     // spec §4.2: {k, thresh, protocol, econv, dconv, L, ncoeff}
+  nlohmann::json energies;      // QCSchema-named energy components, emitted flat
+  int scf_iterations = -1;
   //
   PropertyResults properties;
   SCFResults() = default;
@@ -455,6 +469,11 @@ public:
     j["model"] = model;
     j["scf_total_energy"] = scf_total_energy;
     j["scf_dispersion_correction_energy"] = scf_dispersion_correction_energy;
+
+    j["xc"] = xc;
+    if (!precision.is_null()) j["precision"] = precision;
+    for (const auto &kv : energies.items()) j[kv.key()] = kv.value();
+    if (scf_iterations >= 0) j["scf_iterations"] = scf_iterations;
 
     // Optional nested block
     if (has_data(properties)) {
@@ -489,6 +508,15 @@ public:
       scf_total_energy = j.value("scf_total_energy", 0.0);
     scf_dispersion_correction_energy =
         j.value("scf_dispersion_correction_energy", 0.0);
+
+    xc = j.value("xc", std::string("hf"));
+    precision = j.contains("precision") ? j.at("precision") : nlohmann::json();
+    scf_iterations = j.value("scf_iterations", -1);
+    energies = nlohmann::json::object();
+    for (const char *k : {"nuclear_repulsion_energy", "scf_one_electron_energy",
+                          "scf_two_electron_energy", "scf_xc_energy", "scf_kinetic_energy",
+                          "scf_nuclear_attraction_energy", "scf_coulomb_energy", "scf_pcm_energy"})
+      if (j.contains(k)) energies[k] = j.at(k);
 
     // Nested properties: optional
     if (j.contains("properties")) {
