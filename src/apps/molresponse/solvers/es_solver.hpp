@@ -73,7 +73,7 @@ struct ESProblem {
 };
 
 /// Excited states as the homogeneous case of the linear response (report §1.2,
-/// "Excited states"): the same operator as \ref rr_eq_lin with \f$v\equiv0\f$ is the
+/// "Excited states"): the same operator as \ref rr_eq_lin "(lin)" with \f$v\equiv0\f$ is the
 /// eigenproblem. \f$(x^{f},y^{f})\f$ at \f$\omega_f\f$ solve
 /// \f[
 ///   (F^{0}-\epsilon_i-\omega_f)\,x_i^{f} = -\hat Q\,g'[\gamma^{f}]\,\phi_i,\qquad
@@ -88,7 +88,7 @@ struct ESProblem {
 /// \f]
 /// which is the metric of the spectral resolution that ties the excited states to the
 /// two-photon amplitude (see tpa::tpa_moment_residue). Each equation is inverted with the
-/// BSH Green's function exactly as in \ref rr_eq_bsh with \f$\omega_B\to\omega_f\f$.
+/// BSH Green's function exactly as in \ref rr_eq_bsh "(bsh)" with \f$\omega_B\to\omega_f\f$.
 /// \par Reference
 /// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.2 "First order: the linear response in MRA form", paragraph "Excited states".
 template <typename Type, typename Shell>

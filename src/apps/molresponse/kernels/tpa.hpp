@@ -51,9 +51,10 @@ namespace molresponse_v3::tpa {
 /// perturbation vector" — the analogue of beta's VBC source. assemble_tpa saves
 /// these to disk (mirroring beta/Raman vbc_states) for reuse + inspection.
 ///
-/// Each source is \ref rr_eq_PQ with \f$C\f$ replaced by the eigenvector: the residue introduces
+/// Each source is \ref rr_eq_PQ "(PQ)" with \f$C\f$ replaced by the eigenvector: the residue introduces
 /// no dagger and changes nothing inside \f$(P,Q)\f$ — the same source \f$\beta\f$ contracts with
-/// a driven leg is here contracted with an excited state (see tpa_moment_residue).
+/// a driven leg is here contracted with an excited state (see tpa_moment_residue). Reached on
+/// the legacy candidate path; the default path builds its sources through `tpa_pq_spec_sym`.
 /// \par Reference
 /// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.6 "Residue analysis: the two-photon amplitude", gloss "Same source, two contractions".
 inline std::array<ResponseStateXY<ClosedShell>, 3>
@@ -128,7 +129,7 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
 /// Write the coupled first-order equations as \f$(\Lambda-\omega\Delta)|X,Y\rangle=-|P,Q\rangle\f$
 /// with \f$\Lambda\f$ the (symmetric) electronic Hessian and \f$\Delta=\mathrm{diag}(1,-1)\f$ the
 /// metric. The eigenproblem \f$(\Lambda-\Omega_N\Delta)|X^N,Y^N\rangle=0\f$ with
-/// \f$\langle X^N,Y^N|\Delta|X^M,Y^M\rangle=\delta_{NM}\f$ (the normalization \ref rr_eq_esnorm)
+/// \f$\langle X^N,Y^N|\Delta|X^M,Y^M\rangle=\delta_{NM}\f$ (the normalization \ref rr_eq_esnorm "(esnorm)")
 /// has paired solutions \f$(\Omega_N,(X^N,Y^N))\f$ and \f$(-\Omega_N,(Y^N,X^N))\f$, and
 /// completeness in the \f$\Delta\f$ metric gives the spectral resolution
 /// \anchor rr_eq_spec
@@ -138,7 +139,7 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
 ///    - \frac{|Y^K,X^K\rangle\langle Y^K,X^K|}{\Omega_K+\omega}\right].
 /// \f]
 /// The quadratic response in \f$2n{+}1\f$ form is
-/// \f$\mathrm{Tr}(v^{A}\gamma_L^{BC})+\langle X^{A},Y^{A}|P^{BC},Q^{BC}\rangle\f$ (\ref rr_eq_beta up
+/// \f$\mathrm{Tr}(v^{A}\gamma_L^{BC})+\langle X^{A},Y^{A}|P^{BC},Q^{BC}\rangle\f$ (\ref rr_eq_beta "(beta)" up
 /// to the factor \f$-2\f$). Setting the \f$A\f$ frequency to \f$-\omega'\f$ and letting
 /// \f$\omega'\to\Omega_N\f$, the trace is finite and drops out, while the \f$K=N\f$ absorption
 /// branch of the resolution isolates \f$|X^{A},Y^{A}\rangle\to|X^N,Y^N\rangle\,v^{A}_{0N}/(\Omega_N-\omega')\f$;
@@ -151,7 +152,11 @@ tpa_moment(madness::World &world, const ResponseGroundState &g0,
 ///   \delta^{\rm 2PA} = \tfrac{1}{30}\textstyle\sum_{bc}\bigl[F\,S_{bb}S_{cc} + (G+H)\,S_{bc}S_{bc}\bigr],
 /// \f]
 /// with \f$F=G=H=2\f$ for linearly polarized parallel photons and \f$\sqrt2\f$ the translation
-/// between this solver's eigenvector normalization and DALTON's (`prefactor` above).
+/// between this solver's eigenvector normalization and DALTON's. The √2 is applied by the
+/// caller (`calc_executor.hpp`: `S.scale(std::sqrt(2.0) * ctx.tpa_prefactor)`); `prefactor`
+/// here is the hook for it and defaults to 1.0, so this function alone returns \f$S/\sqrt2\f$.
+/// The production composition (`tpa_residue`, the default) is `tpa_moment_residue_1e` +
+/// `tpa_pq_spec_sym`; this vbc-based contraction is kept under `tpa_decompose` for comparison.
 /// \par Reference
 /// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.6 "Residue analysis: the two-photon amplitude", eqs. (spec), (tpa).
 inline madness::Tensor<double>

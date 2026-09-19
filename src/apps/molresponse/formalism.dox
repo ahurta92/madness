@@ -7,8 +7,9 @@ time-dependent Hartree--Fock / Kohn--Sham orbital equation expanded order by ord
 field, with orthonormality of the occupied orbitals (the orbital form of density-matrix
 idempotency) imposed at each order. The equations are those of the release report
 2026-09-09 (`madness-workspace/reports/2026-09-09_release_report/main.tex`, §1 "Formalism");
-the derivations are in `reports/2026-09-08_first_principles_derivation` and
-`reports/2026-09-09_orientation_derivation`.
+the derivations are in `madness-workspace/reports/2026-09-08_first_principles_derivation` and
+`madness-workspace/reports/2026-09-09_orientation_derivation`. `madness-workspace`
+(`github.com/ahurta92/madness-workspace`) is the companion repository these reports live in.
 
 \section rf_conventions Objects and conventions
 
@@ -16,13 +17,13 @@ Occupied orbitals \f$\phi_i\f$ (\f$i=1..N_{\rm occ}\f$, closed shell), ground-st
 operator \f$F^{0}\f$ with \f$F^{0}\phi_i=\epsilon_i\phi_i\f$, projector onto the virtual space
 \f$\hat Q=1-\sum_i|\phi_i\rangle\langle\phi_i|\f$. A pair density \f$\gamma(r,r')\f$ has the
 diagonal \f$\rho_\gamma(r)=\gamma(r,r)\f$ (carrying the closed-shell factor 2) and enters through
-the first derivative of the two-electron operator \f$g'[\gamma]\f$ (\ref rr_eq_gprime), with
+the first derivative of the two-electron operator \f$g'[\gamma]\f$ (\ref rr_eq_gprime "(g')"), with
 \f$c_x=1\f$ for Hartree--Fock (the DFT kernel adds \f$f_{\rm xc}[\rho_\gamma]\f$ and, at second
 order, a \f$g''\f$ term that vanishes for HF).
 
 Every convention that matters is fixed by one statement: <em>a response density at
 \f$+\omega\f$ is \f$\gamma^{B}=|x^{B}\rangle\langle\phi|+|\phi\rangle\langle y^{B}|\f$, and its
-dagger is the same density at \f$-\omega\f$</em> (\ref rr_eq_legs). In the code this is spelled
+dagger is the same density at \f$-\omega\f$</em> (\ref rr_eq_legs "(legs)"). In the code this is spelled
 out by source_spec::gamma_legs, source_spec::gamma_dagger_legs and source_spec::ketbra; every
 second-order term is written with them.
 
@@ -36,13 +37,17 @@ second-order term is written with them.
 | \ref rr_eq_gammaL "(gammaL)", \ref rr_eq_PQ "(PQ)" | the one source | tpa_source_spec.hpp: quadratic_source; vbc.hpp: compute_vbc_spec | tests/test_vbc_spec_equivalence, tests/test_tpa_pq_vs_vbc |
 | \ref rr_eq_beta "(beta)" | \f$2n{+}1\f$ contraction | beta.hpp: beta_abc | — |
 | \ref rr_eq_raman "(raman)" | nuclear leg | Perturbations.hpp: nuclear_operator | — |
-| \ref rr_eq_spec "(spec)", \ref rr_eq_tpa "(tpa)" | 2PA moments | tpa.hpp: tpa_sources, tpa_moment_residue | — |
+| \ref rr_eq_spec "(spec)", \ref rr_eq_tpa "(tpa)" | 2PA moments | tpa.hpp: tpa_moment_residue_1e + tpa_pq_spec_sym (default); tpa_sources, tpa_moment_residue (legacy vbc path) | — |
 
 \section rf_reading How to read a second-order term
 
-\f$\beta\f$ contracts \f$(P,Q)\f$ (\ref rr_eq_PQ) with a driven leg at \f$+\omega_\sigma\f$ and adds
+\f$\beta\f$ contracts \f$(P,Q)\f$ (\ref rr_eq_PQ "(PQ)") with a driven leg at \f$+\omega_\sigma\f$ and adds
 the unrelaxed trace \f$\mathrm{Tr}(v^{A}\gamma_L^{BC})\f$; Raman is the same contraction with the
 \f$C\f$ leg the static response to \f$v^{Q}\f$; 2PA contracts the same \f$(P,Q)\f$ with an
 eigenvector and drops the trace. The residue introduces no dagger and changes nothing inside
 \f$(P,Q)\f$.
+
+\par See also
+`docs/guides/formalism.md` (the same equations, prose form, GitHub-rendered) and `README.md`
+(where this page sits among the other molresponse documentation).
 */
