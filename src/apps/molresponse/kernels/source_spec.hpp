@@ -102,6 +102,24 @@ struct LegPair {
 // ---------------------------------------------------------------------------
 
 /// Legs of gamma^B = |x><phi| + |phi><y|  (response density at +omega).
+///
+/// The exchange-leg dictionary of the report (§1.1): `madness::Exchange` evaluates
+/// \f[
+///   \mathrm{result}_i(r) = \sum_k \mathrm{ket}_k(r)\int \frac{\mathrm{bra}_k(r')\,f_i(r')}{|r-r'|}\,dr',
+/// \f]
+/// so a leg pair \f$\{\mathrm{bra},\mathrm{ket}\}\f$ represents the pair density
+/// \f$|\mathrm{ket}\rangle\langle\mathrm{bra}|\f$. The one convention every second-order term
+/// rests on: <em>a response density at \f$+\omega\f$ is</em>
+/// \anchor rr_eq_legs
+/// \f[
+///   \gamma^{B} = |x^{B}\rangle\langle\phi| + |\phi\rangle\langle y^{B}|
+///   \quad\Longleftrightarrow\quad \{\phi, x^{B}\},\ \{y^{B}, \phi\},
+/// \f]
+/// <em>and its dagger \f$\gamma^{B\dagger} = |\phi\rangle\langle x^{B}| + |y^{B}\rangle\langle\phi|\f$
+/// is the same density at \f$-\omega\f$</em> (gamma_dagger_legs). ketbra(u, w) is the single
+/// leg of \f$|u\rangle\langle w|\f$.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.1 "Objects and conventions", paragraph "The exchange-leg dictionary".
 inline std::vector<LegPair>
 gamma_legs(const vecfuncT &x, const vecfuncT &y, const vecfuncT &phi) {
   return {{phi, x}, {y, phi}};
