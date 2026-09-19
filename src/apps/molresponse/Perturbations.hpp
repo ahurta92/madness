@@ -182,7 +182,7 @@ dipole_operators(World& world) {
 ///   v^{Q} = \frac{\partial V_{\rm nuc}}{\partial Q}
 ///         = \sum_{\alpha} Z_\alpha \frac{\partial}{\partial Q}\frac{-1}{|r-R_\alpha|},
 /// \f]
-/// so the machinery of \ref rr_eq_PQ and \ref rr_eq_beta is reused verbatim with
+/// so the machinery of \ref rr_eq_PQ "(PQ)" and \ref rr_eq_beta "(beta)" is reused verbatim with
 /// \f$C\to Q\f$: the \f$C\f$ leg is the static response to \f$v^{Q}\f$ (one function per
 /// orbital, \f$x^{Q}=y^{Q}\f$), the \f$B\f$ leg is the dipole response at \f$\omega\f$, and the
 /// \f$A\f$ leg is the dipole response at \f$\omega_\sigma=\omega\f$. This function is \f$v^{Q}\f$:

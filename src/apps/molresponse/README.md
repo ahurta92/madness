@@ -31,13 +31,15 @@ for this release.
   [excited states](docs/guides/excited_states.md) ·
   [two-photon absorption](docs/guides/two_photon_absorption.md) ·
   [DALTON warm-start](docs/guides/dalton_warm_start.md).
-- **Formalism in the Doxygen** — `formalism.dox` (`\page response_formalism`) fixes the symbols and indexes the equations, each stated at the object that implements it (the release report's §1 correspondence table).
 - **[`docs/guides/example_output.md`](docs/guides/example_output.md)** — what a run
   prints and writes (real output).
 - **[`docs/guides/records_and_metadata.md`](docs/guides/records_and_metadata.md)** —
   the results/metadata schema, restart, and provenance: the interface to script against.
 - **[`docs/guides/formalism.md`](docs/guides/formalism.md)** — the shared response
   formalism the guides specialize.
+- **[`formalism.dox`](formalism.dox)** — the same equations as the guide, one per
+  implementing object; the Doxygen `\page response_formalism` fixes the symbols
+  and indexes the release report's §1 correspondence table.
 - **[`docs/guides/parallelism.md`](docs/guides/parallelism.md)** — subworld /
   state-parallel design.
 - **[`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md)** — the capability matrix.

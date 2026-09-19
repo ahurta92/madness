@@ -139,7 +139,7 @@ vbc_half_spec(madness::World &world, const ResponseGroundState &g0,
 /// VB_op / VC_op are the raw one-electron perturbation operators of B and C
 /// (dipole components, or dV_nuc/dQ for Raman). Closed-shell only.
 ///
-/// This is \ref rr_eq_PQ written term by term with the leg dictionary — [L] the
+/// This is \ref rr_eq_PQ "(PQ)" written term by term with the leg dictionary — [L] the
 /// \f$-g'[\gamma_L^{BC}]\phi_p\f$ term, [A] the \f$-\hat Q F^{B}x_p^{C}\f$ term, [M] the
 /// occupied-matrix term \f$\sum_k x_k^{C}F^{B}_{kp}\f$ — for the (B,C) and (C,B) orderings
 /// that tpa::quadratic_source emits in one call. The two builders are gated equal by

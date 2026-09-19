@@ -62,7 +62,9 @@ This linear solve (`solve_fd_protocol`) is the single most reused component in t
 
 At $\omega_B=0$, $x^{B}=y^{B}$ and only one function per orbital is solved (`Static`); at finite
 frequency both channels are kept (`Full`). The polarizability is the trace
-$\alpha_{AB}(\omega)=-\mathrm{Tr}(v^{A}\gamma^{B})=-\sum_i\bigl[\langle\phi_i|v^{A}|x_i^{B}\rangle+\langle y_i^{B}|v^{A}|\phi_i\rangle\bigr]$.
+$\alpha_{AB}(\omega)=-\mathrm{Tr}(v^{A}\gamma^{B})=-\sum_i\bigl[\langle\phi_i|v^{A}|x_i^{B}\rangle+\langle y_i^{B}|v^{A}|\phi_i\rangle\bigr]$
+(the closed-shell factor 2 is carried by $\rho_\gamma$ in this convention; the per-orbital form
+in [polarizability.md](polarizability.md) writes it explicitly as $-2(\dots)$).
 
 **Excited states** are the same operator with $v\equiv0$: $(x^{f},y^{f})$ at $\omega_f$ solve the
 equations above with right-hand sides $-\hat Qg'[\gamma^{f}]\phi_i$ and
@@ -70,6 +72,12 @@ $-\hat Qg'[\gamma^{f\dagger}]\phi_i$ (RPA / full TDHF; dropping the $y$ channel 
 Eigenvectors are normalized as $\langle x^f|x^f\rangle-\langle y^f|y^f\rangle=1$.
 
 ## Second order: the one source
+
+A property is a trace of a perturbation operator against a response density — in the
+generalized notation used by the engine and by the sibling guides,
+$P_{ABC}(-\omega_A;\omega_B,\omega_C)=\mathrm{Tr}[v^{A}\gamma^{BC}]$ with the frequency sum rule
+$\omega_A=-(\omega_B+\omega_C)$ (the "(A, B, C) machinery" the Raman and hyperpolarizability
+guides refer to). What follows is how $\gamma^{BC}$ is obtained.
 
 With both photon frequencies positive, the Fock operator that meets $\gamma^{C}$ is $F^{B}$ at
 $+\omega_B$, *undaggered*. Idempotency fixes the occupied–occupied and virtual–virtual blocks of
@@ -149,13 +157,19 @@ S_{BC}=\sqrt2\,\bigl[\langle x^{f}|P^{BC}\rangle+\langle y^{f}|Q^{BC}\rangle\big
 $$
 
 with $F=G=H=2$ for linearly polarized parallel photons and $\sqrt2$ the translation between
-this solver's eigenvector normalization and DALTON's (`tpa_moment_residue` in `kernels/tpa.hpp`).
+this solver's eigenvector normalization and DALTON's. The $\sqrt2$ is applied by the caller,
+`calc_executor.hpp`'s `S.scale(std::sqrt(2.0) * ctx.tpa_prefactor)`; the default composition is
+`tpa_moment_residue_1e` + `tpa_pq_spec_sym` (`tpa_moment_residue` in `kernels/tpa.hpp` is the
+vbc-based path kept under `tpa_decompose` for comparison).
 See [two-photon absorption](two_photon_absorption.md).
 
 ## References
 
 - Release report 2026-09-09, §1 "Formalism" (`madness-workspace/reports/2026-09-09_release_report`).
 - First-principles derivation and orientation derivation
-  (`reports/2026-09-08_first_principles_derivation`, `reports/2026-09-09_orientation_derivation`);
+  (`madness-workspace/reports/2026-09-08_first_principles_derivation`,
+  `madness-workspace/reports/2026-09-09_orientation_derivation`);
   working-equation form in `reports/2026-09-09_beta_tpa_working_equations`.
 - Parker *et al.* (2018) and Sałek *et al.* (2002), mirrored line by line in the derivations above.
+- `madness-workspace` (`github.com/ahurta92/madness-workspace`) is the companion repository
+  these reports live in.
