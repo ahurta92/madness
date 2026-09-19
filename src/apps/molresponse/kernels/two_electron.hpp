@@ -70,6 +70,22 @@ struct ExchangePair {
 /// phi0, gamma) would vanish under Q). `J` is the already-applied Coulomb
 /// potential coulop(rho); the caller builds it once and reuses it across the
 /// X/Y (and spin) components.
+///
+/// This is the report's \f$g'[\gamma]\f$ — the first derivative of the two-electron operator
+/// evaluated with a pair density \f$\gamma(r,r')\f$ whose diagonal \f$\rho_\gamma(r)=\gamma(r,r)\f$
+/// carries the closed-shell factor 2:
+/// \anchor rr_eq_gprime
+/// \f[
+///   g'[\gamma]f = J[\rho_\gamma]f - c_x K[\gamma]f,\qquad
+///   (K[\gamma]f)(r) = \int \frac{\gamma(r,r')\,f(r')}{|r-r'|}\,dr',\qquad
+///   g'[\gamma]^{\dagger} = g'[\gamma^{\dagger}],
+/// \f]
+/// with \f$c_x=1\f$ for Hartree--Fock (`c_xc` here; the DFT kernel adds \f$f_{\rm xc}[\rho_\gamma]\f$
+/// and, at second order, a \f$g''\f$ term that vanishes for HF). `J` is \f$J[\rho_\gamma]\f$
+/// already applied; each `ExchangePair {bra, ket}` contributes one \f$K\f$ built from the pair
+/// density \f$|\mathrm{ket}\rangle\langle\mathrm{bra}|\f$ (see source_spec::gamma_legs).
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.1 "Objects and conventions" (the \f$g'\f$ definition).
 inline vecfuncT
 apply_gamma_raw(madness::World &world,
                   const madness::real_function_3d &J,
