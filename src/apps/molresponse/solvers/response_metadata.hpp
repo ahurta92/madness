@@ -210,6 +210,17 @@ public:
     j_["run_summary"]["dropped_work"] = items;
   }
 
+  /// Run-level record (spec §4.1): which code, on which host, with what stage
+  /// timing produced this calc dir. Full-replace upsert — the per-state
+  /// `metrics` blocks keep the per-node wall times; this is the run's total.
+  void set_run_info(const nlohmann::json &info) { j_["run_info"] = info; }
+
+  /// Why the executor's run() exited (`complete`, `complete_with_stalled`, …).
+  /// Documented in records_and_metadata.md; written here for the first time.
+  void set_stop_reason(const std::string &reason) {
+    j_["run_summary"]["stop_reason"] = reason;
+  }
+
   /// Process-wide read-only switch. Concurrent per-root verification
   /// processes (--tpa-roots) share one calc dir; with this set every save()
   /// is a no-op so siblings cannot race on the index (in-memory mutations

@@ -24,8 +24,11 @@
 #include "../solvers/response_metadata.hpp"
 
 #include <nlohmann/json.hpp>
+#include <madness/misc/info.h>
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
+
+#include <unistd.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -121,6 +124,28 @@ struct StageTimer {
 // ---------------------------------------------------------------------------
 // run_response — load ground -> plan -> CalcManager -> assemble -> Output.
 // ---------------------------------------------------------------------------
+
+/// Run-level record (spec §4.1): code version, host, ranks/threads, the
+/// stage timing in hand at this point, and the executor's stop reason.
+/// Called from run_response_with_ground (every entry point: madqc, the test
+/// driver, the CLI) with plan_build/solve/assemble, and again from the
+/// run_response wrapper once load/total exist — set_run_info is a
+/// full-replace upsert, so the later, fuller record wins. Rank 0 only:
+/// callers hold the rank-0 guard and own the save().
+inline void stamp_run_info(ResponseMetadata &meta, madness::World &world,
+                           const nlohmann::json &timing,
+                           const nlohmann::json &diagnostics) {
+  char host[256] = {0};
+  gethostname(host, sizeof(host) - 1);
+  meta.set_run_info({{"madness", {{"version", madness::info::version()},
+                                  {"git_commit", madness::info::git_commit()}}},
+                     {"hostname", std::string(host)},
+                     {"nproc", world.size()},
+                     {"threads", static_cast<int>(madness::ThreadPool::size())},
+                     {"timing", timing}});
+  if (diagnostics.contains("stop_reason") && diagnostics["stop_reason"].is_string())
+    meta.set_stop_reason(diagnostics["stop_reason"].get<std::string>());
+}
 
 /// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
 /// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the
@@ -334,12 +359,13 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
 #else
     meta.set_io_info("native", false);
 #endif
+    out.timing = std::move(timing);
+    out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
+    stamp_run_info(meta, world, out.timing, out.diagnostics);
     meta.save();
     out.metadata = meta.json();
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];
-    out.timing = std::move(timing);
-    out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
   }
   return out;
 }
@@ -379,6 +405,16 @@ run_response(madness::World &world, const ResponseWorkflowInput &in) {
                      "  solve_wall_s=", out.timing["solve"]["wall_s"],
                      "  assemble_wall_s=", out.timing["assemble"]["wall_s"],
                      "  total_wall_s=", out.timing["total"]["wall_s"]);
+
+    // Re-stamp with the load/total stages only this wrapper knows; the core
+    // already wrote plan_build/solve/assemble (full-replace upsert).
+    {
+      auto meta = ResponseMetadata::load_or_create(
+          in.settings.calc_dir + "/response_metadata.json");
+      stamp_run_info(meta, world, out.timing, out.diagnostics);
+      meta.save();
+      out.metadata = meta.json();
+    }
   }
   return out;
 }
