@@ -839,7 +839,6 @@ EXCLUDE_SYMLINKS       = NO
 EXCLUDE_PATTERNS       = LIBS.h \
                          mraX.cc \
                          mraX.h \
-                         */external/*/*.hpp \
                          *.tex
 
 # The EXCLUDE_SYMBOLS tag can be used to specify one or more symbol names
