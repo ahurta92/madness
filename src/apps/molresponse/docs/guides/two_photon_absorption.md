@@ -15,8 +15,10 @@ strengths and cross-sections (Monson–McClain averages).
 Conceptually, 2PA is obtained as a **residue of the quadratic (hyperpolarizability)
 response** taken at an excitation, rather than as a separate property built from
 scratch — so it reuses the excited-state and frequency-response machinery. The
-precise working equations are still being finalized and will be documented in
-[`formalism.md`](formalism.md); this guide intentionally does not pin them down.
+working equations — the spectral resolution, the residue that identifies S_BC, and
+delta^2PA — are stated in [`formalism.md`](formalism.md) (section *Two-photon
+absorption: the residue of the quadratic response*) and in the Doxygen of
+`kernels/tpa.hpp`; they are those of the 2026-09-09 release report §1.6.
 
 ## Status
 

@@ -306,7 +306,7 @@ tpa_pq_spec_sym(madness::World &world, const ResponseGroundState &g0,
 /// and the \f$e^{-i\omega_\sigma t}\f$ component of the equation of motion, \f$\hat Q\f$-projected,
 /// is the second-order linear-response equation with the source
 /// \anchor rr_eq_PQ
-/// \f{aligned}{
+/// \f{align*}{
 ///   P_p^{BC} &= (1+\mathcal P^{BC})\Bigl[\underbrace{\textstyle\sum_k x_k^{C}F^{B}_{kp}}_{[M]}
 ///      \;\underbrace{-\;\hat Q F^{B}x_p^{C}}_{[A]}\Bigr]
 ///      \;\underbrace{-\;g'[\gamma_L^{BC}]\phi_p}_{[L]}
@@ -320,7 +320,7 @@ tpa_pq_spec_sym(madness::World &world, const ResponseGroundState &g0,
 /// orderings). This is the only second-order source: \f$\beta\f$ (beta::beta_abc), Raman and
 /// 2PA (tpa::tpa_moment_residue) all contract it; they differ only in what they contract it with.
 /// \par Reference
-/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.3 "Second order: the one source", eqs. (gammaL), (PQ); the report's eq. (19) of the 2026 paper, Parker eq. (28), Sałek eq. (68).
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.3 "Second order: the one source", eqs. (gammaL), (PQ); eq. (19) of the 2026 paper, Parker eq. (28), Sałek eq. (68).
 inline ResponseStateXY<ClosedShell>
 quadratic_source(madness::World &world, const ResponseGroundState &g0,
                  const ResponseStateXY<ClosedShell> &B,
