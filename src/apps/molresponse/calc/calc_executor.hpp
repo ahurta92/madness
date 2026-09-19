@@ -419,6 +419,42 @@ void reproject_state(State &st, int k, double thresh) {
 /// converged-or-partial seed via try_load_fd_state (which re-projects a
 /// coarser source to the active key). Saves the result (+ metrics) through
 /// save_fd_state.
+///
+/// The equation solved is the first-order (linear) response of the report's §1.2.
+/// For a one-electron perturbation \f$v^{B}\f$ at frequency \f$+\omega_B\f$ the response is
+/// the pair \f$(x^{B},y^{B})\f$, both \f$\hat Q\f$-projected, with
+/// \f[
+///   \gamma^{B} = \sum_i\bigl[\,|x_i^{B}\rangle\langle\phi_i| + |\phi_i\rangle\langle y_i^{B}|\,\bigr],\qquad
+///   F^{B} = v^{B} + g'[\gamma^{B}],\qquad
+///   \bar F^{B} = (F^{B})^{\dagger} = v^{B} + g'[\gamma^{B\dagger}],
+/// \f]
+/// and the coupled equations
+/// \anchor rr_eq_lin
+/// \f[
+///   (F^{0}-\epsilon_i-\omega_B)\,x_i^{B} = -\hat Q F^{B}\phi_i,\qquad
+///   (F^{0}-\epsilon_i+\omega_B)\,y_i^{B} = -\hat Q \bar F^{B}\phi_i .
+/// \f]
+/// \f$F^{0}\f$ is never formed as a matrix: with \f$F^{0}=-\tfrac12\nabla^2+V^{0}\f$ each
+/// equation is inverted with the bound-state Helmholtz Green's function,
+/// \anchor rr_eq_bsh
+/// \f[
+///   x_i^{B} = -2\,\hat G_{\mu_i^{-}}\Bigl[V^{0}x_i^{B} + \hat Q F^{B}\phi_i\Bigr],\qquad
+///   \hat G_{\mu} = (-\nabla^2+\mu^2)^{-1},\qquad
+///   \mu_i^{\mp} = \sqrt{-2(\epsilon_i\pm\omega_B)},
+/// \f]
+/// (and the same for \f$y\f$ with \f$\mu_i^{+}\f$), iterated to self-consistency with KAIN
+/// acceleration. Convergence is judged on the BSH residual of the equation above and on the
+/// change of \f$\rho_{\gamma^B}\f$, at each rung of the threshold ladder (`thresh` here is one
+/// rung; the wavelet order \f$k\f$ follows the rung). At \f$\omega_B=0\f$, \f$x^{B}=y^{B}\f$ and
+/// one function per orbital is solved (`Static`); at finite frequency both channels are kept
+/// (`Full`). The observable of the linear solve is the polarizability trace
+/// \anchor rr_eq_alpha
+/// \f[
+///   \alpha_{AB}(\omega) = -\mathrm{Tr}(v^{A}\gamma^{B})
+///   = -\sum_i\bigl[\langle\phi_i|v^{A}|x_i^{B}\rangle + \langle y_i^{B}|v^{A}|\phi_i\rangle\bigr].
+/// \f]
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.2 "First order: the linear response in MRA form", eqs. (lin), (bsh).
 template <typename Type, typename Shell>
 NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                          double freq, double thresh, NodeAction action,
