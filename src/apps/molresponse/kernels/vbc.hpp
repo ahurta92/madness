@@ -138,6 +138,17 @@ vbc_half_spec(madness::World &world, const ResponseGroundState &g0,
 /// blocks, both ordered halves, evaluated by source_spec::assemble_source.
 /// VB_op / VC_op are the raw one-electron perturbation operators of B and C
 /// (dipole components, or dV_nuc/dQ for Raman). Closed-shell only.
+///
+/// This is \ref rr_eq_PQ written term by term with the leg dictionary — [L] the
+/// \f$-g'[\gamma_L^{BC}]\phi_p\f$ term, [A] the \f$-\hat Q F^{B}x_p^{C}\f$ term, [M] the
+/// occupied-matrix term \f$\sum_k x_k^{C}F^{B}_{kp}\f$ — for the (B,C) and (C,B) orderings
+/// that tpa::quadratic_source emits in one call. The two builders are gated equal by
+/// tests/test_vbc_spec_equivalence. Until 2026-09-09 this builder carried every response
+/// density transposed (\f$|\phi\rangle\langle x|\f$ for \f$|x\rangle\langle\phi|\f$), i.e. it
+/// built \f$\gamma^{B\dagger}\f$ in place of \f$\gamma^{B}\f$; static \f$\beta\f$ is blind to
+/// this (\f$x=y\f$), finite-frequency \f$\beta\f$ and Raman are not.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.3 "Second order: the one source" (Implementation gloss) and §2 "The one quadratic source: what changed".
 template <class Shell>
 inline ResponseStateXY<Shell>
 compute_vbc_spec(madness::World &world, const ResponseGroundState &g0,
