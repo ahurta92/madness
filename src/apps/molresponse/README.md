@@ -31,6 +31,7 @@ for this release.
   [excited states](docs/guides/excited_states.md) ·
   [two-photon absorption](docs/guides/two_photon_absorption.md) ·
   [DALTON warm-start](docs/guides/dalton_warm_start.md).
+- **Formalism in the Doxygen** — `formalism.dox` (`\page response_formalism`) fixes the symbols and indexes the equations, each stated at the object that implements it (the release report's §1 correspondence table).
 - **[`docs/guides/example_output.md`](docs/guides/example_output.md)** — what a run
   prints and writes (real output).
 - **[`docs/guides/records_and_metadata.md`](docs/guides/records_and_metadata.md)** —
