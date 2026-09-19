@@ -37,6 +37,26 @@ using vecfuncT = std::vector<madness::real_function_3d>;
 /// verbatim v2-ported contraction (byte-identical). OPEN-SHELL is guarded: the
 /// open-shell gamma exists (Kernels<Full,OpenShell>::apply_g), but the open-shell
 /// make_zeta + per-spin contraction kernels are not yet derived (step 6b/7).
+///
+/// The quadratic response function is a trace,
+/// \f$\beta_{ABC}(-\omega_\sigma;\omega_B,\omega_C) = -\mathrm{Tr}(v^{A}\gamma^{BC})\f$. Splitting
+/// \f$\gamma^{BC}\f$ into the idempotency block \ref rr_eq_gammaL and the solved block, and using
+/// the symmetry of the response operator to move the resolvent onto the \f$A\f$ leg (the
+/// \f$2n{+}1\f$ rule), no second-order vector is ever solved for:
+/// \anchor rr_eq_beta
+/// \f{gathered}{
+///   \beta_{ABC} = -2\,(b_1+b_2+b_3),\\
+///   b_1 = -\bigl[\langle x^{A}|P^{BC}\rangle + \langle y^{A}|Q^{BC}\rangle\bigr],\qquad
+///   b_2 = \langle v^{A}y^{C}|x^{B}\rangle + \langle v^{A}\zeta^{BC}|\phi\rangle,\qquad
+///   b_3 = b_2\big|_{B\leftrightarrow C}
+/// \f}
+/// with \f$(x^{A},y^{A})\f$ the driven response at \f$+\omega_\sigma=\omega_B+\omega_C\f$ and
+/// \f$(P^{BC},Q^{BC})\f$ the source \ref rr_eq_PQ. \f$b_2+b_3=\mathrm{Tr}(v^{A}\gamma_L^{BC})\f$
+/// needs no solve; \f$b_1\f$ needs the three first-order legs and the source. Second-harmonic
+/// generation is \f$\omega_B=\omega_C=\omega\f$, \f$\omega_\sigma=2\omega\f$; the static limit has
+/// \f$x=y\f$, \f$P=Q\f$, and Kleinman symmetry (\f$\beta_{zxx}=\beta_{xxz}\f$) holds exactly.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.4 "β: the 2n+1 contraction", eq. (beta).
 template <class Shell>
 inline double
 beta_abc(madness::World &world, const ResponseGroundState &g0,
