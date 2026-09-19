@@ -4,86 +4,158 @@ The shared machinery every property in this engine specializes. The individual
 feature guides ([polarizability](polarizability.md),
 [hyperpolarizability](hyperpolarizability.md), [Raman](raman.md),
 [two-photon absorption](two_photon_absorption.md)) point back here rather than
-re-deriving it. This is a working summary; the full derivation and benchmarks are
-in the accompanying paper(s).
+re-deriving it. The equations are those of the release report 2026-09-09
+(`madness-workspace/reports/2026-09-09_release_report/main.tex`, §1); the same
+equations are stated in the Doxygen at the object that implements each one
+(`formalism.dox`, page *Response formalism*).
 
-## The perturbation expansion
+## Objects and conventions
 
-Response properties are derivatives of the energy (equivalently, of the density
-matrix) with respect to one or more perturbing fields. Expanding the density
-matrix γ in the field strengths λ<sub>C</sub>,
+Occupied orbitals $\phi_i$ ($i=1..N_{\rm occ}$, closed shell), ground-state Fock operator
+$F^{0}$ with $F^{0}\phi_i=\epsilon_i\phi_i$, projector onto the virtual space
+$\hat Q=1-\sum_i|\phi_i\rangle\langle\phi_i|$. A pair density $\gamma(r,r')$ has the diagonal
+$\rho_\gamma(r)=\gamma(r,r)$ (carrying the closed-shell factor 2) and enters through the first
+derivative of the two-electron operator,
 
-    γ = γ⁰ + Σ_C λ_C γ^C + Σ_BC λ_B λ_C γ^BC + …
+$$
+g'[\gamma]f = J[\rho_\gamma]f - c_x K[\gamma]f,\qquad
+(K[\gamma]f)(r) = \int \frac{\gamma(r,r')\,f(r')}{|r-r'|}\,dr',\qquad
+g'[\gamma]^{\dagger} = g'[\gamma^{\dagger}],
+$$
 
-gives the ground state γ⁰, the **first-order** responses γ^C (linear), the
-**second-order** responses γ^BC (quadratic), and so on. Each order satisfies a
-response equation obtained by collecting terms at that order in the
-Fock/commutator relation.
+with $c_x=1$ for Hartree–Fock. Every convention that matters is fixed by one statement:
+*a response density at $+\omega$ is $\gamma^{B}=|x^{B}\rangle\langle\phi|+|\phi\rangle\langle y^{B}|$,
+and its dagger is the same density at $-\omega$.* In the code: `gamma_legs`,
+`gamma_dagger_legs`, `ketbra` in `kernels/source_spec.hpp`.
 
-## First-order (linear) response
+## First order: the linear response in MRA form
 
-For a perturbation v^C at frequency ω<sub>C</sub>, the first-order response is
-carried by a pair of orbital-space functions (x<sub>i</sub><sup>C</sup>,
-y<sub>i</sub><sup>C</sup>) — the excitation and de-excitation parts — one pair per
-occupied orbital *i*. They solve the coupled response equations, cast in MADNESS
-as a bound-state Helmholtz (BSH / Green's-function) fixed-point iteration on the
-resolution ladder:
+For a one-electron perturbation $v^{B}$ at frequency $+\omega_B$ the response is the pair
+$(x^{B},y^{B})$, both $\hat Q$-projected, with
 
-    x_p^C = −2 Ĝ(k_p) * [ V⁰ x_p^C − Σ ε_ip x_i^C + g′[γ^C] φ_p + V_p^C ]
+$$
+\gamma^{B}=\sum_i\bigl[|x_i^{B}\rangle\langle\phi_i|+|\phi_i\rangle\langle y_i^{B}|\bigr],\qquad
+F^{B}=v^{B}+g'[\gamma^{B}],\qquad \bar F^{B}=(F^{B})^{\dagger}=v^{B}+g'[\gamma^{B\dagger}],
+$$
 
-and the conjugate equation for y. Here g′[γ^C] is the first derivative of the
-electron-interaction operator evaluated with the response density (the coupling
-that makes the equations self-consistent). This linear solve is the **FD solver**;
-it is the single most reused component in the engine.
+and the coupled equations
 
-## Property contraction — the (A, B, C) form
+$$
+(F^{0}-\epsilon_i-\omega_B)\,x_i^{B}=-\hat QF^{B}\phi_i,\qquad
+(F^{0}-\epsilon_i+\omega_B)\,y_i^{B}=-\hat Q\bar F^{B}\phi_i .
+$$
 
-A property is a trace of a perturbation operator against a response density. In
-the generalized notation used throughout the engine,
+MADNESS never forms $F^{0}$ as a matrix. Writing $F^{0}=-\tfrac12\nabla^2+V^{0}$ and moving the
+potential to the right, each equation is inverted with the bound-state Helmholtz (BSH) Green's
+function,
 
-    P_ABC(−ω_A; ω_B, ω_C) = Tr[ v^A γ^BC ]
+$$
+x_i^{B}=-2\,\hat G_{\mu_i^{-}}\Bigl[V^{0}x_i^{B}+\hat QF^{B}\phi_i\Bigr],\qquad
+\hat G_{\mu}=(-\nabla^2+\mu^2)^{-1},\qquad
+\mu_i^{\mp}=\sqrt{-2(\epsilon_i\pm\omega_B)},
+$$
 
-with the frequency sum rule ω_A = −(ω_B + ω_C). Choosing the operators and orders
-selects the property. The quadratic response density γ^BC contains a lower-order
-part γ_L (products of first-order responses, plus an occupied-space relaxation
-term ζ) and a genuinely second-order part γ_Q built from the **VBC source** — the
-quadratic right-hand side assembled from the two first-order responses and their
-operators.
+(and the same for $y$ with $\mu_i^{+}$), iterated to self-consistency with KAIN acceleration;
+convergence is judged on the BSH residual and on the change of $\rho_{\gamma^B}$, at each rung
+of the threshold ladder (protocol $10^{-4}\to10^{-6}$, wavelet order $k$ following the rung).
+This linear solve (`solve_fd_protocol`) is the single most reused component in the engine.
 
-## Specializations
+At $\omega_B=0$, $x^{B}=y^{B}$ and only one function per orbital is solved (`Static`); at finite
+frequency both channels are kept (`Full`). The polarizability is the trace
+$\alpha_{AB}(\omega)=-\mathrm{Tr}(v^{A}\gamma^{B})=-\sum_i\bigl[\langle\phi_i|v^{A}|x_i^{B}\rangle+\langle y_i^{B}|v^{A}|\phi_i\rangle\bigr]$.
 
-**Polarizability α** — the linear special case: A and C are dipole operators, no
-quadratic source. α<sub>ij</sub>(ω) = −2(⟨x<sub>i</sub>(ω)|μ<sub>j</sub>⟩ +
-⟨y<sub>i</sub>(ω)|μ<sub>j</sub>⟩). See [polarizability](polarizability.md).
+**Excited states** are the same operator with $v\equiv0$: $(x^{f},y^{f})$ at $\omega_f$ solve the
+equations above with right-hand sides $-\hat Qg'[\gamma^{f}]\phi_i$ and
+$-\hat Qg'[\gamma^{f\dagger}]\phi_i$ (RPA / full TDHF; dropping the $y$ channel gives TDA).
+Eigenvectors are normalized as $\langle x^f|x^f\rangle-\langle y^f|y^f\rangle=1$.
 
-**Hyperpolarizability β** — the quadratic case with A, B, C all dipole operators;
-β<sub>ABC</sub>(−ω<sub>A</sub>; ω<sub>B</sub>, ω<sub>C</sub>) contracts the dipole
-against the VBC-sourced γ^BC. See [hyperpolarizability](hyperpolarizability.md).
+## Second order: the one source
 
-**Raman** — the same quadratic machinery with a **nuclear-displacement** operator
-substituted for one leg (the polarizability gradient), rather than a third dipole.
-See [Raman](raman.md).
+With both photon frequencies positive, the Fock operator that meets $\gamma^{C}$ is $F^{B}$ at
+$+\omega_B$, *undaggered*. Idempotency fixes the occupied–occupied and virtual–virtual blocks of
+the second-order density without any solve,
 
-## Two-photon absorption — being finalized
+$$
+\gamma_L^{BC}=\sum_i\Bigl[|x_i^{B}\rangle\langle y_i^{C}|+|x_i^{C}\rangle\langle y_i^{B}|
+  -|\phi_i\rangle\langle\zeta_i^{BC}|-|\phi_i\rangle\langle\zeta_i^{CB}|\Bigr],\qquad
+\zeta_i^{BC}=\sum_j\phi_j\,\langle y_i^{B}|x_j^{C}\rangle ,
+$$
 
-<!-- PLACEHOLDER. The two-photon transition moment is obtained as the single
-     residue of the quadratic response at an excitation energy. The precise
-     working composition — in particular the two-electron E[3] residue term that
-     distinguishes it from an ordinary β evaluation — is still being finalized and
-     will be written out here once settled. Until then the two-photon guide
-     describes the property and its preliminary results without committing to the
-     equations. -->
+and the $e^{-i\omega_\sigma t}$ component of the equation of motion, $\hat Q$-projected, is the
+second-order linear-response equation with the source
 
-Two-photon absorption is obtained as the **single residue of the quadratic
-response** (β) taken at an excited state, rather than as a separate property. It
-therefore reuses the excited-state and frequency-response machinery above. The
-precise working equations — including the two-electron residue correction that
-makes it distinct from an ordinary β evaluation — are **being finalized** and will
-be added to this section; see [two-photon absorption](two_photon_absorption.md)
-for the current descriptive treatment and preliminary results.
+$$
+\begin{aligned}
+P_p^{BC}&=(1+\mathcal P^{BC})\Bigl[\underbrace{\textstyle\sum_kx_k^{C}F^{B}_{kp}}_{[M]}
+   \;\underbrace{-\;\hat QF^{B}x_p^{C}}_{[A]}\Bigr]
+   \;\underbrace{-\;g'[\gamma_L^{BC}]\phi_p}_{[L]}
+   \;\underbrace{-\;g''[\gamma^{B}\gamma^{C}+\gamma^{C}\gamma^{B}]\phi_p}_{[G],\ \mathrm{HF}:\,0},
+   \qquad F^{B}_{kp}=\langle\phi_k|F^{B}|\phi_p\rangle,\\
+Q_p^{BC}&=P_p^{BC}\big|_{x\leftrightarrow y\ \text{on every leg}}
+   =(1+\mathcal P^{BC})\Bigl[\textstyle\sum_ky_k^{C}\bar F^{B}_{kp}-\hat Q\bar F^{B}y_p^{C}\Bigr]
+   -g'[\gamma_L^{BC\dagger}]\phi_p-\dots
+\end{aligned}
+$$
+
+where $\mathcal P^{BC}$ swaps $B\leftrightarrow C$. This is the *only* second-order source
+(`quadratic_source` in `kernels/tpa_source_spec.hpp`; `compute_vbc_spec` in `kernels/vbc.hpp` is
+the same equation term by term): β, Raman and 2PA all contract it; they differ only in what they
+contract it with.
+
+## β: the 2n+1 contraction
+
+$$
+\beta_{ABC}=-2\,(b_1+b_2+b_3),\qquad
+b_1=-\bigl[\langle x^{A}|P^{BC}\rangle+\langle y^{A}|Q^{BC}\rangle\bigr],\qquad
+b_2=\langle v^{A}y^{C}|x^{B}\rangle+\langle v^{A}\zeta^{BC}|\phi\rangle,\qquad
+b_3=b_2|_{B\leftrightarrow C}
+$$
+
+with $(x^{A},y^{A})$ the driven response at $+\omega_\sigma=\omega_B+\omega_C$; no second-order
+vector is ever solved for. SHG is $\omega_B=\omega_C=\omega$; in the static limit $x=y$, $P=Q$
+and Kleinman symmetry holds exactly. See [hyperpolarizability](hyperpolarizability.md).
+
+## Raman: the nuclear-displacement leg
+
+$$
+\frac{\partial\alpha_{AB}(\omega)}{\partial Q}=\beta_{ABQ}(-\omega;\omega,0),\qquad
+v^{Q}=\frac{\partial V_{\rm nuc}}{\partial Q}=\sum_{\alpha}Z_\alpha\frac{\partial}{\partial Q}\frac{-1}{|r-R_\alpha|},
+$$
+
+so the β machinery is reused with $C\to Q$: the $C$ leg is the static response to $v^{Q}$
+(`nuclear_operator`, `MolecularDerivativeFunctor`), the $B$ leg the dipole response at $\omega$,
+the $A$ leg the dipole response at $\omega_\sigma=\omega$. See [Raman](raman.md).
+
+## Two-photon absorption: the residue of the quadratic response
+
+Write the coupled first-order equations as $(\Lambda-\omega\Delta)|X,Y\rangle=-|P,Q\rangle$ with
+$\Lambda$ the electronic Hessian and $\Delta=\mathrm{diag}(1,-1)$. Completeness of the paired
+eigenvectors in the $\Delta$ metric gives
+
+$$
+(\Lambda-\omega\Delta)^{-1}
+= \sum_K\left[\frac{|X^K,Y^K\rangle\langle X^K,Y^K|}{\Omega_K-\omega}
+ - \frac{|Y^K,X^K\rangle\langle Y^K,X^K|}{\Omega_K+\omega}\right],
+$$
+
+and the residue of $\beta_{ABC}(-\omega';\omega_B,\omega'-\omega_B)$ at $\omega'\to\Omega_N$
+identifies the two-photon transition moment as the eigenvector contracted with the *same* source
+$(P,Q)$ — no dagger, nothing changed inside $(P,Q)$. With degenerate photons
+$\omega_B=\omega_C=\omega_f/2$,
+
+$$
+S_{BC}=\sqrt2\,\bigl[\langle x^{f}|P^{BC}\rangle+\langle y^{f}|Q^{BC}\rangle\bigr],\qquad
+\delta^{\rm 2PA}=\tfrac{1}{30}\textstyle\sum_{bc}\bigl[F\,S_{bb}S_{cc}+(G{+}H)S_{bc}S_{bc}\bigr],
+$$
+
+with $F=G=H=2$ for linearly polarized parallel photons and $\sqrt2$ the translation between
+this solver's eigenvector normalization and DALTON's (`tpa_moment_residue` in `kernels/tpa.hpp`).
+See [two-photon absorption](two_photon_absorption.md).
 
 ## References
 
-- The MADNESS response / correlation-consistent basis benchmark papers (α, β).
-- Quadratic-response and two-photon literature (to be cited when the 2PA section
-  is finalized).
+- Release report 2026-09-09, §1 "Formalism" (`madness-workspace/reports/2026-09-09_release_report`).
+- First-principles derivation and orientation derivation
+  (`reports/2026-09-08_first_principles_derivation`, `reports/2026-09-09_orientation_derivation`);
+  working-equation form in `reports/2026-09-09_beta_tpa_working_equations`.
+- Parker *et al.* (2018) and Sałek *et al.* (2002), mirrored line by line in the derivations above.
