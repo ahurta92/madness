@@ -291,6 +291,36 @@ tpa_pq_spec_sym(madness::World &world, const ResponseGroundState &g0,
 /// S = sqrt2 (<x^f|P> + <y^f|Q>) in 2PA. One call = both photon orderings, so
 /// it replaces vbc::compute_vbc's (B,C)+(C,B) sum one-for-one, with identical
 /// sign structure; in the static (x=y) limit the two coincide.
+///
+/// With both photon frequencies positive, the only products in the equation of motion that
+/// oscillate at \f$\omega_\sigma=\omega_B+\omega_C\f$ are (component at \f$+\omega_B\f$) ×
+/// (component at \f$+\omega_C\f$), so the Fock operator that meets \f$\gamma^{C}\f$ is
+/// \f$F^{B}\f$ at \f$+\omega_B\f$, undaggered. Idempotency fixes the occupied--occupied and
+/// virtual--virtual blocks of the second-order density without any solve,
+/// \anchor rr_eq_gammaL
+/// \f[
+///   \gamma_L^{BC} = \sum_i\Bigl[\,|x_i^{B}\rangle\langle y_i^{C}| + |x_i^{C}\rangle\langle y_i^{B}|
+///     - |\phi_i\rangle\langle\zeta_i^{BC}| - |\phi_i\rangle\langle\zeta_i^{CB}|\,\Bigr],\qquad
+///   \zeta_i^{BC} = \sum_j \phi_j\,\langle y_i^{B}|x_j^{C}\rangle ,
+/// \f]
+/// and the \f$e^{-i\omega_\sigma t}\f$ component of the equation of motion, \f$\hat Q\f$-projected,
+/// is the second-order linear-response equation with the source
+/// \anchor rr_eq_PQ
+/// \f{aligned}{
+///   P_p^{BC} &= (1+\mathcal P^{BC})\Bigl[\underbrace{\textstyle\sum_k x_k^{C}F^{B}_{kp}}_{[M]}
+///      \;\underbrace{-\;\hat Q F^{B}x_p^{C}}_{[A]}\Bigr]
+///      \;\underbrace{-\;g'[\gamma_L^{BC}]\phi_p}_{[L]}
+///      \;\underbrace{-\;g''[\gamma^{B}\gamma^{C}+\gamma^{C}\gamma^{B}]\phi_p}_{[G],\ \mathrm{HF}:\,0},
+///      \qquad F^{B}_{kp} = \langle\phi_k|F^{B}|\phi_p\rangle,\\
+///   Q_p^{BC} &= P_p^{BC}\big|_{x\leftrightarrow y\ \text{on every leg}}
+///      = (1+\mathcal P^{BC})\Bigl[\textstyle\sum_k y_k^{C}\bar F^{B}_{kp} - \hat Q\bar F^{B}y_p^{C}\Bigr]
+///      - g'[\gamma_L^{BC\dagger}]\phi_p - \dots
+/// \f}
+/// where \f$\mathcal P^{BC}\f$ swaps the labels \f$B\leftrightarrow C\f$ (one call emits both
+/// orderings). This is the only second-order source: \f$\beta\f$ (beta::beta_abc), Raman and
+/// 2PA (tpa::tpa_moment_residue) all contract it; they differ only in what they contract it with.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.3 "Second order: the one source", eqs. (gammaL), (PQ); the report's eq. (19) of the 2026 paper, Parker eq. (28), Sałek eq. (68).
 inline ResponseStateXY<ClosedShell>
 quadratic_source(madness::World &world, const ResponseGroundState &g0,
                  const ResponseStateXY<ClosedShell> &B,
