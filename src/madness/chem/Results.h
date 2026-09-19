@@ -444,7 +444,7 @@ public:
   bool uses_dftd3 = false;
   bool uses_pcm = false;
   bool uses_libxc = false;
-  std::string xc = "hf";        // functional the SCF ran with (deck `dft.xc`)
+  std::string xc;                // functional the SCF ran with (deck `dft.xc`); empty = not set
   nlohmann::json precision;     // spec §4.2: {k, thresh, protocol, econv, dconv, L, ncoeff}
   nlohmann::json energies;      // QCSchema-named energy components, emitted flat
   int scf_iterations = -1;
@@ -476,7 +476,7 @@ public:
                       {"pcm", uses_pcm},
                       {"libxc", uses_libxc}};
 
-    j["xc"] = xc;
+    if (!xc.empty()) j["xc"] = xc;
     if (!precision.is_null()) j["precision"] = precision;
     for (const auto &kv : energies.items()) j[kv.key()] = kv.value();
     if (scf_iterations >= 0) j["scf_iterations"] = scf_iterations;
@@ -521,7 +521,7 @@ public:
       uses_libxc = c.value("libxc", false);
     }
 
-    xc = j.value("xc", std::string("hf"));
+    xc = j.value("xc", std::string());
     precision = j.contains("precision") ? j.at("precision") : nlohmann::json();
     scf_iterations = j.value("scf_iterations", -1);
     energies = nlohmann::json::object();

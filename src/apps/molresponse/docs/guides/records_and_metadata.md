@@ -31,12 +31,17 @@ with a schema you build on.
   "vbc_states":     { "<vbc_id>": { "<protocol_key>": { ... } } },
   "properties":     { "<name>": { "<protocol_key>": [ { ... }, ... ] } },
   "run_summary":    { stop_reason, dropped_work, ... },
+  "run_info":       { madness{version,git_commit}, hostname, nproc, threads, timing{<stage>: seconds} },
   "io":             { backend, hdf5_compiled }
 }
 ```
 
 `<protocol_key>` is the resolution rung, e.g. `1e-04_k6`, `1e-06_k8` — the
 threshold and the polynomial order together, because they always move together.
+
+`run_summary.stop_reason` is `unknown` when the scheduler did not report one.
+`run_info.timing` carries `plan_build`/`solve`/`assemble` from every entry
+point and additionally `load`/`total` from the CLI wrapper.
 
 ## The three conventions that matter
 
