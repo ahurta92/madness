@@ -132,6 +132,11 @@ struct StageTimer {
 /// run_response wrapper once load/total exist — set_run_info is a
 /// full-replace upsert, so the later, fuller record wins. Rank 0 only:
 /// callers hold the rank-0 guard and own the save().
+///
+/// stop_reason is ALWAYS written (defaulting to "unknown" when the scheduler
+/// didn't report one), same as set_dropped_work's full-replace contract: a
+/// conditional write would let a stale reason from a previous run in the
+/// same calc dir survive a run that no longer sets one.
 inline void stamp_run_info(ResponseMetadata &meta, madness::World &world,
                            const nlohmann::json &timing,
                            const nlohmann::json &diagnostics) {
@@ -143,8 +148,7 @@ inline void stamp_run_info(ResponseMetadata &meta, madness::World &world,
                      {"nproc", world.size()},
                      {"threads", static_cast<int>(madness::ThreadPool::size())},
                      {"timing", timing}});
-  if (diagnostics.contains("stop_reason") && diagnostics["stop_reason"].is_string())
-    meta.set_stop_reason(diagnostics["stop_reason"].get<std::string>());
+  meta.set_stop_reason(diagnostics.value("stop_reason", std::string("unknown")));
 }
 
 /// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
