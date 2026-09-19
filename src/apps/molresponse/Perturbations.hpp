@@ -172,6 +172,25 @@ dipole_operators(World& world) {
 /// VC_op in Raman beta(dipole; dipole, nuclear)). Matches molresponse_v2
 /// make_perturbation_operator(NuclearDisplacement): MolecularDerivativeFunctor on
 /// gs.molecule(), truncate-on-project then truncate_mode 1.
+///
+/// Vibrational Raman intensities need the derivative of the frequency-dependent
+/// polarizability with respect to a nuclear coordinate \f$Q\f$. In the response language that
+/// derivative is a quadratic response with one static nuclear perturbation,
+/// \anchor rr_eq_raman
+/// \f[
+///   \frac{\partial\alpha_{AB}(\omega)}{\partial Q} = \beta_{ABQ}(-\omega;\omega,0),\qquad
+///   v^{Q} = \frac{\partial V_{\rm nuc}}{\partial Q}
+///         = \sum_{\alpha} Z_\alpha \frac{\partial}{\partial Q}\frac{-1}{|r-R_\alpha|},
+/// \f]
+/// so the machinery of \ref rr_eq_PQ and \ref rr_eq_beta is reused verbatim with
+/// \f$C\to Q\f$: the \f$C\f$ leg is the static response to \f$v^{Q}\f$ (one function per
+/// orbital, \f$x^{Q}=y^{Q}\f$), the \f$B\f$ leg is the dipole response at \f$\omega\f$, and the
+/// \f$A\f$ leg is the dipole response at \f$\omega_\sigma=\omega\f$. This function is \f$v^{Q}\f$:
+/// `MolecularDerivativeFunctor` (the derivative of the smoothed nuclear attraction, with the
+/// MRA refinement pinned at the nucleus); sign and unit are those of a Cartesian displacement
+/// of atom `atom` along axis `axis` in bohr.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.5 "Raman: the nuclear-displacement leg", eq. (raman).
 inline real_function_3d
 nuclear_operator(World& world, const GroundState& gs, int atom, int axis) {
     MADNESS_CHECK(axis >= 0 && axis <= 2);
