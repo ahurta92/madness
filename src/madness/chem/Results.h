@@ -441,7 +441,7 @@ public:
   // empirical dispersion (DFT-D3) contribution already contained in
   // scf_total_energy; 0.0 when no correction was applied
   double scf_dispersion_correction_energy = 0.0;
-  std::string xc = "hf";        // functional the SCF ran with (deck `dft.xc`)
+  std::string xc;                // functional the SCF ran with (deck `dft.xc`); empty = not set
   nlohmann::json precision;     // spec §4.2: {k, thresh, protocol, econv, dconv, L, ncoeff}
   nlohmann::json energies;      // QCSchema-named energy components, emitted flat
   int scf_iterations = -1;
@@ -470,7 +470,7 @@ public:
     j["scf_total_energy"] = scf_total_energy;
     j["scf_dispersion_correction_energy"] = scf_dispersion_correction_energy;
 
-    j["xc"] = xc;
+    if (!xc.empty()) j["xc"] = xc;
     if (!precision.is_null()) j["precision"] = precision;
     for (const auto &kv : energies.items()) j[kv.key()] = kv.value();
     if (scf_iterations >= 0) j["scf_iterations"] = scf_iterations;
@@ -509,7 +509,7 @@ public:
     scf_dispersion_correction_energy =
         j.value("scf_dispersion_correction_energy", 0.0);
 
-    xc = j.value("xc", std::string("hf"));
+    xc = j.value("xc", std::string());
     precision = j.contains("precision") ? j.at("precision") : nlohmann::json();
     scf_iterations = j.value("scf_iterations", -1);
     energies = nlohmann::json::object();
