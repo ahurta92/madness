@@ -367,6 +367,27 @@ int main() {
            "index intact after kill-simulated save cycle");
   }
 
+  // ---- run_info + stop_reason (Phase 0.3) ---------------------------------
+  std::printf("=== run_info ===\n");
+  {
+    const std::string p = (tmp / "run_info.json").string();
+    std::filesystem::remove(p);
+    auto m = ResponseMetadata::load_or_create(p);
+    m.set_run_info({{"timing", {{"total", {{"wall_s", 12.5}}}}}, {"nproc", 8}});
+    m.set_stop_reason("complete");
+    m.save();
+    auto back = ResponseMetadata::load_or_create(p);
+    EXPECT(back.json()["run_info"]["timing"]["total"]["wall_s"] == 12.5, "run_info.timing survives save/reload");
+    EXPECT(back.json()["run_info"]["nproc"] == 8,                         "run_info.nproc survives save/reload");
+    EXPECT(back.json()["run_summary"]["stop_reason"] == "complete",       "stop_reason persisted under run_summary");
+    // a second run replaces, never appends
+    back.set_run_info({{"nproc", 16}});
+    back.save();
+    auto again = ResponseMetadata::load_or_create(p);
+    EXPECT(!again.json()["run_info"].contains("timing") && again.json()["run_info"]["nproc"] == 16,
+           "set_run_info is a full-replace upsert");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);
