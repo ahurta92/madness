@@ -72,6 +72,25 @@ struct ESProblem {
   int                 n_roots = 0;
 };
 
+/// Excited states as the homogeneous case of the linear response (report §1.2,
+/// "Excited states"): the same operator as \ref rr_eq_lin with \f$v\equiv0\f$ is the
+/// eigenproblem. \f$(x^{f},y^{f})\f$ at \f$\omega_f\f$ solve
+/// \f[
+///   (F^{0}-\epsilon_i-\omega_f)\,x_i^{f} = -\hat Q\,g'[\gamma^{f}]\,\phi_i,\qquad
+///   (F^{0}-\epsilon_i+\omega_f)\,y_i^{f} = -\hat Q\,g'[\gamma^{f\dagger}]\,\phi_i,\qquad
+///   \gamma^{f} = \sum_i\bigl[\,|x_i^{f}\rangle\langle\phi_i| + |\phi_i\rangle\langle y_i^{f}|\,\bigr],
+/// \f]
+/// (RPA / full TDHF when both channels are kept — `Type = Full`; dropping the \f$y\f$ channel
+/// gives TDA — `Type = TDA`). Eigenvectors are normalized in the paired metric,
+/// \anchor rr_eq_esnorm
+/// \f[
+///   \langle x^{f}|x^{f}\rangle - \langle y^{f}|y^{f}\rangle = 1,
+/// \f]
+/// which is the metric of the spectral resolution that ties the excited states to the
+/// two-photon amplitude (see tpa::tpa_moment_residue). Each equation is inverted with the
+/// BSH Green's function exactly as in \ref rr_eq_bsh with \f$\omega_B\to\omega_f\f$.
+/// \par Reference
+/// Release report 2026-09-09 (madness-workspace/reports/2026-09-09_release_report/main.tex), §1.2 "First order: the linear response in MRA form", paragraph "Excited states".
 template <typename Type, typename Shell>
 class ESSolver {
 public:
