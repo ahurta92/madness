@@ -58,6 +58,11 @@ no simple-dftd3 to register it with. That laptop is not uniformly slower: it ran
 so treat the 12 s as an upper bound of the same order, and re-measure it on
 node26 once simple-dftd3 is available there.
 
+`response_he_alpha` was measured on a Seawulf Milan node at
+`MAD_NUM_THREADS=7` (the thread count its `CMakeLists.txt` comment
+records), one second inside the `short` boundary; re-measure before
+leaning on the tier.
+
 | Case | `--wf=` | System | Demonstrates | Time | Tier |
 |------|---------|--------|--------------|------|------|
 | `scf_he_hf` | `scf` | He | the minimal deck — start here | 5 s | short |
@@ -71,6 +76,7 @@ node26 once simple-dftd3 is available there.
 | `scf_he_tpss` | `scf` | He | the only meta-GGA — the non-multiplicative kinetic-energy-density term | 17 s | medium |
 | `oep_be_oaep` | `oep` | Be | optimized effective potential, OAEP model; virial diagnostics | 28 s | medium |
 | `cis_he_singlets` | `cis` | He | CIS excited states; the `tdhf` group | 9 s | medium |
+| `response_he_alpha` | `response` | He | linear response: static + dynamic α_zz at one rung; the task-record envelope | 9 s | short |
 | `scf_lih_pbe_d3` | `scf` | LiH | Grimme D3 dispersion in the energy *and* the single-point gradient (needs simple-dftd3 + libxc) | 12 s | medium |
 | `scf_h2o_hf` | `scf` | H₂O | `protocol` ladder 1e-4 → 1e-6 | 38 s | long |
 | `scf_lih_optimize_tight` | `scf` + `--optimize` | LiH | optimizer thresholds pinned explicitly in the `optimization` group | 38 s | long |
@@ -206,6 +212,45 @@ scripted tests compare precisely that. A dark state's `1e-26` oscillator strengt
 checked to `1e-3` is just as empty. Compare a key that carries a value, or set
 `"allow_zero": true` where the near-zero is the physics (a symmetry-vanishing
 dipole component, a gradient at a stationary point).
+
+## Response cases
+
+The `response_*` cases are the regression suite for `madqc --wf=response`
+(molresponse): does each property still run, still converge, and still give the
+number it gave last time. Every case is one rung (`protocol [1e-4]`, `k 6`,
+`xc hf`); nothing here is a converged number — the converged numbers live in
+the response benchmarks (DALTON comparisons at `1e-6`/`1e-8`), not in CI. The
+nightly water case runs at the same HF/aug-cc-pVQZ optimized geometry those
+benchmarks use, so its numbers can be read against DALTON to about a percent.
+
+Three things every response `check.json` asserts:
+
+1. **Converged.** `tasks[1].convergence.status == "converged"` (the response
+   task's envelope: every state at the finest rung converged and
+   `run_summary.stop_reason == "complete"`), `n_unconverged == 0`, and
+   `convergence.iterations` under a `max` cap of 1.5× the reference count — a
+   jump in iterations is a regression even when the number lands.
+2. **Same number.** Each asserted property within `tol`/`rtol` of `reference/`:
+   α `tol 1e-3` (absolute, au), β `rtol 0.01`, excitation energies `tol 1e-3`,
+   2PA `rtol 0.05`, Raman `rtol 0.02` — 10× the run-to-run spread at
+   `dconv 1e-4`, loose enough not to flap on thread scheduling.
+3. **Envelope intact.** `precision.k`, `precision.protocol_key`, `type`,
+   `stop_reason` compared exactly.
+
+Wall time is recorded in the reference (`provenance.wall_s`,
+`run_info.timing`) and never asserted: a wall-time gate on a shared node is
+noise.
+
+Key paths: α is `tasks[1].properties.response_properties.alpha.<pk>[row].alpha[i][j]`
+with `<pk>` the protocol key (`"1e-04_k6"`), rows in `dipole.frequencies`
+order and `i,j` indexing the letters of `dipole.directions`; β and Raman rows
+are `…beta.<pk>[row]` / `…raman.<pk>[row]` with `A`, `B`, `C`, `freq_b`,
+`freq_c` naming the component (rows ordered A fastest, then B, then C); 2PA is
+`…tpa.<pk>[row]` with `es_root_id`, `omega`, `D_linear`; excitation energies
+are `tasks[1].metadata.excited_states.<pk>.roots[i].omega`.
+
+The nightly set is the `long`/`verylong` response cases:
+`ctest -L qctest -R "madness/test/qc/response_" -LE "short|medium"`.
 
 ## Adding a case
 
