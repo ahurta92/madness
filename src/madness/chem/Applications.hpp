@@ -678,10 +678,15 @@ public:
                         {"metadata", metadata_},
                         {"properties", properties_}};
     // Task-entry envelope (spec §4.1): precision is omitted when nothing ran,
-    // convergence is always stated (status "unknown" in that case).
+    // convergence is always stated with its full five keys (status "unknown"
+    // in that case) so consumers never have to probe for missing fields.
     if (!precision_.is_null()) j["precision"] = precision_;
     j["convergence"] = convergence_.is_null()
-                           ? nlohmann::json{{"status", "unknown"}, {"iterations", -1}}
+                           ? nlohmann::json{{"status", "unknown"},
+                                            {"iterations", -1},
+                                            {"n_states", 0},
+                                            {"n_unconverged", 0},
+                                            {"stop_reason", "unknown"}}
                            : convergence_;
     return j;
   }
