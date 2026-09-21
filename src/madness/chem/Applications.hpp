@@ -665,6 +665,8 @@ public:
       properties_["response_properties"] = std::move(res.properties);
       properties_["vibrational_analysis"] = std::move(res.vibrational_analysis);
       properties_["raman_spectra"] = std::move(res.raman_spectra);
+      precision_ = std::move(res.precision);
+      convergence_ = std::move(res.convergence);
     }
   }
 
@@ -672,15 +674,24 @@ public:
    * @brief Return a JSON fragment summarizing results
    */
   [[nodiscard]] nlohmann::json results() const override {
-    return {{"type", "response"},
-            {"metadata", metadata_},
-            {"properties", properties_}};
+    nlohmann::json j = {{"type", "response"},
+                        {"metadata", metadata_},
+                        {"properties", properties_}};
+    // Task-entry envelope (spec §4.1): precision is omitted when nothing ran,
+    // convergence is always stated (status "unknown" in that case).
+    if (!precision_.is_null()) j["precision"] = precision_;
+    j["convergence"] = convergence_.is_null()
+                           ? nlohmann::json{{"status", "unknown"}, {"iterations", -1}}
+                           : convergence_;
+    return j;
   }
 
 private:
   World &world_;
   nlohmann::json metadata_;
   nlohmann::json properties_;
+  nlohmann::json precision_;
+  nlohmann::json convergence_;
   std::optional<nlohmann::json> vibrational_analysis_;
   std::shared_ptr<SCF> reference_;
 };
