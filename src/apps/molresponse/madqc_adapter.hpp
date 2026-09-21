@@ -7,9 +7,10 @@
 // Satisfies the duck-typed interface ResponseApplication<Library> expects
 // (Applications.hpp): `Library::label()` + `Library::run_response(world, params,
 // scf, outdir) -> Results{metadata, properties, vibrational_analysis,
-// raman_spectra}`. So `ResponseApplication<molresponse_v3_lib>` runs the v3
-// pipeline through the same madqc workflow path as v2's molresponse_lib —
-// enabling a SAME-INPUT calc_info.json parity check (engine = v2 vs v3).
+// raman_spectra, precision, convergence}`. So
+// `ResponseApplication<molresponse_v3_lib>` runs the v3 pipeline through the
+// same madqc workflow path as v2's molresponse_lib — enabling a SAME-INPUT
+// calc_info.json parity check (engine = v2 vs v3).
 //
 // It builds a v3 GroundState from the moldft restart ARCHIVE (resolved from
 // scf_calc->work_dir, like v2's make_ground_context — NOT from the in-memory
@@ -25,6 +26,7 @@
 // selected in madqc.cpp instead).
 // -----------------------------------------------------------------------------
 
+#include <apps/molresponse/orchestrator/response_envelope.hpp>
 #include <apps/molresponse/orchestrator/response_workflow.hpp>
 #include <apps/molresponse/solvers/dalton_import.hpp>
 #include <apps/molresponse/solvers/dalton_gs_seed.hpp>   // GS seed from molden (dalton.dir)
@@ -174,6 +176,8 @@ struct molresponse_v3_lib {
     nlohmann::json properties;
     nlohmann::json vibrational_analysis;  // empty for alpha (R3a)
     nlohmann::json raman_spectra;         // empty for alpha (R3a)
+    nlohmann::json precision;             // task-record envelope (response_envelope.hpp); null if nothing ran
+    nlohmann::json convergence;           // {status, iterations, n_states, n_unconverged, stop_reason}
   };
 
   inline static Results
@@ -442,6 +446,12 @@ struct molresponse_v3_lib {
     Results res;
     res.metadata = std::move(out.metadata);
     res.properties = std::move(out.properties);
+    // Task-record envelope (Phase 0 spec §4.1), so the response task states its
+    // own precision and convergence the way the SCF task does.
+    auto env = response_task_envelope(res.metadata);
+    if (!env.precision.is_null()) env.precision["dconv"] = rp.dconv();
+    res.precision = std::move(env.precision);
+    res.convergence = std::move(env.convergence);
     if (world.rank() == 0) {
       res.metadata["engine"]         = "molresponse_v3";
       res.metadata["v3_timing"]      = std::move(out.timing);
