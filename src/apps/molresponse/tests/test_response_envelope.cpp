@@ -36,7 +36,7 @@ int main() {
     EXPECT(env.precision["k"] == 8, "precision.k is the finest rung's k");
     EXPECT(env.precision["thresh"] == 1e-6, "precision.thresh is the finest rung's thresh");
     EXPECT(env.precision["protocol_key"] == "1e-06_k8", "precision.protocol_key names the finest rung");
-    EXPECT(env.precision["protocol"] == nlohmann::json({1e-4, 1e-6}), "precision.protocol lists rungs in index order");
+    EXPECT(env.precision["protocol"] == nlohmann::json({1e-4, 1e-6}), "precision.protocol lists rungs coarse -> fine");
     EXPECT(env.convergence["status"] == "converged", "all states converged + complete -> converged");
     EXPECT(env.convergence["iterations"] == 12, "iterations is the max over finest-rung states (ES 12)");
     EXPECT(env.convergence["n_states"] == 4, "n_states counts 2 FD + 1 ES + 1 VBC at the finest rung");
@@ -61,6 +61,58 @@ int main() {
     md["run_summary"]["stop_reason"] = "wall_limit";
     const auto env = response_task_envelope(md);
     EXPECT(env.convergence["status"] == "unconverged", "stop_reason != complete -> unconverged");
+  }
+  // Every PRODUCTION writer registers its rung with index = -1
+  // (fd_save_load.hpp:187, es_save_load.hpp:228, vbc_save_load.hpp:76,
+  // dalton_import.hpp:827), so the ladder order must come from the physical
+  // accuracy, never from `index`.
+  {
+    auto md = two_rung_metadata();
+    md["protocols"]["1e-04_k6"]["index"] = -1;
+    md["protocols"]["1e-06_k8"]["index"] = -1;
+    const auto env = response_task_envelope(md);
+    EXPECT(env.precision["protocol_key"] == "1e-06_k8",
+           "index -1 on every rung: the tightest thresh is still the finest");
+    EXPECT(env.precision["protocol"] == nlohmann::json({1e-4, 1e-6}),
+           "index -1 on every rung: protocol still ordered coarse -> fine");
+    EXPECT(env.convergence["status"] == "converged", "index -1 on every rung: status unaffected");
+  }
+  {
+    auto md = two_rung_metadata();
+    md["protocols"] = {{"1e-06_k8", {{"index", -1}, {"thresh", 1e-6}, {"k", 8}}},
+                       {"1e-06_k10", {{"index", -1}, {"thresh", 1e-6}, {"k", 10}}}};
+    const auto env = response_task_envelope(md);
+    EXPECT(env.precision["protocol_key"] == "1e-06_k10", "same thresh: the larger k is the finer rung");
+  }
+  // A dalton.dir seed registers a synthetic sibling "<key>_dseed" at the same
+  // (thresh, k) whose FD entries are placeholders (dalton_import.hpp:827). It is
+  // a seed bundle, not a rung of the ladder.
+  {
+    auto md = two_rung_metadata();
+    md["protocols"]["1e-04_k6"]["index"] = -1;
+    md["protocols"]["1e-06_k8"]["index"] = -1;
+    md["protocols"]["1e-06_k8_dseed"] = {{"index", -1}, {"thresh", 1e-6}, {"k", 8}};
+    md["fd_states"]["dipole_z"]["1e-06_k8_dseed"]["f0.00000"] = {{"converged", false}, {"iter", 0}};
+    const auto env = response_task_envelope(md);
+    EXPECT(env.precision["protocol_key"] == "1e-06_k8", "a _dseed sibling does not become the finest rung");
+    EXPECT(env.precision["protocol"] == nlohmann::json({1e-4, 1e-6}),
+           "a _dseed sibling is not a rung of the protocol ladder");
+    EXPECT(env.convergence["status"] == "converged",
+           "a _dseed placeholder state does not unconverge the run");
+    EXPECT(env.convergence["n_states"] == 4, "a _dseed placeholder state is not counted");
+  }
+  {
+    auto md = two_rung_metadata();
+    md["protocols"]["1e-08_k10"] = "not an object";
+    const auto env = response_task_envelope(md);
+    EXPECT(env.precision["protocol_key"] == "1e-06_k8", "a non-object protocols entry is skipped");
+  }
+  {
+    nlohmann::json md;
+    md["protocols"]["1e-06_k8_dseed"] = {{"index", -1}, {"thresh", 1e-6}, {"k", 8}};
+    const auto env = response_task_envelope(md);
+    EXPECT(env.precision.is_null(), "a registry of only synthetic keys -> precision null");
+    EXPECT(env.convergence["status"] == "unknown", "a registry of only synthetic keys -> status unknown");
   }
   {
     const auto env = response_task_envelope(nlohmann::json::object());
