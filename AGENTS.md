@@ -98,6 +98,18 @@ provably ran, unlike prose documentation of parameter knobs.
 `src/examples/qc/README.md` indexes the cases and records the deck gotchas
 (`protocol` ladder vs. fixed `k`, per-workflow group blocks, …).
 
+The `response_*` cases are the `madqc --wf=response` regression suite. Every
+commit runs α (He) and excited states (H₂, TDA and RPA) — those three are
+`medium` or below. The nightly set is β (LiH, `long`) and the water
+Raman/excited-state/2PA case (`verylong`); all five cases run at
+`protocol [1e-4]`. Nightly:
+`ctest -L qctest -R "madness/test/qc/response_" -LE "short|medium"`. The
+README's "Response cases" section documents the `calc_info.json` key paths.
+Two nightly cases (`response_f_doublet_beta`, `response_c_triplet_beta`) are
+open-shell and deliberately pin a gap: the solver is shell-generic but the
+quadratic source is closed-shell only, so they assert converged legs plus the
+recorded drop rather than a β value.
+
 ```
 ctest -L qctest                                   # all cases
 ctest -L qctest -LE verylong                      # skip the expensive ones

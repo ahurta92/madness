@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert the unified task-record envelope (spec §4.1) on a madqc calc_info.json.
+"""Assert the unified task-record envelope (spec §4.1) on a madqc calc_info.json — SCF task always, response task with --expect-response.
 
 Usage: check_task_envelope.py <prefix>.calc_info.json [--expect-response]
 Exit 0 iff every assertion holds; prints one line per check.
@@ -85,6 +85,21 @@ def main() -> int:
         check(resp is not None, "a response task entry exists")
         if resp is not None:
             check("wall_s" in resp.get("provenance", {}), "response task provenance.wall_s present")
+            prec, conv = resp.get("precision"), resp.get("convergence")
+            check(isinstance(prec, dict), "response task precision block present")
+            if isinstance(prec, dict):
+                for k in ("k", "thresh", "protocol", "protocol_key", "dconv"):
+                    check(k in prec, f"response precision.{k} present")
+            check(isinstance(conv, dict), "response task convergence block present")
+            if isinstance(conv, dict):
+                check(conv.get("status") in ("converged", "unconverged", "unknown"),
+                      "response convergence.status set")
+                check(conv.get("status") == "converged", "response convergence.status == converged")
+                check(isinstance(conv.get("iterations"), int) and conv["iterations"] >= 1,
+                      "response convergence.iterations >= 1")
+            timing = resp.get("metadata", {}).get("run_info", {}).get("timing", {})
+            check(isinstance(timing.get("solve"), dict) and "wall_s" in timing["solve"],
+                  "response run_info.timing.solve.wall_s present")
     print(f"{fails} failure(s)")
     return 1 if fails else 0
 

@@ -10,6 +10,13 @@
 
 if (BUILD_TESTING AND Python3_EXECUTABLE)
 
+  # The runner's own comparison semantics (tol / rtol / max / allow_zero), so a
+  # change to run_qctest.py cannot silently loosen every case at once.
+  add_test(NAME madness/test/qc/run_qctest_selftest/run
+           COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/bin/test_run_qctest.py")
+  set_tests_properties(madness/test/qc/run_qctest_selftest/run
+                       PROPERTIES LABELS "qctest;short;applications")
+
   # Tiers are MEASURED wall times (node26, 96 cores, MAD_NUM_THREADS=20), not
   # estimates: short < 10 s, medium < 30 s, long < 2 min, verylong beyond.
   # Re-measure before retagging; short+medium gate every CI run via
@@ -31,6 +38,29 @@ if (BUILD_TESTING AND Python3_EXECUTABLE)
   # the only case with k varying across the protocol; must agree with nemo_he_hf
   add_qctest(nemo_he_varyk     madqc "qctest;medium;applications")    #  13 s
   add_qctest(cis_he_singlets   madqc "qctest;medium;applications")    #   9 s
+  # the first `response` case: the smallest complete molresponse deck (see README).
+  # `medium`, not `short`: at the explicit `dconv 1e-4` it measures 10 s, on the
+  # far side of the 10 s short boundary. Still inside check-short-madness.
+  add_qctest(response_he_alpha madqc "qctest;medium;applications")    #  10 s, 7 threads
+  # the same H2 deck twice: the `excited.*` path, once in the Tamm-Dancoff
+  # approximation and once at full RPA (`excited.tda false`)
+  add_qctest(response_h2_es_tda madqc "qctest;medium;applications")   #  21 s, 7 threads
+  add_qctest(response_h2_es_rpa madqc "qctest;medium;applications")   #  24 s, 7 threads
+  # the `quadratic` path: the z FD leg plus one VBC solve for the static
+  # beta_zzz of LiH. `long` rather than the CI tier the rest of the response
+  # set sits in -- a static beta cannot be cut below this (see check.json)
+  add_qctest(response_lih_beta madqc "qctest;long;applications")      #  42 s, 7 threads
+  # the nightly case: water at its HF/aug-cc-pVQZ optimized geometry -- alpha(0)
+  # xyz, one Raman component (d alpha_zz/d z_O), two RPA excited states and their
+  # 2PA. `verylong`, nightly only; runs `dconv 1e-3` so the nuclear leg converges
+  # (see check.json)
+  add_qctest(response_h2o_raman_tpa madqc "qctest;verylong;applications") # 1951 s, 7 threads; nightly
+  # Open-shell (unrestricted) reference. These pin a GAP rather than a property:
+  # the solver is shell-generic and every FD leg converges, but the quadratic
+  # source is closed-shell only, so the beta nodes stall and no property row is
+  # assembled. See each check.json description.
+  add_qctest(response_f_doublet_beta  madqc "qctest;verylong;applications")  # 287 s, 7 threads; nightly, open shell nopen 1
+  add_qctest(response_c_triplet_beta  madqc "qctest;verylong;applications")  # 305 s, 7 threads; nightly, open shell nopen 2
   add_qctest(scf_h2o_hf        madqc "qctest;long;applications")      #  35 s
   # asserts the optimizer projects translations/rotations out of the gradient
   # before testing convergence, and that explicit `optimization` values beat the

@@ -58,6 +58,14 @@ no simple-dftd3 to register it with. That laptop is not uniformly slower: it ran
 so treat the 12 s as an upper bound of the same order, and re-measure it on
 node26 once simple-dftd3 is available there.
 
+The seven `response_*` cases were measured on a Seawulf Milan node at
+`MAD_NUM_THREADS=7` (the thread count their `CMakeLists.txt` comments
+record), not on node26: `response_he_alpha` just over the `short` boundary at
+10 s and so registered `medium`, `response_h2_es_tda` and `response_h2_es_rpa`
+a handful of seconds inside `medium`, `response_lih_beta` well inside `long`, and
+`response_h2o_raman_tpa` — the nightly case — `verylong` at 1951 s, well
+inside the 7200 s ctest timeout; re-measure before leaning on those tiers.
+
 | Case | `--wf=` | System | Demonstrates | Time | Tier |
 |------|---------|--------|--------------|------|------|
 | `scf_he_hf` | `scf` | He | the minimal deck — start here | 5 s | short |
@@ -67,6 +75,13 @@ node26 once simple-dftd3 is available there.
 | `scf_he_tpss` | `scf` | He | the only meta-GGA — the non-multiplicative kinetic-energy-density term | 17 s | medium |
 | `oep_be_oaep` | `oep` | Be | optimized effective potential, OAEP model; virial diagnostics | 28 s | medium |
 | `cis_he_singlets` | `cis` | He | CIS excited states; the `tdhf` group | 9 s | medium |
+| `response_he_alpha` | `response` | He | linear response: static + dynamic α_zz at one rung; the task-record envelope | 10 s | medium |
+| `response_h2_es_tda` | `response` | H₂ | the lowest TDA excitation energy (`excited.*`), one rung | 21 s | medium |
+| `response_h2_es_rpa` | `response` | H₂ | the same at RPA (`excited.tda false`) | 24 s | medium |
+| `response_lih_beta` | `response` | LiH | static β_zzz (`quadratic true`) plus α_zz, one rung | 42 s | long |
+| `response_h2o_raman_tpa` | `response` | H₂O | at the HF/aug-cc-pVQZ optimized geometry: α(0) xyz, one Raman component, two RPA excited states and their 2PA — the nightly case | 1951 s | verylong |
+| `response_f_doublet_beta` | `response` | F | **open shell**, doublet (`nopen 1`): static + dynamic β requested; pins that the legs converge and the quadratic source is refused | 287 s | verylong |
+| `response_c_triplet_beta` | `response` | C | **open shell**, triplet (`nopen 2`): the same, with two unpaired electrons | 305 s | verylong |
 | `scf_lih_pbe_d3` | `scf` | LiH | Grimme D3 dispersion in the energy *and* the single-point gradient (needs simple-dftd3 + libxc) | 12 s | medium |
 | `scf_h2o_hf` | `scf` | H₂O | `protocol` ladder 1e-4 → 1e-6 | 38 s | long |
 | `scf_lih_optimize_tight` | `scf` + `--optimize` | LiH | optimizer thresholds pinned explicitly in the `optimization` group | 38 s | long |
@@ -175,9 +190,20 @@ read.
 }
 ```
 
-`key` is a path of keys and list indices into `<prefix>.calc_info.json`. `tol` is
-an absolute tolerance; `0` means "must match exactly", and ints and strings always
-compare exactly. A key absent from either file is a failure, not a skip. Optional
+`key` is a path of keys and list indices into `<prefix>.calc_info.json`. Each
+check then carries one or more of:
+
+- `tol` — an absolute tolerance against the reference; `0` means "must match
+  exactly", and ints, strings and booleans always compare exactly.
+- `rtol` — a relative tolerance, |run − reference| ≤ `rtol` · |reference|. A
+  reference of exactly zero is rejected (the bound would be zero) unless
+  `allow_zero` is set, in which case the run must reproduce the zero.
+- `max` — an upper bound on the *produced* value alone; the reference is not
+  consulted. Use it for iteration counts and residuals, where the reference is a
+  budget rather than a number to reproduce. It may be combined with `tol` or
+  `rtol` in the same entry.
+
+A key absent from either file is a failure, not a skip. Optional
 `requires` gates a case on resources — `{"threads": 20}`, `{"mpi": true}`,
 `{"env": ["MAD_ROOT_DIR"]}` — and turns it into a ctest skip rather than a
 failure.
@@ -191,6 +217,84 @@ scripted tests compare precisely that. A dark state's `1e-26` oscillator strengt
 checked to `1e-3` is just as empty. Compare a key that carries a value, or set
 `"allow_zero": true` where the near-zero is the physics (a symmetry-vanishing
 dipole component, a gradient at a stationary point).
+
+## Response cases
+
+The `response_*` cases are the regression suite for `madqc --wf=response`
+(molresponse): does each property still run, still converge, and still give the
+number it gave last time. Every case is one rung (`protocol [1e-4]`, `k 6`,
+`xc hf`); nothing here is a converged number — the converged numbers live in
+the response benchmarks (DALTON comparisons at `1e-6`/`1e-8`), not in CI. The
+nightly water case runs at the same HF/aug-cc-pVQZ optimized geometry those
+benchmarks use, so its numbers can be read against DALTON to about a percent.
+
+Three things every response `check.json` asserts:
+
+1. **Converged.** `tasks[1].convergence.status == "converged"` (the response
+   task's envelope: every state at the finest rung converged and
+   `run_summary.stop_reason == "complete"`), `n_unconverged == 0`, and
+   `convergence.iterations` under a `max` cap of 1.5× the reference count — a
+   jump in iterations is a regression even when the number lands.
+2. **Same number.** Each asserted property within `tol`/`rtol` of `reference/`:
+   α `tol 1e-3` (absolute, au), β `rtol 0.01`, excitation energies `tol 1e-3`,
+   2PA `rtol 0.05`, Raman `rtol 0.02`. Every case sets its response-block
+   `dconv` explicitly — `1e-4` for `response_he_alpha`, `response_h2_es_tda`,
+   `response_h2_es_rpa` and `response_lih_beta`, `1e-3` for
+   `response_h2o_raman_tpa` (see the gate note below) — so none of them falls
+   back on the derived `100 × thresh`. Repeating a case against a reference
+   generated from the same build moves the asserted numbers by ~1e-15
+   (measured: 5e-15 on He's α_zz, 1e-15 on both H₂ roots), i.e. floating-point
+   reassociation from thread scheduling and nothing else. The tolerances above
+   are therefore a floor, not a spread estimate: they are ~12 orders of
+   magnitude above the noise, so a check cannot flap, and a solver change that
+   legitimately moves one of these (still coarsely converged) iterates lands as
+   a reference update someone has to justify rather than as a silent pass.
+3. **Envelope intact.** `precision.k`, `precision.protocol_key`, `type`,
+   `stop_reason` compared exactly.
+
+Wall time is recorded in the reference (`provenance.wall_s`,
+`run_info.timing`) and never asserted: a wall-time gate on a shared node is
+noise.
+
+`response_h2o_raman_tpa` is the one case whose response block runs
+`dconv 1e-3`. The FD/ES convergence gate is absolute (`bsh < 5*dconv`), and the
+Raman leg's nuclear-displacement response is ~10³ larger than a dipole leg's,
+so at `dconv 1e-4` that leg plateaus near 4e-3, never reaches the 5e-4 gate,
+and Raman is dropped from the output entirely; at `dconv 1e-3` the nuclear leg
+converges at bsh ≈ 4.4e-3 against the 5e-3 gate. A red on that case's
+`convergence.status` therefore most likely means the Raman leg stalled again
+(`stop_reason complete_with_dropped_beta`) — a real signal about the solver,
+not scheduling noise. The Raman value it pins is a regression baseline, not a
+converged Raman intensity; the converged number was validated separately at
+`1e-6`/`k8`.
+
+Key paths: α is `tasks[1].properties.response_properties.alpha.<pk>[row].alpha[i][j]`
+with `<pk>` the protocol key (`"1e-04_k6"`), rows in `dipole.frequencies`
+order and `i,j` indexing the letters of `dipole.directions`; β and Raman rows
+are `…beta.<pk>[row]` / `…raman.<pk>[row]` with `A`, `B`, `C`, `freq_b`,
+`freq_c` naming the component (rows ordered A fastest, then B, then C); 2PA is
+`…tpa.<pk>[row]` with `es_root_id`, `omega`, `D_linear`; excitation energies
+are `tasks[1].metadata.excited_states.<pk>.roots[i].omega`.
+
+The nightly set is the `long`/`verylong` response cases:
+`ctest -L qctest -R "madness/test/qc/response_" -LE "short|medium"`. "Nightly"
+is a tier, not a schedule: until a scheduled runner exists, those cases run only
+when someone invokes them — `cm_qctest nightly` in the author's harness, or the
+ctest line above.
+
+**Two cases pin a gap, not a number.** `response_f_doublet_beta` and
+`response_c_triplet_beta` run an unrestricted (open-shell) reference and request
+static and dynamic β. The response *solver* is shell-generic and every
+finite-difference leg in both cases converges, but the quadratic source is
+closed-shell only, so the β nodes stall, are quarantined by the no-progress
+guard, and no property row is assembled — `response_properties` comes back empty
+and the run still exits 0. Open-shell α assembly is refused for the same reason
+(`calc_executor.hpp:2323`): the assembly readers are hardcoded to the
+closed-shell archive layout. These two cases therefore assert the unrestricted
+reference (the α and β eigenvalue sets differ in size), the converged legs, and
+the recorded drop (`stop_reason`, `dropped_work`). A red on either one means that
+behaviour changed, which is the point. When open-shell quadratic response lands,
+replace those assertions with β values and regenerate.
 
 ## Adding a case
 
