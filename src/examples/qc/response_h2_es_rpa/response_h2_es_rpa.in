@@ -26,7 +26,7 @@ response
     excited.guess_max_iter 1
     excited.maxiter        20
     excited.maxsub         4
-    print_level            1
+    print_level            0   # the ES analysis must still be written (review C7)
 end
 
 molecule
