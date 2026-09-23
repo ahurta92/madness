@@ -35,7 +35,6 @@ response
     excited.num_states    2
     excited.tda           false
     excited.tpa           true
-    excited.maxiter       30
     dconv                 1e-3
     maxiter               60
     print_level           1

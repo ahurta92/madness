@@ -23,9 +23,6 @@ response
     excited.enable         true
     excited.num_states     1
     excited.tda            true
-    excited.guess_max_iter 1
-    excited.maxiter        20
-    excited.maxsub         4
     print_level            1
 end
 
