@@ -61,6 +61,11 @@ if (BUILD_TESTING AND Python3_EXECUTABLE)
   # assembled. See each check.json description.
   add_qctest(response_f_doublet_beta  madqc "qctest;verylong;applications")  # 287 s, 7 threads; nightly, open shell nopen 1
   add_qctest(response_c_triplet_beta  madqc "qctest;verylong;applications")  # 305 s, 7 threads; nightly, open shell nopen 2
+  # Refusal cases (check.json "expect_error"): each deck must be rejected with the
+  # stated reason rather than run and quietly drop the property. No reference/.
+  add_qctest(response_he_beta_or_refused   madqc "qctest;short;applications")
+  add_qctest(response_he_raman_bad_atom    madqc "qctest;short;applications")
+  add_qctest(response_he_lda_beta_refused  madqc "qctest;short;applications")
   add_qctest(scf_h2o_hf        madqc "qctest;long;applications")      #  35 s
   # asserts the optimizer projects translations/rotations out of the gradient
   # before testing convergence, and that explicit `optimization` values beat the

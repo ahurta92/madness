@@ -296,6 +296,24 @@ the recorded drop (`stop_reason`, `dropped_work`). A red on either one means tha
 behaviour changed, which is the point. When open-shell quadratic response lands,
 replace those assertions with β values and regenerate.
 
+### Refusal cases
+
+Three `response_he_*` cases are decks that must be **refused**. Their `check.json` carries `"expect_error": "<text>"` in place of `checks`, and they have no `reference/` directory. A case passes only if all of these hold:
+
+- `madqc` exits non-zero;
+- `calc_info.json` records a `task_failed` entry;
+- that entry's error contains the text.
+
+A run that succeeds, a crash that leaves no record, and a failure for some other reason all fail the case.
+
+| Case | Refused because |
+|---|---|
+| `response_he_beta_or_refused` | `beta.or`: no quadratic source for optical rectification yet |
+| `response_he_raman_bad_atom` | `raman.nuc_atom` beyond the molecule |
+| `response_he_lda_beta_refused` | β on a DFT ground state, which needs the unimplemented g''_xc |
+
+Each one replaces a run that used to exit 0 without the property, or fail later with an unnamed error.
+
 ## Adding a case
 
 No code, four data files:
