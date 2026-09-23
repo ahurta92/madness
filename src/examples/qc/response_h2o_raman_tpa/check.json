@@ -28,6 +28,8 @@
     {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 0, "omega"], "tol": 1e-3},
     {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 0, "D_linear"], "rtol": 0.05},
     {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 1, "es_root_id"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 1, "D_linear"], "rtol": 0.05}
+    {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 1, "D_linear"], "rtol": 0.05},
+    {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 0, "converged"], "tol": 0},
+    {"key": ["tasks", 1, "properties", "response_properties", "tpa", "1e-04_k6", 1, "converged"], "tol": 0}
   ]
 }
