@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for run_qctest.compare: the tol / rtol / max / allow_zero semantics
+"""Unit tests for run_qctest.compare: the tol / rtol / max / min / allow_zero semantics
 every qctest check.json relies on.
 
 Run by hand:   python3 bin/test_run_qctest.py
@@ -61,9 +61,20 @@ class CompareTests(unittest.TestCase):
         self.write({"it": 9}, {"it": 8})
         self.assertFalse(self.compare([{"key": ["it"], "max": 12, "tol": 0}]))
 
+    def test_min_bounds_the_output_only(self):
+        self.write({"n": 15}, {"n": 3})  # the reference thread count is irrelevant
+        self.assertTrue(self.compare([{"key": ["n"], "min": 1}]))
+        self.assertFalse(self.compare([{"key": ["n"], "min": 16}]))
+
+    def test_min_and_max_together_bound_both_sides(self):
+        self.write({"t": 5.0}, {"t": 5.0})
+        self.assertTrue(self.compare([{"key": ["t"], "min": 1.0, "max": 10.0}]))
+        self.assertFalse(self.compare([{"key": ["t"], "min": 6.0, "max": 10.0}]))
+
     def test_missing_key_fails_for_every_kind(self):
         self.write({"a": 1.0}, {"a": 1.0})
         self.assertFalse(self.compare([{"key": ["zz"], "max": 1}]))
+        self.assertFalse(self.compare([{"key": ["zz"], "min": 1}]))
         self.assertFalse(self.compare([{"key": ["zz"], "rtol": 0.1}]))
         self.assertFalse(self.compare([{"key": ["zz"], "tol": 0.1}]))
 

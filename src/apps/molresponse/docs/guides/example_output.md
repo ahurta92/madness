@@ -46,17 +46,18 @@ end
   Task 0 : SCF  (model = scf)
   ----------------------------------------------------------------------
     Molecule         : H2O
-    Total energy     :      -76.065377246 Ha       -2069.8444 eV
-    Orbital eps (a)  : -20.5621 -0.9593 -0.9593 -0.7225 -0.5092  (Ha)
+    Total energy     :      -76.065379523 Ha       -2069.8444 eV
+    Orbital eps (a)  : -20.5618 -0.9612 -0.9612 -0.7189 -0.5092  (Ha)
     Converged        :  thresh = 0.0001  dconv = 0.0001
-    Wall time        :  0.0 s   (1 MPI x 1 threads)
+    Wall time        :  41.9 s   (1 MPI x 8 threads)
 
   Task 1 : RESPONSE
   ----------------------------------------------------------------------
     alpha[1e-04_k6](w=0.000)
-      x :      9.482637     -0.000000     -0.000000
-      y :     -0.000000      8.714917      0.000000
-      z :      0.000000      0.000000      7.973547
+      x :      9.482368     -0.000000      0.000000
+      y :     -0.000000      8.701129      0.000010
+      z :     -0.000000      0.000005      7.970723
+    Wall time        :  141.1 s   (1 MPI x 8 threads)
 
 ======================================================================
 ```
@@ -64,8 +65,9 @@ end
 Note the shape: the workflow ran the ground state as task 0 and the response as
 task 1, and the α label carries the **protocol key** (`1e-04_k6`) and the
 frequency, because both are part of the result's identity. The off-diagonal
-elements are zero to ~10⁻⁷ here, which is the symmetry of this geometry showing
-up as a numerical check for free.
+elements are at most ~10⁻⁵ here; the symmetry of this geometry makes them zero,
+so their size is a numerical check for free. Each task's `Wall time` line gives
+that task's wall time and the run's MPI ranks × threads (`MAD_NUM_THREADS`).
 
 ## Excited states
 

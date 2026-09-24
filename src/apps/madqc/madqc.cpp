@@ -333,7 +333,9 @@ int main(int argc, char **argv) {
              {"workflow", user_workflow},
              {"hostname", std::string(host)},
              {"nproc", world.size()},
-             {"threads", static_cast<int>(madness::ThreadPool::size())}});
+             // application threads: the pool plus the main thread, which also
+             // runs tasks -- i.e. MAD_NUM_THREADS when that is set
+             {"threads", static_cast<int>(madness::ThreadPool::size()) + 1}});
       }
 
       // io provenance for ALL tasks (today only response writes MRA restart
