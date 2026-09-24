@@ -127,6 +127,8 @@ struct RestartSources {
 
     /// <prefix>.restartaodata exists
     bool restartao_present = false;
+    /// its header; nullopt for a file written before the header existed
+    std::optional<RestartAOHeader> ao_header;
 
     /// an NWChem file was named in the input
     bool nwfile_named = false;
@@ -215,6 +217,8 @@ struct RestartPlan {
     /// rung, and its eprec, xc and nuclear correlation factor agree with this run's
     bool archive_converged = false;
     bool archive_same_hamiltonian = false;
+    /// id of the restartdata archive when source is restartdata, 0 when none recorded
+    ArchiveId archive_id = 0;
 
     /// true if orbitals have to be read from disk before anything else happens
     bool needs_load() const { return source != RestartSource::initial_guess; }
@@ -233,7 +237,7 @@ struct RestartPlan {
         int m = static_cast<int>(mode);
         int s = static_cast<int>(source);
         ar & m & s & iterate & protocol_start & stale_energy & warn & why & archive_nmo_alpha
-           & archive_converged & archive_same_hamiltonian;
+           & archive_converged & archive_same_hamiltonian & archive_id;
         mode = static_cast<RestartMode>(m);
         source = static_cast<RestartSource>(s);
     }
@@ -288,7 +292,21 @@ inline RestartPlan plan_restart(const RestartMode mode, const RestartSources& di
     MADNESS_CHECK_THROW(not protocol.empty(), "empty protocol in plan_restart");
     const std::size_t last = protocol.size() - 1;
 
-    const bool ao_available = disk.restartao_present and can.ao;
+    // AO projections with a header must belong to these atoms and, when there is
+    // a restartdata to compare with, to that very archive: save_mos writes both
+    // with one id, and a run that skips the AO file (nwfile) leaves an older one
+    // behind. A file without a header predates the check and is taken on trust.
+    auto ao_matches = [&]() {
+        if (not disk.ao_header.has_value()) return true;
+        const RestartAOHeader& h = disk.ao_header.value();
+        if (compare_geometry(h.molecule, requested) == GeometryMatch::different_composition)
+            return false;
+        if (disk.meta.has_value() and disk.meta->archive_id != 0 and h.archive_id != 0 and
+                disk.meta->archive_id != h.archive_id)
+            return false;
+        return true;
+    };
+    const bool ao_available = disk.restartao_present and can.ao and ao_matches();
     const bool nwchem_available = disk.nwfile_named and can.nwchem;
 
     // the precision this run has to reach. dconv cannot be demanded tighter
@@ -326,6 +344,7 @@ inline RestartPlan plan_restart(const RestartMode mode, const RestartSources& di
     // ---- use restartdata, iterating from wherever it left off --------------
     // what the archive's header says about the orbitals it holds
     auto describe_archive = [&](const RestartMetadata& meta) {
+        plan.archive_id = meta.archive_id;
         plan.archive_converged = meta.converged_for_thresh < 1.0;
         plan.archive_same_hamiltonian = hamiltonian_mismatch(meta).empty();
     };
@@ -581,6 +600,10 @@ inline RestartSources survey_restart_sources(World& world, const std::string& pr
     world.gop.broadcast(flags, 2, 0);
     disk.restartdata_present = (flags[0] == 1);
     disk.restartao_present = (flags[1] == 1);
+    if (disk.restartao_present) {
+        if (world.rank() == 0) disk.ao_header = RestartAOHeader::peek(prefix + ".restartaodata");
+        world.gop.broadcast_serializable(disk.ao_header, 0);
+    }
 
     if (disk.restartdata_present) {
         disk.meta = peek_restartdata(world, prefix + ".restartdata");

@@ -271,6 +271,10 @@ public:
     /// nuclear correlation factor behind restart_representation, e.g. "slater:2.0"
     std::string restart_ncf;
 
+    /// id of the restartdata archive these orbitals were last saved to or loaded
+    /// from; 0 if neither happened or the archive predates ids (see ArchiveId)
+    ArchiveId archive_id = 0;
+
     /// the Hamiltonian these orbitals solve: written into the restartdata header
     /// and compared against it by the restart planner
     HamiltonianKey hamiltonian_key() const {
