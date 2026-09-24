@@ -6,7 +6,7 @@ A qctest case is a self-contained directory (see src/examples/qc/README.md):
     <case>/<case>.in                        the input deck
     <case>/run.sh                           one-liner invocation
     <case>/check.json                       result keys + tolerances
-        (each check: "key" plus "tol" | "rtol" | "max"; see compare()),
+        (each check: "key" plus "tol" | "rtol" | "max" | "min"; see compare()),
         or "expect_error": "<text>" for a case that must be REFUSED
         (see check_expected_error(); no checks and no reference needed);
         optional "expect_files": [glob, ...] relative to the work dir, each of
@@ -198,6 +198,25 @@ def check_max(data, keys, bound):
     return ok
 
 
+def check_min(data, keys, bound):
+    """Lower bound on the produced value alone.
+
+    For values that vary with the machine and launch (thread count, wall time) and
+    so cannot be compared with a reference, but must be recorded and sensible.
+    """
+    try:
+        value = lookup(data, keys)
+    except (KeyError, IndexError, TypeError) as e:
+        print(f"key {keys} not found in the output: {type(e).__name__}: {e}")
+        return False
+    if not _number(value):
+        print(f"key {keys} is {value!r}, not a number; 'min' needs a numeric value")
+        return False
+    ok = value >= bound
+    print(f"key {keys} {'within' if ok else 'below'} min {bound}: {value}")
+    return ok
+
+
 def check_rtol(out, ref, keys, rtol, allow_zero=False):
     """|out - ref| <= rtol * |ref|.
 
@@ -233,16 +252,19 @@ def compare(output, reference, checks):
       tol   absolute tolerance against the reference (0 = exact; ints/strings/bools exact)
       rtol  relative tolerance against the reference
       max   upper bound on the produced value alone (reference not consulted)
-    `max` may be combined with `tol` or `rtol`; an entry with only `max` never reads
-    the reference value.
+      min   lower bound on the produced value alone (reference not consulted)
+    `max`/`min` may be combined with `tol` or `rtol`; an entry with only bounds
+    never reads the reference value.
     """
     cmp = madjsoncompare(str(output), str(reference))
     for entry in checks:
         keys = entry["key"]
         if "max" in entry:
             cmp.success = check_max(cmp.data1, keys, entry["max"]) and cmp.success
-            if "tol" not in entry and "rtol" not in entry:
-                continue
+        if "min" in entry:
+            cmp.success = check_min(cmp.data1, keys, entry["min"]) and cmp.success
+        if ("max" in entry or "min" in entry) and "tol" not in entry and "rtol" not in entry:
+            continue
         if "rtol" in entry:
             cmp.success = check_rtol(cmp.data1, cmp.data2, keys, entry["rtol"],
                                      entry.get("allow_zero", False)) and cmp.success

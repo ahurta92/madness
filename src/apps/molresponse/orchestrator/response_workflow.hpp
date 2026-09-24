@@ -146,7 +146,8 @@ inline void stamp_run_info(ResponseMetadata &meta, madness::World &world,
                                   {"git_commit", madness::info::git_commit()}}},
                      {"hostname", std::string(host)},
                      {"nproc", world.size()},
-                     {"threads", static_cast<int>(madness::ThreadPool::size())},
+                     // pool + main thread, as in the calc_info provenance
+                     {"threads", static_cast<int>(madness::ThreadPool::size()) + 1},
                      {"timing", timing}});
   meta.set_stop_reason(diagnostics.value("stop_reason", std::string("unknown")));
 }

@@ -215,6 +215,9 @@ check then carries one or more of:
   consulted. Use it for iteration counts and residuals, where the reference is a
   budget rather than a number to reproduce. It may be combined with `tol` or
   `rtol` in the same entry.
+- `min` — a lower bound on the *produced* value alone, likewise. Use it for
+  values that depend on the machine or launch (thread count, wall time), which
+  must be recorded but cannot match a reference.
 
 A key absent from either file is a failure, not a skip. Optional
 `requires` gates a case on resources — `{"threads": 20}`, `{"mpi": true}`,

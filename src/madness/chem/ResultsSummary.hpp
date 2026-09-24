@@ -94,7 +94,32 @@ inline std::string clean_axis(const std::string &s) {
 
 inline std::string rule(char c = '-', int n = 70) { return std::string(n, c); }
 
-inline void write_scf_section(std::ostream &os, const nlohmann::json &t) {
+// The wall time is stamped per task by the driver (provenance.wall_s); the
+// parallel layout is run-level provenance (nproc, and threads = application
+// threads, i.e. MAD_NUM_THREADS). Print what is recorded rather than
+// defaulting a missing value to 0 s or 1 thread.
+inline void write_wall_time(std::ostream &os, const nlohmann::json &t,
+                            const nlohmann::json &run) {
+  const nlohmann::json none = nlohmann::json::object();
+  const auto &tp = t.contains("provenance") ? t["provenance"] : none;
+  const bool has_wall = tp.contains("wall_s");
+  const bool has_par = run.contains("nproc") && run.contains("threads");
+  if (!has_wall && !has_par)
+    return;
+  os << "    Wall time        :  ";
+  if (has_wall)
+    os << std::fixed << std::setprecision(1) << tp["wall_s"].get<double>()
+       << " s" << std::defaultfloat;
+  else
+    os << "(not recorded)";
+  if (has_par)
+    os << "   (" << run["nproc"].get<int>() << " MPI x "
+       << run["threads"].get<int>() << " threads)";
+  os << "\n";
+}
+
+inline void write_scf_section(std::ostream &os, const nlohmann::json &t,
+                              const nlohmann::json &run) {
   const auto &props = t.value("properties", nlohmann::json::object());
 
   if (t.contains("molecule")) {
@@ -171,13 +196,7 @@ inline void write_scf_section(std::ostream &os, const nlohmann::json &t) {
     os << "    Converged        :  thresh = " << c.value("converged_for_thresh", 0.0)
        << "  dconv = " << c.value("converged_for_dconv", 0.0) << "\n";
   }
-  if (t.contains("metadata")) {
-    const auto &m = t["metadata"];
-    os << "    Wall time        :  " << std::fixed << std::setprecision(1)
-       << m.value("elapsed_time", 0.0) << " s   (" << m.value("mpi_size", 1)
-       << " MPI x " << m.value("nthreads", 1) << " threads)\n"
-       << std::defaultfloat;
-  }
+  write_wall_time(os, t, run);
 }
 
 inline void write_excitations_section(std::ostream &os, const nlohmann::json &t) {
@@ -212,7 +231,8 @@ inline void write_correlation_section(std::ostream &os, const nlohmann::json &t)
        << std::defaultfloat;
 }
 
-inline void write_response_section(std::ostream &os, const nlohmann::json &t) {
+inline void write_response_section(std::ostream &os, const nlohmann::json &t,
+                                   const nlohmann::json &run) {
   const auto &props = t.value("properties", nlohmann::json::object());
   // v3 shape: response_properties is an OBJECT keyed property -> protocol_key
   // -> row(s). (The old v2 engine emitted a flat array — handled below for
@@ -308,6 +328,7 @@ inline void write_response_section(std::ostream &os, const nlohmann::json &t) {
       os << "\n" << std::defaultfloat;
     }
   }
+  write_wall_time(os, t, run);
 }
 
 } // namespace summary_detail
@@ -364,6 +385,8 @@ inline void write_results_summary(std::ostream &os,
     return;
   }
 
+  const nlohmann::json run_provenance =
+      calc_info.value("provenance", nlohmann::json::object());
   int i = 0;
   for (const auto &t : calc_info["tasks"]) {
     const std::string type = t.value("type", std::string());
@@ -403,9 +426,9 @@ inline void write_results_summary(std::ostream &os,
     }
 
     if (type == "response") {
-      write_response_section(os, t);
+      write_response_section(os, t, run_provenance);
     } else if (model == "scf" || t.contains("scf_eigenvalues_a")) {
-      write_scf_section(os, t);
+      write_scf_section(os, t, run_provenance);
     } else if (model == "optimize") {
       write_optimization_section(os, t);
     } else {

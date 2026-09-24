@@ -6,10 +6,12 @@
 #include <madness/mra/mra.h>
 #include <madness/chem/SCF.h>
 #include <madness/chem/Results.h>
+#include <madness/chem/ResultsSummary.hpp>
 #include <madness/world/test_utilities.h>
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <map>
+#include <sstream>
 #include <string>
 
 using namespace madness;
@@ -85,6 +87,41 @@ int test_results_envelope_roundtrip() {
     return t.end();
 }
 
+int test_summary_wall_time() {
+    test_output t("results summary: Wall time line");
+    auto line = [](const nlohmann::json& calc_info) {
+        std::ostringstream os;
+        qcapp::write_results_summary(os, calc_info);
+        const std::string s = os.str();
+        const auto b = s.find("Wall time");
+        return b == std::string::npos ? std::string() : s.substr(b, s.find('\n', b) - b);
+    };
+    // The shape madqc records: the task's time under the task's provenance, the
+    // parallel layout under the run-level provenance. The task metadata holds
+    // only mpi_size, and must not be what the line is read from.
+    const nlohmann::json scf = {{"model", "scf"},
+                                {"provenance", {{"wall_s", 392.43}}},
+                                {"metadata", {{"mpi_size", 1}}}};
+    const nlohmann::json run = {{"nproc", 2}, {"threads", 16}};
+    t.checkpoint(line({{"provenance", run}, {"tasks", {scf}}})
+                     == "Wall time        :  392.4 s   (2 MPI x 16 threads)",
+                 "time from task provenance.wall_s, layout from run provenance");
+    // A missing value is not printed as 0 s or 1 thread.
+    t.checkpoint(line({{"tasks", {scf}}}) == "Wall time        :  392.4 s",
+                 "no layout invented when the run provenance is absent");
+    t.checkpoint(line({{"tasks", {{{"model", "scf"}}}}}).empty(),
+                 "no Wall time line when nothing is recorded");
+    // The response section prints the same line from the same sources.
+    const nlohmann::json rsp = {{"type", "response"},
+                                {"provenance", {{"wall_s", 178.84}}},
+                                {"metadata", nlohmann::json::object()},
+                                {"properties", nlohmann::json::object()}};
+    t.checkpoint(line({{"provenance", run}, {"tasks", {rsp}}})
+                     == "Wall time        :  178.8 s   (2 MPI x 16 threads)",
+                 "response task prints its wall time");
+    return t.end();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -93,6 +130,7 @@ int main(int argc, char** argv) {
     int error = 0;
     error += test_scf_data_accessors();
     error += test_results_envelope_roundtrip();
+    error += test_summary_wall_time();
     finalize();
     return error;
 }

@@ -3,6 +3,8 @@
   "checks": [
     {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
     {"key": ["tasks", 0, "scf_eigenvalues_a", "vals", 0], "tol": 1e-3},
-    {"key": ["tasks", 0, "model"], "tol": 0}
+    {"key": ["tasks", 0, "model"], "tol": 0},
+    {"key": ["provenance", "threads"], "min": 1},
+    {"key": ["tasks", 0, "provenance", "wall_s"], "min": 0.001}
   ]
 }
