@@ -22,6 +22,7 @@
 #include "../calc/calc_manager.hpp"         // CalcManager
 #include "../solvers/gs_fingerprint.hpp"    // GS-archive restart-safety gate
 #include "../solvers/response_metadata.hpp"
+#include "../solvers/restart_hdf5.hpp"      // gs_archive_id for an HDF5-only ground state
 
 #include <nlohmann/json.hpp>
 #include <madness/misc/info.h>
@@ -152,6 +153,32 @@ inline void stamp_run_info(ResponseMetadata &meta, madness::World &world,
   meta.set_stop_reason(diagnostics.value("stop_reason", std::string("unknown")));
 }
 
+/// the archive_id of the ground-state archive, as 16 hex digits; "" if it
+/// records none (v4/v5) or cannot be read. Rank-local. The native archive is
+/// preferred, as GroundState does; part 0 of it starts with the writer count,
+/// then the header. Without one, the `/restart` attributes of <archive>.h5.
+inline std::string gs_archive_id(const std::string &archive) {
+  const std::string part0 = archive + ".00000";
+  if (!std::filesystem::exists(part0)) {
+#ifdef MADNESS_HAS_HDF5
+    if (const auto attrs = peek_restartdata_hdf5(archive + ".h5"); attrs && attrs->archive_id)
+      return madness::archive_id_to_string(attrs->archive_id);
+#endif
+    return {};
+  }
+  try {
+    madness::archive::BinaryFstreamInputArchive ar(part0.c_str());
+    int nio = 0;
+    ar & nio;
+    madness::RestartMetadata meta;
+    meta.read(ar);
+    return meta.archive_id ? madness::archive_id_to_string(meta.archive_id)
+                           : std::string();
+  } catch (...) {
+    return {};
+  }
+}
+
 /// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
 /// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the
 /// cubic-cell half-edge and `fock_json` the moldft Fock path ("" = compute).
@@ -214,10 +241,22 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
       // first — otherwise the stamp save() fails to open its .tmp and the
       // collective error path aborts a perfectly good run.
       std::filesystem::create_directories(in.settings.calc_dir);
-      const GsFingerprint fp = gs_archive_fingerprint(in.archive_file);
+      // the archive's id when it records one (restartdata v6), else its bytes
+      const std::string current_id = gs_archive_id(in.archive_file);
+      std::optional<GsFingerprint> hashed;
+      auto hash = [&]() -> const GsFingerprint & {
+        if (!hashed) hashed = gs_archive_fingerprint(in.archive_file);
+        return *hashed;
+      };
       auto meta = ResponseMetadata::load_or_create(meta_path);
       const std::string stored = meta.ground_state_fingerprint();
-      switch (gs_fingerprint_verdict(meta.json(), fp.hex)) {
+      const auto verdict = gs_identity_verdict(meta.json(), current_id,
+                                               [&] { return hash().hex; });
+      // a match on the hash alone, with an id now available: record the id,
+      // so the next run compares ids instead of hashing again
+      const bool upgrade = verdict == GsGateVerdict::Match && !current_id.empty() &&
+                           meta.json()["ground_state"].value("archive_id", "").empty();
+      switch (verdict) {
         case GsGateVerdict::Match:    gate = 0; break;
         case GsGateVerdict::FreshDir: gate = 1; break;
         case GsGateVerdict::MissingStamp:
@@ -235,7 +274,8 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
             gate = 2;
             madness::print(
                 "[GS-FINGERPRINT] OVERRIDE (MADRESPONSE_ALLOW_GS_MISMATCH=1): "
-                "stamp", stored, "!= current", fp.hex,
+                "stamp", stored.empty() ? current_id : stored, "!= current",
+                current_id.empty() ? hash().hex : current_id,
                 "— restamping and continuing. The existing response states "
                 "remain loadable; results are only trustworthy if these "
                 "archives are phase-identical.");
@@ -243,10 +283,11 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
             gate = 3;
             madness::print(
                 "[GS-FINGERPRINT] MISMATCH in", meta_path, "\n"
-                "  stored :", stored,
+                "  stored :", meta.json()["ground_state"].dump(),
                 "(stamped when this dir's response states were written)\n"
-                "  current:", fp.hex, "(", in.archive_file, ",", fp.bytes,
-                "bytes,", fp.nparts, "part(s))\n"
+                "  current:", current_id.empty() ? "hash " + hash().hex
+                                                 : "archive id " + current_id,
+                "(", in.archive_file, ")\n"
                 "  The cached response states belong to a DIFFERENT ground-state "
                 "archive. Orbitals of a regenerated ground state can be "
                 "phase-flipped (identical physics, opposite signs), and reusing "
@@ -257,8 +298,13 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
           break;
         }
       }
-      if (gate == 1 || gate == 2) {
-        meta.set_ground_state(in.archive_file, fp.hex, fp.bytes, fp.nparts);
+      if (gate == 1 || gate == 2 || upgrade) {
+        // with an id there is nothing to hash; without one, the bytes stand in
+        if (current_id.empty())
+          meta.set_ground_state(in.archive_file, hash().hex, hash().bytes,
+                                hash().nparts);
+        else
+          meta.set_ground_state(in.archive_file, "", 0, 0, current_id);
         meta.save();
       }
     } catch (const std::exception &e) {

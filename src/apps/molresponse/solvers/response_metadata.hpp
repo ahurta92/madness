@@ -150,11 +150,14 @@ public:
   /// archive (regenerated orbitals => possible phase flips) must not reuse
   /// the cached response vectors.
   void set_ground_state(const std::string &archive, const std::string &hex,
-                        std::uint64_t bytes, int nparts) {
+                        std::uint64_t bytes, int nparts,
+                        const std::string &archive_id = "") {
     j_["ground_state"] = {{"archive", archive},
                           {"fnv1a64", hex},
                           {"bytes", bytes},
                           {"nparts", nparts}};
+    // restartdata v6: the archive's own identity, compared in place of the hash
+    if (!archive_id.empty()) j_["ground_state"]["archive_id"] = archive_id;
   }
 
   /// The stamped GS fingerprint, or "" if this metadata predates the stamp.

@@ -12,6 +12,7 @@
 
 #include "../solvers/fd_save_load.hpp"  // detail_fd_save_load::check_writer_nproc
 #include "../solvers/response_state.hpp"
+#include "../solvers/restart_hdf5.hpp"
 
 #include <madness/mra/mra.h>
 
@@ -192,15 +193,28 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- np-guard: native np-mismatch refused, hdf5 + legacy pass ----
+  // ---- np-guard: a native np-mismatch proceeds by default (the archive is
+  // np-portable) and is refused only under MADRESPONSE_STRICT_NP=1; hdf5,
+  // legacy and matching entries always pass ----
   bool ok_npguard = false;
   {
     using detail_fd_save_load::check_writer_nproc;
-    bool threw_native = false;
-    try {
-      check_writer_nproc(world, IoBackend::Native,
-                         static_cast<int>(world.size()) + 1, "test", "arch");
-    } catch (const std::runtime_error&) { threw_native = true; }
+    const char* strict_env = std::getenv("MADRESPONSE_STRICT_NP");
+    const std::string saved = strict_env ? strict_env : "";
+    auto native_mismatch_throws = [&](const char* strict) {
+      if (strict) setenv("MADRESPONSE_STRICT_NP", strict, 1);
+      else unsetenv("MADRESPONSE_STRICT_NP");
+      bool threw = false;
+      try {
+        check_writer_nproc(world, IoBackend::Native,
+                           static_cast<int>(world.size()) + 1, "test", "arch");
+      } catch (const std::runtime_error&) { threw = true; }
+      return threw;
+    };
+    const bool proceeds_default = !native_mismatch_throws(nullptr);
+    const bool threw_native = native_mismatch_throws("1");
+    if (strict_env) setenv("MADRESPONSE_STRICT_NP", saved.c_str(), 1);
+    else unsetenv("MADRESPONSE_STRICT_NP");
     bool ok_hdf5 = true, ok_legacy = true, ok_match = true;
     try {  // hdf5 blob is np-portable — mismatch must NOT throw
       check_writer_nproc(world, IoBackend::Hdf5,
@@ -213,10 +227,11 @@ int main(int argc, char** argv) {
       check_writer_nproc(world, IoBackend::Native,
                          static_cast<int>(world.size()), "test", "arch");
     } catch (...) { ok_match = false; }
-    ok_npguard = threw_native && ok_hdf5 && ok_legacy && ok_match;
+    ok_npguard = proceeds_default && threw_native && ok_hdf5 && ok_legacy && ok_match;
     if (world.rank() == 0)
-      std::printf("np-guard: native mismatch refused=%s  hdf5 pass=%s  "
-                  "legacy pass=%s  match pass=%s\n",
+      std::printf("np-guard: native mismatch proceeds by default=%s  refused when "
+                  "strict=%s  hdf5 pass=%s  legacy pass=%s  match pass=%s\n",
+                  proceeds_default ? "yes" : "NO",
                   threw_native ? "yes" : "NO", ok_hdf5 ? "yes" : "NO",
                   ok_legacy ? "yes" : "NO", ok_match ? "yes" : "NO");
   }
@@ -255,11 +270,40 @@ int main(int argc, char** argv) {
                   e_before, tmp_gone ? "yes" : "NO", e_after);
   }
 
-  const bool ok = ok_x && ok_xy && ok_toggle && ok_npguard && ok_atomic;
+  // ---- the restartdata header as /restart attributes, committed with the blob ----
+  bool ok_attrs = false;
+  {
+    RestartMetadata meta;
+    meta.archive_id = new_archive_id(world);
+    meta.origin = "scf";
+    meta.nalpha = 3; meta.nbeta = 2; meta.nmo_beta = 4;
+    meta.xc = "hf"; meta.eprec = 1.e-4; meta.localize = "canon";
+    meta.representation = Representation::mo;
+    meta.k = 6; meta.L = 20.0; meta.converged_for_thresh = 1.e-4;
+    save_parallel_archive_hdf5(world, "attrs.restartdata.h5", 0,
+                               [&](auto& ar) { meta.write(ar); },
+                               [&](hid_t file) { write_restart_attributes(file, meta, 5); });
+    int good = 0;
+    if (world.rank() == 0) {
+      const auto a = peek_restartdata_hdf5("attrs.restartdata.h5");
+      good = a && a->archive_id == meta.archive_id && a->origin == "scf" &&
+             a->nalpha == 3 && a->nbeta == 2 && a->nmo_alpha == 5 && a->nmo_beta == 4 &&
+             a->header_version == RestartMetadata::CURRENT_VERSION &&
+             HamiltonianKey::from_json(a->hamiltonian_key) == meta.hamiltonian_key() &&
+             a->localize == "canon" && a->k == 6;
+      good = good && !peek_restartdata_hdf5("no_such_file.h5").has_value();
+      std::printf("restart attributes: round trip=%s\n", good ? "yes" : "NO");
+      std::filesystem::remove("attrs.restartdata.h5");
+    }
+    world.gop.broadcast(good, 0);
+    ok_attrs = good == 1;
+  }
+
+  const bool ok = ok_x && ok_xy && ok_toggle && ok_npguard && ok_atomic && ok_attrs;
   if (world.rank() == 0)
     std::printf(ok ? " VERDICT: PASS — X and XY round-trip exact on both paths; "
                      "HDF5 auto-detected; backend toggle removes the stale "
-                     "twin; np-guard + atomic tmp OK.\n"
+                     "twin; np-guard + atomic tmp + /restart attributes OK.\n"
                    : " VERDICT: FAIL — see errors above.\n");
   const int rc = ok ? 0 : 1;
 

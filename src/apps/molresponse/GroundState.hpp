@@ -117,6 +117,7 @@ private:
 
     std::shared_ptr<SCF> scf_;
     std::string archive_path_;   ///< the archive from_archive loaded (for reloads)
+    RestartMetadata archive_meta_;  ///< its header; the HDF5 mirror copies its identity
     int original_k_;
     int current_k_ = 0;  // k that orbitals are currently projected to
     // Truncation the orbitals currently CARRY (-1 = pristine, never
@@ -150,6 +151,9 @@ public:
         std::string localize_method;
         double converged_for_thresh = 0.0;
         unsigned int nmo_alpha = 0;
+        /// the whole header, for what the fields above do not carry: the
+        /// archive_id and, from v6, the electron counts
+        RestartMetadata meta;
     };
 
     static ArchiveHeader read_archive_header(World& world,

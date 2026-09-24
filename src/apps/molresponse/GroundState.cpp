@@ -8,6 +8,7 @@
 
 #include "broadcast_json.hpp"
 #include "solvers/function_hdf5_io.hpp"   // HDF5 blob archive (no-op without MADNESS_HAS_HDF5)
+#include "solvers/restart_hdf5.hpp"       // its /restart attributes
 #include <madness/misc/info.h>
 
 #include <cmath>
@@ -70,10 +71,19 @@ GroundState GroundState::from_archive(World& world,
     // nalpha/nbeta from Z + charge + nopen, and SCF::load_mos reads EXACTLY
     // param.nmo_alpha() orbitals — with the neutral default a charged species
     // silently DROPS its HOMO (anion) or mis-derives nopen. The archive side
-    // knows the truth: closed shell nelec = 2*nmo_alpha exactly; open shell
-    // takes nalpha/nbeta from the moldft calc_info.json sibling.
+    // knows the truth: a v6 header records nalpha/nbeta; before that, closed
+    // shell nelec = 2*nmo_alpha exactly, and open shell takes nalpha/nbeta
+    // from the moldft calc_info.json sibling.
     const double Z = molecule.total_nuclear_charge();
-    if (header.spin_restricted) {
+    if (header.meta.nalpha >= 0 && header.meta.nbeta >= 0) {
+        const int na = header.meta.nalpha, nb = header.meta.nbeta;
+        const double charge = Z - static_cast<double>(na + nb);
+        params.set_user_defined_value("charge", charge);
+        params.set_user_defined_value("nopen", na - nb);
+        if (world.rank() == 0 && (std::abs(charge) > 1e-6 || na != nb))
+            print("ARCHIVE_HEADER: nalpha=", na, " nbeta=", nb, " nopen=", na - nb,
+                  " inferred charge=", charge);
+    } else if (header.spin_restricted) {
         const double charge = Z - 2.0 * static_cast<double>(header.nmo_alpha);
         params.set_user_defined_value("charge", charge);
         if (world.rank() == 0 && std::abs(charge) > 1e-6)
@@ -127,6 +137,7 @@ GroundState GroundState::from_archive(World& world,
     // aware loader (native SCF::load_mos, or the HDF5 blob).
     GroundState gs(world, scf);
     gs.archive_path_ = archive_path;
+    gs.archive_meta_ = header.meta;
     gs.load_orbitals(world);
     gs.original_k_ = header.k;
     gs.current_k_ = header.k;
@@ -157,6 +168,20 @@ GroundState::read_archive_header(World& world,
                 "GroundState::read_archive_header: cannot read the header of " +
                 archive_path + ".h5: " + e.what());
         }
+        // the attribute copy of the header, if the file has one, must describe
+        // the same archive as the stream it sits next to
+        int agree = 1;
+        if (world.rank() == 0) {
+            const auto attrs = peek_restartdata_hdf5(archive_path + ".h5");
+            agree = (!attrs || (attrs->archive_id == meta.archive_id &&
+                                attrs->header_version == meta.version &&
+                                attrs->nmo_alpha == int(nmo_alpha_read))) ? 1 : 0;
+        }
+        world.gop.broadcast(agree, 0);
+        if (!agree)
+            throw std::runtime_error(
+                "GroundState::read_archive_header: the /restart attributes of " + archive_path +
+                ".h5 disagree with the header inside it; the file is damaged");
 #else
         throw std::runtime_error("GroundState::read_archive_header: " + archive_path +
                                  ".h5 found but this build has no HDF5 support");
@@ -198,6 +223,7 @@ GroundState::read_archive_header(World& world,
     }
 
     h.nmo_alpha = nmo_alpha_read;
+    h.meta = meta;
     return h;
 }
 
@@ -254,6 +280,7 @@ void GroundState::load_orbitals(World& world) {
     scf_->current_energy       = meta.current_energy;
     scf_->converged_for_thresh = meta.converged_for_thresh;
     scf_->converged_for_dconv  = meta.converged_for_dconv;
+    scf_->archive_id           = meta.archive_id;
     if (world.rank() == 0)
         print("loaded ", scf_->amo.size(), " alpha MOs from ", archive_path_ + ".h5",
               " (HDF5 blob) with thresh and k: ", scf_->amo[0].thresh(), scf_->amo[0].k());
@@ -265,19 +292,28 @@ void GroundState::load_orbitals(World& world) {
 
 void GroundState::save_archive_hdf5(World& world, const std::string& path) const {
 #ifdef MADNESS_HAS_HDF5
-    RestartMetadata meta;
+    // A mirror of the archive these orbitals were loaded from: it keeps that
+    // archive's identity (archive_id, origin, electron counts, Hamiltonian key)
+    // so a consumer can tell the two describe the same orbitals, and a stale
+    // mirror -- one whose id differs from the native archive's -- is visible.
+    RestartMetadata meta      = archive_meta_;
+    meta.version              = RestartMetadata::CURRENT_VERSION;
     meta.current_energy       = scf_->current_energy;
     meta.spin_restricted      = scf_->param.spin_restricted();
     meta.L                    = scf_->param.L();
     meta.k                    = scf_->amo.empty() ? FunctionDefaults<3>::get_k() : scf_->amo[0].k();
     meta.molecule             = scf_->molecule;
-    meta.xc                   = scf_->param.xc();
     meta.localize             = scf_->param.localize_method();
     meta.converged_for_thresh = scf_->converged_for_thresh;
     meta.converged_for_dconv  = scf_->converged_for_dconv;
     meta.representation       = Representation::mo;
-    meta.ncf                  = scf_->restart_ncf;
-    meta.eprec                = scf_->molecule.parameters.eprec();
+    meta.archive_id           = scf_->archive_id;
+    if (archive_meta_.version == 0 || archive_meta_.xc.empty()) {
+        // no native header behind these orbitals: record what the SCF knows
+        meta.xc               = scf_->param.xc();
+        meta.ncf              = scf_->restart_ncf;
+        meta.eprec            = scf_->molecule.parameters.eprec();
+    }
     meta.madness_version      = MADNESS_PACKAGE_VERSION;
     save_parallel_archive_hdf5(world, path, /*deflate=*/0, [&](auto& ar) {
         meta.write(ar);
@@ -289,6 +325,8 @@ void GroundState::save_archive_hdf5(World& world, const std::string& path) const
             ar & scf_->beps & scf_->bocc & scf_->bset;
             for (const auto& f : scf_->bmo) ar & f;
         }
+    }, [&](hid_t file) {
+        write_restart_attributes(file, meta, static_cast<unsigned int>(scf_->amo.size()));
     });
     if (world.rank() == 0)
         print("GroundState: wrote HDF5 archive ", path, " (", scf_->amo.size(), " alpha MOs)");
@@ -426,7 +464,17 @@ void GroundState::build_fock_matrices(World& world, double vtol,
 
         auto protocol_key = std::string("thresh: ") + std::to_string(thresh)
                           + std::string(" k: ") + std::to_string(current_k);
-        if (fock_json.contains(protocol_key)) {
+        // an entry stamped with another archive's id was computed from other
+        // orbitals (an earlier rung, geometry or run) that share the key
+        const std::string loaded_id =
+            scf_->archive_id ? archive_id_to_string(scf_->archive_id) : std::string();
+        const bool other_archive = fock_json.contains(protocol_key) &&
+            fock_json[protocol_key].contains("archive_id") && !loaded_id.empty() &&
+            fock_json[protocol_key]["archive_id"].get<std::string>() != loaded_id;
+        if (other_archive && world.rank() == 0)
+            print("GroundState: the", protocol_key, "entry of", fock_json_file,
+                  "belongs to another archive; recomputing the Fock matrix");
+        if (fock_json.contains(protocol_key) && !other_archive) {
             focka_ = tensor_from_json<double>(fock_json[protocol_key]["focka"]);
             if (!is_spin_restricted() && fock_json[protocol_key].contains("fockb")) {
                 fockb_ = tensor_from_json<double>(fock_json[protocol_key]["fockb"]);

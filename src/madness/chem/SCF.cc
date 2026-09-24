@@ -340,6 +340,26 @@ void SCF::save_mos(World& world) {
     }
     commit_parallel_archive(world, tmpname, archivename);
 
+    // SCF::solve has just written this rung's Fock matrix into <prefix>.fock.json
+    // (keyed by thresh and k only); tie it to the archive it belongs with, so a
+    // reader holding other orbitals under the same key can tell
+    if (world.rank() == 0) {
+        const std::string fockname = param.prefix()+".fock.json";
+        const std::string key = std::string("thresh: ") + std::to_string(FunctionDefaults<3>::get_thresh())
+                              + std::string(" k: ") + std::to_string(FunctionDefaults<3>::get_k());
+        try {
+            json fock_json;
+            if (std::ifstream in(fockname); in) in >> fock_json;
+            if (fock_json.contains(key)) {
+                fock_json[key]["archive_id"] = archive_id_to_string(archive_id);
+                { std::ofstream out(fockname+".tmp"); out << std::setw(4) << fock_json << std::endl; }
+                std::filesystem::rename(fockname+".tmp", fockname);
+            }
+        } catch (...) {
+            print("WARNING: could not stamp the archive id into", fockname);
+        }
+    }
+
     // Do not make a restartaodata file if nwchem orbitals used,
     // as no aoamo/aobmo overlap matrix can be computed. A file left over from an
     // earlier run then carries an older archive_id, and the planner ignores it.

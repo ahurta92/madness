@@ -28,6 +28,7 @@
 #include "../tools/dalton_gto.hpp"
 #include "../ResponseProtocol.hpp"
 #include "function_hdf5_io.hpp"   // HDF5 twin of the seed archive (no-op without MADNESS_HAS_HDF5)
+#include "restart_hdf5.hpp"       // its /restart attributes
 
 #include <madness/chem/Restart.h>
 #include <madness/chem/molecule.h>
@@ -206,7 +207,11 @@ write_gs_seed_from_molden(madness::World &world, const std::string &molden_path,
     // DALTON starting point can be visualized next to the MADNESS result.
     if (hdf5_io_enabled())
       save_parallel_archive_hdf5(world, name + ".h5", /*deflate=*/0,
-                                 [&](auto &ar) { emit(ar); });
+                                 [&](auto &ar) { emit(ar); },
+                                 [&](hid_t file) {
+                                   write_restart_attributes(
+                                       file, meta, static_cast<unsigned int>(amo.size()));
+                                 });
 #endif
     return name;
   };

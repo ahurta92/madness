@@ -284,6 +284,31 @@ int main() {
            "ground_state stamp survives save/reload");
     EXPECT(m2.json()["ground_state"]["nparts"] == 2,
            "ground_state block carries nparts");
+
+    // With an archive_id (restartdata v6) the id is the identity, and the hash
+    // is computed only when the stamp has nothing else to compare with.
+    using molresponse_v3::gs_identity_verdict;
+    int hashes = 0;
+    auto hash_of = [&](const std::string &hex) {
+      return [&hashes, hex] { ++hashes; return hex; };
+    };
+    const std::string id1 = "00000000000000a1", id2 = "00000000000000a2";
+    // an old, hash-only stamp against an archive that now has an id: hash once
+    EXPECT(gs_identity_verdict(m.json(), id1, hash_of(fp1.hex)) == GsGateVerdict::Match &&
+               hashes == 1,
+           "hash-only stamp + id archive -> Match by hash");
+    m.set_ground_state(base, "", 0, 0, id1);
+    hashes = 0;
+    EXPECT(gs_identity_verdict(m.json(), id1, hash_of(fp2.hex)) == GsGateVerdict::Match &&
+               hashes == 0,
+           "id stamp + same id -> Match without hashing");
+    EXPECT(gs_identity_verdict(m.json(), id2, hash_of(fp1.hex)) == GsGateVerdict::Mismatch,
+           "id stamp + different id -> Mismatch");
+    EXPECT(gs_identity_verdict(m.json(), "", hash_of(fp1.hex)) == GsGateVerdict::Mismatch,
+           "id stamp + archive without id (rewritten by an older writer) -> Mismatch");
+    auto fresh = ResponseMetadata::load_or_create((tmp / "gs_meta_fresh.json").string());
+    EXPECT(gs_identity_verdict(fresh.json(), id1, hash_of(fp1.hex)) == GsGateVerdict::FreshDir,
+           "no stamp, no states -> FreshDir");
   }
 
   // ---- stale shard sweep (F2 restart safety) --------------------------------

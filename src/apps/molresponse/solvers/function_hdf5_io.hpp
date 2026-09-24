@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -96,6 +97,31 @@ inline void write_attr_darray(hid_t loc, const char* name, const double* v, hsiz
   H5Awrite(at, H5T_NATIVE_DOUBLE, v);
   H5Aclose(at);
   H5Sclose(sp);
+}
+inline void write_attr_s(hid_t loc, const char* name, const std::string& v) {
+  hid_t t = H5Tcopy(H5T_C_S1);
+  H5Tset_size(t, std::max<std::size_t>(v.size(), 1));
+  H5Tset_strpad(t, H5T_STR_NULLPAD);
+  hid_t sp = H5Screate(H5S_SCALAR);
+  hid_t at = H5Acreate2(loc, name, t, sp, H5P_DEFAULT, H5P_DEFAULT);
+  H5Awrite(at, t, v.empty() ? "" : v.data());
+  H5Aclose(at);
+  H5Sclose(sp);
+  H5Tclose(t);
+}
+inline std::string read_attr_s(hid_t loc, const char* name) {
+  hid_t at = H5Aopen(loc, name, H5P_DEFAULT);
+  hid_t t = H5Aget_type(at);
+  std::string v(H5Tget_size(t), '\0');
+  hid_t mt = H5Tcopy(H5T_C_S1);
+  H5Tset_size(mt, v.size());
+  H5Tset_strpad(mt, H5T_STR_NULLPAD);
+  H5Aread(at, mt, v.data());
+  H5Tclose(mt);
+  H5Tclose(t);
+  H5Aclose(at);
+  v.erase(v.find_last_not_of('\0') + 1);
+  return v;
 }
 inline long long read_attr_i(hid_t loc, const char* name) {
   long long v = 0;
@@ -313,7 +339,8 @@ namespace detail_function_hdf5 {
 // deflate_level 0 = contiguous; 1..9 = chunked + gzip (transparent on read).
 inline void write_byte_dataset(const std::string& path,
                                const std::vector<unsigned char>& buf,
-                               int deflate_level) {
+                               int deflate_level,
+                               const std::function<void(hid_t)>& extra = nullptr) {
   H5ErrorScope h5errs;  // no recursive auto-print; codes checked below
   hid_t file = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   MADNESS_CHECK_THROW(file >= 0, "write_byte_dataset: H5Fcreate failed (path/permissions/disk?)");
@@ -344,6 +371,8 @@ inline void write_byte_dataset(const std::string& path,
   H5Dclose(ds);
   if (plist >= 0) H5Pclose(plist);
   H5Sclose(sp);
+  // anything the caller adds lands in the same file, before the same rename
+  if (extra) extra(file);
   // Close status matters: HDF5 buffers metadata until close, so a failed
   // close means the file on disk may be incomplete. Callers rename a tmp
   // over the real name only after this returns cleanly.
@@ -391,9 +420,14 @@ inline bool hdf5_io_enabled() {
 /// Generic: serialize arbitrary parallel-archive content to one HDF5 dataset via
 /// the optimized VectorOutputArchive gather. The callback runs the `ar & ...`
 /// ops exactly as the BinaryFstream path would (e.g. `ar & na; for(f) ar & f;`).
+///
+/// \p extra, if given, runs on rank 0 with the open file before it is closed and
+/// renamed into place -- e.g. write_restart_attributes -- so that what it adds is
+/// committed together with the blob.
 template <class StoreCb>
 void save_parallel_archive_hdf5(World& world, const std::string& path,
-                                int deflate_level, StoreCb&& cb) {
+                                int deflate_level, StoreCb&& cb,
+                                const std::function<void(hid_t)>& extra = nullptr) {
   std::vector<unsigned char> buf;
   {
     archive::VectorOutputArchive var(buf);
@@ -413,7 +447,7 @@ void save_parallel_archive_hdf5(World& world, const std::string& path,
     // rename only installs a fully flushed file.
     try {
       const std::string tmp = path + ".tmp";
-      detail_function_hdf5::write_byte_dataset(tmp, buf, deflate_level);
+      detail_function_hdf5::write_byte_dataset(tmp, buf, deflate_level, extra);
       std::filesystem::rename(tmp, path);
     } catch (const std::exception& e) { save_err = e.what(); }
       catch (...) { save_err = "save_parallel_archive_hdf5: unknown error for " + path; }

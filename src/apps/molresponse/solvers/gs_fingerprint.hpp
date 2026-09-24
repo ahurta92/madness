@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -118,6 +119,34 @@ enum class GsGateVerdict {
   MissingStamp, // states exist but predate the stamp -> warn, stamp, proceed
   Mismatch      // stamp differs -> the restart state belongs to another GS
 };
+
+/// the gate's verdict when the archive may carry an archive_id (restartdata v6)
+///
+/// An id is the archive's identity: SCF::save_mos draws a new one on every
+/// write, so equal ids mean the same orbitals, phases included, and comparing
+/// them costs nothing. The byte hash remains for what has no id -- a stamp
+/// written before ids existed, or an archive from an older writer -- and is
+/// computed only then (\p current_hex is called lazily).
+///
+/// @param[in] current_id  the archive's id as 16 hex digits, "" if it records none
+inline GsGateVerdict gs_identity_verdict(const nlohmann::json &meta,
+                                         const std::string &current_id,
+                                         const std::function<std::string()> &current_hex) {
+  std::string stored_id, stored_hex;
+  if (meta.contains("ground_state") && meta["ground_state"].is_object()) {
+    stored_id = meta["ground_state"].value("archive_id", "");
+    stored_hex = meta["ground_state"].value("fnv1a64", "");
+  }
+  if (stored_id.empty() && stored_hex.empty())
+    return metadata_has_response_states(meta) ? GsGateVerdict::MissingStamp
+                                              : GsGateVerdict::FreshDir;
+  if (!stored_id.empty() && !current_id.empty())
+    return stored_id == current_id ? GsGateVerdict::Match : GsGateVerdict::Mismatch;
+  if (!stored_hex.empty())
+    return stored_hex == current_hex() ? GsGateVerdict::Match : GsGateVerdict::Mismatch;
+  // stamped with an id, but the archive now records none: rewritten since
+  return GsGateVerdict::Mismatch;
+}
 
 inline GsGateVerdict gs_fingerprint_verdict(const nlohmann::json &meta,
                                             const std::string &current_hex) {

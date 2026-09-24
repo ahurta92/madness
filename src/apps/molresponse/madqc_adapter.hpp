@@ -371,10 +371,11 @@ struct molresponse_v3_lib {
             "(F2 state-parallel fan-out requested)");
       // Review io HIGH (early warning, not a hard gate): on a MULTI-NODE run
       // the subworlds write native archives at subworld-rank-count, but
-      // property assembly reloads them at universe scale — the native np-guard
-      // then aborts AFTER the full solve. Warn up front so the user isn't
-      // surprised late; the HDF5 backend gathers to one client and reloads at
-      // any np. (Single-node subworlds, where writer==reader np, are fine.)
+      // property assembly reloads them at universe scale. The native archive is
+      // np-portable and the np-guard proceeds by default, but aborts AFTER the
+      // full solve under MADRESPONSE_STRICT_NP=1. Say so up front; the HDF5
+      // backend gathers to one client and reloads at any np. (Single-node
+      // subworlds, where writer==reader np, are fine.)
 #ifdef MADNESS_HAS_HDF5
       const bool hdf5_on = hdf5_io_enabled();
 #else
