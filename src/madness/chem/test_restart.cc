@@ -288,22 +288,22 @@ void test_automatic() {
         RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
         meta.eprec = 1.e-4;
         const RestartPlan same = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 1.e-4);
+                user_dconv, lih(), Representation::mo, HamiltonianKey{.eprec = 1.e-4});
         check(not same.iterate, "auto: matching eprec keeps the convergence claim");
 
         const RestartPlan diff = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 1.e-6);
+                user_dconv, lih(), Representation::mo, HamiltonianKey{.eprec = 1.e-6});
         check(diff.iterate, "auto: differing eprec re-converges");
         check(diff.source == RestartSource::restartdata,
               "auto: differing eprec still uses the orbitals as a guess");
 
         // 0 on either side means "not recorded", which is not a mismatch
         const RestartPlan unknown = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 0.0);
+                user_dconv, lih(), Representation::mo, HamiltonianKey{});
         check(not unknown.iterate, "auto: unknown requested eprec is not a mismatch");
         const RestartPlan unknown2 = plan_restart(A,
                 with_archive(converged_archive(1.e-6, 1.e-4)), moldft, ladder, user_dconv,
-                lih(), Representation::mo, 1.e-6);
+                lih(), Representation::mo, HamiltonianKey{.eprec = 1.e-6});
         check(not unknown2.iterate, "auto: unrecorded archive eprec is not a mismatch");
     }
 
@@ -314,11 +314,11 @@ void test_automatic() {
         RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
         meta.xc = "hf";
         const RestartPlan same = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 0.0, "hf");
+                user_dconv, lih(), Representation::mo, HamiltonianKey{.xc = "hf"});
         check(not same.iterate, "auto: matching xc keeps the convergence claim");
 
         const RestartPlan diff = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 0.0, "lda");
+                user_dconv, lih(), Representation::mo, HamiltonianKey{.xc = "lda"});
         check(diff.iterate, "auto: a different functional re-converges");
         check(diff.source == RestartSource::restartdata,
               "auto: a different functional still uses the orbitals as a guess");
@@ -330,11 +330,11 @@ void test_automatic() {
 
         // an empty string on either side is "not recorded", not a mismatch
         const RestartPlan unknown = plan_restart(A, with_archive(meta), moldft, ladder,
-                user_dconv, lih(), Representation::mo, 0.0, "");
+                user_dconv, lih(), Representation::mo, HamiltonianKey{});
         check(not unknown.iterate, "auto: unknown requested xc is not a mismatch");
         const RestartPlan unknown2 = plan_restart(A,
                 with_archive(converged_archive(1.e-6, 1.e-4)), moldft, ladder, user_dconv,
-                lih(), Representation::mo, 0.0, "lda");
+                lih(), Representation::mo, HamiltonianKey{.xc = "lda"});
         check(not unknown2.iterate, "auto: unrecorded archive xc is not a mismatch");
     }
 
@@ -345,11 +345,11 @@ void test_automatic() {
         RestartMetadata meta = converged_archive(1.e-6, 1.e-4, Representation::nemo);
         meta.ncf = "slater:2.000000";
         const RestartPlan same = plan_restart(A, with_archive(meta), nemo, ladder,
-                user_dconv, lih(), Representation::nemo, 0.0, "", "slater:2.000000");
+                user_dconv, lih(), Representation::nemo, HamiltonianKey{.ncf = "slater:2.000000"});
         check(not same.iterate, "auto: matching ncf keeps the convergence claim");
 
         const RestartPlan diff = plan_restart(A, with_archive(meta), nemo, ladder,
-                user_dconv, lih(), Representation::nemo, 0.0, "", "slater:1.000000");
+                user_dconv, lih(), Representation::nemo, HamiltonianKey{.ncf = "slater:1.000000"});
         check(diff.iterate, "auto: a different ncf re-converges");
         check(diff.source == RestartSource::restartdata,
               "auto: a different ncf still uses the orbitals as a guess");
@@ -376,7 +376,7 @@ void test_automatic() {
         };
         auto plan_for = [&](const RestartMode mode, const std::size_t nmo) {
             return plan_restart(mode, short_archive(nmo), moldft, ladder, user_dconv, lih(),
-                                Representation::mo, 0.0, "", "", 7);
+                                Representation::mo, HamiltonianKey{}, 7);
         };
         const RestartPlan fewer = plan_for(A, 5);
         check(fewer.source == RestartSource::restartdata, "auto, short archive: reads the archive");
@@ -404,7 +404,7 @@ void test_automatic() {
     // what the plan tells freeze_occupied about the archive
     {
         const RestartPlan good = plan_restart(A, with_archive(converged_archive(1.e-4, 1.e-3)), moldft,
-                                              ladder, user_dconv, lih(), Representation::mo, 0.0, "hf");
+                                              ladder, user_dconv, lih(), Representation::mo, HamiltonianKey{.xc = "hf"});
         check(good.archive_converged and good.archive_same_hamiltonian,
               "auto, converged archive: converged for this Hamiltonian");
         const RestartPlan never = plan_restart(A, with_archive(converged_archive(1.e10, 1.e10)), moldft,
@@ -414,7 +414,7 @@ void test_automatic() {
         RestartMetadata lda = converged_archive(1.e-6, 1.e-4);
         lda.xc = "lda";
         const RestartPlan other = plan_restart(A, with_archive(lda), moldft, ladder, user_dconv, lih(),
-                                               Representation::mo, 0.0, "hf");
+                                               Representation::mo, HamiltonianKey{.xc = "hf"});
         check(other.source == RestartSource::restartdata and other.iterate and
               other.archive_converged and not other.archive_same_hamiltonian,
               "auto, xc mismatch: re-converged, flagged as another Hamiltonian");
@@ -560,6 +560,66 @@ void test_serialization() {
           "serialize: archive_same_hamiltonian");
 }
 
+/// the operator key: one comparison for the planner, the header and the results file
+void test_hamiltonian_key() {
+    HamiltonianKey a;
+    a.xc = "hf"; a.eprec = 1.e-4; a.field = {0.0, 0.0, 0.0}; a.core_type = "none";
+    a.psp_calc = 0; a.pcm = "none"; a.ncf = "slater:1.0";
+
+    check(a.mismatch(a).empty(), "key: equal to itself");
+    check(a.mismatch(HamiltonianKey{}).empty(), "key: an unrecorded request is not a mismatch");
+    check(HamiltonianKey{}.mismatch(a).empty(), "key: an unrecorded archive is not a mismatch");
+
+    auto differs = [&](const std::string& name, auto&& change) {
+        HamiltonianKey b = a;
+        change(b);
+        check(not a.mismatch(b).empty(), "key: " + name + " is a different Hamiltonian");
+    };
+    differs("xc", [](HamiltonianKey& b) { b.xc = "lda"; });
+    differs("eprec", [](HamiltonianKey& b) { b.eprec = 1.e-6; });
+    differs("ncf", [](HamiltonianKey& b) { b.ncf = "slater:2.0"; });
+    differs("field", [](HamiltonianKey& b) { b.field = {0.0, 0.0, 1.e-3}; });
+    differs("core_type", [](HamiltonianKey& b) { b.core_type = "mcp"; });
+    differs("psp_calc", [](HamiltonianKey& b) { b.psp_calc = 1; });
+    differs("pcm", [](HamiltonianKey& b) { b.pcm = "water:iefpcm:eps=78.39:probe=1.385"; });
+
+    const HamiltonianKey back = HamiltonianKey::from_json(a.to_json());
+    check(back == a, "key: json round trip");
+    check(HamiltonianKey::from_json(nlohmann::json::object()) == HamiltonianKey{},
+          "key: an empty json reads as unrecorded");
+
+    // the planner sees the new fields through the header: a converged archive in a
+    // different external field keeps its orbitals as a guess, but re-converges
+    const RestartMode A = RestartMode::automatic;
+    const RestartCapabilities moldft = RestartCapabilities::all();
+    RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
+    meta.xc = "hf";
+    HamiltonianKey requested;
+    requested.xc = "hf";
+    const RestartPlan same = plan_restart(A, with_archive(meta), moldft, ladder, user_dconv,
+                                          lih(), Representation::mo, requested);
+    check(not same.iterate, "key: a v5 archive leaves the new fields unrecorded");
+}
+
+/// localize selects which orbitals of the same solution are stored
+void test_localize() {
+    const RestartMode A = RestartMode::automatic;
+    const RestartCapabilities moldft = RestartCapabilities::all();
+    RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
+    meta.localize = "boys";
+    auto plan_for = [&](const std::string& localize) {
+        return plan_restart(A, with_archive(meta), moldft, ladder, user_dconv, lih(),
+                            Representation::mo, HamiltonianKey{}, 0, localize);
+    };
+    check(not plan_for("boys").iterate, "localize: the same method reuses the archive");
+    check(not plan_for("").iterate, "localize: an unrecorded request is not a mismatch");
+    const RestartPlan other = plan_for("canon");
+    check(other.iterate, "localize: a different method iterates");
+    check(other.source == RestartSource::restartdata, "localize: from the archive's orbitals");
+    check(other.protocol_start == ladder.size() - 1, "localize: at the final rung only");
+    check(other.archive_same_hamiltonian, "localize: still the same Hamiltonian");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -571,6 +631,8 @@ int main(int argc, char** argv) {
     test_explicit_modes();
     test_single_rung_ladder();
     test_serialization();
+    test_hamiltonian_key();
+    test_localize();
 
     if (world.rank() == 0) {
         print("");
