@@ -57,13 +57,19 @@ int test_results_envelope_roundtrip() {
     t.checkpoint(back.precision["ncoeff"] == 123456,                  "precision round-trips");
     t.checkpoint(std::fabs(back.energies["scf_kinetic_energy"].get<double>() - 76.0) < 1e-15,
                  "energies round-trip");
+
+    // xc left at its (empty) default -> not set, so the key must not appear.
+    SCFResults no_xc;
+    no_xc.scf_molecule = mol;
+    t.checkpoint(!no_xc.to_json().contains("xc"),                     "unset xc key is omitted");
+
     // Old checkpoint: none of the new keys present -> defaults, no throw.
     nlohmann::json old = j;
     for (const char* k : {"xc", "precision", "scf_iterations", "nuclear_repulsion_energy",
                           "scf_one_electron_energy", "scf_two_electron_energy", "scf_kinetic_energy"})
         old.erase(k);
     SCFResults legacy(old);
-    t.checkpoint(legacy.xc == "hf" && legacy.scf_iterations == -1 && legacy.precision.is_null()
+    t.checkpoint(legacy.xc.empty() && legacy.scf_iterations == -1 && legacy.precision.is_null()
                  && legacy.energies.empty(),                          "legacy checkpoint loads with defaults");
 
     ConvergenceResults c;

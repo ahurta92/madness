@@ -1191,22 +1191,36 @@ struct moldft_lib {
         return it == last.end() ? 0.0 : it->second;
       };
       scf_res.scf_total_energy = energy;   // moldft never set this (0.0); only the nemo path did (Applications.hpp:1313)
-      nlohmann::json e;
-      e["nuclear_repulsion_energy"]      = get("e_nrep");
-      e["scf_kinetic_energy"]            = get("e_kinetic");
-      e["scf_nuclear_attraction_energy"] = get("e_nuclear");
-      e["scf_coulomb_energy"]            = get("e_coulomb");
-      e["scf_pcm_energy"]                = get("e_pcm");
-      e["scf_one_electron_energy"]       = get("e_kinetic") + get("e_nuclear") + get("e_local");
-      e["scf_two_electron_energy"]       = get("e_coulomb") + get("e_xc");   // HF: e_xc is exact exchange
-      if (scf->xc.is_dft()) e["scf_xc_energy"] = get("e_xc");
-      scf_res.energies = e;
-      scf_res.scf_iterations = scf->e_data.iterations();
+
+      // Reload-only path (NextAction::ReloadOnly / restart read_only): value()
+      // returns without ever calling scf->e_data.add_data(), so last() is
+      // empty here. Recording an all-zero energy decomposition and
+      // scf_iterations = 0 next to the real (archive-derived) total energy
+      // would misreport a converged reload as an unconverged, zero-energy
+      // solve, so leave `energies` unset and iterations at their -1 defaults.
+      if (!last.empty()) {
+        nlohmann::json e;
+        e["nuclear_repulsion_energy"]      = get("e_nrep");
+        e["scf_kinetic_energy"]            = get("e_kinetic");
+        e["scf_nuclear_attraction_energy"] = get("e_nuclear");
+        e["scf_coulomb_energy"]            = get("e_coulomb");
+        e["scf_pcm_energy"]                = get("e_pcm");
+        e["scf_one_electron_energy"]       = get("e_kinetic") + get("e_nuclear") + get("e_local");
+        e["scf_two_electron_energy"]       = get("e_coulomb") + get("e_xc");   // HF: e_xc is exact exchange
+        if (scf->xc.is_dft()) e["scf_xc_energy"] = get("e_xc");
+        scf_res.energies = e;
+        scf_res.scf_iterations = scf->e_data.iterations();
+        conv_res.iterations = scf->e_data.iterations();
+      }
       scf_res.xc = scf->param.xc();
 
+      // Collective: one reduction total instead of one per orbital
+      // (Function::size() is itself a collective global sum).
+      world.gop.fence();
       std::size_t ncoeff = 0;
-      for (const auto &f : scf->amo) ncoeff += f.size();
-      for (const auto &f : scf->bmo) ncoeff += f.size();
+      for (const auto &f : scf->amo) ncoeff += f.size_local();
+      for (const auto &f : scf->bmo) ncoeff += f.size_local();
+      world.gop.sum(ncoeff);
       scf_res.precision = {{"k", FunctionDefaults<3>::get_k()},
                            {"thresh", FunctionDefaults<3>::get_thresh()},
                            {"protocol", scf->param.protocol()},
@@ -1215,7 +1229,12 @@ struct moldft_lib {
                            {"L", scf->param.L()},
                            {"ncoeff", ncoeff}};
 
-      conv_res.iterations = scf->e_data.iterations();
+      // converged_for_thresh/dconv always come from the engine (on the reload
+      // path, from the archive header -- SCF.cc:456) and describe the stored
+      // wavefunction truthfully either way, so this status check runs
+      // unconditionally. It deliberately checks against param.dconv() (what
+      // the deck asked for), which is stricter than the engine's own reload
+      // test max(protocol.back(), dconv) (SCF.h:625-629).
       const double finest = scf->param.protocol().empty()
                                 ? FunctionDefaults<3>::get_thresh()
                                 : scf->param.protocol().back();
@@ -1328,6 +1347,7 @@ struct nemo_lib {
     sr.beps = nm->get_calc()->beps;
     sr.properties = pr;
     sr.scf_total_energy = nm->get_calc()->current_energy;
+    sr.xc = nm->get_calc()->param.xc();
     sr.scf_dispersion_correction_energy = nm->get_calc()->dispersion.energy(
         world, nm->get_calc()->molecule);
     // The geometry this reference was solved at. Without it, results_["molecule"]
