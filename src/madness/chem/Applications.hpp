@@ -456,6 +456,12 @@ public:
       results_["convergence_info"] = results_["convergence"];
       results_["metadata"] = {{"mpi_size", world_.size()}};
 
+      // Task-entry envelope: every task states its type; precision
+      // is mirrored so consumers need not know the nested layout.
+      results_["type"] = results_["scf"].value("model", std::string("scf"));
+      if (results_["scf"].contains("precision"))
+        results_["precision"] = results_["scf"]["precision"];
+
       // write the checkpoint file atomically (tmp write + rename) so a crash
       // or ENOSPC mid-write cannot truncate a previously-good checkpoint and
       // brick the next restart. See defect-1 in the raman thread brief.
@@ -1174,6 +1180,50 @@ struct moldft_lib {
 #else
     scf_res.uses_libxc = false;
 #endif
+
+    // SCF task record: what this SCF actually ran at and
+    // what it produced, under QCSchema names where they exist. Pure bookkeeping
+    // from quantities the solve already holds — nothing here changes a number.
+    {
+      const auto last = scf->e_data.last();
+      auto get = [&](const char *k) {
+        auto it = last.find(k);
+        return it == last.end() ? 0.0 : it->second;
+      };
+      scf_res.scf_total_energy = energy;   // moldft never set this (0.0); only the nemo path did (Applications.hpp:1313)
+      nlohmann::json e;
+      e["nuclear_repulsion_energy"]      = get("e_nrep");
+      e["scf_kinetic_energy"]            = get("e_kinetic");
+      e["scf_nuclear_attraction_energy"] = get("e_nuclear");
+      e["scf_coulomb_energy"]            = get("e_coulomb");
+      e["scf_pcm_energy"]                = get("e_pcm");
+      e["scf_one_electron_energy"]       = get("e_kinetic") + get("e_nuclear") + get("e_local");
+      e["scf_two_electron_energy"]       = get("e_coulomb") + get("e_xc");   // HF: e_xc is exact exchange
+      if (scf->xc.is_dft()) e["scf_xc_energy"] = get("e_xc");
+      scf_res.energies = e;
+      scf_res.scf_iterations = scf->e_data.iterations();
+      scf_res.xc = scf->param.xc();
+
+      std::size_t ncoeff = 0;
+      for (const auto &f : scf->amo) ncoeff += f.size();
+      for (const auto &f : scf->bmo) ncoeff += f.size();
+      scf_res.precision = {{"k", FunctionDefaults<3>::get_k()},
+                           {"thresh", FunctionDefaults<3>::get_thresh()},
+                           {"protocol", scf->param.protocol()},
+                           {"econv", scf->param.econv()},
+                           {"dconv", scf->param.dconv()},
+                           {"L", scf->param.L()},
+                           {"ncoeff", ncoeff}};
+
+      conv_res.iterations = scf->e_data.iterations();
+      const double finest = scf->param.protocol().empty()
+                                ? FunctionDefaults<3>::get_thresh()
+                                : scf->param.protocol().back();
+      conv_res.status = (scf->converged_for_thresh <= finest &&
+                         scf->converged_for_dconv <= scf->param.dconv())
+                            ? "converged" : "unconverged";
+    }
+
     scf_res.properties = prop_res;
 
     return results;
