@@ -39,6 +39,9 @@ set(MADCHEM_HEADERS
     mp2.h
     nemo.h
     NWChem.h
+    molden_gto.h
+    dalton_rspvec.h
+    gto_mra.h
     oep.h
     pcm.h
     PNOF12Potentials.h

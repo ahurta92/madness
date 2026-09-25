@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+namespace madness {
+
 // RSPVEC binary reader: Fortran unformatted sequential (gfortran, little-endian,
 // 4-byte record markers). Layout pinned from DALTON/rsp/rspcr5.F (WRTRSP/REARSP)
 // and DALTON/sirius/sirset.F (JWOP ordering for the C1 case).
@@ -167,3 +169,5 @@ split_ov(const std::vector<double>& vec, int n_occ, int n_vir) {
         ") nor 2*n_occ*n_vir (" + std::to_string(2 * n_ov) +
         ") -- multi-symmetry (NSYM>1) file not supported");
 }
+
+} // namespace madness

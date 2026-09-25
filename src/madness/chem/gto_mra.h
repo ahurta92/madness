@@ -1,6 +1,6 @@
 #pragma once
 
-// dalton_mra.hpp — shared DALTON(molden) -> MADNESS MRA projection machinery.
+// gto_mra.h — shared DALTON(molden) -> MADNESS MRA projection machinery.
 //
 // Extracted from tpa_from_dalton.cpp / seed_from_dalton.cpp (which carried
 // private copies) so the FD seed path (solvers/dalton_import.hpp) can reuse it
@@ -11,7 +11,7 @@
 //          = sum_mu (C_vir · blkᵀ)[mu,i] chi_mu(r)
 // used for both response vectors (RSPVEC blocks) and plain MO columns.
 
-#include "dalton_gto.hpp"
+#include <madness/chem/molden_gto.h>
 
 #include <madness/mra/mra.h>
 #include <madness/tensor/tensor_lapack.h>   // syev (Loewdin gauge polish)
@@ -24,7 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace molresponse_v3 {
+namespace madness {
 
 /// Gaussian linear-combination functor: evaluates sum_mu w[mu] chi_mu(r) over
 /// a parsed molden basis. special_points() = the shell centers, so the initial
@@ -141,4 +141,4 @@ occupied_gauge_rotation(madness::World &world,
   return inner(M, Sinvhalf);   // Loewdin: exactly unitary
 }
 
-} // namespace molresponse_v3
+} // namespace madness

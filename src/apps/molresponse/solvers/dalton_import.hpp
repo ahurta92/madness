@@ -60,9 +60,9 @@
 #include "../Perturbations.hpp"
 #include "../ResponseProtocol.hpp"
 #include "../ResponsePropertyPlanner.hpp"
-#include "../tools/dalton_gto.hpp"
-#include "../tools/dalton_mra.hpp"
-#include "../tools/dalton_rspvec.hpp"
+#include <madness/chem/molden_gto.h>
+#include <madness/chem/gto_mra.h>
+#include <madness/chem/dalton_rspvec.h>
 #include "es_save_load.hpp"        // save_es_roots / try_load_es_bundle (ES seed)
 #include "fd_save_load.hpp"        // response_filename
 #include "gs_fingerprint.hpp"      // fnv1a64_update / kFnv1a64Basis
@@ -675,7 +675,7 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
   // DALTON's response vectors are indexed by its CANONICAL occupied MOs; the
   // FD solver's x_i belong to the MADNESS ground-state orbitals — typically
   // LOCALIZED (moldft `localize new`). Project the DALTON occupied MOs to MRA
-  // and build U = M (M^T M)^{-1/2} via the shared helper (tools/dalton_mra.hpp
+  // and build U = M (M^T M)^{-1/2} via the shared helper (chem/gto_mra.h
   // occupied_gauge_rotation — physics rationale, fidelity eigenvalue print and
   // the <0.5 hard error live there); every seed block is rotated
   //     x^MAD_j = sum_i x^DAL_i U(i,j)     (same for y)
