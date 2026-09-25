@@ -200,6 +200,24 @@ DALTON side, learned the hard way:
 The gecko `SeededCampaign` (madness-workspace/workflow) writes these decks and the
 SLURM chain (DALTON seed → madqc) for the closeout molecules.
 
+## Where the code lives
+
+The generic pieces are in chem, since the SCF seed uses them too:
+
+| piece | header |
+|---|---|
+| molden parser, Gaussian-orbital evaluation | `madness/chem/molden_gto.h` |
+| Gaussian orbitals onto the MRA basis | `madness/chem/gto_mra.h` |
+| DALTON `RSPVEC` reader | `madness/chem/dalton_rspvec.h` |
+| locating a DALTON directory, the geometry check | `madness/chem/dalton_dir.h` |
+| the SCF ground-state seed and madqc's hook | `madness/chem/dalton_seed.h` |
+
+What stays in molresponse is the response side: turning `RSPVEC` records into
+frequency-dependent and excited-state seeds (`solvers/dalton_import.hpp`), the
+response tools (`tools/seed_from_dalton`, `tpa_from_dalton`,
+`dalton_es_seed_bundle`), and the HDF5 twin of the ground-state seed
+(`solvers/dalton_gs_seed.hpp`).
+
 ## Scope
 
 Closed-shell, matching the response engine's scope. The projection tools run on a

@@ -236,6 +236,26 @@ the form the scripted tests in this directory use.
 | `tdhf`     | `cis` | cis |
 | `nemo`     | `nemo` | nemo |
 | `oep`      | `oep` | oep |
+| `io`       | `io` | run-wide: restart backend (`backend`) and the DALTON seed (`dalton.dir`) |
+
+### Starting from a DALTON calculation
+
+`io { dalton.dir <dir> }` names the output of a DALTON run: a directory holding
+`molden.inp` and `RSPVEC`, loose or in a single `*.tar.gz`. A relative path is
+resolved against the directory madqc is launched from. madqc then seeds the
+SCF from it: before the SCF plans its restart, the occupied molden orbitals
+are projected onto the MRA basis at the deck's `l` and first protocol
+threshold, orthonormalized, and written as `<prefix>.restartdata`, which
+`restart auto` resumes from and iterates. An existing `<prefix>.restartdata*`
+always wins. The molden geometry must match the deck's to 1e-4 bohr, or the
+run stops. The seed is closed-shell only, and `<prefix>.gs_seed.json` records
+what was seeded.
+
+The code is in chem: `madness/chem/dalton_seed.h` (the seed and the madqc
+hook), `dalton_dir.h` (locating the files, the geometry check), `molden_gto.h`,
+`gto_mra.h` and `dalton_rspvec.h` (the readers and the projection). For the
+response workflow the same directory also seeds the response states; see
+[`../molresponse/docs/guides/dalton_warm_start.md`](../molresponse/docs/guides/dalton_warm_start.md).
 
 ---
 
