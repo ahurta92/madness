@@ -9,6 +9,8 @@
 #include <madness/chem/RestartPlan.h>
 #include <madness/world/MADworld.h>
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -620,6 +622,145 @@ void test_localize() {
     check(other.archive_same_hamiltonian, "localize: still the same Hamiltonian");
 }
 
+/// header v6: the id, the electron counts and the rest of the key survive a round
+/// trip; a v5 header still reads, with everything v6 added left unrecorded
+void test_header_v6(World& world) {
+    const std::size_t bufsize = 1 << 16;
+    std::vector<unsigned char> buf(bufsize);
+
+    RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
+    meta.version = RestartMetadata::CURRENT_VERSION;
+    meta.archive_id = new_archive_id(world);
+    meta.origin = "scf";
+    meta.nalpha = 2; meta.nbeta = 1; meta.nmo_beta = 3;
+    HamiltonianKey key;
+    key.xc = "lda"; key.eprec = 1.e-4; key.field = {0.0, 0.0, 1.e-3}; key.core_type = "none";
+    key.psp_calc = 0; key.pcm = "none";
+    meta.set_hamiltonian_key(key);
+    {
+        archive::BufferOutputArchive ar(buf.data(), bufsize);
+        meta.write(ar);
+    }
+    RestartMetadata back;
+    {
+        archive::BufferInputArchive ar(buf.data(), bufsize);
+        back.read(ar);
+    }
+    check(back.version == 6, "v6: version");
+    check(back.archive_id == meta.archive_id and back.archive_id != 0, "v6: archive_id");
+    check(back.origin == "scf", "v6: origin");
+    check(back.nalpha == 2 and back.nbeta == 1 and back.nmo_beta == 3, "v6: electron counts");
+    check(back.hamiltonian_key() == key, "v6: the whole Hamiltonian key");
+
+    // a v5 writer: the v4 fields, then the v5 tail, and nothing after it
+    {
+        archive::BufferOutputArchive ar(buf.data(), bufsize);
+        const unsigned int v = 5;
+        const int rep = static_cast<int>(Representation::mo);
+        ar & v & meta.current_energy & meta.spin_restricted & meta.L & meta.k & meta.molecule
+           & meta.xc & meta.localize & meta.converged_for_thresh;
+        ar & meta.converged_for_dconv & rep & meta.ncf & meta.eprec & meta.madness_version;
+    }
+    RestartMetadata v5;
+    {
+        archive::BufferInputArchive ar(buf.data(), bufsize);
+        v5.read(ar);
+    }
+    check(v5.version == 5 and v5.archive_id == 0, "v5: reads, with no archive id");
+    check(v5.nalpha == -1 and v5.psp_calc == -1 and v5.field.empty(),
+          "v5: the v6 fields read as not recorded");
+    check(v5.hamiltonian_key().xc == "lda", "v5: the fields it had are kept");
+
+    const ArchiveId a = new_archive_id(world), b = new_archive_id(world);
+    check(a != 0 and b != 0 and a != b, "new_archive_id: nonzero and fresh every time");
+    check(archive_id_from_string(archive_id_to_string(a)) == a, "archive id: hex round trip");
+    check(archive_id_from_string("not hex") == 0, "archive id: garbage reads as none");
+}
+
+/// the AO projections are used only if their header matches the atoms and the archive
+void test_ao_header(World& world) {
+    const RestartMode A = RestartMode::automatic;
+    const RestartCapabilities moldft = RestartCapabilities::all();
+    RestartMetadata meta = converged_archive(1.e-6, 1.e-4);
+    meta.archive_id = 42;
+
+    auto displaced_plan = [&](const std::optional<RestartAOHeader>& header) {
+        RestartSources disk = with_archive(meta, true);
+        disk.ao_header = header;
+        return plan_restart(A, disk, moldft, ladder, user_dconv, lih_displaced(),
+                            Representation::mo);
+    };
+    RestartAOHeader h;
+    h.archive_id = 42;
+    h.molecule = lih();
+    check(displaced_plan(h).source == RestartSource::restartao, "ao: same id is used");
+    check(displaced_plan(std::nullopt).source == RestartSource::restartao,
+          "ao: a legacy file without a header is used");
+    h.archive_id = 43;
+    check(displaced_plan(h).source == RestartSource::initial_guess,
+          "ao: projections of another archive are not used");
+    h.archive_id = 42;
+    h.molecule = beh2();
+    check(displaced_plan(h).source == RestartSource::initial_guess,
+          "ao: projections for other atoms are not used");
+
+    // the plan names the archive it read
+    const RestartPlan plan = plan_restart(A, with_archive(meta), moldft, ladder, user_dconv,
+                                          lih(), Representation::mo);
+    check(plan.archive_id == 42, "plan: carries the archive id");
+
+    // present() tells a headed file from a legacy one without a failing read
+    if (world.rank() == 0) {
+        {
+            archive::BinaryFstreamOutputArchive ar("test_restart_ao_new");
+            RestartAOHeader w;
+            w.archive_id = 7;
+            w.molecule = lih();
+            w.write(ar);
+            ar << Tensor<double>(2, 2);
+        }
+        {
+            archive::BinaryFstreamOutputArchive ar("test_restart_ao_old");
+            ar << Tensor<double>(2, 2);
+        }
+        check(RestartAOHeader::present("test_restart_ao_new"), "ao: a headed file is recognized");
+        check(not RestartAOHeader::present("test_restart_ao_old"), "ao: a legacy file is recognized");
+        const auto peeked = RestartAOHeader::peek("test_restart_ao_new");
+        check(peeked.has_value() and peeked->archive_id == 7, "ao: peek reads the id");
+        std::filesystem::remove("test_restart_ao_new");
+        std::filesystem::remove("test_restart_ao_old");
+    }
+    world.gop.fence();
+}
+
+/// writing under a temporary name and renaming leaves one consistent archive
+void test_commit(World& world) {
+    const std::string name = "test_restart_commit.restartdata";
+    // stale parts from an earlier, wider write, and a previous archive
+    if (world.rank() == 0) {
+        for (const char* p : {".00000", ".00001", ".00002"}) std::ofstream(name + p) << "old";
+    }
+    world.gop.fence();
+    {
+        archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(world, (name + ".tmp").c_str(), 1);
+        ar & 12345;
+    }
+    commit_parallel_archive(world, name + ".tmp", name);
+    int value = 0;
+    {
+        archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(world, name.c_str());
+        ar & value;
+    }
+    check(value == 12345, "commit: the new archive is in place");
+    if (world.rank() == 0) {
+        check(not std::filesystem::exists(name + ".tmp.00000"), "commit: no temporary left");
+        check(not std::filesystem::exists(name + ".00001") and
+              not std::filesystem::exists(name + ".00002"), "commit: stale parts removed");
+        std::filesystem::remove(name + ".00000");
+    }
+    world.gop.fence();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -633,6 +774,9 @@ int main(int argc, char** argv) {
     test_serialization();
     test_hamiltonian_key();
     test_localize();
+    test_header_v6(world);
+    test_ao_header(world);
+    test_commit(world);
 
     if (world.rank() == 0) {
         print("");
