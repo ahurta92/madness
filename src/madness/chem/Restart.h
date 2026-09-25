@@ -35,6 +35,7 @@
 #ifndef MADNESS_CHEM_RESTART_H__INCLUDED
 #define MADNESS_CHEM_RESTART_H__INCLUDED
 
+#include <madness/chem/HamiltonianKey.h>
 #include <madness/chem/molecule.h>
 #include <madness/mra/mra.h>
 
@@ -180,6 +181,15 @@ struct RestartMetadata {
             representation = representation_from_int(rep);
         }
         // else: the v5 members keep their defaults, which all read as "unknown"
+    }
+
+    /// the Hamiltonian these orbitals solve, as far as this header records it
+    HamiltonianKey hamiltonian_key() const {
+        HamiltonianKey k;
+        k.xc = xc;
+        k.eprec = eprec;
+        k.ncf = ncf;
+        return k;
     }
 
     /// true if these orbitals are at least as converged as the request

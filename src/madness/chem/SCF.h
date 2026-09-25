@@ -271,6 +271,12 @@ public:
     /// nuclear correlation factor behind restart_representation, e.g. "slater:2.0"
     std::string restart_ncf;
 
+    /// the Hamiltonian these orbitals solve: written into the restartdata header
+    /// and compared against it by the restart planner
+    HamiltonianKey hamiltonian_key() const {
+        return make_hamiltonian_key(param, molecule, pcm_param, restart_ncf);
+    }
+
     /// set while an optimizer drives this SCF, to keep the raw derivative table
     /// out of the log next to MolOpt's projected one -- see SCF::derivatives
     mutable bool suppress_raw_gradient_print=false;
@@ -657,7 +663,7 @@ public:
         // is no drift to detect.
         RestartPlan plan = make_restart_plan(world, restart_mode_from_string(calc.param.restart()),
                 calc.param, calc.molecule, calc.restart_representation,
-                RestartCapabilities::all(), calc.restart_ncf);
+                RestartCapabilities::all(), calc.hamiltonian_key());
 
         // set the target basis BEFORE reading, so load_mos reprojects straight
         // into the rung we are about to iterate at rather than into whatever k
