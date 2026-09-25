@@ -76,6 +76,13 @@ if (BUILD_TESTING AND Python3_EXECUTABLE)
   add_qctest(response_h2o_tpa_seeded  madqc "qctest;verylong;applications") # 2621-3320 s on dd (N1), 7 threads; nightly, dalton.dir
   add_qctest(response_f_doublet_beta  madqc "qctest;verylong;applications")  # 287 s, 7 threads; nightly, open shell nopen 1
   add_qctest(response_c_triplet_beta  madqc "qctest;verylong;applications")  # 305 s, 7 threads; nightly, open shell nopen 2
+  # DFT linear response checked against DALTON, not against a MADNESS run: the
+  # reference/ values are DALTON t-aug-cc-pVQZ alphas (inputs and output in each
+  # case's dalton_reference/). Phase 3.3 of the molresponse plan.
+  add_qctest(response_he_lda_alpha     madqc "qctest;medium;applications")   #   22 s on dd (N1), 7 threads
+  add_qctest(response_he_pbe0_alpha    madqc "qctest;long;applications")     #   52 s on dd (N1), 7 threads
+  add_qctest(response_h2o_lda_alpha    madqc "qctest;verylong;applications") #  512 s on dd (N1), 7 threads; nightly
+  add_qctest(response_h2o_pbe0_alpha   madqc "qctest;verylong;applications") # 4581 s on dd (N1), 7 threads; nightly
   # Refusal cases (check.json "expect_error"): each deck must be rejected with the
   # stated reason rather than run and quietly drop the property. No reference/.
   add_qctest(response_he_beta_or_refused   madqc "qctest;short;applications")
