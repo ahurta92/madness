@@ -6,7 +6,7 @@ Exit 0 iff every assertion holds; prints one line per check.
 """
 import json, sys
 
-REQUIRED_TOP = ("schema_name", "schema_version", "provenance", "tasks")
+REQUIRED_TOP = ("schema_name", "schema_version", "provenance")
 REQUIRED_PROVENANCE = ("madness", "workflow", "hostname", "nproc", "threads")
 REQUIRED_SCF = ("xc", "precision", "scf_iterations", "nuclear_repulsion_energy",
                 "scf_one_electron_energy", "scf_two_electron_energy", "scf_kinetic_energy",
@@ -23,9 +23,11 @@ def main() -> int:
         print(("  [PASS]  " if cond else "  [FAIL]  ") + label)
         if not cond: fails += 1
     for k in REQUIRED_TOP: check(k in ci, f"top-level '{k}' present")
+    check("tasks" in ci and isinstance(ci["tasks"], list), "top-level 'tasks' is a list")
+    tasks = ci.get("tasks") if isinstance(ci.get("tasks"), list) else []
     for k in REQUIRED_PROVENANCE: check(k in ci.get("provenance", {}), f"provenance.{k} present")
     check("git_commit" in ci.get("provenance", {}).get("madness", {}), "provenance.madness.git_commit present")
-    scf = next((t for t in ci["tasks"] if t.get("type") in ("scf", "nemo")), None)
+    scf = next((t for t in tasks if isinstance(t, dict) and t.get("type") in ("scf", "nemo")), None)
     check(scf is not None, "an SCF task entry has type scf|nemo")
     if scf is not None:
         for k in REQUIRED_SCF: check(k in scf["scf"], f"scf.{k} present")
@@ -44,7 +46,7 @@ def main() -> int:
         else:
             check(False, "energy components present for the sum check")
     if expect_response:
-        resp = next((t for t in ci["tasks"] if t.get("type") == "response"), None)
+        resp = next((t for t in tasks if isinstance(t, dict) and t.get("type") == "response"), None)
         check(resp is not None, "a response task entry exists")
         if resp is not None:
             check("wall_s" in resp.get("provenance", {}), "response task provenance.wall_s present")
