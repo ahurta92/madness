@@ -13,7 +13,7 @@
 // --archive=<moldft restartdata>: load the MADNESS ground state and rotate
 // every root's x (and y with --full) into ITS occupied gauge with
 // U = M (M^T M)^{-1/2}, M_ji = <phi^DAL_j|phi^MAD_i> (shared helper
-// occupied_gauge_rotation, tools/dalton_mra.hpp). DALTON pairs response
+// occupied_gauge_rotation, chem/gto_mra.h). DALTON pairs response
 // vectors with its CANONICAL occupied MOs; a localized MADNESS ground state
 // (moldft `localize new`) makes an unrotated seed silently worthless
 // (measured on the h2o FD A/B: seed-implied alpha_zz 3.56 vs 8.39, zero
@@ -29,9 +29,9 @@
 //                    [--archive=<moldft restartdata>]
 //                    [--thresh=1e-4] [--scale=1.41421356]
 
-#include "dalton_rspvec.hpp"
-#include "dalton_gto.hpp"
-#include "dalton_mra.hpp"    // shared DaltonResponseFunctor + projection helpers
+#include <madness/chem/dalton_rspvec.h>
+#include <madness/chem/molden_gto.h>
+#include <madness/chem/gto_mra.h>    // shared DaltonResponseFunctor + projection helpers
                              // + occupied_gauge_rotation
 
 #include "../GroundState.hpp"
@@ -58,7 +58,7 @@ using namespace madness;
 using namespace molresponse_v3;
 
 // DaltonResponseFunctor + the AO->MRA projection helpers now live in
-// dalton_mra.hpp (shared with tpa_from_dalton and the dalton.dir FD seed
+// chem/gto_mra.h (shared with tpa_from_dalton and the dalton.dir FD seed
 // path, solvers/dalton_import.hpp).
 
 int main(int argc, char** argv) {
@@ -281,7 +281,7 @@ int main(int argc, char** argv) {
         const bool yzero = parser.key_exists("yzero");
 
         // Project one occ-vir block (flat, row-major occ-outer) into n_occ
-        // Functions scaled by sgn*scale — shared machinery (dalton_mra.hpp).
+        // Functions scaled by sgn*scale — shared machinery (chem/gto_mra.h).
         auto project_block = [&](const std::vector<double>& blk,
                                  double sgn) -> vecfuncT {
             return project_dalton_ov_block(world, molden.basis,

@@ -33,9 +33,9 @@
 //                   [--roots=0,1,2,3] [--scale-xf=1] [--scale-na=1]
 //                   [--yflip-xf] [--yflip-na] [--lo=1e-10]
 
-#include "dalton_rspvec.hpp"
-#include "dalton_gto.hpp"
-#include "dalton_mra.hpp"                // shared AO->MRA projection machinery
+#include <madness/chem/dalton_rspvec.h>
+#include <madness/chem/molden_gto.h>
+#include <madness/chem/gto_mra.h>                // shared AO->MRA projection machinery
 
 #include "../Perturbations.hpp"          // dipole_operator (length gauge)
 #include "../ResponseProtocol.hpp"
@@ -60,7 +60,7 @@ using namespace molresponse_v3;
 namespace {
 
 // AO->MRA projection machinery (DaltonResponseFunctor / project_dalton_weights
-// / project_dalton_ov_block) now shared in dalton_mra.hpp — also used by the
+// / project_dalton_ov_block) now shared in chem/gto_mra.h — also used by the
 // FD seed path (solvers/dalton_import.hpp). Local aliases keep call sites.
 using vecfuncT = std::vector<real_function_3d>;
 constexpr auto project_weights = project_dalton_weights;

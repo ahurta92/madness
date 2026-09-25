@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+namespace madness {
+
 // Standalone GTO evaluation and Molden parser for DALTON output.
 // No MADNESS dependencies. Supports spherical shells l=0..4 (s,p,d,f,g).
 // Normalization convention: each spherical harmonic component is normalized
@@ -467,3 +469,5 @@ inline DaltonMoldenResult read_molden(const std::string& path) {
     res.n_mo = n_mo;
     return res;
 }
+
+} // namespace madness

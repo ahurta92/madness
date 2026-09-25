@@ -25,7 +25,7 @@
 //     protocol rung is fine.
 // ===========================================================================
 
-#include "../tools/dalton_gto.hpp"
+#include <madness/chem/molden_gto.h>
 #include "../ResponseProtocol.hpp"
 #include "function_hdf5_io.hpp"   // HDF5 twin of the seed archive (no-op without MADNESS_HAS_HDF5)
 
