@@ -23,6 +23,7 @@
 // the `unit` ctest tier). The collective wrapper (rank-0 compute + broadcast
 // + all-ranks abort) lives in orchestrator/response_workflow.hpp.
 
+#include <madness/chem/fnv1a64.h>
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -42,16 +43,8 @@ struct GsFingerprint {
   int           nparts = 0; // archive part files found
 };
 
-inline std::uint64_t fnv1a64_update(std::uint64_t h, const char *p,
-                                    std::size_t n) {
-  for (std::size_t i = 0; i < n; ++i) {
-    h ^= static_cast<unsigned char>(p[i]);
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-
-inline constexpr std::uint64_t kFnv1a64Basis = 14695981039346656037ULL;
+using madness::fnv1a64_update;   // chem/fnv1a64.h
+using madness::kFnv1a64Basis;
 
 /// The physical files behind a MADNESS archive base name: either the bare
 /// file itself, or the ParallelOutputArchive parts "<base>.00000", ".00001",
