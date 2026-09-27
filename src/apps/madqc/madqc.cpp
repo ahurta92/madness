@@ -295,9 +295,10 @@ int main(int argc, char **argv) {
         pm.get<CalculationParameters>().set_derived_value("save", true);
         auto reference =
             std::make_shared<SCFApplication<moldft_lib>>(world, pm);
-        // Seeding showcase (2026-09-09): with `dalton.dir` in the deck, the
-        // ground state is seeded from the DALTON molden before the SCF plans
-        // its restart (see molresponse_v3::seed_gs_from_dalton_dir).
+        // With `dalton.dir` in the deck, the ground state is seeded from the
+        // DALTON molden before the SCF plans its restart (see
+        // madness::seed_gs_from_dalton_dir, chem/dalton_seed.h); the HDF5
+        // twin of the seed is molresponse's (gs_seed_hdf5_twin).
         // io.dalton.dir (run-wide) wins; response.dalton.dir is the alias.
         if (const std::string ddir =
                 !pm.get<IOParameters>().dalton_dir().empty()
@@ -306,7 +307,8 @@ int main(int argc, char **argv) {
             !ddir.empty()) {
           reference->set_pre_run_hook(
               [ddir](World &w, const Params &p, const std::filesystem::path &d) {
-                molresponse_v3::seed_gs_from_dalton_dir(w, p, d, ddir);
+                madness::seed_gs_from_dalton_dir(w, p, d, ddir,
+                                                 molresponse_v3::gs_seed_hdf5_twin());
               });
         }
         wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));

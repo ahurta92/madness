@@ -44,6 +44,7 @@ set(MADCHEM_HEADERS
     gto_mra.h
     dalton_dir.h
     fnv1a64.h
+    dalton_seed.h
     oep.h
     pcm.h
     PNOF12Potentials.h

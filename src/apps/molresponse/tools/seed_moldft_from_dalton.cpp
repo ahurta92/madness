@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
         GsSeedOptions opt;
         opt.L = L; opt.thresh = thresh; opt.energy = energy;
         opt.xc = xc; opt.localize = loc; opt.nio = nio;
+        opt.after_save = molresponse_v3::gs_seed_hdf5_twin();
         auto rep = write_gs_seed_from_molden(world, molden_path, n_occ, out_prefix, opt);
         if (world.rank() == 0) {
             print("  max |S_ij| (i!=j) pre-orthonormalization =", rep.max_offdiag_pre,
