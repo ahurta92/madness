@@ -658,11 +658,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // skipped on restart nor fed to property assembly as if good.
   auto converged_now = [](const typename Solver::State &st, const Solver &sv) {
     if (st.diverged) return false;
-    double mb = 0.0, md = 0.0;
-    for (double r : st.last_bsh_residual)     mb = std::max(mb, r);
-    for (double r : st.last_density_residual) md = std::max(md, r);
-    const auto &t = sv.targets();
-    return mb <= t.bsh_residual && md <= t.density_residual;
+    return sv.within_targets(st);   // the relative gate, as FDSolver::converged
   };
 
   // Best-effort acceptance (--accept-at-maxiter): a non-diverged solve that

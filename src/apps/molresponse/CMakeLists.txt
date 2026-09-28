@@ -37,6 +37,10 @@ add_mad_executable(test_bsh_shift
 add_mad_executable(test_es_plateau
                    "tests/test_es_plateau.cpp"
                    "MADchem")
+# The relative FD convergence gate (review C1): ||dx|| <= atol + rtol ||x||.
+add_mad_executable(test_fd_gate
+                   "tests/test_fd_gate.cpp"
+                   "MADchem")
 # Deck excited.* iteration keys -> ExecutorSettings (review finding C2).
 add_mad_executable(test_deck_settings
                    "tests/test_deck_settings.cpp;GroundState.cpp"
@@ -249,7 +253,7 @@ install(TARGETS molresponse
 # --- any machine, and heavier tiers are opt-in by label / cache variable. ----
 if (BUILD_TESTING)
   # Tier 1 — "unit": pure logic, no fixtures, no MPI launcher required.
-  foreach(_t test_calc_manager test_protocol_key test_bsh_shift test_deck_settings test_es_plateau
+  foreach(_t test_calc_manager test_protocol_key test_bsh_shift test_deck_settings test_es_plateau test_fd_gate
              test_response_metadata
              test_response_envelope
              test_response_property_planner test_state_metrics

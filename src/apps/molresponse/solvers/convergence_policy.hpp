@@ -68,6 +68,16 @@ struct ConvergencePolicy {
   // pass at the coarse rung (the 1e-4/k6 0-of-4 stall).
   double omega_residual_factor   = 5.0;
 
+  // Relative part of the FD gate (review C1): rtol = relative_residual_factor
+  // * dconv. The FD legs pass when ||dx|| <= bsh_target + rtol ||x|| and
+  // ||drho|| <= density_target + rtol ||rho1|| (fd_leg_converged). The
+  // absolute targets alone scaled the relative accuracy as 1/||x||: a leg with
+  // ||x|| ~ 1e3 (a nuclear-displacement or Li leg) was held ~1000x tighter
+  // than a unit leg. The factor is 5 for the same reason as the absolute
+  // targets: a converged leg's relative ||dx|| floors at ~2e-4 at dconv 1e-4
+  // (Li static alpha), so rtol = dconv could never pass. ES is unaffected.
+  double relative_residual_factor = 5.0;
+
   // Cluster-unmix threshold factor in rs::diagonalize. The legacy
   // path uses 100·thresh for TDA (loose) and 10·thresh for Full/RPA
   // (tighter — clusters with smaller separation get polar-decomp
@@ -103,13 +113,13 @@ struct ConvergencePolicy {
   // CLI: --fd-tensor-tile=N (doc 33 Inc-3b).
   int exchange_tile = 0;
 
-  // Diverging-residual bail-out. Triggers only on a runaway residual
-  // (BSH residual > guard). The legacy ES guard was 2.0 in normalised
-  // units, but FD's iter-1 residual from a "x = perturbation" guess is
-  // O(perturbation norm) which can easily exceed 2.0 for closed-shell
-  // first-row molecules — so 2.0 false-fires on iter 1 in FD. Bumped
-  // to 1e3 (effectively off) until we wire a relative-growth check
-  // (compare iter k vs iter k-1, bail if it grew by >2×).
+  // Diverging-residual bail-out. Triggers only on a runaway residual. The
+  // legacy ES guard was 2.0 in normalised units, but FD's iter-1 residual from
+  // a "x = perturbation" guess is O(perturbation norm), which can easily
+  // exceed 2.0 for closed-shell first-row molecules, so 2.0 false-fires on
+  // iter 1 in FD. FD applies it relative to the response (fd_exploded):
+  // ||dx|| > guard * max(1, ||x||), so a large-norm leg is not flagged for a
+  // residual that is small relative to it. ES applies it as is.
   double explosion_guard = 1.0e3;
 
   // Minimum iters before we even check convergence (lets KAIN warm up).
@@ -252,8 +262,10 @@ struct ConvergencePolicy {
   // CIS-style guesses, 0 for restart from converged lower-protocol
   // state. (Affects ESSolver only; ignored by FDSolver.)
   int  tda_warmup_iters = 0;
-  // Step-restriction: if ||x_new − x_old|| > maxrotn after KAIN,
-  // damp the step toward x_old. Set < 0 to disable.
+  // Step-restriction: if ||x_new − x_old|| > maxrotn · max(1, ||x_old||)
+  // after KAIN, damp the step toward x_old (step_cap). Relative so that a
+  // large FD leg (||x|| ~ 36 for Li) is not held to unit-sized steps; for a
+  // normalized ES root it is the absolute cap as before. Set < 0 to disable.
   double maxrotn = 0.5;
 
   // Step-restriction granularity:
@@ -280,6 +292,7 @@ struct ConvergencePolicy {
     double bsh_residual;     // ‖x_old − x_new‖ cap (FD gate; ES sanity only)
     double density_residual; // ‖ρ_new − ρ_old‖ cap
     double omega_residual;   // |ω_new − ω_old| cap (ES eigenvalue gate)
+    double rtol = 0.0;       // relative part of the FD gate (fd_leg_converged)
   };
 
   Targets effective_for_thresh(double thresh) const {
@@ -290,9 +303,46 @@ struct ConvergencePolicy {
     t.density_residual = density_residual_factor * dconv;  // SCF.cc:2382 (da < dconv*max(5,natom))
     t.bsh_residual     = bsh_residual_factor * dconv;      // SCF.cc:2382 (bsh < 5*dconv)
     t.omega_residual   = omega_residual_factor * dconv;    // ES eigenvalue gate
+    t.rtol             = relative_residual_factor * dconv; // FD relative gate
     return t;
   }
 };
+
+/// The FD gate for one quantity: atol + rtol * norm. A leg with no recorded
+/// norm (0) keeps exactly the absolute gate.
+inline double fd_gate(double atol, double rtol, double norm) {
+  return atol + rtol * std::max(0.0, norm);
+}
+
+/// Both FD gates for one leg: ||dx|| <= atol + rtol ||x|| and
+/// ||drho|| <= atol_rho + rtol ||rho1||.
+inline bool fd_leg_within(double bsh, double x_norm, double drho,
+                          double rho_norm, const ConvergencePolicy::Targets &t) {
+  return bsh <= fd_gate(t.bsh_residual, t.rtol, x_norm) &&
+         drho <= fd_gate(t.density_residual, t.rtol, rho_norm);
+}
+
+/// One FD leg's convergence at iteration `iter`. It needs two iterations: the
+/// density change is first measured at the second, and a leg whose first
+/// step fell under the gate used to pass with no density check at all.
+inline bool fd_leg_converged(int iter, double bsh, double x_norm, double drho,
+                             double rho_norm,
+                             const ConvergencePolicy::Targets &t) {
+  if (iter <= 1) return false;
+  return fd_leg_within(bsh, x_norm, drho, rho_norm, t);
+}
+
+/// The FD explosion guard, relative to the leg: ||dx|| > guard * max(1, ||x||).
+/// For a leg of norm <= 1 it is the absolute guard as before.
+inline bool fd_exploded(double bsh, double x_norm, double guard) {
+  return bsh > guard * std::max(1.0, x_norm);
+}
+
+/// The step-restriction cap for a function (or state) of norm `x_norm`:
+/// maxrotn · max(1, ||x||). Absolute for norms up to 1.
+inline double step_cap(double maxrotn, double x_norm) {
+  return maxrotn * std::max(1.0, x_norm);
+}
 
 /// ES solve-level verdict from per-root flags, one entry per slot: the solve is
 /// stalled when at least one active (unlocked) root has plateaued

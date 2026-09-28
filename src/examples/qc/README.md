@@ -282,17 +282,16 @@ Wall time is recorded in the reference (`provenance.wall_s`,
 `run_info.timing`) and never asserted: a wall-time gate on a shared node is
 noise.
 
-`response_h2o_raman_tpa` is the one case whose response block runs
-`dconv 1e-3`. The FD/ES convergence gate is absolute (`bsh < 5*dconv`), and the
-Raman leg's nuclear-displacement response is ~10³ larger than a dipole leg's,
-so at `dconv 1e-4` that leg plateaus near 4e-3, never reaches the 5e-4 gate,
-and Raman is dropped from the output entirely; at `dconv 1e-3` the nuclear leg
-converges at bsh ≈ 4.4e-3 against the 5e-3 gate. A red on that case's
-`convergence.status` therefore most likely means the Raman leg stalled again
-(`stop_reason complete_with_dropped_beta`) — a real signal about the solver,
-not scheduling noise. The Raman value it pins is a regression baseline, not a
-converged Raman intensity; the converged number was validated separately at
-`1e-6`/`k8`.
+`response_h2o_raman_tpa` pins the FD relative gate. Its Raman leg's
+nuclear-displacement response is ~10³ larger than a dipole leg's; under the old
+absolute gate (`bsh < 5*dconv`) that leg plateaued near 4e-3 at `dconv 1e-4`
+and Raman was dropped, so the deck ran `dconv 1e-3`. The gate is now
+`bsh <= 5 dconv (1 + ||x||)` (and likewise for the density), and the deck runs
+`dconv 1e-4`. A red on that case's `convergence.status` therefore most likely
+means the Raman leg stalled again (`stop_reason complete_with_dropped_beta`) —
+a real signal about the solver, not scheduling noise. The Raman value it pins
+is a regression baseline, not a converged Raman intensity; the converged
+number was validated separately at `1e-6`/`k8`.
 
 Key paths: α is `tasks[1].properties.response_properties.alpha.<pk>[row].alpha[i][j]`
 with `<pk>` the protocol key (`"1e-04_k6"`), rows in `dipole.frequencies`

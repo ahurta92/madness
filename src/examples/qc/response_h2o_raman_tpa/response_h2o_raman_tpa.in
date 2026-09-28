@@ -6,11 +6,13 @@
 # (refs/madness_results.json::h2o_hfopt), so the numbers can be read against
 # those to about a percent; the assertions compare only to reference/.
 #
-# dconv 1e-3 (not 1e-4): the FD gate is bsh < 5*dconv ABSOLUTE, and the
-# nuclear-displacement leg's response is ~1e3 larger than a dipole leg's, so at
-# 5e-4 it plateaus near 4e-3 and Raman is dropped. 5e-3 is the loosest gate that
-# still converges every leg here; the number is a regression baseline, not a
-# converged Raman intensity (that lives at 1e-6/k8).
+# The response block runs dconv 1e-4 like the rest of the deck. It used to run
+# 1e-3: the FD gate was bsh < 5*dconv ABSOLUTE and the nuclear-displacement
+# leg's response is ~1e3 larger than a dipole leg's, so at 1e-4 that leg
+# plateaued near 4e-3 and Raman was dropped. The gate is now relative
+# (bsh <= 5 dconv (1 + ||x||)), and every leg converges at 1e-4 -- the nuclear
+# leg in ~22 iterations. The number is a regression baseline, not a converged
+# Raman intensity (that lives at 1e-6/k8).
 #
 # Run:   ./run.sh          (or: madqc --wf=response response_h2o_raman_tpa.in)
 
@@ -35,7 +37,7 @@ response
     excited.num_states    2
     excited.tda           false
     excited.tpa           true
-    dconv                 1e-3
+    dconv                 1e-4
     maxiter               60
     print_level           1
 end
