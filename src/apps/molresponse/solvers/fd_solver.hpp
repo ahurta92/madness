@@ -54,6 +54,7 @@
 #include <madness/mra/mra.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <type_traits>
@@ -140,7 +141,11 @@ public:
   /// string to disable.
   void set_log_path(const std::string &path) {
     log_path_ = path;
-    log_header_written_ = false;
+    // A restarted solve appends to the file its earlier attempt wrote; the
+    // header is written only into a new or empty file.
+    std::error_code ec;
+    log_header_written_ = !path.empty() && std::filesystem::exists(path, ec) &&
+                          std::filesystem::file_size(path, ec) > 0;
   }
 
   void refresh_convergence_targets() {

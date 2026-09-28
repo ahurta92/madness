@@ -186,9 +186,16 @@ Three conventions worth knowing:
   es__<protocol>/                 excited-state bundles (one archive per root)
   <pert>__<protocol>__<freq>      converged response states (restartable)
   es_analysis__<protocol>.json    transition properties
+  convergence/<solve>.csv         per-iteration residuals of every FD leg and ES bundle,
+                                  one file per rung (named like the archive)
 <prefix>.out                      the human summary
 <prefix>.calc_info.json           the workflow-level record (all tasks)
 ```
+
+The convergence logs have one row per iteration and channel (FD) or root (ES):
+`iter, protocol_thresh, state, omega, bsh_residual, density_residual, diverged`,
+plus `property, gate, stalled` for FD. They are appended as the solve runs, so a
+killed or restarted solve keeps its history.
 
 Response states are written per protocol rung and are **restartable**: a re-run
 reloads the coarse rung and climbs from it rather than starting over. See

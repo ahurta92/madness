@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <limits>
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -227,7 +228,11 @@ public:
   /// disable.
   void set_log_path(const std::string &path) {
     log_path_ = path;
-    log_header_written_ = false;
+    // A restarted solve appends to the file its earlier attempt wrote; the
+    // header is written only into a new or empty file.
+    std::error_code ec;
+    log_header_written_ = !path.empty() && std::filesystem::exists(path, ec) &&
+                          std::filesystem::file_size(path, ec) > 0;
   }
 
   /// Called by iterate_protocol after FunctionDefaults<3>::thresh has

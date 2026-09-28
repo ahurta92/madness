@@ -458,6 +458,22 @@ void reproject_state(State &st, int k, double thresh) {
     rho = madness::project(rho, k, thresh);
 }
 
+/// Per-iteration convergence log of one solve: <calc_dir>/convergence/<stem>.csv,
+/// one row per iteration and channel/root (FDSolver/ESSolver::
+/// append_convergence_log). The stem names the solve the way its archive is
+/// named, so the rung is in the file name. Rank 0 of the solving World creates
+/// the directory and is the only writer.
+inline std::string convergence_log_path(madness::World &world,
+                                        const std::string &calc_dir,
+                                        const std::string &stem) {
+  const std::string dir = calc_dir + "/convergence";
+  if (world.rank() == 0) {
+    std::error_code ec;   // concurrent subworlds may race on the mkdir
+    std::filesystem::create_directories(dir, ec);
+  }
+  return dir + "/" + stem + ".csv";
+}
+
 } // namespace detail_exec
 
 // ---------------------------------------------------------------------------
@@ -620,6 +636,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   }
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
+  solver.set_log_path(detail_exec::convergence_log_path(
+      world, ctx.calc_dir, response_filename(pert.description(), protocol_key(), freq)));
 
   // The protocol + ground state + target are already set up above for `thresh`.
   // iterate_protocol calls prepare() before the (single) step; re-doing the
@@ -790,6 +808,8 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   }
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
+  solver.set_log_path(detail_exec::convergence_log_path(
+      world, ctx.calc_dir, "es__" + protocol_key()));
   solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
   // Review HIGH: the locked step variant (lock_converged, the production
   // default) uses the per-root REFERENCE γ path and ignores gamma_tensor_, so
@@ -1000,6 +1020,8 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   }
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
+  solver.set_log_path(detail_exec::convergence_log_path(
+      world, ctx.calc_dir, "es__" + protocol_key()));
 
   double prepared_t = t0;
   auto prepare = [&](double th, Solver &solv, Solver::State &st) {
