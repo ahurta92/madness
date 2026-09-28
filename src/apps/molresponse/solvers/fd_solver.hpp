@@ -86,6 +86,12 @@ public:
     /// the diagonal property estimate of this channel, tracked per iteration
     /// so the property's own convergence can be read off the log (2026-09-11).
     std::vector<double>                     last_property;
+    /// Per-channel ||x|| (after KAIN) and ||rho1||: the scales of the relative
+    /// FD gate, ||dx|| <= atol + rtol ||x|| and ||drho|| <= atol + rtol ||rho1||
+    /// (review C1). Empty for a state loaded from disk, which then falls back
+    /// to the absolute gate.
+    std::vector<double>                     last_x_norm;
+    std::vector<double>                     last_rho_norm;
     /// Normalised distance per iteration (newest last), ONE TRACK PER GATED
     /// QUANTITY: [0] = max bsh/bsh_target, [1] = max drho/density_target.
     /// A stall needs every track flat (ConvergencePolicy::plateau); reset when
@@ -438,9 +444,11 @@ private:
     if (out.gate_history.size() < 2) out.gate_history.resize(2);
     double g_bsh = 0.0, g_rho = 0.0;
     for (std::size_t c = 0; c < out.last_bsh_residual.size(); ++c) {
-      g_bsh = std::max(g_bsh, out.last_bsh_residual[c] / targets_.bsh_residual);
+      g_bsh = std::max(g_bsh, out.last_bsh_residual[c] /
+                                  fd_gate(targets_.bsh_residual, targets_.rtol, x_norm(out, c)));
       if (c < out.last_density_residual.size())
-        g_rho = std::max(g_rho, out.last_density_residual[c] / targets_.density_residual);
+        g_rho = std::max(g_rho, out.last_density_residual[c] /
+                                    fd_gate(targets_.density_residual, targets_.rtol, rho_norm(out, c)));
     }
     // iter 1 has no previous density, so drho is 0 and would read as "target
     // met"; mark it as no measurement so the track cannot be compared against it.
@@ -534,6 +542,8 @@ public:
     out.last_bsh_residual.assign(M, 0.0);
     out.last_property.assign(M, 0.0);
     out.last_theta_norm.assign(M, 0.0);
+    out.last_x_norm.assign(M, 0.0);
+    out.last_rho_norm.assign(M, 0.0);
     out.rho_alpha_prev.resize(M);
 
     // Inc-2: build the φ-only g0 exchange tensor ONCE per protocol (cached on the
@@ -549,6 +559,7 @@ public:
     for (int r = 0; r < M; ++r) {
       // ρ (one density function per response; kept for next iter's Δρ check)
       auto rho = K::compute_density(world_, target_.gs, in.responses[r]);
+      out.last_rho_norm[r] = rho.norm2();
       if (!in.rho_alpha_prev.empty()) {
         auto drho = rho - in.rho_alpha_prev[r];
         out.last_density_residual[r] = drho.norm2();
@@ -605,9 +616,13 @@ public:
         (print_level_ >= PrintLevel::Verbose) ? 1 : 0;
     kain_.apply(in.responses, out.responses, kain_diag);
 
-    // Explosion guard
-    for (double r : out.last_bsh_residual) {
-      if (r > policy_.explosion_guard) { out.diverged = true; break; }
+    // ||x|| after KAIN (the iterate that is saved), then the explosion guard,
+    // relative to it.
+    for (int r = 0; r < M; ++r)
+      out.last_x_norm[r] = storage_norm(world_, out.responses[r]);
+    for (int r = 0; r < M; ++r) {
+      if (fd_exploded(out.last_bsh_residual[r], out.last_x_norm[r],
+                      policy_.explosion_guard)) { out.diverged = true; break; }
     }
 
     // Property trace (after KAIN: this is the iterate that will be saved).
@@ -621,23 +636,45 @@ public:
     return out;
   }
 
-  /// Converged: per-channel BSH residual < bsh_target AND
-  ///            per-channel Δρ < density_target  (iter >= 2)
-  ///            OR diverged.
+  /// Every leg within its relative gate (review C1): ||dx|| <= atol + rtol ||x||
+  /// and ||drho|| <= atol + rtol ||rho1|| (fd_leg_within). No iteration rule and
+  /// no diverged/stalled check: the executor's "converged now" verdict uses this
+  /// together with its own diverged test.
+  bool within_targets(const State &s) const {
+    if (s.last_bsh_residual.empty()) return false;
+    for (std::size_t c = 0; c < s.last_bsh_residual.size(); ++c) {
+      const double drho = c < s.last_density_residual.size() ? s.last_density_residual[c] : 0.0;
+      if (!fd_leg_within(s.last_bsh_residual[c], x_norm(s, c), drho, rho_norm(s, c), targets_))
+        return false;
+    }
+    return true;
+  }
+
+  /// Converged: diverged or stalled (the loop exits; the executor reports
+  /// them), or every leg converged by fd_leg_converged: at least two
+  /// iterations, so the density change has been measured, and both relative
+  /// gates hold.
   bool converged(const State &s) const {
     if (s.diverged) return true;
     if (s.stalled)  return true;   // exit; executor reads State::stalled
     if (s.iter < policy_.min_iters_before_conv) return false;
     if (s.last_bsh_residual.empty()) return false;
+    for (std::size_t c = 0; c < s.last_bsh_residual.size(); ++c) {
+      const double drho = c < s.last_density_residual.size() ? s.last_density_residual[c] : 0.0;
+      if (!fd_leg_converged(s.iter, s.last_bsh_residual[c], x_norm(s, c), drho,
+                            rho_norm(s, c), targets_))
+        return false;
+    }
+    return true;
+  }
 
-    double mx_bsh = 0.0;
-    for (double r : s.last_bsh_residual) mx_bsh = std::max(mx_bsh, r);
-    if (mx_bsh >= targets_.bsh_residual) return false;
-
-    if (s.iter <= 1) return true;
-    double mx_drho = 0.0;
-    for (double r : s.last_density_residual) mx_drho = std::max(mx_drho, r);
-    return mx_drho < targets_.density_residual;
+  /// ||x|| / ||rho1|| of leg c, or 0 when not recorded (a state loaded from
+  /// disk): the gate then falls back to the absolute target.
+  static double x_norm(const State &s, std::size_t c) {
+    return c < s.last_x_norm.size() ? s.last_x_norm[c] : 0.0;
+  }
+  static double rho_norm(const State &s, std::size_t c) {
+    return c < s.last_rho_norm.size() ? s.last_rho_norm[c] : 0.0;
   }
 
   void save(const State &s, const std::string &path_prefix) const {

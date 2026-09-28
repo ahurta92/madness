@@ -46,8 +46,9 @@
 // SCF.cc:2058) is applied AFTER KAIN, also AFTER raw BSH when KAIN is
 // disabled or skipped. For each function p in the flat state:
 //
-//     if ||v[p] − new_v[p]|| > maxrotn:
-//         new_v[p] := s · new_v[p] + (1−s) · v[p],  s = maxrotn / norm
+//     cap = maxrotn · max(1, ||v[p]||)            (step_cap)
+//     if ||v[p] − new_v[p]|| > cap:
+//         new_v[p] := s · new_v[p] + (1−s) · v[p],  s = cap / norm
 //
 // =========================================================================
 
@@ -262,15 +263,18 @@ private:
       // Per-orbital diff norms via batched norm2s (collective-safe).
       auto diff  = madness::sub(world_, v_new, v_old);
       auto norms = madness::norm2s(world_, diff);
+      auto old_norms = madness::norm2s(world_, v_old);
       bool changed = false;
 
       if (per_state) {
         // ---- state-wise: one norm over the whole flattened state, one scale.
-        double total2 = 0.0;
+        double total2 = 0.0, old2 = 0.0;
         for (double n : norms) total2 += n * n;
+        for (double n : old_norms) old2 += n * n;
         const double total = std::sqrt(total2);
-        if (total > maxrotn) {
-          const double scale = maxrotn / total;
+        const double cap   = step_cap(maxrotn, std::sqrt(old2));
+        if (total > cap) {
+          const double scale = cap / total;
           for (std::size_t p = 0; p < v_new.size(); ++p)
             v_new[p].gaxpy(scale, v_old[p], 1.0 - scale, false);
           changed = true;
@@ -279,7 +283,7 @@ private:
           if (diag_level >= 1 && world_.rank() == 0) {
             printf("[STEP-REST] iter=%d state=%zu STATE-WISE  ||Δstate||=%.3e "
                    "scale=%.3f  cap=%.3e\n",
-                   calls_consumed_, s, total, scale, maxrotn);
+                   calls_consumed_, s, total, scale, cap);
             fflush(stdout);
           }
         }
@@ -291,8 +295,9 @@ private:
       double max_norm = 0.0;
       for (std::size_t p = 0; p < v_new.size(); ++p) {
         max_norm = std::max(max_norm, norms[p]);
-        if (norms[p] > maxrotn) {
-          const double scale = maxrotn / norms[p];
+        const double cap = step_cap(maxrotn, old_norms[p]);
+        if (norms[p] > cap) {
+          const double scale = cap / norms[p];
           // v_new[p] := scale·v_new[p] + (1−scale)·v_old[p]
           v_new[p].gaxpy(scale, v_old[p], 1.0 - scale, false);
           changed = true;
@@ -308,7 +313,7 @@ private:
       // iteration speed.
       if (diag_level >= 1 && n_clamped > 0 && world_.rank() == 0) {
         printf("[STEP-REST] iter=%d state=%zu clamped=%d/%zu  "
-               "max_unrestricted=%.3e  cap=%.3e\n",
+               "max_unrestricted=%.3e  maxrotn=%.3e\n",
                calls_consumed_, s, n_clamped, v_new.size(),
                max_norm, maxrotn);
         fflush(stdout);
