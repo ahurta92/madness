@@ -49,6 +49,7 @@
 #include<madness/chem/SCF.h>
 #include<madness/chem/CalculationParameters.h>
 #include<madness/chem/SCFProtocol.h>
+#include<madness/chem/ConvergenceLog.h>
 #include<madness/chem/correlationfactor.h>
 #include<madness/chem/molecular_optimizer.h>
 #include <madness/mra/nonlinsol.h>
@@ -314,10 +315,13 @@ public:
     }
 
 
+	/// @param[out] tested  if given: each criterion's value and target, in
+	///                     convergence-log order; untested targets are nan
 	bool check_convergence(const std::vector<double> energies,
 			const std::vector<double> oldenergies, const double bsh_norm,
 			const double delta_density, const CalculationParameters& param,
-			const double econv, const double dconv) const {
+			const double econv, const double dconv,
+			std::vector<std::pair<std::string, double>>* tested = nullptr) const {
 
         double maxenergychange=fabs(energies.size()-oldenergies.size());	// >0 if oldenergyvec not initialized
         for (auto iter1=energies.begin(), iter2=oldenergies.begin();
@@ -330,6 +334,18 @@ public:
 		bool total_energy_conv=param.converge_total_energy() ? delta_energy<econv : true;
 		bool each_energy_conv=param.converge_each_energy() ? maxenergychange<econv*3.0 : true;
 		bool density_conv=param.converge_density() ? delta_density<dconv : true;
+
+		if (tested) {
+			const double nt = convergence_not_tested;
+			*tested = {{"delta_energy", delta_energy},
+					{"energy_target", param.converge_total_energy() ? econv : nt},
+					{"max_energy_change", maxenergychange},
+					{"each_energy_target", param.converge_each_energy() ? econv*3.0 : nt},
+					{"bsh_residual", bsh_norm},
+					{"bsh_target", param.converge_bsh_residual() ? dconv : nt},
+					{"density_residual", delta_density},
+					{"density_target", param.converge_density() ? dconv : nt}};
+		}
 
 		if (world.rank()==0 and param.print_level()>2) {
 			std::stringstream line;

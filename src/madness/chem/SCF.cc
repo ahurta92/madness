@@ -42,6 +42,7 @@
 #include <madness.h>
 #include <madness/chem/SCF.h>
 #include <madness/chem/Restart.h>
+#include <madness/chem/ConvergenceLog.h>
 #include <madchem.h>
 
 #if defined(__has_include)
@@ -2794,6 +2795,7 @@ void SCF::solve(World& world) {
     tensorT Q;
     bool do_this_iter = true;
     bool converged = false;
+    double etot_prev = 0.0;
 
     // Every orbital source (guess, restart, NWChem, the virtual step-down) rebuilds
     // aocc/bocc as 1 below nalpha/nbeta and 0 above; the input list overrides that here.
@@ -3060,14 +3062,37 @@ void SCF::solve(World& world) {
         }
 
 
+        const double density_target = dconv * double(std::max(size_t(5), molecule.natom()));
+        const bool test_bsh = !param.get<bool>("conv_only_dens");
+        const double bsh_target = 5.0 * dconv;
+        //print("##convergence criteria: density delta=", da < dconv * molecule.natom() && db < dconv * molecule.natom(), ", bsh_residual=", (param.conv_only_dens || bsh_residual < 5.0*dconv));
+        if (iter > 0 && da < density_target && db < density_target
+            && (!test_bsh || bsh_residual < bsh_target))
+            converged = true;
+        // previous conv was too tight for small systems
+        // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
+        //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
+
+        // What the test above compared, per iteration and rung (ConvergenceLog.h).
+        // Same columns as Nemo::solve; the energy is not a moldft criterion, so its
+        // targets are logged as nan.
+        append_convergence_row(world, "scf", {
+            {"iter", double(iter)},
+            {"protocol_thresh", FunctionDefaults<3>::get_thresh()},
+            {"k", double(FunctionDefaults<3>::get_k())},
+            {"energy", etot},
+            {"delta_energy", iter > 0 ? std::abs(etot - etot_prev) : convergence_not_tested},
+            {"energy_target", convergence_not_tested},
+            {"max_energy_change", convergence_not_tested},
+            {"each_energy_target", convergence_not_tested},
+            {"bsh_residual", bsh_residual},
+            {"bsh_target", test_bsh ? bsh_target : convergence_not_tested},
+            {"density_residual", std::max(da, db)},
+            {"density_target", density_target},
+            {"converged", converged ? 1.0 : 0.0}});
+        etot_prev = etot;
+
         if (iter > 0) {
-            //print("##convergence criteria: density delta=", da < dconv * molecule.natom() && db < dconv * molecule.natom(), ", bsh_residual=", (param.conv_only_dens || bsh_residual < 5.0*dconv));
-            if (da < dconv * std::max(size_t(5), molecule.natom()) && db < dconv * std::max(size_t(5), molecule.natom())
-                && (param.get<bool>("conv_only_dens") || bsh_residual < 5.0 * dconv))
-                converged = true;
-            // previous conv was too tight for small systems
-            // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
-            //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
 
             // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
             if (converged || iter == param.maxiter() - 1) {

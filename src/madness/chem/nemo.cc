@@ -670,8 +670,19 @@ double Nemo::solve(const SCFProtocol &proto) {
     real_function_3d olddensity = density;
     density = R_square * compute_density(nemo);
     double deltadens = (density - olddensity).norm2();
+    std::vector<std::pair<std::string, double>> tested;
     converged = check_convergence(energies, oldenergies, bsh_norm, deltadens,
-                                  get_calc_param(), proto.econv, proto.dconv);
+                                  get_calc_param(), proto.econv, proto.dconv, &tested);
+
+    // What check_convergence compared, per iteration and rung (ConvergenceLog.h).
+    std::vector<std::pair<std::string, double>> row = {
+        {"iter", double(iter)},
+        {"protocol_thresh", FunctionDefaults<3>::get_thresh()},
+        {"k", double(FunctionDefaults<3>::get_k())},
+        {"energy", energy}};
+    row.insert(row.end(), tested.begin(), tested.end());
+    row.emplace_back("converged", converged ? 1.0 : 0.0);
+    append_convergence_row(world, "scf", row);
 
     // save_mos writes current_energy into the archive header, so it has to hold
     // the energy of the orbitals being written. Without this the header carried

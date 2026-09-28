@@ -72,6 +72,7 @@ set(MADCHEM_HEADERS
     CCLib.hpp
     projector.h
     Results.h
+    ConvergenceLog.h
     QCPropertyInterface.h
     SAP.h
     SCF.h

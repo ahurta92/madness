@@ -41,6 +41,16 @@ A `h2o/` directory is also created holding per-step work dirs
 (`h2o/task_0/moldft/`, `h2o/task_1/molresponse/`, …) with restart archives and
 any density/orbital plots.
 
+Each work dir also has a `convergence/` directory with one CSV row per solver
+iteration: `scf.csv` for the moldft or nemo SCF, and one file per FD leg and
+excited-state bundle per protocol rung for response. The SCF log has the same
+columns for both engines: `iter, protocol_thresh, k, energy`, then each
+criterion's value next to its target (`delta_energy`/`energy_target`,
+`max_energy_change`/`each_energy_target`, `bsh_residual`/`bsh_target`,
+`density_residual`/`density_target`), then `converged`. A criterion the engine
+does not test has target `nan` (moldft tests only the density and BSH residual).
+Restarted solves append to the same file.
+
 ---
 
 ## Workflows
