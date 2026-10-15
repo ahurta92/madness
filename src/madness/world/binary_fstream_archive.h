@@ -98,6 +98,12 @@ namespace madness {
 
             /// Flush the filestream.
             void flush();
+
+            /// Inspect write/flush/close status without throwing inside a parallel
+            /// archive operation. Check after close, then agree collectively on
+            /// success before publishing a checkpoint. The serialized format and
+            /// existing I/O behavior are unchanged.
+            [[nodiscard]] bool good() const { return os.good(); }
         };
 
         /// Wraps an archive around a binary filestream for input.

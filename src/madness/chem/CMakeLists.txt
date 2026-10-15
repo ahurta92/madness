@@ -54,6 +54,7 @@ set(MADCHEM_HEADERS
     ParameterManager.hpp
     ResponseParameters.hpp
     Restart.h
+    StageCheckpoint.h
     RestartPlan.h
     PathManager.hpp
     Applications.hpp
@@ -205,6 +206,13 @@ if(BUILD_TESTING)
   endif(MADNESS_HAS_DFTD3)
 
   add_unittests(chem "${CHEM_TEST_SOURCES_SHORT}" "MADchem;MADgtest" "unittests;short")
+  # Checkpoint storage exercises the runtime archives without a chemistry solve.
+  add_unittests(chem "test_stage_checkpoint.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  set_tests_properties(madness/test/chem/test_stage_checkpoint/run PROPERTIES TIMEOUT 60)
+  if(ENABLE_MPI)
+    add_mpi_tests(chem test_stage_checkpoint "2" "MADworld" "unittests;short")
+    set_tests_properties(madness/test/chem/test_stage_checkpoint_mpi2/run PROPERTIES TIMEOUT 60)
+  endif()
   # the rotating operand only moves between ranks, so the distributed path needs more than one
   add_mpi_tests(chem test_exchange_asymmetric "2" "MADchem;MADgtest" "unittests;short")
   add_unittests(chem "${CHEM_TEST_SOURCES_LONG}" "MADchem;MADgtest" "unittests;long")
