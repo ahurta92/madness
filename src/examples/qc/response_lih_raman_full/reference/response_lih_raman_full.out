@@ -1,0 +1,77 @@
+
+======================================================================
+  MADQC RESULTS SUMMARY
+======================================================================
+
+  Task 0 : SCF  (model = scf)
+  ----------------------------------------------------------------------
+    Molecule         : HLi
+    Total energy     :       -7.987232641 Ha        -217.3437 eV
+    Orbital eps (a)  : -2.4459 -0.3014  (Ha)
+    Converged        :  thresh = 0.0001  dconv = 0.0001
+    Wall time        :  0.0 s   (1 MPI x 1 threads)
+
+  Task 1 : RESPONSE
+  ----------------------------------------------------------------------
+    alpha[1e-04_k6](w=0.000)
+      x :     25.434912      0.000000      0.000000
+      y :      0.000000     25.434912      0.000000
+      z :      0.000000     -0.000000     22.155842
+    raman[1e-04_k6](x,dipole_x,nuc_0_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_x,nuc_0_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_0_x; wB=0.000,wC=0.000) =       1.072276
+    raman[1e-04_k6](x,dipole_x,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_x,nuc_1_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_1_x; wB=0.000,wC=0.000) =      -1.065506
+    raman[1e-04_k6](x,dipole_y,nuc_0_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_0_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_y,nuc_0_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_y,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_y,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_z,nuc_0_x; wB=0.000,wC=0.000) =       1.072129
+    raman[1e-04_k6](y,dipole_z,nuc_0_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_z,nuc_0_x; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](x,dipole_z,nuc_1_x; wB=0.000,wC=0.000) =      -1.065563
+    raman[1e-04_k6](y,dipole_z,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_z,nuc_1_x; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_x,nuc_0_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_x,nuc_0_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_0_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_x,nuc_1_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_x,nuc_1_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_1_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](x,dipole_y,nuc_0_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_0_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_y,nuc_0_y; wB=0.000,wC=0.000) =       1.072276
+    raman[1e-04_k6](x,dipole_y,nuc_1_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_1_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_y,nuc_1_y; wB=0.000,wC=0.000) =      -1.065506
+    raman[1e-04_k6](x,dipole_z,nuc_0_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_z,nuc_0_y; wB=0.000,wC=0.000) =       1.072129
+    raman[1e-04_k6](z,dipole_z,nuc_0_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](x,dipole_z,nuc_1_y; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_z,nuc_1_y; wB=0.000,wC=0.000) =      -1.065563
+    raman[1e-04_k6](z,dipole_z,nuc_1_y; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_x,nuc_0_z; wB=0.000,wC=0.000) =      -6.921440
+    raman[1e-04_k6](y,dipole_x,nuc_0_z; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_0_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_x,nuc_1_z; wB=0.000,wC=0.000) =       6.963022
+    raman[1e-04_k6](y,dipole_x,nuc_1_z; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](z,dipole_x,nuc_1_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_y,nuc_0_z; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_0_z; wB=0.000,wC=0.000) =      -6.921440
+    raman[1e-04_k6](z,dipole_y,nuc_0_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_y,nuc_1_z; wB=0.000,wC=0.000) =      -0.000000
+    raman[1e-04_k6](y,dipole_y,nuc_1_z; wB=0.000,wC=0.000) =       6.963022
+    raman[1e-04_k6](z,dipole_y,nuc_1_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](x,dipole_z,nuc_0_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_z,nuc_0_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_z,nuc_0_z; wB=0.000,wC=0.000) =     -13.534607
+    raman[1e-04_k6](x,dipole_z,nuc_1_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](y,dipole_z,nuc_1_z; wB=0.000,wC=0.000) =       0.000000
+    raman[1e-04_k6](z,dipole_z,nuc_1_z; wB=0.000,wC=0.000) =      13.508627
+    Vibrational frequencies (cm^-1): -0.0 -0.0 -0.0 0.0 0.0 1441.6
+
+======================================================================
+

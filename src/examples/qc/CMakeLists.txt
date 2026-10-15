@@ -66,6 +66,10 @@ if (BUILD_TESTING AND Python3_EXECUTABLE)
   # 2PA. `verylong`, nightly only; runs `dconv 1e-3` so the nuclear leg converges
   # (see check.json)
   add_qctest(response_h2o_raman_tpa madqc "qctest;verylong;applications") # 1951 s, 7 threads; nightly
+  # full vibrational Raman of LiH: 3 dipole + 6 nuclear legs, 18 quadratic sources, Hessian from the
+  # nuclear response states, one mode with activity and depolarization ratio. `verylong` by the tier
+  # rule (257 s at 10 threads on dd); nightly.
+  add_qctest(response_lih_raman_full madqc "qctest;verylong;applications") # 257 s, 10 threads (dd); nightly
   # Open-shell (unrestricted) reference. These pin a GAP rather than a property:
   # the solver is shell-generic and every FD leg converges, but the quadratic
   # source is closed-shell only, so the beta nodes stall and no property row is

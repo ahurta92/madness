@@ -1,0 +1,459 @@
+{
+  "description": "Full vibrational Raman of LiH (HF, one rung: protocol 1e-4, k 6, l 50): alpha(0) xyz, the complete static polarizability gradient over all 3N = 6 nuclear coordinates (raman.nuc_atom -1; 54 rows under response_properties.raman), the Hessian assembled from the same six nuclear response states (vibrational_analysis), and the one vibrational mode with its Raman activity and depolarization ratio (raman_spectra). Asserted: the stretch frequency 1441.64 cm^-1 (rtol 0.01), d alpha_zz / d z_Li = -13.5346 and d alpha_zz / d z_H = +13.5086 (rows 50, 53; rtol 0.02; their sum is the translational-invariance residual, 0.2 %), activity 350.43 A^4/amu (rtol 0.02), depolarization ratio 0.0328 (rtol 0.05). For reading, not asserted: the removed molresponse_v2 engine gave 1427.94 cm^-1, 350.59 A^4/amu, 0.0323 and d alpha_zz/d z_Li = -13.502 at protocol [1e-4, 1e-5], l 80 (archived LiH reference), and the v3 single-component scripted test gives -13.549 at 1e-6/k8. Response dconv 1e-3 because the nuclear legs' responses are ~1e3 larger than a dipole leg's and the FD gate is absolute (see response_h2o_raman_tpa); nothing here is a converged Raman value. Reference: RelWithDebInfo, Pthreads, ArmPL, 1 rank x 10 threads, dd (Neoverse-N1), 2026-10-15, branch molresponse/full-raman on 0b4be47ec, wall 257 s (first run, cold).",
+  "requires": {
+    "threads": 4
+  },
+  "checks": [
+    {
+      "key": [
+        "tasks",
+        0,
+        "properties",
+        "energy"
+      ],
+      "tol": 1e-05
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "type"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "protocols",
+        "1e-04_k6",
+        "k"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "v3_diagnostics",
+        "stop_reason"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "alpha",
+        "1e-04_k6",
+        0,
+        "converged"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "alpha",
+        "1e-04_k6",
+        0,
+        "alpha",
+        0,
+        0
+      ],
+      "tol": 0.001
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "alpha",
+        "1e-04_k6",
+        0,
+        "alpha",
+        2,
+        2
+      ],
+      "tol": 0.001
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        50,
+        "A"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        50,
+        "B"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        50,
+        "C"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        50,
+        "converged"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        50,
+        "beta"
+      ],
+      "rtol": 0.02
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        53,
+        "A"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        53,
+        "B"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        53,
+        "C"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        53,
+        "converged"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "response_properties",
+        "raman",
+        "1e-04_k6",
+        53,
+        "beta"
+      ],
+      "rtol": 0.02
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "vibrational_analysis",
+        "n_atoms"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "vibrational_analysis",
+        "frequencies_cm1",
+        "vals",
+        5
+      ],
+      "rtol": 0.01
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "vibrational_analysis",
+        "reducedmass",
+        "vals",
+        5
+      ],
+      "rtol": 0.01
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "completeness",
+        "f0.00000",
+        "rows_found"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "completeness",
+        "f0.00000",
+        "all_rows_converged"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "raman_spectra",
+        "f0.00000",
+        0,
+        "mode"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "raman_spectra",
+        "f0.00000",
+        0,
+        "freq_cm1"
+      ],
+      "rtol": 0.01
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "raman_spectra",
+        "f0.00000",
+        0,
+        "pol_int"
+      ],
+      "rtol": 0.02
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "raman_spectra",
+        "f0.00000",
+        0,
+        "dep_ratio"
+      ],
+      "rtol": 0.05
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "properties",
+        "raman_spectra",
+        "raman_spectra",
+        "f0.00000",
+        0,
+        "converged"
+      ],
+      "tol": 0
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "dipole_x",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 18
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "dipole_y",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 18
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "dipole_z",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 18
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_0_x",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_0_y",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_0_z",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_1_x",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_1_y",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    },
+    {
+      "key": [
+        "tasks",
+        1,
+        "metadata",
+        "fd_states",
+        "nuc_1_z",
+        "1e-04_k6",
+        "f0.00000",
+        "iter"
+      ],
+      "max": 12
+    }
+  ]
+}
