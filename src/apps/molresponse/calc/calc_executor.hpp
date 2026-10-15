@@ -1791,7 +1791,11 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
     return fd_leg_accuracy(acc_meta, p, f, acc_thr, acc_k, key);  // rank-0 only
   };
 
-  for (const auto &vr : plan.vbc) {
+  // Full Raman plans carry the all-atoms nuclear sentinel on the C side; the
+  // saved sources are per atom (build_dag expanded them), so expand here too.
+  const auto vbc_requests = expand_vbc_requests(
+      plan.vbc, static_cast<int>(gs.molecule().natom()));
+  for (const auto &vr : vbc_requests) {
     const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
     const std::string vbc_id =
         vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);

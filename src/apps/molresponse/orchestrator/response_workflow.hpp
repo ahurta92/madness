@@ -19,6 +19,7 @@
 #include "../ResponseProtocol.hpp"          // set_response_protocol
 #include "../ResponsePropertyPlanner.hpp"   // ResponsePlan
 #include "../calc/calc_executor.hpp"        // ExecutorSettings/Context, FdResponseExecutor, assemble_*
+#include "../solvers/raman_analysis.hpp"    // full Raman: Hessian + normal-mode spectrum
 #include "../calc/calc_manager.hpp"         // CalcManager
 #include "../solvers/gs_fingerprint.hpp"    // GS-archive restart-safety gate
 #include "../solvers/response_metadata.hpp"
@@ -56,6 +57,8 @@ struct ResponseWorkflowInput {
 struct ResponseWorkflowOutput {
   nlohmann::json properties;   // Tier-A tensors (mirror of metadata "properties")
   nlohmann::json metadata;     // full response_metadata.json
+  nlohmann::json vibrational_analysis;  // full Raman: Hessian, modes (metadata mirror)
+  nlohmann::json raman_spectra;         // full Raman: per-mode activities (metadata mirror)
   nlohmann::json timing;       // R1 — reserved
   nlohmann::json diagnostics;  // R1 — reserved
   nlohmann::json exports;      // R2 — reserved
@@ -330,6 +333,12 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   assemble_alpha(ctx, in.plan, in.protocols.back());
   if (!in.plan.vbc.empty())
     assemble_beta(ctx, in.plan, in.protocols.back());
+  // Full Raman: the plan carries the all-atoms nuclear sentinel only when the
+  // request asked for every coordinate, so its presence IS the gate for the
+  // normal-mode analysis (Hessian from the nuclear response states, then the
+  // per-mode spectrum from the raman rows assemble_beta just wrote).
+  if (plan_requests_full_raman(in.plan))
+    assemble_raman_spectrum(ctx, in.plan, in.protocols.back());
   // 2PA: derived FD legs are only planned when the request asked for the
   // two-photon contraction (request.tpa), so their presence IS the gate.
   // assemble_tpa self-guards (returns if no ES bundle; ClosedShell only).
@@ -352,6 +361,10 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
     out.metadata = meta.json();
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];
+    if (out.metadata.contains("vibrational_analysis"))
+      out.vibrational_analysis = out.metadata["vibrational_analysis"];
+    if (out.metadata.contains("raman_spectra"))
+      out.raman_spectra = out.metadata["raman_spectra"];
     out.timing = std::move(timing);
     out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
   }

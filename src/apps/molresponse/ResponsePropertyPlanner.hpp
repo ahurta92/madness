@@ -79,8 +79,9 @@ struct ResponsePropertyRequest {
   std::vector<char>    axes         = {'x','y','z'};
   /// Raman (PolarizabilityGradient/Nuclear): restrict to a SINGLE nuclear
   /// component (atom index, axis 0=x/1=y/2=z) for a cheap one-component test.
-  /// -1 (default) = full per-atom xyz set (full-tensor VBC emission + sentinel
-  /// expansion is deferred until the state-parallel design lands).
+  /// -1 (default) = the full per-atom xyz set: 3N nuclear legs and the
+  /// dipole x nuclear sources for every coordinate, expanded per atom by
+  /// build_dag; enables the normal-mode Raman analysis.
   int                  raman_nuc_atom = -1;
   int                  raman_nuc_axis = -1;
   BetaProcess          beta_process = BetaProcess::SHG;       // Hyperpolarizability
@@ -139,8 +140,30 @@ struct ResponsePlan {
   std::vector<DerivedFDRequest> derived_fd;  // FD-after-ES (freq from a root)
   std::vector<FDRequest>        nuclear_fd;  // nuclear-displacement FD; pert.atom<0
                                              // = all-atoms sentinel (expand per molecule)
-  std::vector<VBCRequest>       vbc;         // quadratic sources for beta
+  std::vector<VBCRequest>       vbc;         // quadratic sources for beta/Raman;
+                                             // pert_c.atom<0 = all-atoms sentinel
 };
+
+/// The VBC requests with every all-atoms nuclear sentinel on the C side
+/// replaced by one request per atom in [0, n_atoms). Concrete requests pass
+/// through unchanged. Shared by build_dag (nodes) and assemble_beta (rows) so
+/// the two agree on the set of sources a full-Raman plan means.
+inline std::vector<VBCRequest>
+expand_vbc_requests(const std::vector<VBCRequest> &vbc, int n_atoms) {
+  std::vector<VBCRequest> out;
+  for (const auto &r : vbc) {
+    if (r.pert_c.is_all_atoms()) {
+      for (int a = 0; a < n_atoms; ++a) {
+        VBCRequest c = r;
+        c.pert_c = Perturbation::nuclear(a, r.pert_c.axis);
+        out.push_back(std::move(c));
+      }
+    } else {
+      out.push_back(r);
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 namespace detail_planner {
@@ -341,12 +364,22 @@ inline ResponsePlan plan_one(const ResponsePropertyRequest &req) {
                                   req.protocol_thresholds});
             }
         } else {
-          // FULL set: all atoms x xyz nuclear FD. The dipole x nuclear VBC
-          // emission + per-atom sentinel expansion in build_dag is DEFERRED
-          // until state-parallel lands (use raman_nuc_atom/axis for now).
+          // FULL set: all atoms x xyz nuclear FD, plus the dipole x nuclear VBC
+          // for every (optical axis, displacement axis) pair. Both carry the
+          // all-atoms sentinel (atom < 0); build_dag expands them to one node
+          // per atom against the concrete molecule, so the planner stays
+          // molecule-independent. The 3N derivative columns feed the normal-
+          // mode Raman analysis (solvers/raman_analysis.hpp).
           for (int dax = 0; dax < 3; ++dax) {
-            plan.nuclear_fd.push_back(
-                {Perturbation::nuclear_all(dax), 0.0, req.protocol_thresholds});
+            const Perturbation nuc_all = Perturbation::nuclear_all(dax);
+            plan.nuclear_fd.push_back({nuc_all, 0.0, req.protocol_thresholds});
+            for (double w : req.frequencies)
+              for (char ax_b : req.axes) {
+                int ib = axis_index(ax_b);
+                if (ib < 0) continue;
+                plan.vbc.push_back({Perturbation::dipole(ib), nuc_all, w, 0.0,
+                                    req.protocol_thresholds});
+              }
           }
         }
       } else {

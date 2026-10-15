@@ -159,6 +159,22 @@ int main() {
     for (const auto &n : dag)
       EXPECT(!(n.kind == CalcKind::NuclearFD && n.pert.is_all_atoms()),
              "no unexpanded all-atoms sentinel remains");
+    // Full Raman: the 9 sentinel VBC expand to one node per atom, each naming
+    // its concrete legs as prerequisites.
+    int vbc = 0; bool concrete = true, prereq_ok = true;
+    for (const auto &n : dag) {
+      if (n.kind != CalcKind::VBC) continue;
+      ++vbc;
+      concrete = concrete && !n.pert_c.is_all_atoms();
+      prereq_ok = prereq_ok && n.prerequisites.size() == 2 &&
+                  n.prerequisites[0] == fd_node_id(n.pert, n.freq) &&
+                  n.prerequisites[1] == fd_node_id(n.pert_c, n.freq_c);
+    }
+    EXPECT(vbc == 18, "9 sentinel VBC x 2 atoms = 18 VBC nodes");
+    EXPECT(concrete, "no VBC keeps the all-atoms sentinel");
+    EXPECT(prereq_ok, "each VBC depends on its concrete dipole and nuclear legs");
+    EXPECT(find_id(dag, "vbc:dipole_x__nuc_1_z@f0.00000_f0.00000") != nullptr,
+           "vbc dipole_x x nuc_1_z node id");
   }
 
   // ====== build_dag: resonance Raman -> ES + symbolic derived FD ===========

@@ -129,11 +129,11 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<std::string>("nuclear.directions", "xyz", "directions for nuclear response");
         initialize<std::vector<double>>("nuclear.frequencies", {0.0}, "frequencies for nuclear response");
         initialize<int>("raman.nuc_atom", 0,
-                        "vibrational Raman: index of the displaced atom (0-based). One "
-                        "nuclear coordinate per run; a full polarizability gradient needs "
-                        "3N runs sharing one calculation directory, which reuse the dipole "
-                        "responses. -1 selects the full per-atom set, which is not "
-                        "implemented yet and will throw.");
+                        "vibrational Raman: index of the displaced atom (0-based) for a "
+                        "single polarizability-gradient component, or -1 for the full set: "
+                        "all 3N nuclear coordinates, the Hessian from the same nuclear "
+                        "response states, and the normal-mode Raman spectrum "
+                        "(properties.vibrational_analysis / raman_spectra).");
         initialize<int>("raman.nuc_axis", 2,
                         "vibrational Raman: Cartesian axis of the displacement, 0=x 1=y 2=z.");
         initialize<bool>("quadratic", false, "Compute quadratic response properties from defined perturbations");

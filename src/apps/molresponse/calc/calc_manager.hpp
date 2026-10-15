@@ -319,6 +319,8 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 ///                    bundle converges (run(), next increment).
 ///   * nuclear_fd  -> all-atoms sentinel (pert.atom < 0) expands to one node
 ///                    per atom in [0, n_atoms); a concrete atom passes through.
+///   * vbc         -> one node each; a C side with the all-atoms sentinel
+///                    expands per atom the same way (full Raman).
 std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
   std::vector<CalcNode> dag;
 
@@ -388,7 +390,10 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     }
   }
 
-  for (const auto &r : plan.vbc) {
+  // One VBC node per (B,C) pair. A C side carrying the all-atoms nuclear
+  // sentinel (full Raman) expands to one node per atom, exactly like the
+  // nuclear_fd sentinel above, so its prerequisites name the concrete legs.
+  for (const auto &r : expand_vbc_requests(plan.vbc, n_atoms)) {
     CalcNode n;
     n.kind          = CalcKind::VBC;
     n.pert          = r.pert_b;     // B side

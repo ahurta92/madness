@@ -206,6 +206,12 @@ public:
   /// while stop_reason claimed 'complete'). Full-replace upsert: run() writes
   /// the current list on every exit, so a later run that completes the work
   /// clears it (empty array = nothing dropped).
+  /// Replace one top-level analysis section (e.g. "vibrational_analysis",
+  /// "raman_spectra"). Unlike add_property these are whole records, not rows.
+  void set_section(const std::string &key, nlohmann::json value) {
+    j_[key] = std::move(value);
+  }
+
   void set_dropped_work(const nlohmann::json &items) {
     j_["run_summary"]["dropped_work"] = items;
   }

@@ -107,36 +107,42 @@ Example (H₂O/HF): β_zzz(0,0)≈7.76.
 
 ---
 
-## Vibrational Raman  🟡 single component (validation pending)
+## Vibrational Raman  🟡 preliminary (full spectrum); single component ✅
 
-Raman intensity from β(dipole; dipole, nuclear) — the response to a nuclear
-displacement. The method is benchmark-quality in principle, but in v3 it is
-**not yet validated**: there is no reference value on file, and the correctness
-of the printed Raman output has not been confirmed — treat results as
-provisional until checked. **Currently single-component** (one `(atom, axis)`);
-the full per-atom/axis tensor is in development (it depends on the state-parallel
-layer).
+Polarizability gradients ∂α_AB/∂Q from β(dipole; dipole, nuclear) — the response
+to a nuclear displacement — and, for the full set, the Hessian, normal modes and
+per-mode Raman activities. Closed shell only.
 
 | Knob | Meaning |
 |------|---------|
-| `requested_properties [raman]` | request the Raman (polarizability-gradient) property |
-| `dipole.directions` / `dipole.frequencies` | the dipole perturbation |
-| `nuclear.directions` / `nuclear.frequencies` | the nuclear-displacement perturbation |
+| `requested_properties [polarizability, raman]` | request the Raman (polarizability-gradient) property |
+| `dipole.directions` / `dipole.frequencies` | the optical perturbation (frequencies of the derivative) |
+| `raman.nuc_atom N`, `raman.nuc_axis 0/1/2` | one nuclear coordinate: nine ∂α_AB/∂Q rows |
+| `raman.nuc_atom -1` | all 3N coordinates + Hessian + normal-mode spectrum |
 
 ```text
 response
-    engine              v3
-    requested_properties [raman]
-    dipole.directions   z
-    dipole.frequencies  [0.0]
-    nuclear.directions  z
-    nuclear.frequencies [0.0]
+    dipole               true
+    dipole.directions    xyz
+    dipole.frequencies   [0.0]
+    requested_properties [polarizability, raman]
+    raman.nuc_atom       -1
+    dconv                1e-3
 end
 ```
 
-The nuclear-displacement FD source is cusped and **resolution-limited**: it
-floors at coarse protocols and only sharpens by climbing (e.g.
-`protocol [1e-4, 1e-6]`). **Result:** `properties.raman_spectra`.
+The nuclear-displacement responses are ~10³ larger than the dipole ones and the
+FD gate is absolute (`bsh < 5*dconv`), so a response `dconv 1e-3` is needed for
+those legs at `protocol [1e-4]`; the derivative source is cusped and sharpens
+only by climbing (e.g. `protocol [1e-4, 1e-6]`). **Result:** rows under
+`response_properties.raman.<protocol>` (`A`, `B`, `C`, `freq_b`, `freq_c`, `beta`,
+`converged`); with the full set also `properties.vibrational_analysis` (Hessian,
+frequencies in hartree and cm⁻¹, normal modes, reduced masses) and
+`properties.raman_spectra` (per optical frequency: 9 × 3N derivatives, their
+normal-mode projection, and per mode `freq_cm1`, `alpha2`, `beta2`, `pol_int`
+in Å⁴/amu, `dep_ratio`, plus the same invariants in a.u.). The legacy
+`nuclear.*` keys are not read by this engine. Working decks:
+`src/examples/qc/response_lih_raman_full`, `response_h2o_raman_tpa`.
 
 ---
 
@@ -194,8 +200,8 @@ The response task in `<prefix>.calc_info.json`:
 | `…[].component` | axis labels, e.g. `["z","z"]` (α) or `["z","z","z"]` (β) |
 | `…[].freqB` (+ `freqC` for β) | driving frequencies (a.u.) |
 | `…[].value` | the tensor component |
-| `properties.raman_spectra` | per-mode Raman intensities (when computed) |
-| `properties.vibrational_analysis` | normal-mode frequencies (when computed) |
+| `properties.raman_spectra` | per-mode Raman activities and depolarization ratios (full-set Raman) |
+| `properties.vibrational_analysis` | Hessian, frequencies, normal modes, reduced masses (full-set Raman) |
 | `metadata` | per-state / per-protocol convergence + (v3) `timing`, `diagnostics` |
 
 The human-readable `<prefix>.out` renders the same numbers (see the example in

@@ -56,6 +56,10 @@ add_mad_executable(test_response_property_planner
 add_mad_executable(test_state_metrics
                    "tests/test_state_metrics.cpp"
                    "MADchem")
+# Full Raman Tier-B formulas (invariants, mode projection) on synthetic tensors.
+add_mad_executable(test_raman_spectrum
+                   "tests/test_raman_spectrum.cpp"
+                   "MADtensor")
 add_mad_executable(test_calc_manager
                    "tests/test_calc_manager.cpp"
                    "MADchem")
@@ -247,6 +251,7 @@ install(TARGETS molresponse
 if (BUILD_TESTING)
   # Tier 1 — "unit": pure logic, no fixtures, no MPI launcher required.
   foreach(_t test_calc_manager test_protocol_key test_bsh_shift test_deck_settings test_es_plateau
+             test_raman_spectrum
              test_response_metadata
              test_response_property_planner test_state_metrics
              test_diagonalize_slots test_dalton_import)

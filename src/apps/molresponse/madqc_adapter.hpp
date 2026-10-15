@@ -173,8 +173,8 @@ struct molresponse_v3_lib {
   struct Results {
     nlohmann::json metadata;
     nlohmann::json properties;
-    nlohmann::json vibrational_analysis;  // empty for alpha (R3a)
-    nlohmann::json raman_spectra;         // empty for alpha (R3a)
+    nlohmann::json vibrational_analysis;  // full Raman only (raman.nuc_atom -1)
+    nlohmann::json raman_spectra;         // full Raman only (raman.nuc_atom -1)
   };
 
   inline static Results
@@ -287,31 +287,39 @@ struct molresponse_v3_lib {
       add(r);
     }
     if (wants("raman")) {
-      // ONE nuclear coordinate per run (deck: raman.nuc_atom / raman.nuc_axis;
-      // default atom 0, z as before). The run emits the whole dipole x dipole
-      // block for that coordinate at every requested frequency, so a full 3N
-      // Cartesian polarizability gradient is 3N runs over one calculation
-      // directory: the dipole responses are computed once and reloaded. The
-      // planner's full per-atom sentinel is still deferred (post-state-parallel).
+      // Deck raman.nuc_atom / raman.nuc_axis select ONE nuclear coordinate:
+      // the run emits the dipole x dipole block of d(alpha)/dQ for it at every
+      // requested frequency. raman.nuc_atom -1 selects the FULL set: 3N nuclear
+      // legs, the dipole x nuclear sources for every coordinate, and the
+      // normal-mode Raman analysis (Hessian from the same nuclear response
+      // states, frequencies, activities, depolarization ratios) under
+      // properties.vibrational_analysis / properties.raman_spectra.
       ResponsePropertyRequest r;
       r.kind = ResponsePropertyKind::PolarizabilityGradient;
       r.gradient_mode = GradientMode::Nuclear;
       r.frequencies = freqs;
       r.raman_nuc_atom = rp.raman_nuc_atom();
       r.raman_nuc_axis = rp.raman_nuc_axis();
-      if (r.raman_nuc_atom < 0 || r.raman_nuc_axis < 0 || r.raman_nuc_axis > 2)
-        throw std::runtime_error(
-            "response: raman.nuc_atom must be >= 0 and raman.nuc_axis in 0..2 — "
-            "the full per-atom Raman tensor is not implemented; drive the 3N "
-            "coordinates as 3N runs over one calc dir");
-      // Upper bound (review finding C13): an out-of-range atom otherwise fails
-      // later, inside the nuclear-derivative functor, as an unnamed exception.
-      if (const int natom = static_cast<int>(scf_calc->molecule.natom());
-          r.raman_nuc_atom >= natom)
-        throw std::runtime_error(
-            "response: raman.nuc_atom " + std::to_string(r.raman_nuc_atom) +
-            " is out of range for a molecule of " + std::to_string(natom) +
-            " atom(s) (atoms are numbered from 0)");
+      const int natom = static_cast<int>(scf_calc->molecule.natom());
+      if (r.raman_nuc_atom >= 0) {
+        if (r.raman_nuc_axis < 0 || r.raman_nuc_axis > 2)
+          throw std::runtime_error(
+              "response: raman.nuc_axis must be 0 (x), 1 (y) or 2 (z)");
+        // Upper bound (review finding C13): an out-of-range atom otherwise
+        // fails later, inside the nuclear-derivative functor, as an unnamed
+        // exception.
+        if (r.raman_nuc_atom >= natom)
+          throw std::runtime_error(
+              "response: raman.nuc_atom " + std::to_string(r.raman_nuc_atom) +
+              " is out of range for a molecule of " + std::to_string(natom) +
+              " atom(s) (atoms are numbered from 0)");
+      } else {
+        r.raman_nuc_atom = -1;   // full set; the axis is ignored
+        r.raman_nuc_axis = -1;
+        if (world.rank() == 0)
+          print("response: raman.nuc_atom -1 — full polarizability gradient over",
+                3 * natom, "nuclear coordinates with normal-mode analysis");
+      }
       add(r);
     }
     if (rp.excited_enable()) {
@@ -465,6 +473,8 @@ struct molresponse_v3_lib {
     Results res;
     res.metadata = std::move(out.metadata);
     res.properties = std::move(out.properties);
+    res.vibrational_analysis = std::move(out.vibrational_analysis);
+    res.raman_spectra = std::move(out.raman_spectra);
     if (world.rank() == 0) {
       res.metadata["engine"]         = "molresponse_v3";
       res.metadata["v3_timing"]      = std::move(out.timing);
