@@ -139,6 +139,9 @@ template <typename... Groups> class ParameterManager {
 public:
   ParameterManager() : world_(World::get_default()) {}
 
+  /// Empty independent groups, populated by a scoped input reader.
+  explicit ParameterManager(World &world) : world_(world) {}
+
   /// "Master" ctor: takes any single intput file, JSON or plain-text
   // ParameterManager(World &w, const path &filename) : world_(w) {
   ParameterManager(World &w, const commandlineparser &parser)

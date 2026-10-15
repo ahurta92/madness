@@ -51,6 +51,9 @@ namespace madness {
 struct CalculationParameters : public QCCalculationParametersBase {
   static constexpr char const* tag = "dft";
 
+  // A prefix may include an explicit output directory on a case-sensitive filesystem.
+  std::set<std::string> case_sensitive_keys() const override { return {"prefix"}; }
+
 	CalculationParameters(const CalculationParameters& other) = default;
 
 	CalculationParameters(World& world, const commandlineparser& parser) : CalculationParameters() {

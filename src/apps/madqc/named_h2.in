@@ -1,0 +1,32 @@
+# Fresh named stages. Run: madqc named_h2.in --prefix=H2-run
+molecule H2
+  units atomic
+  eprec 1e-6
+  no_orient true
+  H 0 0 -0.7
+  H 0 0 0.7
+end
+
+moldft gs
+  molecule H2
+  xc hf
+  L 20
+  localize canon
+  protocol [1e-4, 1e-6]
+  dconv 1e-5
+  econv 1e-6
+  maxiter 30
+  requested_properties [energy, dipole]
+end
+
+molresponse optical
+  reference gs
+  protocol [1e-4, 1e-6]
+  dconv 1e-4
+  maxiter 30
+  kain true
+  requested_properties [polarizability]
+  polarizability.frequencies [0.0, 0.02]
+  polarizability.frequency_units au
+  polarizability.components [zz]
+end

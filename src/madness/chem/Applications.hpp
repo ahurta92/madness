@@ -1043,6 +1043,9 @@ NextAction valid(World &world, const SCFResultsTuple &results,
 struct moldft_lib {
   static constexpr const char *label() { return "moldft"; }
 
+  explicit moldft_lib(std::string input_path = "mad.in")
+      : input_path_(std::move(input_path)) {}
+
   vector<double> protocol;
   SCFResultsTuple last_results_;
 
@@ -1188,8 +1191,9 @@ private:
     const auto &mol = params.get<Molecule>();
 
     world.gop.fence();
+    std::string input_error;
     if (world.rank() == 0) {
-      if (true) {
+      try {
         // should always overwrite for now
 
         json in;
@@ -1209,15 +1213,21 @@ private:
         // the restart can never fire. Everything else that set_derived_values()
         // computes is re-derived identically by the SCF ctor.
         in["dft"]["prefix"] = cp.prefix();
-        std::ofstream ofs("mad.in");
+        std::ofstream ofs(input_path_);
+        ofs.exceptions(std::ios::failbit | std::ios::badbit);
         write_json_to_input_file(in, {"dft", "pcm"}, ofs);
         mol.print_defined_only(ofs);
+        ofs.close();
+      } catch (const std::exception& e) {
+        input_error = "writing SCF input " + input_path_ + ": " + e.what();
       }
     }
+    world.gop.broadcast_serializable(input_error, 0);
+    if (!input_error.empty()) throw std::runtime_error(input_error);
     world.gop.fence();
 
     commandlineparser parser;
-    parser.set_keyval("input", "mad.in");
+    parser.set_keyval_keep_case("input", input_path_);
     if (world.rank() == 0)
       ::print("input filename: ", parser.value("input"));
 
@@ -1226,6 +1236,7 @@ private:
     calc_ = std::make_shared<SCF>(world, parser);
   }
 
+  std::string input_path_;
   std::shared_ptr<Calc> calc_;
 }; // namespace moldft_lib
 

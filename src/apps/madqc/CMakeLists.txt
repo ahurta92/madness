@@ -83,3 +83,33 @@ endif()
 endif(BUILD_TESTING)
 
 install(TARGETS madqc DESTINATION "${MADNESS_INSTALL_BINDIR}")
+
+if(BUILD_TESTING)
+  add_mad_executable(test_named_stages "test_named_stages.cc" "MADchem")
+  add_test(NAME madness/test/madqc/test_named_stages/run COMMAND test_named_stages)
+  set_tests_properties(madness/test/madqc/test_named_stages/run
+    PROPERTIES LABELS "unittests;short" TIMEOUT 60)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_stages/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_named_stages> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(madness/test/madqc/test_named_stages/mpi2
+      PROPERTIES LABELS "unittests;short" TIMEOUT 60)
+  endif()
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_stages_e2e/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_stages_e2e.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_stages_e2e/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_stages_e2e/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_stages_e2e.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_stages_e2e/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
+  endif()
+endif()

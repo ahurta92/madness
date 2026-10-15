@@ -179,7 +179,8 @@ struct molresponse_v3_lib {
   inline static Results
   run_response(madness::World &world, const Params &params,
                const std::shared_ptr<madness::SCF> &scf_calc,
-               const std::filesystem::path &outdir) {
+               const std::filesystem::path &outdir,
+               const std::filesystem::path &reference_prefix = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
@@ -226,9 +227,12 @@ struct molresponse_v3_lib {
     const double L = cp.L();
     set_response_protocol(world, L, protocol.front());
     const std::string prefix     = cp.prefix();
-    const fs::path    moldft_dir = fs::proximate(scf_calc->work_dir, outdir);
-    const std::string archive    = (moldft_dir / (prefix + ".restartdata")).string();
-    const std::string fock_json  = (moldft_dir / (prefix + ".fock.json")).string();
+    // Named stages supply absolute paths and never change process cwd.
+    const fs::path source_prefix = reference_prefix.empty()
+        ? fs::proximate(scf_calc->work_dir, outdir) / prefix
+        : reference_prefix;
+    const std::string archive = source_prefix.string() + ".restartdata";
+    const std::string fock_json = source_prefix.string() + ".fock.json";
     GroundState gs = GroundState::from_archive(world, archive, scf_calc->molecule);
     const double thresh = FunctionDefaults<3>::get_thresh();
     auto coulop = poperatorT(
@@ -321,7 +325,7 @@ struct molresponse_v3_lib {
     // would double the path (outdir/outdir) and the metadata would be written/read
     // in different places, leaving Output.properties empty. (outdir is still used
     // above to resolve the ground archive relative to this cwd.)
-    in.settings.calc_dir = ".";
+    in.settings.calc_dir = reference_prefix.empty() ? "." : outdir.string();
     in.settings.max_iters = static_cast<int>(rp.maxiter());
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
     // standalone --fd-subworlds flag; archive_file above makes it live).

@@ -50,6 +50,7 @@
 #include <fstream>
 #include <iostream>
 
+#include "RunNamedStages.hpp"
 #include <Drivers.hpp>
 #include <ParameterManager.hpp>
 #include <WorkflowBuilders.hpp>
@@ -67,6 +68,8 @@ using namespace madness;
 
 void help(const std::string &wf) {
   print("Usage: madqc [options] [input_file]");
+  print("Named decks: molecule H2 / moldft gs / molresponse optical (see named-stages.md).");
+  print("  --prefix=<new-directory>    : output root for a fresh named-stage run");
   print("\nOptions:");
   print("  --help=<workflow>           : show this help message");
   print("  --print_parameters=<group>  : print all parameters and exit");
@@ -201,6 +204,7 @@ int main(int argc, char **argv) {
       if (world.rank() == 0)
         print(info::print_revision_information());
 
+      if (!named_stages::run_if_named(world, parser)) {
       // Create workflow
       qcapp::Workflow wf;
       std::string user_workflow = "scf";
@@ -348,6 +352,7 @@ int main(int argc, char **argv) {
         // produced into <prefix>.viz_manifest.json for gecko/ParaView/VMD.
         qcapp::write_viz_manifest(prefix, wf.results());
       }
+      } // existing unnamed workflow
     } catch (const MadnessException &e) {
       rc = 1;
       if (world.rank() == 0) {
