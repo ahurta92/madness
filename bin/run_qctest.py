@@ -6,7 +6,11 @@ A qctest case is a self-contained directory (see src/examples/qc/README.md):
     <case>/<case>.in                        the input deck
     <case>/run.sh                           one-liner invocation
     <case>/check.json                       result keys + tolerances
-        (each check: "key" plus "tol" | "rtol" | "max"; see compare())
+        (each check: "key" plus "tol" | "rtol" | "max"; see compare()),
+        or "expect_error": "<text>" for a case that must be REFUSED
+        (see check_expected_error(); no checks and no reference needed);
+        optional "expect_files": [glob, ...] relative to the work dir, each of
+        which must match a produced file (see check_expected_files())
     <case>/reference/<case>.calc_info.json  compared numerically
     <case>/reference/<case>.out             for humans; never compared
 
@@ -50,7 +54,7 @@ def load_check(case, updating):
         sys.exit(f"qctest: no check.json in {case}")
     with open(check_file) as f:
         check = json.load(f)
-    if not check.get("checks") and not updating:
+    if not check.get("checks") and not check.get("expect_error") and not updating:
         sys.exit(f"qctest: {check_file} lists no checks")
     return check
 
@@ -269,6 +273,64 @@ def compare(output, reference, checks):
     return cmp.success
 
 
+def check_expected_error(output, exitcode, expected):
+    """A refusal case passes only if the run was refused, loudly, for the stated reason.
+
+    madqc must exit non-zero AND record the failure in its calc_info.json as a
+    `task_failed` entry whose `error` contains `expected` (Workflow::run writes it
+    before rethrowing). A run that succeeds, a crash that leaves no record, and a
+    failure for some other reason all fail the case -- a refusal test that any
+    error satisfies would pass on a segfault.
+    """
+    if exitcode == 0:
+        print(f"FAILED: expected the run to be refused ({expected!r}), but it exited 0")
+        return False
+    if not output.is_file():
+        print(f"FAILED: exit code {exitcode} but no {output.name} records why")
+        return False
+    with open(output) as f:
+        tasks = json.load(f).get("tasks", [])
+    errors = [t.get("error", "") for t in tasks if t.get("type") == "task_failed"]
+    if any(expected in e for e in errors):
+        print(f"refused as expected: {expected!r}")
+        return True
+    print(f"FAILED: expected a task_failed error containing {expected!r}; recorded: {errors}")
+    return False
+
+
+def check_expected_files(workdir, patterns):
+    """Every glob in `patterns` (relative to workdir) must match at least one file.
+
+    For side outputs that calc_info.json does not carry but the case must still
+    produce -- e.g. the excited-state analysis JSON next to the calc dir.
+    """
+    ok = True
+    for pat in patterns:
+        hits = sorted(workdir.glob(pat))
+        if hits:
+            print(f"expected file present: {pat} -> {hits[0].relative_to(workdir)}")
+        else:
+            print(f"FAILED: no file matches {pat!r} under {workdir}")
+            ok = False
+    return ok
+
+
+def external_reference_source(case):
+    """The `reference_source` a case's reference declares, or None.
+
+    A reference that holds another code's numbers (e.g. DALTON's) says so in a
+    top-level `reference_source`; --update would replace them with this run's
+    own result and turn the check into MADNESS against itself."""
+    for ref in sorted((case / "reference").glob("*.calc_info.json")):
+        try:
+            src = json.loads(ref.read_text()).get("reference_source")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if src:
+            return src
+    return None
+
+
 def update_reference(case, output, report):
     refdir = case / "reference"
     refdir.mkdir(exist_ok=True)
@@ -293,6 +355,12 @@ def main():
     if not case.is_dir():
         sys.exit(f"qctest: no such case directory: {case}")
     workdir = Path.cwd().resolve()
+    if args.update:
+        source = external_reference_source(case)
+        if source:
+            sys.exit(f"qctest: {case.name}'s reference is not a MADNESS run "
+                     f"(reference_source: {source}); refusing --update, which would "
+                     "overwrite it with this run's own result")
     check = load_check(case, args.update)
 
     print(f"qctest case: {case.name}")
@@ -321,6 +389,14 @@ def main():
     output = workdir / check.get("output", f"{case.name}.calc_info.json")
     report = workdir / output.name.replace(".calc_info.json", ".out")
 
+    if check.get("expect_error"):
+        if args.update:
+            print("note: refusal case -- no reference to update")
+            return 0
+        ok = check_expected_error(output, exitcode, check["expect_error"])
+        print("final success:", ok)
+        return 0 if ok else 1
+
     if not output.is_file():
         print(f"FAILED: expected result file {output.name} was not produced")
         return 1
@@ -335,6 +411,7 @@ def main():
         return 1
 
     ok = compare(output, reference, check["checks"])
+    ok = check_expected_files(workdir, check.get("expect_files", [])) and ok
     print("final success:", ok and exitcode == 0)
     return 0 if (ok and exitcode == 0) else 1
 

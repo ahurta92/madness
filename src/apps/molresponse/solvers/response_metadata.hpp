@@ -206,6 +206,12 @@ public:
   /// while stop_reason claimed 'complete'). Full-replace upsert: run() writes
   /// the current list on every exit, so a later run that completes the work
   /// clears it (empty array = nothing dropped).
+  /// Replace one top-level analysis section (e.g. "vibrational_analysis",
+  /// "raman_spectra"). Unlike add_property these are whole records, not rows.
+  void set_section(const std::string &key, nlohmann::json value) {
+    j_[key] = std::move(value);
+  }
+
   void set_dropped_work(const nlohmann::json &items) {
     j_["run_summary"]["dropped_work"] = items;
   }
@@ -405,6 +411,46 @@ best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
                if (a.k != b.k) return a.k < b.k;       // higher k wins
                return a.thresh > b.thresh;             // smaller thresh wins
              })
+      ->key;
+}
+
+/// Pick the best usable ES restart source (protocol key) for a bundle of
+/// `want_type` / `want_shell` / `n_roots` (0 = any root count) at target
+/// (target_thresh, target_k). "Usable" = same type and shell, the same root
+/// count when the entry records one, COARSER-OR-EQUAL to the target, and NOT
+/// `diverged` (never re-seed from a blown-up bundle — review finding C4; the FD
+/// twin above has the same rule). Exact target_key first, else closest-to-target
+/// (max k, then min thresh). "" if none. Pure: reads only the json. Used by
+/// try_load_es_bundle.
+inline std::string
+best_usable_es_source_key(const nlohmann::json &meta, const std::string &want_type,
+                          const std::string &want_shell, int n_roots,
+                          double target_thresh, int target_k,
+                          const std::string &target_key) {
+  if (!meta.contains("excited_states") || !meta["excited_states"].is_object()) return {};
+  if (!meta.contains("protocols") || !meta["protocols"].is_object()) return {};
+  const auto &protos = meta["protocols"];
+  struct Cand { std::string key; double thresh; int k; };
+  std::vector<Cand> cands;
+  for (const auto &[key, ent] : meta["excited_states"].items()) {
+    if (ent.value("type",  std::string{}) != want_type)  continue;
+    if (ent.value("shell", std::string{}) != want_shell) continue;
+    if (n_roots > 0 && ent.contains("n_roots") &&
+        ent.value("n_roots", 0) != n_roots)              continue;
+    if (ent.value("diverged", false))                    continue;
+    if (!protos.contains(key))                           continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
+  }
+  if (cands.empty()) return {};
+  for (const auto &c : cands)
+    if (c.key == target_key) return c.key;
+  return std::max_element(cands.begin(), cands.end(),
+                          [](const Cand &a, const Cand &b) {
+                            if (a.k != b.k) return a.k < b.k;
+                            return a.thresh > b.thresh;
+                          })
       ->key;
 }
 

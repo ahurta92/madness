@@ -31,6 +31,8 @@
 
 #include <madness/chem/SCFOperators.h>
 
+#include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include <cstdlib>
@@ -67,7 +69,14 @@ inline void debug_gs_fock_check(madness::World &world, const ResponseGroundState
     K[i] = madness::inner(phi[i], Kphi[i]);
   }
   auto gram = madness::matrix_inner(world, phi, phi);
-  std::vector<double> zs = {-3.0, -1.0, -0.3, 0.0, 0.3, 1.0, 1.5, 2.0, 2.7, 3.5, 5.0, 8.0, 15.0, 40.0};
+  // Sample points along z, kept only if they lie inside the cell: Function::eval
+  // throws on a coordinate outside it (the L=30 open-shell qctest decks and z=40).
+  std::vector<double> zs;
+  {
+    const auto &cell = madness::FunctionDefaults<3>::get_cell();
+    for (double z : {-3.0, -1.0, -0.3, 0.0, 0.3, 1.0, 1.5, 2.0, 2.7, 3.5, 5.0, 8.0, 15.0, 40.0})
+      if (z > cell(2, 0) && z < cell(2, 1)) zs.push_back(z);
+  }
   std::vector<double> vz(zs.size(), 0.0);
   {
     auto vl = madness::copy(t.V_local_alpha);
@@ -100,6 +109,12 @@ inline ResponseGroundState
 build_response_ground_state_open_shell(madness::World &world, GroundState &gs,
                                         double c_xc = 1.0,
                                         double lo   = 1.0e-10) {
+  // Open-shell DFT response (spin-resolved f_xc) is NOT supported — the XC
+  // response-kernel port is RHF-only (apply_xc_kernel asserts !spin_polarized).
+  // Fail loud rather than silently return HF-like numbers for a DFT functional.
+  if (gs.scf().xc.is_dft() && gs.hf_exchange_coefficient() != 1.0)
+    throw std::runtime_error(
+        "open-shell DFT response (f_xc) not supported: RHF/closed-shell only");
   ResponseGroundState t;
   t.amo            = gs.orbitals_alpha();
   t.aeps           = gs.energies_alpha();
@@ -150,6 +165,19 @@ build_response_ground_state_closed_shell(madness::World &world, GroundState &gs,
   // Cache K0 once (avoids re-copying the occupied orbitals on every compute_V0x
   // exchange apply — see ResponseGroundState::K0_alpha). K0_beta stays null (CS).
   t.K0_alpha = common_ops::make_ground_exchange(world, t.amo, lo);
+
+  // DFT/hybrid response kernel (f_xc). Gate mirrors GroundState::build_v_local:
+  // a DFT functional with a non-unit exact-exchange
+  // coefficient (pure DFT c_xc==0, or hybrids 0<c_xc<1). Built with
+  // spin_polarized=FALSE — apply_xc_kernel asserts !is_spin_polarized() (RHF
+  // only) — unlike build_v_local, which (harmlessly) passes is_spin_restricted().
+  // Null otherwise ⇒ the pure-HF path is byte-unchanged. Mirrors chem/TDHF.cc.
+  if (gs.scf().xc.is_dft() && gs.hf_exchange_coefficient() != 1.0) {
+    auto &scf  = gs.scf();
+    auto  arho = scf.make_density(world, scf.get_aocc(), scf.get_amo());
+    t.xc = std::make_shared<madness::XCOperator<double, 3>>(
+        world, scf.param.xc(), /*spin_polarized=*/false, arho, arho);
+  }
   debug_gs_fock_check(world, t, "closed");
   return t;
 }

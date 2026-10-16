@@ -80,5 +80,93 @@ class CompareTests(unittest.TestCase):
         self.assertTrue(self.compare([{"key": ["w"], "tol": 0, "allow_zero": True}]))
 
 
+class ExpectErrorTests(unittest.TestCase):
+    """A refusal case: the deck must be rejected, loudly, for the stated reason."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.out = self.dir / "case.calc_info.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_failed(self, error):
+        self.out.write_text(json.dumps({"tasks": [
+            {"type": "scf"},
+            {"type": "task_failed", "task_index": 1, "error": error}]}))
+
+    def check(self, exitcode, expected):
+        return run_qctest.check_expected_error(self.out, exitcode, expected)
+
+    def test_refusal_with_the_expected_reason_passes(self):
+        self.write_failed("response: beta.or is not implemented (no signed-frequency source)")
+        self.assertTrue(self.check(1, "beta.or is not implemented"))
+
+    def test_a_run_that_succeeds_fails_the_case(self):
+        self.out.write_text(json.dumps({"tasks": [{"type": "scf"}, {"type": "response"}]}))
+        self.assertFalse(self.check(0, "beta.or is not implemented"))
+
+    def test_a_failure_for_another_reason_fails_the_case(self):
+        self.write_failed("eval: coordinate upper-bound error in dimension")
+        self.assertFalse(self.check(1, "beta.or is not implemented"))
+
+    def test_a_nonzero_exit_without_a_record_fails_the_case(self):
+        self.assertFalse(self.check(1, "beta.or is not implemented"))
+
+    def test_load_check_accepts_expect_error_without_checks(self):
+        (self.dir / "check.json").write_text(json.dumps({"expect_error": "x"}))
+        self.assertEqual(run_qctest.load_check(self.dir, False)["expect_error"], "x")
+
+
+class ExpectFilesTests(unittest.TestCase):
+    """Side outputs a case must produce (e.g. the ES analysis JSON)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_every_pattern_must_match_a_file(self):
+        (self.dir / "a" / "b").mkdir(parents=True)
+        (self.dir / "a" / "b" / "es_analysis__1e-04_k6.json").write_text("{}")
+        self.assertTrue(run_qctest.check_expected_files(
+            self.dir, ["a/*/es_analysis__*.json"]))
+        self.assertFalse(run_qctest.check_expected_files(
+            self.dir, ["a/*/es_analysis__*.json", "a/*/missing_*.json"]))
+
+    def test_no_patterns_passes(self):
+        self.assertTrue(run_qctest.check_expected_files(self.dir, []))
+
+
+class ExternalReferenceTests(unittest.TestCase):
+    """A reference holding another code's numbers (reference_source) must not be
+    overwritten by --update with MADNESS's own result."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.case = Path(self.tmp.name) / "case"
+        (self.case / "reference").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_declared_source_is_reported(self):
+        (self.case / "reference" / "case.calc_info.json").write_text(
+            json.dumps({"reference_source": "DALTON t-aug-cc-pVQZ", "tasks": []}))
+        self.assertEqual(run_qctest.external_reference_source(self.case),
+                         "DALTON t-aug-cc-pVQZ")
+
+    def test_ordinary_reference_is_not_external(self):
+        (self.case / "reference" / "case.calc_info.json").write_text(
+            json.dumps({"tasks": []}))
+        self.assertIsNone(run_qctest.external_reference_source(self.case))
+
+    def test_no_reference_yet_is_not_external(self):
+        self.assertIsNone(run_qctest.external_reference_source(self.case))
+
+
 if __name__ == "__main__":
     unittest.main()

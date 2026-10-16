@@ -108,6 +108,9 @@ struct ExecutorSettings {
   PrintLevel        print_level = PrintLevel::Normal;
   std::string       calc_dir;      // holds response_metadata.json + archives
   int               max_iters = 25;
+  // ES iteration budget per rung (deck excited.maxiter); 0 = inherit max_iters.
+  int               es_max_iters = 0;
+  int es_iter_budget() const { return es_max_iters > 0 ? es_max_iters : max_iters; }
   // Cross-type seed toggle (optional): a derived FD starts from its converged
   // ES-root vector rather than the perturbation source. Default OFF — measured
   // neutral-to-slightly-worse at ωₙ/2 (off-resonance, H2); the ES root is the
@@ -208,6 +211,9 @@ struct ExecutorSettings {
   double            es_warmup_oversample  = 3.0;
   int               es_kain_maxsub        = 8;
   double            es_maxrotn            = 0.5;
+  // KAIN in the MAIN ES solve (deck `kain`, when set). The warmup is KAIN-free
+  // regardless: its whole length is the tda_warmup_iters no-KAIN window.
+  bool              es_kain               = true;
   // Delay KAIN onset in the MAIN ES solve by this many iters (pure BSH +
   // step-restriction first, so roots stabilize before KAIN starts recording
   // history). 0 = KAIN from iter 1 (previous behaviour). Distinct from
@@ -242,6 +248,11 @@ struct ExecutorSettings {
   // protocol in --protocol is the de-facto "final" rung; its recorded
   // bsh_residual is the verdict either way.
   bool              accept_at_maxiter = false;
+  // --hylleraas: after each FD solve, also evaluate the STATIONARY estimate of
+  // <v|x> and the error bound docs/guides/convergence.md states but nothing
+  // computed (|d alpha| <= |c| ||theta|| ||r_B||), plus a stationarity
+  // self-check. Static only. Off by default.
+  bool              hylleraas             = false;
   // F2 (doc 32 §5): fan independent states out across subworlds. This is the
   // number of subworlds PER PHYSICAL NODE (F2f): 0 = single-World reference
   // (byte-identical); 1 = one subworld per node (node-aligned); >1 = sub-node /
@@ -286,6 +297,69 @@ struct ExecutorContext : ExecutorSettings {
 
 // ---------------------------------------------------------------------------
 namespace detail_exec {
+
+/// Collective: rank 0 reads response_metadata.json (ResponseMetadata is
+/// rank-0 only) and broadcasts it, so every rank schedules from the same
+/// bytes rather than from whatever its own filesystem view shows after the
+/// fence. A rank-0 read failure is broadcast too, so all ranks throw together
+/// instead of the others waiting in the broadcast.
+inline nlohmann::json load_metadata_rank0(madness::World &world,
+                                          const std::string &path) {
+  std::string text, err;
+  if (world.rank() == 0) {
+    try {
+      text = ResponseMetadata::load_or_create(path).json().dump();
+    } catch (const std::exception &e) {
+      err = e.what();
+      if (err.empty()) err = "unknown error";
+    }
+  }
+  world.gop.broadcast_serializable(err, 0);
+  if (!err.empty()) throw std::runtime_error(err);
+  world.gop.broadcast_serializable(text, 0);
+  return nlohmann::json::parse(text);
+}
+
+/// The ES warmup and main-solve policies, from the caller's settings. Shared by
+/// the TDA and Full executors. The warmup runs es_tda_warmup_iters iterations
+/// inside a no-KAIN window of the same length, so it is KAIN-free whatever
+/// `kain` says; the main solve delays KAIN by es_main_kain_delay.
+struct EsIterationPolicies {
+  ConvergencePolicy warm;
+  ConvergencePolicy main;
+};
+inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s) {
+  EsIterationPolicies p;
+  p.warm                          = s.policy;
+  p.warm.kain                     = true;
+  p.warm.kain_maxsub              = s.es_kain_maxsub;
+  p.warm.maxrotn                  = s.es_maxrotn;
+  p.warm.tda_warmup_iters         = s.es_tda_warmup_iters;
+  p.warm.warmup_oversample_factor = s.es_warmup_oversample;
+  p.main                  = p.warm;
+  p.main.kain             = s.es_kain;
+  p.main.tda_warmup_iters = s.es_main_kain_delay;
+  p.main.lock_converged   = s.es_lock_converged;  // warmup never locks
+  return p;
+}
+
+/// Remove the wall-clock and RSS fields from every `metrics` object in a
+/// metadata subtree. They are measurements OF the run, not results of it: two
+/// re-solves of the same stuck state agree on every number that matters and
+/// disagree on these, which is exactly backwards for a progress comparison.
+inline void strip_volatile_metrics(nlohmann::json &j) {
+  if (j.is_object()) {
+    auto m = j.find("metrics");
+    if (m != j.end() && m->is_object()) {
+      m->erase("wall_s");
+      m->erase("rss_gb");
+    }
+    for (auto &kv : j.items()) strip_volatile_metrics(kv.value());
+  } else if (j.is_array()) {
+    for (auto &e : j) strip_volatile_metrics(e);
+  }
+}
+
 
 inline bool is_static_freq(double freq) { return std::abs(freq) < 1e-12; }
 
@@ -585,6 +659,12 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
 
+  // Property-accuracy report: the documented error bound, evaluated, and the
+  // stationary estimate beside the naive one. AFTER iterate_protocol, so the
+  // measurement cannot perturb the solve.
+  if (ctx.hylleraas)
+    solver.report_property_accuracy(sf, pert.description(), freq);
+
   NodeResult r;
   const bool strict   = converged_now(sf, solver);
   const bool accepted = accepted_now(sf, solver);
@@ -647,15 +727,10 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   // Warmup policy (KAIN on, kain_maxsub/maxrotn from ctx); the main solve
   // disables the warmup window — the fresh guess is an oversampled TDA warmup
   // (>= 2x roots by default), same recipe as the Full path.
-  ConvergencePolicy warm_policy = ctx.policy;
-  warm_policy.kain                     = true;
-  warm_policy.kain_maxsub              = ctx.es_kain_maxsub;
-  warm_policy.maxrotn                  = ctx.es_maxrotn;
-  warm_policy.tda_warmup_iters         = ctx.es_tda_warmup_iters;
-  warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
-  ConvergencePolicy main_policy = warm_policy;
-  main_policy.tda_warmup_iters = ctx.es_main_kain_delay;
-  main_policy.lock_converged   = ctx.es_lock_converged;  // warmup never locks
+  const detail_exec::EsIterationPolicies es_policies =
+      detail_exec::es_iteration_policies(ctx);
+  const ConvergencePolicy &warm_policy = es_policies.warm;
+  const ConvergencePolicy &main_policy = es_policies.main;
 
   Solver::State s0;
   bool seeded = false;
@@ -664,7 +739,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   // during the solve — see es_seed_guard.hpp).
   std::optional<EsSeedReference> seed_ref;
   if (action != NodeAction::Fresh) {
-    auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
+    auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir, n_roots);
     if (loaded) {
       seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
                                         loaded->source_protocol_key);
@@ -737,7 +812,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   };
 
   solvers::IterateProtocolPolicy pp;
-  pp.max_iters_per_step = ctx.max_iters;
+  pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -804,15 +879,10 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
 
   // Warmup policy (KAIN on, kain_maxsub / maxrotn from ctx); the main solve
   // disables the TDA warmup window (it was done explicitly for the fresh guess).
-  ConvergencePolicy warm_policy = ctx.policy;
-  warm_policy.kain                     = true;
-  warm_policy.kain_maxsub              = ctx.es_kain_maxsub;
-  warm_policy.maxrotn                  = ctx.es_maxrotn;
-  warm_policy.tda_warmup_iters         = ctx.es_tda_warmup_iters;
-  warm_policy.warmup_oversample_factor = ctx.es_warmup_oversample;
-  ConvergencePolicy main_policy = warm_policy;
-  main_policy.tda_warmup_iters = ctx.es_main_kain_delay;
-  main_policy.lock_converged   = ctx.es_lock_converged;  // warmup never locks
+  const detail_exec::EsIterationPolicies es_policies =
+      detail_exec::es_iteration_policies(ctx);
+  const ConvergencePolicy &warm_policy = es_policies.warm;
+  const ConvergencePolicy &main_policy = es_policies.main;
 
   Solver::State s0;
   bool seeded = false;
@@ -822,7 +892,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   // artifact), so seed_ref stays empty on that path.
   std::optional<EsSeedReference> seed_ref;
   if (action != NodeAction::Fresh) {
-    auto loaded = try_load_es_bundle<Full, ClosedShell>(world, ctx.calc_dir);
+    auto loaded = try_load_es_bundle<Full, ClosedShell>(world, ctx.calc_dir, n_roots);
     if (loaded) {
       seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
                                         loaded->source_protocol_key);
@@ -937,7 +1007,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   };
 
   solvers::IterateProtocolPolicy pp;
-  pp.max_iters_per_step = ctx.max_iters;
+  pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -954,8 +1024,10 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   // Post-convergence transition-property report (legacy TDDFT::analysis +
   // analyze_vectors). Runs on the in-memory `sf` (no bundle reload), so it never
   // hits the cross-np load path that caused the parked ES heap-OOB (now guarded
-  // in load_es_roots). See the TDA path above for the full note. Re-enabled.
-  if (r.converged && ctx.print_level >= PrintLevel::Normal)
+  // in load_es_roots). See the TDA path above for the full note. Ungated, like the
+  // TDA path: at print_level 0 the RPA transition properties were silently not
+  // written (review finding C7).
+  if (r.converged)
     report_es_analysis<Full, ClosedShell>(
         world, gs, sf, ctx.print_level,
         ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
@@ -1129,6 +1201,7 @@ enum class SeedStrategy { NearestConverged };
 struct CalcManagerPolicy {
   SeedStrategy seed = SeedStrategy::NearestConverged;
   int          max_iters_per_step = 25;
+  int          es_max_iters_per_step = 0;   // ES budget; 0 = max_iters_per_step
   int          fd_subworlds = 0;   // F2f: subworlds PER NODE (0=off, 1=node-aligned)
   int          fd_subworld_ranks = 0;   // ranks per subworld; >0 = universe split (may span nodes)
 };
@@ -1216,13 +1289,14 @@ public:
     std::set<std::string> stalled_ids;   // quarantined no-progress nodes
     for (;;) {
       world.gop.fence();
-      auto meta = ResponseMetadata::load_or_create(meta_path);
+      const nlohmann::json meta_json = detail_exec::load_metadata_rank0(world, meta_path);
       // Grow the DAG from any ES bundle converged ON DISK (idempotent and
       // restart-safe: reads roots from metadata, not in-memory run state).
-      expand_converged_es(world, meta.json());
+      expand_converged_es(world, meta_json);
       // max_iters flows into reconcile so a budget-exhausted rung climbs the
       // ladder (honest-climb) instead of Resume-looping into the no-progress halt.
-      auto waves = schedule(dag_, ramp, meta.json(), policy_.max_iters_per_step);
+      auto waves = schedule(dag_, ramp, meta_json, policy_.max_iters_per_step,
+                            policy_.es_max_iters_per_step);
       // Review fix (confirmed HIGH — front-wave starvation): quarantine nodes
       // that stopped making progress instead of halting the WHOLE run. Only
       // the front wave ever executes, so a deterministically-stuck node (e.g.
@@ -1247,32 +1321,10 @@ public:
         // invisible to schedule()), and the beta/raman it feeds is dropped
         // without a trace. Audit the plan against the on-disk metadata: any
         // VBC node without a converged entry at its top rung never delivered.
-        nlohmann::json dropped = nlohmann::json::array();
-        for (const auto &n : dag_) {
-          if (n.kind != CalcKind::VBC || n.protocols.empty()) continue;
-          const std::string top = protocol_key_at(n.protocols.back());
-          const auto &j = meta.json();
-          const bool has_entry = j.contains("vbc_states") &&
-                                 j["vbc_states"].contains(n.id) &&
-                                 j["vbc_states"][n.id].contains(top);
-          if (has_entry && j["vbc_states"][n.id][top].value("converged", false))
-            continue;
-          // NB: solve_vbc is one-shot and always saves converged=true, so a
-          // present VBC entry is caught by the `continue` above — the
-          // "built ... not converged" arm is currently unreachable for VBC and
-          // kept only as defensive coverage if VBC ever gains partial saves
-          // (review LOW).
-          const char *reason =
-              stalled_ids.count(n.id)
-                  ? "stalled (quarantined by the no-progress guard)"
-                  : has_entry
-                        ? "built at the top rung but not converged"
-                        : "prerequisites never converged (gated out of every wave)";
-          dropped.push_back({{"id", n.id},
-                             {"top_protocol_key", top},
-                             {"reason", reason}});
-        }
-        // Dropped VBC ⇒ the beta/raman rows it feeds cannot be assembled.
+        // (audit_dropped_work, calc_manager.hpp: undelivered VBC sources and
+        // two-photon legs whose ES bundle never converged.)
+        const nlohmann::json dropped = audit_dropped_work(dag_, meta_json, stalled_ids);
+        // Dropped work ⇒ the beta/raman/2PA rows it feeds cannot be assembled.
         // Record the audit in the metadata (rank 0, through the layer) even
         // when empty, so a later completing run CLEARS a stale drop list.
         if (world.rank() == 0) {
@@ -1322,10 +1374,19 @@ public:
       // legacy max_iters==0 "Resume forever" FD mode), whose reconcile branches
       // don't honest-climb the schedule shape the way the FD/max_iters branch
       // does, so the bare id@protocol signature repeats even mid-convergence.
-      const auto &mj = meta.json();
+      const auto &mj = meta_json;
+      // The fingerprint must contain only what MEANS progress. StateMetrics
+      // embeds wall_s and rss_gb, which differ on every re-solve however little
+      // the solve achieved, so dumping the subtree whole made
+      // `progress == last_progress` unreachable and everything below this `if`
+      // dead code. iters/bytes/coeffs stay: those move only when the state does.
       std::string progress;
-      for (const char *k : {"fd_states", "excited_states", "vbc_states"})
-        if (mj.contains(k)) progress += mj[k].dump();
+      for (const char *k : {"fd_states", "excited_states", "vbc_states"}) {
+        if (!mj.contains(k)) continue;
+        nlohmann::json sub = mj[k];
+        detail_exec::strip_volatile_metrics(sub);
+        progress += sub.dump();
+      }
       if (sig == last_sig && progress == last_progress) {
         // No progress on this wave: quarantine its nodes and try the rest of
         // the schedule. The run only stops when nothing unquarantined remains.
@@ -1629,6 +1690,7 @@ private:
       const std::string es_key = protocol_key_at(es->protocols.back());
       if (!meta["excited_states"].contains(es_key)) continue;
       const auto &b = meta["excited_states"][es_key];
+      if (!detail_calc::es_entry_matches(b, *es)) continue;  // another bundle's roots (C5)
       if (!b.value("converged", false)) continue;       // ES not converged yet
       if (!b.contains("roots") || !b["roots"].is_array()) continue;
 
@@ -1726,29 +1788,14 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
   const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   auto fd_acc = [&](const Perturbation &p, double f) -> nlohmann::json {
-    nlohmann::json a;   // rank-0 only: rows are assembled on rank 0
-    const std::string chan = p.description();
-    const std::string fk   = ResponseMetadata::freq_key(f);
-    const std::string sk =
-        best_usable_fd_source_key(acc_meta, chan, fk, acc_thr, acc_k, key);
-    a["input"] = chan;
-    a["freq"]  = f;
-    a["source_protocol_key"] = sk;
-    if (!sk.empty() && acc_meta["fd_states"][chan][sk].contains(fk)) {
-      const auto &e = acc_meta["fd_states"][chan][sk][fk];
-      // Same semantics as alpha's row_accuracy (review fix): `converged` is the
-      // honest STRICT verdict — an accepted-at-maxiter source (metadata
-      // converged forced true to unblock the VBC gate) reports converged=false
-      // + accepted=true here, never a silently over-stated accuracy claim.
-      const bool acc = e.value("accepted", false);
-      a["converged"]    = e.value("converged", false) && !acc;
-      a["accepted"]     = acc;
-      a["bsh_residual"] = e.value("bsh_residual", 0.0);
-    }
-    return a;
+    return fd_leg_accuracy(acc_meta, p, f, acc_thr, acc_k, key);  // rank-0 only
   };
 
-  for (const auto &vr : plan.vbc) {
+  // Full Raman plans carry the all-atoms nuclear sentinel on the C side; the
+  // saved sources are per atom (build_dag expanded them), so expand here too.
+  const auto vbc_requests = expand_vbc_requests(
+      plan.vbc, static_cast<int>(gs.molecule().natom()));
+  for (const auto &vr : vbc_requests) {
     const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
     const std::string vbc_id =
         vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);
@@ -1951,6 +1998,15 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     print("\n=== TPA assembly  protocol_key=", key, "  n_roots=", nroots, " ===");
 
   std::vector<nlohmann::json> rows;
+  // Rank-0 metadata snapshot for per-row accuracy (the three FD legs at w_f/2),
+  // same discipline as alpha/beta (review finding C9): a 2PA row built on an
+  // unconverged or accepted-at-maxiter leg says so.
+  nlohmann::json acc_meta;
+  if (world.rank() == 0)
+    acc_meta = ResponseMetadata::load_or_create(
+                   ctx.calc_dir + "/response_metadata.json").json();
+  const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
+  const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   // rank-0 table data (S tensor + observables per root) for the Dalton-style print.
   std::vector<int>                     tbl_f;
   std::vector<double>                  tbl_w;
@@ -2173,6 +2229,20 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
                       {"sigma_linear_gm", obs.sigma_linear_gm},
                       {"sigma_circular_gm", obs.sigma_circular_gm},
                       {"delta_parallel", obs.D_linear}});
+      {
+        nlohmann::json legs = nlohmann::json::array();
+        bool all_conv = true; double max_res = 0.0;
+        for (int a = 0; a < 3; ++a) {
+          auto leg = fd_leg_accuracy(acc_meta, Perturbation::dipole(a), wf_half,
+                                     acc_thr, acc_k, key);
+          all_conv = all_conv && leg.value("converged", false);
+          max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
+          legs.push_back(std::move(leg));
+        }
+        rows.back()["row_accuracy"]     = std::move(legs);
+        rows.back()["converged"]        = all_conv;
+        rows.back()["max_bsh_residual"] = max_res;
+      }
       tbl_f.push_back(static_cast<int>(f)); tbl_w.push_back(wf);
       tbl_S.push_back(S); tbl_o.push_back(obs);
     }
@@ -2307,13 +2377,12 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
             ctx.calc_dir + "/response_metadata.json");
-        sk = best_usable_fd_source_key(meta.json(), chan, fkey, thresh, k_now, key);
-        if (!sk.empty()) {
-          const auto &e = meta.json()["fd_states"][chan][sk][fkey];
-          ac = e.value("accepted",  false) ? 1 : 0;
-          cv = (e.value("converged", false) && !ac) ? 1 : 0;
-          rs = e.value("bsh_residual", 0.0);
-        }
+        const auto a = fd_leg_accuracy(meta.json(), Perturbation::dipole(ax[i]), w,
+                                       thresh, k_now, key);
+        sk = a.value("source_protocol_key", std::string{});
+        cv = a.value("converged", false) ? 1 : 0;
+        ac = a.value("accepted", false) ? 1 : 0;
+        rs = a.value("bsh_residual", 0.0);
       }
       world.gop.broadcast_serializable(sk, 0);
       world.gop.broadcast(cv, 0);

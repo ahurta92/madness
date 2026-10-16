@@ -51,6 +51,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -233,13 +234,29 @@ fd_entry(const nlohmann::json &meta, const std::string &pert,
 // can never disagree. (Replaced the old converged-only has_coarser_converged_fd,
 // which missed coarser PARTIALS and didn't exclude diverged seeds.)
 
-/// ES bundle entry at a key, or nullptr.
+/// Is this excited_states entry the bundle `node` asks for? The entry must
+/// record the same type (tda/full) and root count. A legacy entry that records
+/// neither is accepted (it predates the identity fields). Review finding C5: an
+/// entry keyed on protocol alone let a converged TDA bundle satisfy a later RPA
+/// or larger-n_roots request in the same calc dir.
+inline bool es_entry_matches(const nlohmann::json &e, const CalcNode &node) {
+  if (e.contains("type") &&
+      e.value("type", std::string{}) != (node.tda ? "tda" : "full"))
+    return false;
+  if (e.contains("n_roots") && e.value("n_roots", 0) != node.n_roots)
+    return false;
+  return true;
+}
+
+/// ES bundle entry at a key that IS the requested bundle, or nullptr.
 inline const nlohmann::json *es_entry(const nlohmann::json &meta,
-                                      const std::string &key) {
+                                      const std::string &key,
+                                      const CalcNode &node) {
   if (!meta.contains("excited_states") ||
       !meta["excited_states"].contains(key))
     return nullptr;
-  return &meta["excited_states"][key];
+  const auto &e = meta["excited_states"][key];
+  return es_entry_matches(e, node) ? &e : nullptr;
 }
 
 /// VBC status entry at vbc_states/<id>/<key>, or nullptr.
@@ -270,11 +287,13 @@ inline bool has_coarser_converged_vbc(const nlohmann::json &meta,
 }
 
 inline bool has_coarser_converged_es(const nlohmann::json &meta,
+                                     const CalcNode &node,
                                      double target_thresh, int target_k) {
   if (!meta.contains("excited_states") || !meta.contains("protocols"))
     return false;
   const auto &protos = meta["protocols"];
   for (const auto &[key, ent] : meta["excited_states"].items()) {
+    if (!es_entry_matches(ent, node)) continue;
     if (!entry_converged(ent)) continue;
     if (!protos.contains(key)) continue;
     const double t  = protos[key].value("thresh", 0.0);
@@ -300,6 +319,8 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 ///                    bundle converges (run(), next increment).
 ///   * nuclear_fd  -> all-atoms sentinel (pert.atom < 0) expands to one node
 ///                    per atom in [0, n_atoms); a concrete atom passes through.
+///   * vbc         -> one node each; a C side with the all-atoms sentinel
+///                    expands per atom the same way (full Raman).
 std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
   std::vector<CalcNode> dag;
 
@@ -369,7 +390,10 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     }
   }
 
-  for (const auto &r : plan.vbc) {
+  // One VBC node per (B,C) pair. A C side carrying the all-atoms nuclear
+  // sentinel (full Raman) expands to one node per atom, exactly like the
+  // nuclear_fd sentinel above, so its prerequisites name the concrete legs.
+  for (const auto &r : expand_vbc_requests(plan.vbc, n_atoms)) {
     CalcNode n;
     n.kind          = CalcKind::VBC;
     n.pert          = r.pert_b;     // B side
@@ -408,8 +432,12 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
 /// LARGER --maxiter turns the same entry back into Resume (iter < max_iters), so
 /// "continue iterating" is still available. max_iters == 0 = legacy strict
 /// behavior (Resume forever; run() then halts on no-progress).
+///
+/// `es_max_iters` > 0 replaces max_iters for ES nodes (deck excited.maxiter);
+/// 0 inherits max_iters. FD and VBC nodes never see it.
 NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
-                          double thresh, int max_iters = 0) {
+                          double thresh, int max_iters = 0,
+                          int es_max_iters = 0) {
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
 
@@ -422,14 +450,22 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
   // saves identical metadata, which run()'s progress-aware no-progress guard
   // then quarantines — no infinite Restart loop.)
   if (node.kind == CalcKind::ES) {
-    if (const auto *e = detail_calc::es_entry(meta, key)) {
+    if (const auto *e = detail_calc::es_entry(meta, key, node)) {
       if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
       if (detail_calc::entry_diverged(*e))
-        return detail_calc::has_coarser_converged_es(meta, thresh, k)
+        return detail_calc::has_coarser_converged_es(meta, node, thresh, k)
                    ? NodeAction::Restart : NodeAction::Fresh;
+      // Honest climb, as for FD below (review finding C12): a stalled or
+      // budget-exhausted bundle is done at this rung. Without this a stalled
+      // bundle came back Resume on every pass, and the no-progress guard only
+      // stops it if a re-solve writes byte-identical metadata.
+      const int budget = es_max_iters > 0 ? es_max_iters : max_iters;
+      if (budget > 0 &&
+          (e->value("iter", 0) >= budget || e->value("stalled", false)))
+        return NodeAction::Skip;
       return NodeAction::Resume;
     }
-    return detail_calc::has_coarser_converged_es(meta, thresh, k)
+    return detail_calc::has_coarser_converged_es(meta, node, thresh, k)
                ? NodeAction::Restart
                : NodeAction::Fresh;
   }
@@ -459,7 +495,18 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
                  ? NodeAction::Fresh : NodeAction::Restart;
     // Honest-climb: budget exhausted at this rung -> done here, climb (see
     // the doc block above). `iter` is the last attempt's count (save-side).
-    if (max_iters > 0 && e->value("iter", 0) >= max_iters)
+    //
+    // A STALLED attempt counts as exhausted too. The plateau detector gives up
+    // at stall_window (~6) iterations, well short of max_iters (60 in the
+    // shipped decks), so `iter >= max_iters` never fires for it: the rung came
+    // back Resume, re-solved from the same state, plateaued in the same place,
+    // and came back Resume again. The no-progress guard in run() is the second
+    // net, and it was not catching this either (its fingerprint included
+    // wall_s/rss_gb) -- so the default path on any ladder tighter than two rungs
+    // did not terminate. A re-solve of a plateaued state is deterministic;
+    // there is nothing to gain by running it again.
+    if (max_iters > 0 &&
+        (e->value("iter", 0) >= max_iters || e->value("stalled", false)))
       return NodeAction::Skip;
     return NodeAction::Resume;
   }
@@ -498,7 +545,7 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
     if (!dep) return false;
     bool ok = false;
     if (dep->kind == CalcKind::ES) {
-      const auto *e = detail_calc::es_entry(meta, key);
+      const auto *e = detail_calc::es_entry(meta, key, *dep);
       ok = e && detail_calc::entry_converged(*e);
     } else {
       const auto *e = detail_calc::fd_entry(meta, dep->pert.description(),
@@ -542,7 +589,8 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 std::vector<std::vector<WorkItem>>
 schedule(const std::vector<CalcNode> &dag,
          const std::vector<double> &global_ramp,
-         const nlohmann::json &meta, int max_iters = 0) {
+         const nlohmann::json &meta, int max_iters = 0,
+         int es_max_iters = 0) {
   using detail_calc::ramp_contains;
   std::vector<std::vector<WorkItem>> waves;
 
@@ -559,7 +607,7 @@ schedule(const std::vector<CalcNode> &dag,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
     if (!prerequisites_converged(*n, dag, meta, thresh))   return false;
-    const NodeAction a = reconcile_protocol(*n, meta, thresh, max_iters);
+    const NodeAction a = reconcile_protocol(*n, meta, thresh, max_iters, es_max_iters);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};
     return true;
@@ -607,6 +655,88 @@ schedule(const std::vector<CalcNode> &dag,
   }
 
   return waves;
+}
+
+// ---------------------------------------------------------------------------
+// fd_leg_accuracy — the honest verdict of one FD leg behind a property row. Pure.
+// ---------------------------------------------------------------------------
+
+/// Accuracy record of the FD state (pert, freq) a property row was built from,
+/// at target (thresh, k): the SAME source the loader uses (best_usable_fd_source_key),
+/// so the reported accuracy is the accuracy of the state actually contracted.
+/// `converged` is the STRICT verdict — an accepted-at-maxiter state (converged
+/// forced true in fd_states so dependent gates unblock) reports converged=false
+/// and accepted=true. Shared by the alpha, beta/Raman and 2PA assemblers
+/// (review findings C9, D4). Returns {input, freq, source_protocol_key,
+/// converged, accepted, bsh_residual}; source_protocol_key is "" when no usable
+/// state exists.
+inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturbation &p,
+                                      double freq, double thresh, int k,
+                                      const std::string &key) {
+  const std::string chan = p.description();
+  const std::string fk   = ResponseMetadata::freq_key(freq);
+  const std::string sk   = best_usable_fd_source_key(meta, chan, fk, thresh, k, key);
+  nlohmann::json a{{"input", chan}, {"freq", freq}, {"source_protocol_key", sk},
+                   {"converged", false}, {"accepted", false}, {"bsh_residual", 0.0}};
+  if (!sk.empty()) {
+    const auto &e = meta["fd_states"][chan][sk][fk];
+    const bool acc    = e.value("accepted", false);
+    a["converged"]    = e.value("converged", false) && !acc;
+    a["accepted"]     = acc;
+    a["bsh_residual"] = e.value("bsh_residual", 0.0);
+  }
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+// audit_dropped_work — planned work the run ended without delivering. Pure.
+// ---------------------------------------------------------------------------
+
+/// An empty schedule does NOT mean every planned node executed: honest-climb can
+/// walk a stubborn prerequisite up the whole ladder unconverged, and nodes gated
+/// on it are then invisible to schedule(). Audit the plan against the metadata.
+/// Returns [{id, top_protocol_key, reason}]. The run records this under
+/// run_summary/dropped_work and names it in stop_reason.
+inline nlohmann::json audit_dropped_work(const std::vector<CalcNode> &dag,
+                                         const nlohmann::json &meta,
+                                         const std::set<std::string> &stalled_ids) {
+  nlohmann::json dropped = nlohmann::json::array();
+  for (const auto &n : dag) {
+    if (n.kind != CalcKind::VBC || n.protocols.empty()) continue;
+    const std::string top = protocol_key_at(n.protocols.back());
+    const bool has_entry = meta.contains("vbc_states") &&
+                           meta["vbc_states"].contains(n.id) &&
+                           meta["vbc_states"][n.id].contains(top);
+    if (has_entry && meta["vbc_states"][n.id][top].value("converged", false))
+      continue;
+    // solve_vbc is one-shot and always saves converged=true, so a present VBC
+    // entry is caught by the `continue` above; the "built ... not converged" arm
+    // is defensive coverage in case VBC ever gains partial saves.
+    const char *reason =
+        stalled_ids.count(n.id)
+            ? "stalled (quarantined by the no-progress guard)"
+            : has_entry ? "built at the top rung but not converged"
+                        : "prerequisites never converged (gated out of every wave)";
+    dropped.push_back({{"id", n.id}, {"top_protocol_key", top}, {"reason", reason}});
+  }
+  // Two-photon legs ("*" DerivedFD) expand only once their ES bundle converges
+  // at its top rung. If it never did (stalled, budget exhausted, quarantined),
+  // the legs and the 2PA rows they feed were never produced: report it.
+  for (const auto &n : dag) {
+    if (!n.is_symbolic() || n.prerequisites.empty()) continue;
+    const CalcNode *es = nullptr;
+    for (const auto &e : dag)
+      if (e.id == n.prerequisites.front()) { es = &e; break; }
+    if (!es || es->protocols.empty()) continue;
+    const std::string top = protocol_key_at(es->protocols.back());
+    const auto *entry = detail_calc::es_entry(meta, top, *es);
+    if (entry && detail_calc::entry_converged(*entry)) continue;
+    dropped.push_back({{"id", n.id}, {"top_protocol_key", top},
+                       {"reason", "excited-state bundle " + es->id +
+                                      " never converged at its top rung "
+                                      "(two-photon legs never expanded)"}});
+  }
+  return dropped;
 }
 
 // ---------------------------------------------------------------------------

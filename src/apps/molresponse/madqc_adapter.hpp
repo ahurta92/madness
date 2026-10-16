@@ -25,6 +25,7 @@
 // selected in madqc.cpp instead).
 // -----------------------------------------------------------------------------
 
+#include <apps/molresponse/deck_settings.hpp>
 #include <apps/molresponse/orchestrator/response_workflow.hpp>
 #include <apps/molresponse/solvers/dalton_import.hpp>
 #include <apps/molresponse/solvers/dalton_gs_seed.hpp>   // GS seed from molden (dalton.dir)
@@ -172,8 +173,8 @@ struct molresponse_v3_lib {
   struct Results {
     nlohmann::json metadata;
     nlohmann::json properties;
-    nlohmann::json vibrational_analysis;  // empty for alpha (R3a)
-    nlohmann::json raman_spectra;         // empty for alpha (R3a)
+    nlohmann::json vibrational_analysis;  // full Raman only (raman.nuc_atom -1)
+    nlohmann::json raman_spectra;         // full Raman only (raman.nuc_atom -1)
   };
 
   inline static Results
@@ -271,6 +272,15 @@ struct molresponse_v3_lib {
     // hyperpolarizability instead of silently dropping it (M3 golden regen
     // caught this: the alpha+beta deck produced alpha-only output).
     if (wants("hyperpolarizability") || rp.quadratic()) {
+      // Optical rectification needs signed-frequency legs in the quadratic
+      // source, which the planner does not build yet (beta_vbc_pairs returns
+      // no pair for OR): the legs would solve and beta would silently be
+      // absent (review finding C10).
+      if (rp.beta_or())
+        throw std::runtime_error(
+            "response: beta.or (optical rectification) is not implemented — its "
+            "quadratic source needs signed-frequency legs. Drop beta.or for SHG "
+            "(or static, at frequency 0) beta.");
       ResponsePropertyRequest r;
       r.kind = ResponsePropertyKind::Hyperpolarizability;
       r.beta_process = rp.beta_or() ? BetaProcess::OR : BetaProcess::SHG;
@@ -281,15 +291,39 @@ struct molresponse_v3_lib {
       add(r);
     }
     if (wants("raman")) {
-      // SINGLE-COMPONENT vibrational Raman (atom 0, z) — v3's full per-atom
-      // tensor is deferred (post-state-parallel), so this won't match v2's full
-      // Raman; it exercises the β(dipole;dipole,nuclear) path.
+      // Deck raman.nuc_atom / raman.nuc_axis select ONE nuclear coordinate:
+      // the run emits the dipole x dipole block of d(alpha)/dQ for it at every
+      // requested frequency. raman.nuc_atom -1 selects the FULL set: 3N nuclear
+      // legs, the dipole x nuclear sources for every coordinate, and the
+      // normal-mode Raman analysis (Hessian from the same nuclear response
+      // states, frequencies, activities, depolarization ratios) under
+      // properties.vibrational_analysis / properties.raman_spectra.
       ResponsePropertyRequest r;
       r.kind = ResponsePropertyKind::PolarizabilityGradient;
       r.gradient_mode = GradientMode::Nuclear;
       r.frequencies = freqs;
-      r.raman_nuc_atom = 0;
-      r.raman_nuc_axis = 2;
+      r.raman_nuc_atom = rp.raman_nuc_atom();
+      r.raman_nuc_axis = rp.raman_nuc_axis();
+      const int natom = static_cast<int>(scf_calc->molecule.natom());
+      if (r.raman_nuc_atom >= 0) {
+        if (r.raman_nuc_axis < 0 || r.raman_nuc_axis > 2)
+          throw std::runtime_error(
+              "response: raman.nuc_axis must be 0 (x), 1 (y) or 2 (z)");
+        // Upper bound (review finding C13): an out-of-range atom otherwise
+        // fails later, inside the nuclear-derivative functor, as an unnamed
+        // exception.
+        if (r.raman_nuc_atom >= natom)
+          throw std::runtime_error(
+              "response: raman.nuc_atom " + std::to_string(r.raman_nuc_atom) +
+              " is out of range for a molecule of " + std::to_string(natom) +
+              " atom(s) (atoms are numbered from 0)");
+      } else {
+        r.raman_nuc_atom = -1;   // full set; the axis is ignored
+        r.raman_nuc_axis = -1;
+        if (world.rank() == 0)
+          print("response: raman.nuc_atom -1 — full polarizability gradient over",
+                3 * natom, "nuclear coordinates with normal-mode analysis");
+      }
       add(r);
     }
     if (rp.excited_enable()) {
@@ -327,6 +361,8 @@ struct molresponse_v3_lib {
     // above to resolve the ground archive relative to this cwd.)
     in.settings.calc_dir = reference_prefix.empty() ? "." : outdir.string();
     in.settings.max_iters = static_cast<int>(rp.maxiter());
+    // excited.maxiter / guess_max_iter / maxsub (review C2), when the deck sets them.
+    apply_deck_es_knobs(rp, in.settings);
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
     // standalone --fd-subworlds flag; archive_file above makes it live).
     in.settings.fd_subworlds = std::max(0, rp.subworlds());
@@ -360,10 +396,13 @@ struct molresponse_v3_lib {
               "sidesteps the question entirely on multi-node runs.");
     }
     in.settings.policy.dconv_user = rp.dconv();
-    // Deck overrides for the iteration policy (2026-09-10): the response block's
-    // `kain` / `maxrotn` reach the FD/ES solvers only when the deck SETS them.
-    // The deck default kain=false predates the solvers' KAIN-on default;
-    // honouring it unconditionally would switch KAIN off for every run.
+    // Deck overrides for the iteration policy (2026-09-10), applied only when
+    // the deck SETS them: the deck default kain=false predates the solvers'
+    // KAIN-on default, so honouring it unconditionally would switch KAIN off
+    // for every run. This policy is the FD solves' as is. The ES executors
+    // build their own from it (es_iteration_policies): kain.min_residual and
+    // the stall detector carry over, while kain / maxrotn reach ES through
+    // apply_deck_es_knobs above.
     if (rp.is_user_defined("kain"))    in.settings.policy.kain    = rp.kain();
     if (rp.is_user_defined("maxrotn")) in.settings.policy.maxrotn = rp.maxrotn();
     if (rp.is_user_defined("kain.min_residual"))
@@ -438,6 +477,8 @@ struct molresponse_v3_lib {
     Results res;
     res.metadata = std::move(out.metadata);
     res.properties = std::move(out.properties);
+    res.vibrational_analysis = std::move(out.vibrational_analysis);
+    res.raman_spectra = std::move(out.raman_spectra);
     if (world.rank() == 0) {
       res.metadata["engine"]         = "molresponse_v3";
       res.metadata["v3_timing"]      = std::move(out.timing);

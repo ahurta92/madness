@@ -63,14 +63,16 @@ void put_protocol(json &m, double thresh) {
 // Write an fd_states entry. `iter` = the last attempt's iteration count
 // (save-side state.iter) — drives reconcile's honest-climb rule.
 void put_fd(json &m, const std::string &pert, double thresh, double freq,
-            bool converged, bool diverged = false, int iter = 0) {
+            bool converged, bool diverged = false, int iter = 0,
+            bool stalled = false) {
   const std::string key = protocol_key_at(thresh);
   const std::string fk  = ResponseMetadata::freq_key(freq);
   put_protocol(m, thresh);
   m["fd_states"][pert][key][fk] = {{"freq", freq},
                                    {"converged", converged},
                                    {"diverged", diverged},
-                                   {"iter", iter}};
+                                   {"iter", iter},
+                                   {"stalled", stalled}};
 }
 
 void put_es(json &m, double thresh, bool converged, bool diverged = false) {
@@ -78,6 +80,20 @@ void put_es(json &m, double thresh, bool converged, bool diverged = false) {
   put_protocol(m, thresh);
   m["excited_states"][key] = {{"converged", converged},
                               {"diverged", diverged}};
+}
+
+// ES bundle entry with the identity + progress fields save_es_roots writes
+// (type "tda"/"full", shell, n_roots, iter, stalled). put_es above writes the
+// legacy shape (no identity fields).
+void put_es_bundle(json &m, double thresh, bool converged, const std::string &type,
+                   int n_roots, bool stalled = false, int iter = 0,
+                   bool diverged = false) {
+  const std::string key = protocol_key_at(thresh);
+  put_protocol(m, thresh);
+  m["excited_states"][key] = {{"type", type},         {"shell", "closed"},
+                              {"n_roots", n_roots},   {"bundle_dir", "es__" + key},
+                              {"converged", converged}, {"diverged", diverged},
+                              {"stalled", stalled},   {"iter", iter}};
 }
 
 void put_vbc(json &m, const std::string &id, double thresh, bool converged,
@@ -143,6 +159,22 @@ int main() {
     for (const auto &n : dag)
       EXPECT(!(n.kind == CalcKind::NuclearFD && n.pert.is_all_atoms()),
              "no unexpanded all-atoms sentinel remains");
+    // Full Raman: the 9 sentinel VBC expand to one node per atom, each naming
+    // its concrete legs as prerequisites.
+    int vbc = 0; bool concrete = true, prereq_ok = true;
+    for (const auto &n : dag) {
+      if (n.kind != CalcKind::VBC) continue;
+      ++vbc;
+      concrete = concrete && !n.pert_c.is_all_atoms();
+      prereq_ok = prereq_ok && n.prerequisites.size() == 2 &&
+                  n.prerequisites[0] == fd_node_id(n.pert, n.freq) &&
+                  n.prerequisites[1] == fd_node_id(n.pert_c, n.freq_c);
+    }
+    EXPECT(vbc == 18, "9 sentinel VBC x 2 atoms = 18 VBC nodes");
+    EXPECT(concrete, "no VBC keeps the all-atoms sentinel");
+    EXPECT(prereq_ok, "each VBC depends on its concrete dipole and nuclear legs");
+    EXPECT(find_id(dag, "vbc:dipole_x__nuc_1_z@f0.00000_f0.00000") != nullptr,
+           "vbc dipole_x x nuc_1_z node id");
   }
 
   // ====== build_dag: resonance Raman -> ES + symbolic derived FD ===========
@@ -222,6 +254,24 @@ int main() {
            "budget remains (iter < max_iters) -> Resume (continue iterating)");
     EXPECT(reconcile_protocol(fd, m7, 1e-6) == NodeAction::Resume,
            "max_iters unspecified (0) -> legacy Resume");
+    // ---- a STALLED rung is exhausted too, however few iterations it used ----
+    // The plateau detector gives up at stall_window (~6) iterations, far short
+    // of the shipped decks' max_iters (60), so `iter >= max_iters` never fired
+    // for it: reconcile said Resume, the re-solve plateaued in the same place,
+    // and reconcile said Resume again — forever. Re-solving a plateaued state
+    // is deterministic, so there is nothing to gain from the next attempt.
+    json m7s = empty_meta();
+    put_fd(m7s, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
+           /*iter=*/6, /*stalled=*/true);
+    EXPECT(reconcile_protocol(fd, m7s, 1e-6, /*max_iters=*/60) == NodeAction::Skip,
+           "stalled well under the budget -> Skip (climb), not Resume-forever");
+    // Not stalled at the same iteration count keeps the old answer.
+    json m7n = empty_meta();
+    put_fd(m7n, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
+           /*iter=*/6, /*stalled=*/false);
+    EXPECT(reconcile_protocol(fd, m7n, 1e-6, /*max_iters=*/60) == NodeAction::Resume,
+           "same iter, not stalled -> Resume (still converging)");
+
     // A diverged state never climbs — divergence beats the exhausted-budget rule.
     json m8 = empty_meta();
     put_fd(m8, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true,
@@ -404,6 +454,194 @@ int main() {
     for (const auto &wave : w0)
       if (wave_has(wave, vbc->id)) vbc_scheduled = true;
     EXPECT(!vbc_scheduled, "VBC not scheduled while FD prereq unconverged");
+  }
+
+  // ====== reconcile ES: the bundle on disk must BE the requested bundle ======
+  // review/findings C5: the ES verdict keyed on protocol only, so a converged TDA
+  // bundle satisfied a later RPA (or larger n_roots) request in the same calc dir.
+  std::printf("=== reconcile ES: bundle identity (type, n_roots) ===\n");
+  {
+    ResponsePlan plan;
+    plan.es.push_back({/*tda=*/false, /*n_roots=*/2, {1e-4}});
+    auto dag = build_dag(plan, 0);
+    const CalcNode *es = find_id(dag, es_node_id(false, 2));
+    json m = empty_meta();
+    put_es_bundle(m, 1e-4, /*converged=*/true, "tda", 2);
+    EXPECT(reconcile_protocol(*es, m, 1e-4) != NodeAction::Skip,
+           "converged TDA bundle does not satisfy an RPA request");
+    json m2 = empty_meta();
+    put_es_bundle(m2, 1e-4, /*converged=*/true, "full", 1);
+    EXPECT(reconcile_protocol(*es, m2, 1e-4) != NodeAction::Skip,
+           "converged 1-root bundle does not satisfy a 2-root request");
+    json m3 = empty_meta();
+    put_es_bundle(m3, 1e-4, /*converged=*/true, "full", 2);
+    EXPECT(reconcile_protocol(*es, m3, 1e-4) == NodeAction::Skip,
+           "matching converged bundle -> Skip");
+    json m4 = empty_meta();
+    put_es(m4, 1e-4, /*converged=*/true);   // legacy entry: no type / n_roots
+    EXPECT(reconcile_protocol(*es, m4, 1e-4) == NodeAction::Skip,
+           "legacy entry without identity fields still Skips");
+
+    // The derived-FD prerequisite must see the same identity: a converged TDA
+    // bundle does not unblock legs planned for the RPA bundle.
+    plan.derived_fd.push_back({Perturbation::dipole(2), "*", {1e-4}});
+    auto dag2 = build_dag(plan, 0);
+    const CalcNode *dfd = find_id(dag2, derived_fd_node_id(Perturbation::dipole(2), "*"));
+    EXPECT(dfd && !prerequisites_converged(*dfd, dag2, m, 1e-4),
+           "TDA bundle does not satisfy the RPA bundle prerequisite");
+    EXPECT(dfd && prerequisites_converged(*dfd, dag2, m3, 1e-4),
+           "matching bundle satisfies the prerequisite");
+  }
+
+  // ====== reconcile ES: honest climb (a stalled / exhausted rung is done) =====
+  // review/findings C12: ES had no analogue of the FD honest-climb rule, so a
+  // stalled bundle was re-queued as Resume on every pass with no bound.
+  std::printf("=== reconcile ES: honest climb ===\n");
+  {
+    ResponsePlan plan;
+    plan.es.push_back({/*tda=*/true, /*n_roots=*/1, {1e-4}});
+    auto dag = build_dag(plan, 0);
+    const CalcNode *es = find_id(dag, es_node_id(true, 1));
+    json ms = empty_meta();
+    put_es_bundle(ms, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/true, /*iter=*/7);
+    EXPECT(reconcile_protocol(*es, ms, 1e-4, /*max_iters=*/30) == NodeAction::Skip,
+           "stalled unconverged ES bundle -> Skip");
+    json mx = empty_meta();
+    put_es_bundle(mx, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/30);
+    EXPECT(reconcile_protocol(*es, mx, 1e-4, /*max_iters=*/30) == NodeAction::Skip,
+           "budget-exhausted ES bundle -> Skip");
+    json mp = empty_meta();
+    put_es_bundle(mp, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/5);
+    EXPECT(reconcile_protocol(*es, mp, 1e-4, /*max_iters=*/30) == NodeAction::Resume,
+           "partial ES bundle with budget left -> Resume");
+    EXPECT(reconcile_protocol(*es, ms, 1e-4, /*max_iters=*/0) == NodeAction::Resume,
+           "max_iters == 0 keeps the legacy Resume");
+  }
+
+  // ====== reconcile: excited.maxiter is the ES budget ========================
+  // review/findings C2: the deck's excited.maxiter never reached the ES solve;
+  // ES ran (and honest-climbed) on response.maxiter. es_max_iters > 0 is the
+  // ES budget, 0 inherits max_iters, and FD nodes never see it.
+  std::printf("=== reconcile: ES iteration budget ===\n");
+  {
+    ResponsePlan plan;
+    plan.es.push_back({/*tda=*/true, /*n_roots=*/1, {1e-4}});
+    auto dag = build_dag(plan, 0);
+    const CalcNode *es = find_id(dag, es_node_id(true, 1));
+    json m = empty_meta();
+    put_es_bundle(m, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/20);
+    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/30, /*es_max_iters=*/20) ==
+               NodeAction::Skip,
+           "ES bundle at its own budget -> Skip though max_iters has room");
+    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/30, /*es_max_iters=*/0) ==
+               NodeAction::Resume,
+           "es_max_iters == 0 inherits max_iters");
+    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/10, /*es_max_iters=*/40) ==
+               NodeAction::Resume,
+           "a larger ES budget keeps the bundle going past max_iters");
+    EXPECT(schedule(dag, {1e-4}, m, /*max_iters=*/30, /*es_max_iters=*/20).empty(),
+           "schedule passes the ES budget to reconcile");
+
+    CalcNode fd; fd.kind = CalcKind::FD; fd.pert = Perturbation::dipole(2);
+    fd.freq = 0.0; fd.protocols = {1e-4}; fd.id = fd_node_id(fd.pert, fd.freq);
+    json mf = empty_meta();
+    put_fd(mf, "dipole_z", 1e-4, 0.0, /*converged=*/false, false, /*iter=*/20);
+    EXPECT(reconcile_protocol(fd, mf, 1e-4, /*max_iters=*/30, /*es_max_iters=*/20) ==
+               NodeAction::Resume,
+           "FD ignores the ES budget");
+  }
+
+  // ====== ES restart source: never a diverged bundle ==========================
+  // review/findings C4: try_load_es_bundle preferred the exact-key bundle even
+  // when it had diverged, so a Restart re-seeded from the blown-up state. The
+  // selection is now a pure helper shared with the loader (mirrors the FD one).
+  std::printf("=== best_usable_es_source_key ===\n");
+  {
+    const std::string k4 = protocol_key_at(1e-4), k6 = protocol_key_at(1e-6);
+    json m = empty_meta();
+    put_es_bundle(m, 1e-4, /*converged=*/true, "full", 2);
+    put_es_bundle(m, 1e-6, /*converged=*/false, "full", 2, false, 3, /*diverged=*/true);
+    EXPECT(best_usable_es_source_key(m, "full", "closed", 2, 1e-6, 8, k6) == k4,
+           "diverged exact bundle is skipped; the coarser converged one is used");
+    json mp = empty_meta();
+    put_es_bundle(mp, 1e-4, /*converged=*/true, "full", 2);
+    put_es_bundle(mp, 1e-6, /*converged=*/false, "full", 2, false, 3);
+    EXPECT(best_usable_es_source_key(mp, "full", "closed", 2, 1e-6, 8, k6) == k6,
+           "non-diverged exact partial is preferred");
+    EXPECT(best_usable_es_source_key(m, "tda", "closed", 2, 1e-6, 8, k6).empty(),
+           "type mismatch -> no source");
+    EXPECT(best_usable_es_source_key(m, "full", "closed", 3, 1e-6, 8, k6).empty(),
+           "n_roots mismatch -> no source");
+    EXPECT(best_usable_es_source_key(empty_meta(), "full", "closed", 2, 1e-6, 8, k6).empty(),
+           "empty metadata -> no source");
+  }
+
+  // ====== audit_dropped_work: planned work the run never delivered ==========
+  // The VBC audit moved out of CalcManager::run so it can be tested; it now
+  // also reports two-photon legs whose ES bundle never converged at its top
+  // rung (with C12's honest climb such a bundle ends the run unconverged, and
+  // the "*" legs are then never expanded — previously without any trace).
+  std::printf("=== audit_dropped_work ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::Hyperpolarizability;
+    r.beta_process = BetaProcess::SHG;
+    r.frequencies = {0.0};
+    r.axes = {'z'};
+    r.protocol_thresholds = {1e-4};
+    ResponsePlan plan = plan_one(r);
+    plan.es.push_back({/*tda=*/false, /*n_roots=*/1, {1e-4}});
+    plan.derived_fd.push_back({Perturbation::dipole(2), "*", {1e-4}});
+    auto dag = build_dag(plan, 0);
+    const std::string vbc_id = "vbc:dipole_z__dipole_z@f0.00000_f0.00000";
+    const std::string dfd_id = derived_fd_node_id(Perturbation::dipole(2), "*");
+
+    json m = empty_meta();   // nothing delivered
+    auto d = audit_dropped_work(dag, m, {});
+    EXPECT(d.size() == 2, "undelivered VBC and 2PA legs both reported");
+    EXPECT(d.size() == 2 && d[0].value("id", "") == vbc_id &&
+               d[0].value("reason", "") ==
+                   "prerequisites never converged (gated out of every wave)",
+           "VBC entry first, reason unchanged");
+    EXPECT(d.size() == 2 && d[1].value("id", "") == dfd_id &&
+               d[1].value("reason", "").find("never converged") != std::string::npos,
+           "2PA legs reported with the ES bundle as the reason");
+
+    auto s = audit_dropped_work(dag, m, {vbc_id});
+    EXPECT(!s.empty() && s[0].value("reason", "") ==
+                             "stalled (quarantined by the no-progress guard)",
+           "stalled VBC reason unchanged");
+
+    json ok = empty_meta();
+    put_vbc(ok, vbc_id, 1e-4, /*converged=*/true);
+    put_es_bundle(ok, 1e-4, /*converged=*/true, "full", 1);
+    EXPECT(audit_dropped_work(dag, ok, {}).empty(),
+           "delivered VBC + converged ES bundle -> nothing dropped");
+  }
+
+  // ====== fd_leg_accuracy: the honest per-leg verdict every property row uses ==
+  // review/findings C9 + D4: alpha and beta each wrote this logic; 2PA rows had
+  // none. `converged` is the STRICT verdict: an accepted-at-maxiter leg (converged
+  // forced true in fd_states to unblock gates) reports converged=false.
+  std::printf("=== fd_leg_accuracy ===\n");
+  {
+    const std::string k4 = protocol_key_at(1e-4);
+    json m = empty_meta();
+    put_fd(m, "dipole_z", 1e-4, 0.1, /*converged=*/true);
+    m["fd_states"]["dipole_z"][k4]["f0.10000"]["bsh_residual"] = 2.5e-4;
+    auto a = fd_leg_accuracy(m, Perturbation::dipole(2), 0.1, 1e-4, 6, k4);
+    EXPECT(a.value("source_protocol_key", "") == k4 && a.value("converged", false) &&
+               !a.value("accepted", true) && a.value("bsh_residual", 0.0) == 2.5e-4,
+           "converged leg: strict verdict, source key and residual");
+    m["fd_states"]["dipole_z"][k4]["f0.10000"]["accepted"] = true;
+    auto b = fd_leg_accuracy(m, Perturbation::dipole(2), 0.1, 1e-4, 6, k4);
+    EXPECT(!b.value("converged", true) && b.value("accepted", false),
+           "accepted-at-maxiter leg reports converged=false, accepted=true");
+    auto c = fd_leg_accuracy(empty_meta(), Perturbation::dipole(2), 0.1, 1e-4, 6, k4);
+    EXPECT(c.value("source_protocol_key", "x").empty() && !c.value("converged", true),
+           "no usable leg: empty source key, not converged");
+    EXPECT(c.value("input", "") == "dipole_z" && c.value("freq", -1.0) == 0.1,
+           "the leg is identified by input and freq");
   }
 
   std::printf("\n%s  (%d failures)\n", failed ? "FAILED" : "PASSED", failed);

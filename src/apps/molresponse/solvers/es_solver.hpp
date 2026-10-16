@@ -103,9 +103,18 @@ public:
     /// skipped by KAIN/step restriction. Empty = none (the default path never
     /// touches it). Cleared at each protocol (wavelet-thresh) change.
     std::vector<char>                       locked;
-    /// Normalised gate distance per iteration (newest last) for the plateau
-    /// detector (ConvergencePolicy::plateau); reset when the thresh changes.
-    std::vector<double>                     gate_history;
+    /// Normalised distance per iteration (newest last), ONE TRACK PER GATED
+    /// QUANTITY: [0] = max drho/density_target, [1] = max |dw|/omega_target,
+    /// over the ACTIVE roots. A stall needs both flat; reset on a thresh change.
+    std::vector<std::vector<double>>        gate_history;
+    /// The same two tracks per slot, root_gate_history[s] = {drho_s/target,
+    /// |dw_s|/target}, for ConvergencePolicy::root_plateau. Slots hold roots in
+    /// eigenvalue order within a protocol (sort_state_by_omega runs only at
+    /// ramp boundaries), and the history resets with gate_history.
+    std::vector<std::vector<std::vector<double>>> root_gate_history;
+    /// Slots whose root had plateaued above its targets at the last iteration
+    /// (active and not converged). Recorded per root in the bundle metadata.
+    std::vector<int>                        stalled_roots;
     double                                  gate_thresh = -1.0;
     int                                     iter = 0;
     /// Set by step() when the explosion guard trips; iterate<>
@@ -237,7 +246,8 @@ private:
     for (double r : out.last_density_residual) max_drho = std::max(max_drho, r);
     print("iter", out.iter, "  omega =", out.omega,
           "  max_res =", max_res, "  max_dρ =", max_drho,
-          "  gate =", out.gate_history.empty() ? 0.0 : out.gate_history.back());
+          "  gate =", out.gate_history.empty() || out.gate_history[0].empty()
+                          ? 0.0 : out.gate_history[0].back());
     print("             omega(eV) =", out.omega * kHartreeToEV);
 
     if (print_level_ >= PrintLevel::Verbose) {
@@ -1064,39 +1074,83 @@ public:
       out.last_omega_residual[s] = std::abs(out.omega(s) - in.omega(s));
   }
 
-  /// Plateau bookkeeping (2026-09-11): append the normalised gate distance of
-  /// the ACTIVE (unlocked) roots — max over roots of drho/density_target and
-  /// |dw|/omega_target, the same two quantities es_root_converged gates on —
-  /// to the history (reset on a thresh change) and set out.stalled per policy.
-  /// An iteration without a measurable |dw| (sentinel) records +inf, which the
-  /// plateau test treats as "no measurement" (never a stall).
+  /// Plateau bookkeeping: one track per gated quantity (density change, |dw|)
+  /// over the ACTIVE (unlocked) roots, each normalised by its own target. A
+  /// stall needs BOTH flat — testing the max over them stops a solve in which
+  /// one quantity is still falling (see ConvergencePolicy::plateau). An
+  /// iteration with no measurable |dw| (sentinel) records +inf, which makes
+  /// that track inconclusive and withholds the stall.
   void update_stall(State &out, const State &in) const {
     const double thr = madness::FunctionDefaults<3>::get_thresh();
-    out.gate_history = (in.gate_thresh == thr) ? in.gate_history
-                                               : std::vector<double>{};
+    out.gate_history = (in.gate_thresh == thr)
+                           ? in.gate_history
+                           : std::vector<std::vector<double>>(2);
     out.gate_thresh  = thr;
-    double g = 0.0;
-    bool any = false;
+    if (out.gate_history.size() < 2) out.gate_history.resize(2);
+    const double inf = std::numeric_limits<double>::infinity();
+    double g_rho = 0.0, g_om = 0.0;
+    bool any = false, om_ok = true;
     const std::size_t M = out.last_density_residual.size();
-    for (std::size_t s = 0; s < M; ++s) {
-      if (s < out.locked.size() && out.locked[s]) continue;
-      if (s >= out.last_omega_residual.size() ||
-          out.last_omega_residual[s] >= 1.0e8) {           // sentinel: no dw yet
-        g = std::numeric_limits<double>::infinity(); any = true; break;
-      }
-      g = std::max(g, out.last_density_residual[s] / targets_.density_residual);
-      g = std::max(g, out.last_omega_residual[s]   / targets_.omega_residual);
+    for (std::size_t s2 = 0; s2 < M; ++s2) {
+      if (s2 < out.locked.size() && out.locked[s2]) continue;
       any = true;
+      g_rho = std::max(g_rho, out.last_density_residual[s2] / targets_.density_residual);
+      if (s2 >= out.last_omega_residual.size() || out.last_omega_residual[s2] >= 1.0e8)
+        om_ok = false;
+      else
+        g_om = std::max(g_om, out.last_omega_residual[s2] / targets_.omega_residual);
     }
-    if (!any || out.iter <= 1) g = std::numeric_limits<double>::infinity();
-    out.gate_history.push_back(g);
-    out.stalled = !out.diverged && policy_.plateau(out.gate_history);
-    if (out.stalled && print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
-      const std::size_t n = out.gate_history.size();
-      print("[STALL] iter", out.iter, ": gate distance", g, "vs",
-            out.gate_history[n - 1 - static_cast<std::size_t>(policy_.stall_window)],
-            policy_.stall_window, "iters ago (<", 100.0 * policy_.stall_ratio,
-            "% improvement) — density/omega plateau above the targets; stopping.");
+    const bool measured = any && out.iter > 1;
+    out.gate_history[0].push_back(measured ? g_rho : inf);
+    out.gate_history[1].push_back(measured && om_ok ? g_om : inf);
+
+    // Per root: the max tracks above miss a root whose |dw| has met its target
+    // while its density change sits flat above target (root_plateau).
+    out.root_gate_history = (in.gate_thresh == thr)
+                                ? in.root_gate_history
+                                : std::vector<std::vector<std::vector<double>>>{};
+    if (out.root_gate_history.size() < M) out.root_gate_history.resize(M);
+    std::vector<char> active(M, 0), conv(M, 0), plat(M, 0);
+    out.stalled_roots.clear();
+    for (std::size_t s2 = 0; s2 < M; ++s2) {
+      auto &h = out.root_gate_history[s2];
+      if (h.size() < 2) h.resize(2);
+      const bool om_s = s2 < out.last_omega_residual.size() &&
+                        out.last_omega_residual[s2] < 1.0e8;
+      h[0].push_back(out.iter > 1
+                         ? out.last_density_residual[s2] / targets_.density_residual
+                         : inf);
+      h[1].push_back(out.iter > 1 && om_s
+                         ? out.last_omega_residual[s2] / targets_.omega_residual
+                         : inf);
+      active[s2] = !(s2 < out.locked.size() && out.locked[s2]);
+      conv[s2]   = es_root_converged(out, static_cast<int>(s2));
+      plat[s2]   = policy_.root_plateau(h);
+      if (active[s2] && !conv[s2] && plat[s2])
+        out.stalled_roots.push_back(static_cast<int>(s2));
+    }
+    const bool solve_flat = policy_.plateau(out.gate_history);
+    const bool roots_flat = es_roots_stalled(active, conv, plat);
+    out.stalled = !out.diverged && (solve_flat || roots_flat);
+    if (out.stalled && !solve_flat && print_level_ >= PrintLevel::Normal &&
+        world_.rank() == 0) {
+      print("[STALL] iter", out.iter, ": no active root is still improving —",
+            out.stalled_roots.size(), "root(s) flat above target over",
+            policy_.stall_window, "iters (<", 100.0 * policy_.stall_ratio,
+            "% improvement), the rest converged; stopping.");
+      for (int s2 : out.stalled_roots)
+        print("  root", s2, ": density", out.root_gate_history[s2][0].back(),
+              ", |dw|", out.root_gate_history[s2][1].back(), "(normalised)");
+    }
+    if (out.stalled && solve_flat && print_level_ >= PrintLevel::Normal &&
+        world_.rank() == 0) {
+      const std::size_t n = out.gate_history[0].size();
+      const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
+      print("[STALL] iter", out.iter, ": density and |dw| both flat over",
+            policy_.stall_window, "iters (<", 100.0 * policy_.stall_ratio,
+            "% improvement) — density", out.gate_history[0][n - 1], "vs",
+            out.gate_history[0][n - 1 - w], ", |dw|", out.gate_history[1][n - 1],
+            "vs", out.gate_history[1][n - 1 - w], "(normalised); stopping.");
     }
   }
 

@@ -19,6 +19,7 @@
 #include "../ResponseProtocol.hpp"          // set_response_protocol
 #include "../ResponsePropertyPlanner.hpp"   // ResponsePlan
 #include "../calc/calc_executor.hpp"        // ExecutorSettings/Context, FdResponseExecutor, assemble_*
+#include "../solvers/raman_analysis.hpp"    // full Raman: Hessian + normal-mode spectrum
 #include "../calc/calc_manager.hpp"         // CalcManager
 #include "../solvers/gs_fingerprint.hpp"    // GS-archive restart-safety gate
 #include "../solvers/response_metadata.hpp"
@@ -56,6 +57,8 @@ struct ResponseWorkflowInput {
 struct ResponseWorkflowOutput {
   nlohmann::json properties;   // Tier-A tensors (mirror of metadata "properties")
   nlohmann::json metadata;     // full response_metadata.json
+  nlohmann::json vibrational_analysis;  // full Raman: Hessian, modes (metadata mirror)
+  nlohmann::json raman_spectra;         // full Raman: per-mode activities (metadata mirror)
   nlohmann::json timing;       // R1 — reserved
   nlohmann::json diagnostics;  // R1 — reserved
   nlohmann::json exports;      // R2 — reserved
@@ -134,12 +137,26 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
                          const ResponseWorkflowInput &in) {
   ResponseWorkflowOutput out;
   MADNESS_CHECK(!in.protocols.empty());
+  // DFT + quadratic response gate. The quadratic sources (V^BC for beta and
+  // Raman, the derived-FD legs + residue for 2PA) need the SECOND xc kernel
+  // g''_xc[rho^B rho^C] in addition to f_xc. g''_xc is exactly zero for HF
+  // and is not implemented for any functional — running would silently drop
+  // it and return plausible-looking wrong numbers. Refuse instead. Linear
+  // response (alpha) and excited states are fully supported with f_xc.
+  if (gs.scf().xc.is_dft() &&
+      (!in.plan.vbc.empty() || !in.plan.derived_fd.empty()))
+    throw std::runtime_error(
+        "quadratic response (beta / Raman / 2PA) on a DFT ground state needs "
+        "the second xc kernel g''_xc, which is not implemented. Use an HF "
+        "ground state for quadratic properties, or request linear response / "
+        "excited states (f_xc supported) with this functional.");
   nlohmann::json timing;
 
   // 2a. Build the DAG.
   detail_workflow::StageTimer t_build;
   CalcManager::Policy mgr_policy;
   mgr_policy.max_iters_per_step = in.settings.max_iters;
+  mgr_policy.es_max_iters_per_step = in.settings.es_max_iters;
   mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   mgr_policy.fd_subworld_ranks  = in.settings.fd_subworld_ranks;
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
@@ -316,6 +333,12 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   assemble_alpha(ctx, in.plan, in.protocols.back());
   if (!in.plan.vbc.empty())
     assemble_beta(ctx, in.plan, in.protocols.back());
+  // Full Raman: the plan carries the all-atoms nuclear sentinel only when the
+  // request asked for every coordinate, so its presence IS the gate for the
+  // normal-mode analysis (Hessian from the nuclear response states, then the
+  // per-mode spectrum from the raman rows assemble_beta just wrote).
+  if (plan_requests_full_raman(in.plan))
+    assemble_raman_spectrum(ctx, in.plan, in.protocols.back());
   // 2PA: derived FD legs are only planned when the request asked for the
   // two-photon contraction (request.tpa), so their presence IS the gate.
   // assemble_tpa self-guards (returns if no ES bundle; ClosedShell only).
@@ -338,6 +361,10 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
     out.metadata = meta.json();
     if (out.metadata.contains("properties"))
       out.properties = out.metadata["properties"];
+    if (out.metadata.contains("vibrational_analysis"))
+      out.vibrational_analysis = out.metadata["vibrational_analysis"];
+    if (out.metadata.contains("raman_spectra"))
+      out.raman_spectra = out.metadata["raman_spectra"];
     out.timing = std::move(timing);
     out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
   }

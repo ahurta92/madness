@@ -444,6 +444,10 @@ int main(int argc, char **argv) {
         // verdict).
         if (parser.key_exists("accept-at-maxiter"))
           ctx.accept_at_maxiter = true;
+        // --hylleraas: evaluate the convergence guide's error bound and the
+        // stationary property estimate after each FD solve (Static only).
+        if (parser.key_exists("hylleraas"))
+          ctx.hylleraas = true;
         // ES/KAIN experiment knobs (workstreams A + C; sweepable without
         // rebuild).
         if (parser.key_exists("kain-maxsub"))
@@ -526,6 +530,14 @@ int main(int argc, char **argv) {
                 " lock_converged=", (ctx.es_lock_converged ? "on" : "off"),
                 " warmup_cache=", (ctx.es_warmup_cache ? "on" : "off"));
         }
+        // DFT + quadratic gate — same refusal as run_response_with_ground
+        // (this driver bypasses the workflow and assembles directly).
+        if (ctx.gs.scf().xc.is_dft() &&
+            (!plan.vbc.empty() || !plan.derived_fd.empty()))
+          throw std::runtime_error(
+              "quadratic response (beta / Raman / 2PA) on a DFT ground state "
+              "needs the second xc kernel g''_xc, which is not implemented; "
+              "use an HF ground state for quadratic properties.");
         FdResponseExecutor exec(ctx);
         mgr.run(world, exec);
 

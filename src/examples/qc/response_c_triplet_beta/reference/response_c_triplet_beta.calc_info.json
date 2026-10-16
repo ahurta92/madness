@@ -1,0 +1,428 @@
+{
+    "io": {
+        "backend": "native",
+        "hdf5_compiled": false
+    },
+    "tasks": [
+        {
+            "convergence": {
+                "converged_for_dconv": 0.0001,
+                "converged_for_thresh": 0.0001
+            },
+            "convergence_info": {
+                "converged_for_dconv": 0.0001,
+                "converged_for_thresh": 0.0001
+            },
+            "hamiltonian": {
+                "dispersion": "none",
+                "dispersion_atm": false,
+                "dispersion_functional": "none",
+                "localize": "new",
+                "xc": "hf"
+            },
+            "metadata": {
+                "mpi_size": 1
+            },
+            "model": "scf",
+            "molecule": {
+                "geometry": [
+                    [
+                        0.0,
+                        0.0,
+                        0.0
+                    ]
+                ],
+                "parameters": {
+                    "core_type": "none",
+                    "eprec": 1e-06,
+                    "field": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "no_orient": false,
+                    "psp_calc": false,
+                    "pure_ae": true,
+                    "source_name": "response_c_triplet_beta.in",
+                    "source_type": "inputfile",
+                    "symtol": -0.01,
+                    "units": "atomic"
+                },
+                "symbols": [
+                    "C"
+                ]
+            },
+            "optimization_results": {
+                "final_energy": 0.0,
+                "final_geometry": {
+                    "geometry": null,
+                    "parameters": {
+                        "core_type": "none",
+                        "eprec": 0.0001,
+                        "field": [
+                            0.0,
+                            0.0,
+                            0.0
+                        ],
+                        "no_orient": false,
+                        "psp_calc": false,
+                        "pure_ae": true,
+                        "source_name": "tbd",
+                        "source_type": "inputfile",
+                        "symtol": -0.01,
+                        "units": "atomic"
+                    },
+                    "symbols": null
+                },
+                "max_gradient": 0.0,
+                "max_step": 0.0,
+                "nsteps": 0
+            },
+            "properties": {
+                "dipole": {
+                    "ndim": -1,
+                    "size": 0
+                },
+                "energy": -37.69362652747463,
+                "gradient": {
+                    "ndim": -1,
+                    "size": 0
+                }
+            },
+            "scf": {
+                "citations": {
+                    "dftd3": false,
+                    "libxc": false,
+                    "pcm": false
+                },
+                "is_opt": false,
+                "model": "scf",
+                "molecule": {
+                    "geometry": [
+                        [
+                            0.0,
+                            0.0,
+                            0.0
+                        ]
+                    ],
+                    "parameters": {
+                        "core_type": "none",
+                        "eprec": 1e-06,
+                        "field": [
+                            0.0,
+                            0.0,
+                            0.0
+                        ],
+                        "no_orient": false,
+                        "psp_calc": false,
+                        "pure_ae": true,
+                        "source_name": "response_c_triplet_beta.in",
+                        "source_type": "inputfile",
+                        "symtol": -0.01,
+                        "units": "atomic"
+                    },
+                    "symbols": [
+                        "C"
+                    ]
+                },
+                "properties": {
+                    "dipole": {
+                        "ndim": -1,
+                        "size": 0
+                    },
+                    "energy": -37.69362652747463,
+                    "gradient": {
+                        "ndim": -1,
+                        "size": 0
+                    }
+                },
+                "scf_dispersion_correction_energy": 0.0,
+                "scf_eigenvalues_a": {
+                    "dims": [
+                        4
+                    ],
+                    "ndim": 1,
+                    "size": 4,
+                    "vals": [
+                        -11.345311171597748,
+                        -0.8294696896151839,
+                        -0.4391044589280162,
+                        -0.4391045021539588
+                    ]
+                },
+                "scf_eigenvalues_b": {
+                    "dims": [
+                        2
+                    ],
+                    "ndim": 1,
+                    "size": 2,
+                    "vals": [
+                        -11.298744787534956,
+                        -0.5853046222786102
+                    ]
+                },
+                "scf_fock_a": {
+                    "ndim": -1,
+                    "size": 0
+                },
+                "scf_total_energy": 0.0
+            },
+            "scf_eigenvalues_a": {
+                "dims": [
+                    4
+                ],
+                "ndim": 1,
+                "size": 4,
+                "vals": [
+                    -11.345311171597748,
+                    -0.8294696896151839,
+                    -0.4391044589280162,
+                    -0.4391045021539588
+                ]
+            },
+            "scf_eigenvalues_b": {
+                "dims": [
+                    2
+                ],
+                "ndim": 1,
+                "size": 2,
+                "vals": [
+                    -11.298744787534956,
+                    -0.5853046222786102
+                ]
+            },
+            "scf_fock_a": {
+                "ndim": -1,
+                "size": 0
+            },
+            "scf_total_energy": 0.0
+        },
+        {
+            "metadata": {
+                "engine": "molresponse_v3",
+                "excited_states": {},
+                "fd_states": {
+                    "dipole_z": {
+                        "1e-04_k6": {
+                            "f0.00000": {
+                                "accepted": false,
+                                "archive": "dipole_z__1e-04_k6__f0.00000",
+                                "backend": "native",
+                                "bsh_residual": 0.00031561252426961085,
+                                "converged": true,
+                                "diverged": false,
+                                "freq": 0.0,
+                                "iter": 16,
+                                "metrics": {
+                                    "bytes": 5612544,
+                                    "coeffs": 701568,
+                                    "iters": 16,
+                                    "rss_gb": 0.7382888793945313,
+                                    "wall_s": 53.17723798751831
+                                },
+                                "seed": "zero",
+                                "shell": "open_shell",
+                                "stalled": false,
+                                "type": "static",
+                                "writer_nproc": 1
+                            },
+                            "f0.05000": {
+                                "accepted": false,
+                                "archive": "dipole_z__1e-04_k6__f0.05000",
+                                "backend": "native",
+                                "bsh_residual": 0.0004940645204932115,
+                                "converged": true,
+                                "diverged": false,
+                                "freq": 0.05,
+                                "iter": 21,
+                                "metrics": {
+                                    "bytes": 11169792,
+                                    "coeffs": 1396224,
+                                    "iters": 21,
+                                    "rss_gb": 0.8964576721191406,
+                                    "wall_s": 138.58329391479492
+                                },
+                                "seed": "zero",
+                                "shell": "open_shell",
+                                "stalled": false,
+                                "type": "full",
+                                "writer_nproc": 1
+                            },
+                            "f0.10000": {
+                                "accepted": false,
+                                "archive": "dipole_z__1e-04_k6__f0.10000",
+                                "backend": "native",
+                                "bsh_residual": 0.0004938722121124087,
+                                "converged": true,
+                                "diverged": false,
+                                "freq": 0.1,
+                                "iter": 23,
+                                "metrics": {
+                                    "bytes": 11280384,
+                                    "coeffs": 1410048,
+                                    "iters": 23,
+                                    "rss_gb": 0.8774871826171875,
+                                    "wall_s": 151.54598307609558
+                                },
+                                "seed": "zero",
+                                "shell": "open_shell",
+                                "stalled": false,
+                                "type": "full",
+                                "writer_nproc": 1
+                            }
+                        }
+                    }
+                },
+                "ground_state": {
+                    "archive": "../../task_0/moldft/response_c_triplet_beta.restartdata",
+                    "bytes": 5969516,
+                    "fnv1a64": "17c55ca2e04ef34f",
+                    "nparts": 1
+                },
+                "io": {
+                    "backend": "native",
+                    "hdf5_compiled": false
+                },
+                "properties": {},
+                "protocols": {
+                    "1e-04_k6": {
+                        "index": -1,
+                        "k": 6,
+                        "thresh": 0.0001
+                    }
+                },
+                "run_summary": {
+                    "dropped_work": [
+                        {
+                            "id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+                            "reason": "stalled (quarantined by the no-progress guard)",
+                            "top_protocol_key": "1e-04_k6"
+                        },
+                        {
+                            "id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000",
+                            "reason": "stalled (quarantined by the no-progress guard)",
+                            "top_protocol_key": "1e-04_k6"
+                        }
+                    ]
+                },
+                "schema_version": 1,
+                "v3_diagnostics": {
+                    "dropped_beta": [
+                        {
+                            "id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+                            "reason": "stalled (quarantined by the no-progress guard)",
+                            "top_protocol_key": "1e-04_k6"
+                        },
+                        {
+                            "id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000",
+                            "reason": "stalled (quarantined by the no-progress guard)",
+                            "top_protocol_key": "1e-04_k6"
+                        }
+                    ],
+                    "passes": 4,
+                    "schedule": [
+                        {
+                            "items": [
+                                {
+                                    "action": "fresh",
+                                    "id": "fd:dipole_z@f0.00000",
+                                    "thresh": 0.0001
+                                }
+                            ],
+                            "k": 6,
+                            "pass": 0,
+                            "protocol_index": 0,
+                            "thresh": 0.0001
+                        },
+                        {
+                            "items": [
+                                {
+                                    "action": "fresh",
+                                    "id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+                                    "thresh": 0.0001
+                                }
+                            ],
+                            "k": 6,
+                            "pass": 1,
+                            "protocol_index": 0,
+                            "thresh": 0.0001
+                        },
+                        {
+                            "items": [
+                                {
+                                    "action": "fresh",
+                                    "id": "fd:dipole_z@f0.05000",
+                                    "thresh": 0.0001
+                                },
+                                {
+                                    "action": "fresh",
+                                    "id": "fd:dipole_z@f0.10000",
+                                    "thresh": 0.0001
+                                }
+                            ],
+                            "k": 6,
+                            "pass": 2,
+                            "protocol_index": 0,
+                            "thresh": 0.0001
+                        },
+                        {
+                            "items": [
+                                {
+                                    "action": "fresh",
+                                    "id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000",
+                                    "thresh": 0.0001
+                                }
+                            ],
+                            "k": 6,
+                            "pass": 3,
+                            "protocol_index": 0,
+                            "thresh": 0.0001
+                        }
+                    ],
+                    "stall_events": [
+                        {
+                            "pass": 2,
+                            "quarantined": [
+                                "vbc:dipole_z__dipole_z@f0.00000_f0.00000"
+                            ],
+                            "wave": "vbc:dipole_z__dipole_z@f0.00000_f0.00000@1e-04_k6;"
+                        },
+                        {
+                            "pass": 4,
+                            "quarantined": [
+                                "vbc:dipole_z__dipole_z@f0.05000_f0.05000"
+                            ],
+                            "wave": "vbc:dipole_z__dipole_z@f0.05000_f0.05000@1e-04_k6;"
+                        }
+                    ],
+                    "stalled_nodes": [
+                        "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+                        "vbc:dipole_z__dipole_z@f0.05000_f0.05000"
+                    ],
+                    "stop_reason": "complete_with_stalled_and_dropped_beta"
+                },
+                "v3_timing": {
+                    "assemble": {
+                        "cpu_s": 1.267995685338974e-05,
+                        "wall_s": 1.3113021850585938e-05
+                    },
+                    "plan_build": {
+                        "cpu_s": 1.9679777324199677e-05,
+                        "wall_s": 1.6927719116210938e-05
+                    },
+                    "solve": {
+                        "cpu_s": 343.4670131057501,
+                        "wall_s": 343.46701288223267
+                    }
+                },
+                "vbc_states": {}
+            },
+            "properties": {
+                "raman_spectra": null,
+                "response_properties": {},
+                "vibrational_analysis": null
+            },
+            "type": "response"
+        }
+    ]
+}

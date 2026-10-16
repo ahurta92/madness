@@ -1,0 +1,45 @@
+# Full vibrational Raman of LiH -- the smallest full-tensor Raman deck.
+# One rung (protocol 1e-4, k 6): alpha(0) xyz, the complete static
+# polarizability gradient over all 3N = 6 nuclear coordinates
+# (raman.nuc_atom -1), the Hessian built from the same six nuclear response
+# states, the one vibrational mode, and its Raman activity and depolarization
+# ratio. Legs: 3 dipole + 6 nuclear-displacement; 18 quadratic sources.
+#
+# Response dconv 1e-3, not 1e-4: the nuclear-displacement legs' responses are
+# ~1e3 larger than a dipole leg's and the FD gate is bsh < 5*dconv ABSOLUTE
+# (see response_h2o_raman_tpa), so at 5e-4 they plateau and Raman is dropped.
+# The numbers are a regression baseline at k 6, not converged Raman values.
+# The removed molresponse_v2 engine gave, at protocol [1e-4, 1e-5] and l 80:
+# one mode at 1427.94 cm^-1, activity 350.59 A^4/amu, depolarization 0.0323.
+#
+# Run:   ./run.sh          (or: madqc --wf=response response_lih_raman_full.in)
+
+dft
+    xc        hf
+    dconv     1e-4
+    k         6
+    protocol  [1e-4]
+    l         50.0
+    localize  new
+    maxiter   30
+end
+
+response
+    dipole                true
+    dipole.directions     xyz
+    dipole.frequencies    [0.0]
+    requested_properties  [polarizability, raman]
+    raman.nuc_atom        -1
+    kain                  true
+    dconv                 1e-3
+    maxiter               60
+    print_level           1
+end
+
+molecule
+    eprec      1e-6
+    no_orient  true
+    units      angstrom
+    Li  0.0  0.0  -0.803105264950
+    H   0.0  0.0   0.803105264950
+end

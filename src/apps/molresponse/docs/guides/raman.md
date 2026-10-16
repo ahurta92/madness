@@ -17,21 +17,54 @@ operator** — the polarizability differentiated with respect to that displaceme
 
 | configuration | status |
 |---|---|
-| static Raman (polarizability gradients) | ✅ supported |
+| one polarizability-gradient component (`raman.nuc_atom`, `raman.nuc_axis`) | ✅ supported |
+| full 3N gradient tensor + Hessian + normal-mode spectrum (`raman.nuc_atom -1`) | 🟡 preliminary (closed shell) |
 | resonant Raman | 🚧 future (scoping done) |
 
 ## Validation
 
 Raman reuses the β quadratic-response contraction with a different operator on one
-leg; it inherits the shared kernel's validation. A dedicated Raman benchmark (and
-resonant Raman) is future work — no results are reproduced in this release guide.
+leg; it inherits the shared kernel's validation. The full spectrum is read against the
+archived molresponse_v2 LiH values (one mode at 1427.94 cm⁻¹, activity
+350.59 Å⁴/amu, depolarization 0.0323 at protocol [1e-4, 1e-5]); an independent
+Raman benchmark (and resonant Raman) is future work — no results are reproduced
+in this release guide.
 
 ## Run it
 
-Request Raman in the `response` block; because it needs the nuclear-displacement
-perturbation as well as the dipole responses, see the recipe and operator setup in
-[`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md). Results
-land in `response_metadata.json` under `properties/raman`.
+```text
+response
+    dipole                true
+    dipole.directions     xyz
+    dipole.frequencies    [0.0]            # optical frequencies of the derivative
+    requested_properties  [polarizability, raman]
+    raman.nuc_atom        -1               # full set; or an atom index + raman.nuc_axis 0/1/2
+    dconv                 1e-3             # nuclear legs are ~1e3 larger than dipole legs
+end
+```
+
+`madqc --wf=response <deck>`. With a single coordinate the run solves that
+nuclear leg and the dipole legs and writes the nine `properties/raman` rows
+(`A`, `B`, `C`, `freq_b`, `freq_c`, `beta` = ∂α_AB/∂Q_C) to
+`response_metadata.json`. With `raman.nuc_atom -1` it solves all 3N nuclear
+legs, builds the dipole × nuclear source for every coordinate, writes the
+9 × 3N rows, and then the normal-mode analysis:
+
+- `vibrational_analysis`: Hessian (Eh/bohr²) assembled from the same nuclear
+  response states (diagonal from translational invariance, nuclear-repulsion
+  Hessian added), projected frequencies (hartree and cm⁻¹), mass-weighted
+  normal modes, Cartesian displacements per unit normal coordinate, reduced
+  masses.
+- `raman_spectra`: per optical frequency the 9 × 3N derivative table, its
+  projection on the vibrational modes, and per mode α′², β′², the activity
+  45α′² + 4β′² (a.u. and Å⁴/amu), and the depolarization ratio 3β′²/(45α′²+4β′²).
+  Every row states whether all derivative rows that fed it converged.
+
+Both sections also reach the madqc task record as
+`properties.vibrational_analysis` and `properties.raman_spectra`. Decks that
+ran: `src/examples/qc/response_lih_raman_full` (full set) and
+`response_h2o_raman_tpa` (one component). The legacy `nuclear.*` keys are not
+read by this engine.
 
 ## Under the hood
 

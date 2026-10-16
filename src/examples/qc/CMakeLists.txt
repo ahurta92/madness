@@ -47,6 +47,51 @@ if (BUILD_TESTING AND Python3_EXECUTABLE)
   # the only case with k varying across the protocol; must agree with nemo_he_hf
   add_qctest(nemo_he_varyk     madqc "qctest;medium;applications")    #  13 s
   add_qctest(cis_he_singlets   madqc "qctest;medium;applications")    #   9 s
+  # the first `response` case: the smallest complete molresponse deck (see README).
+  # `medium`, not `short`: at the explicit `dconv 1e-4` it measures 10 s, on the
+  # far side of the 10 s short boundary. Still inside check-short-madness.
+  add_qctest(response_he_alpha madqc "qctest;medium;applications")    #  10 s, 7 threads
+  # the same H2 deck twice: the `excited.*` path, once in the Tamm-Dancoff
+  # approximation and once at full RPA (`excited.tda false`)
+  add_qctest(response_h2_es_tda madqc "qctest;medium;applications")   #  21 s, 7 threads
+  add_qctest(response_h2_es_rpa madqc "qctest;medium;applications")   #  24 s, 7 threads
+  # the RPA deck again with `kain false`: the ES solve without KAIN (review C3)
+  add_qctest(response_h2_es_rpa_nokain madqc "qctest;medium;applications") # 31 s on dd (N1), 7 threads; parent 32 s there
+  # the `quadratic` path: the z FD leg plus one VBC solve for the static
+  # beta_zzz of LiH. `long` rather than the CI tier the rest of the response
+  # set sits in -- a static beta cannot be cut below this (see check.json)
+  add_qctest(response_lih_beta madqc "qctest;long;applications")      #  42 s, 7 threads
+  # the nightly case: water at its HF/aug-cc-pVQZ optimized geometry -- alpha(0)
+  # xyz, one Raman component (d alpha_zz/d z_O), two RPA excited states and their
+  # 2PA. `verylong`, nightly only; runs `dconv 1e-3` so the nuclear leg converges
+  # (see check.json)
+  add_qctest(response_h2o_raman_tpa madqc "qctest;verylong;applications") # 1951 s, 7 threads; nightly
+  # full vibrational Raman of LiH: 3 dipole + 6 nuclear legs, 18 quadratic sources, Hessian from the
+  # nuclear response states, one mode with activity and depolarization ratio. `verylong` by the tier
+  # rule (257 s at 10 threads on dd); nightly.
+  add_qctest(response_lih_raman_full madqc "qctest;verylong;applications") # 257 s, 10 threads (dd); nightly
+  # Open-shell (unrestricted) reference. These pin a GAP rather than a property:
+  # the solver is shell-generic and every FD leg converges, but the quadratic
+  # source is closed-shell only, so the beta nodes stall and no property row is
+  # assembled. See each check.json description.
+  # a DALTON seed vs the cold guess on the same water ES + 2PA deck: the
+  # seeded case caps its iterations below the cold counts (see check.json)
+  add_qctest(response_h2o_tpa         madqc "qctest;verylong;applications") # 3319 s on dd (N1), 7 threads; nightly
+  add_qctest(response_h2o_tpa_seeded  madqc "qctest;verylong;applications") # 2621-3320 s on dd (N1), 7 threads; nightly, dalton.dir
+  add_qctest(response_f_doublet_beta  madqc "qctest;verylong;applications")  # 287 s, 7 threads; nightly, open shell nopen 1
+  add_qctest(response_c_triplet_beta  madqc "qctest;verylong;applications")  # 305 s, 7 threads; nightly, open shell nopen 2
+  # DFT linear response checked against DALTON, not against a MADNESS run: the
+  # reference/ values are DALTON t-aug-cc-pVQZ alphas (inputs and output in each
+  # case's dalton_reference/). Phase 3.3 of the molresponse plan.
+  add_qctest(response_he_lda_alpha     madqc "qctest;medium;applications")   #   22 s on dd (N1), 7 threads
+  add_qctest(response_he_pbe0_alpha    madqc "qctest;long;applications")     #   52 s on dd (N1), 7 threads
+  add_qctest(response_h2o_lda_alpha    madqc "qctest;verylong;applications") #  512 s on dd (N1), 7 threads; nightly
+  add_qctest(response_h2o_pbe0_alpha   madqc "qctest;verylong;applications") # 4581 s on dd (N1), 7 threads; nightly
+  # Refusal cases (check.json "expect_error"): each deck must be rejected with the
+  # stated reason rather than run and quietly drop the property. No reference/.
+  add_qctest(response_he_beta_or_refused   madqc "qctest;short;applications")
+  add_qctest(response_he_raman_bad_atom    madqc "qctest;short;applications")
+  add_qctest(response_he_lda_beta_refused  madqc "qctest;short;applications")
   add_qctest(scf_h2o_hf        madqc "qctest;long;applications")      #  35 s
   # asserts the optimizer projects translations/rotations out of the gradient
   # before testing convergence, and that explicit `optimization` values beat the

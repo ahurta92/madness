@@ -5,6 +5,7 @@
 #include "../ResponsePropertyPlanner.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -111,6 +112,34 @@ int main() {
            has_fd(plan.nuclear_fd, "nuc_*_y", 0.0) &&
            has_fd(plan.nuclear_fd, "nuc_*_z", 0.0), "nuc_*_{x,y,z} @ 0");
     EXPECT(plan.es.empty() && plan.derived_fd.empty(), "no ES / no derived FD");
+    // Full set: one dipole x nuclear source per (optical axis, displacement
+    // axis), carrying the all-atoms sentinel for build_dag to expand.
+    EXPECT(plan.vbc.size() == 9, "9 sentinel VBC (3 optical x 3 displacement axes)");
+    bool all_sentinel = !plan.vbc.empty();
+    for (const auto &v : plan.vbc)
+      all_sentinel = all_sentinel && v.pert_c.is_all_atoms() &&
+                     v.pert_b.kind == Perturbation::Kind::Dipole &&
+                     std::abs(v.freq_b - 0.057) < 1e-9 && v.freq_c == 0.0;
+    EXPECT(all_sentinel, "every VBC is dipole@ω x nuc_*@0");
+  }
+
+  // ----- Single coordinate: concrete nuclear leg, 3 VBC, no sentinel -------
+  std::printf("=== PolarizabilityGradient Nuclear single (atom 1, z) ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::PolarizabilityGradient;
+    r.gradient_mode = GradientMode::Nuclear;
+    r.frequencies = {0.0};
+    r.raman_nuc_atom = 1;
+    r.raman_nuc_axis = 2;
+    r.protocol_thresholds = P;
+    auto plan = plan_one(r);
+    EXPECT(plan.nuclear_fd.size() == 1 && has_fd(plan.nuclear_fd, "nuc_1_z", 0.0),
+           "1 concrete nuclear leg nuc_1_z");
+    EXPECT(plan.vbc.size() == 3, "3 VBC (one per optical axis)");
+    bool none_sentinel = true;
+    for (const auto &v : plan.vbc) none_sentinel = none_sentinel && !v.pert_c.is_all_atoms();
+    EXPECT(none_sentinel, "no sentinel in the single-coordinate plan");
   }
 
   // ----- Nuclear axes are full 3N even if optical axes subset --------------
@@ -125,6 +154,7 @@ int main() {
     auto plan = plan_one(r);
     EXPECT(plan.fd.size() == 1,         "1 dipole FD (axes={z})");
     EXPECT(plan.nuclear_fd.size() == 3, "still 3 nuclear-disp axes (need full 3N)");
+    EXPECT(plan.vbc.size() == 3,        "3 sentinel VBC (1 optical x 3 displacement)");
   }
 
   // ----- PolarizabilityGradient Resonant: roots only (default) -------------
