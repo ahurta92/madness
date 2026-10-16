@@ -5,9 +5,9 @@
 # states, the one vibrational mode, and its Raman activity and depolarization
 # ratio. Legs: 3 dipole + 6 nuclear-displacement; 18 quadratic sources.
 #
-# Response dconv 1e-3, not 1e-4: the nuclear-displacement legs' responses are
-# ~1e3 larger than a dipole leg's and the FD gate is bsh < 5*dconv ABSOLUTE
-# (see response_h2o_raman_tpa), so at 5e-4 they plateau and Raman is dropped.
+# Response dconv 1e-4: the FD gate is relative (||dx|| <= atol + 5 dconv ||x||),
+# so the ~1e3-norm nuclear-displacement legs converge at the same dconv as the
+# dipole legs (under the earlier absolute gate they needed dconv 1e-3).
 # The numbers are a regression baseline at k 6, not converged Raman values.
 # The removed molresponse_v2 engine gave, at protocol [1e-4, 1e-5] and l 80:
 # one mode at 1427.94 cm^-1, activity 350.59 A^4/amu, depolarization 0.0323.
@@ -31,7 +31,7 @@ response
     requested_properties  [polarizability, raman]
     raman.nuc_atom        -1
     kain                  true
-    dconv                 1e-3
+    dconv                 1e-4
     maxiter               60
     print_level           1
 end

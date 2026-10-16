@@ -156,8 +156,8 @@
                     "ndim": 1,
                     "size": 2,
                     "vals": [
-                        -2.445933642622304,
-                        -0.3013503069489998
+                        -2.4459336426223057,
+                        -0.3013503069490003
                     ]
                 },
                 "scf_eigenvalues_b": {
@@ -177,8 +177,8 @@
                 "ndim": 1,
                 "size": 2,
                 "vals": [
-                    -2.445933642622304,
-                    -0.3013503069489998
+                    -2.4459336426223057,
+                    -0.3013503069490003
                 ]
             },
             "scf_eigenvalues_b": {
@@ -202,17 +202,17 @@
                                 "accepted": false,
                                 "archive": "dipole_z__1e-04_k6__f0.00000",
                                 "backend": "native",
-                                "bsh_residual": 0.00029617541118012074,
+                                "bsh_residual": 0.00046931715840277296,
                                 "converged": true,
                                 "diverged": false,
                                 "freq": 0.0,
-                                "iter": 12,
+                                "iter": 9,
                                 "metrics": {
                                     "bytes": 2571264,
                                     "coeffs": 321408,
-                                    "iters": 12,
-                                    "rss_gb": 0.5876007080078125,
-                                    "wall_s": 11.026618003845215
+                                    "iters": 9,
+                                    "rss_gb": 0.5736045837402344,
+                                    "wall_s": 10.917387962341309
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -226,7 +226,7 @@
                 "ground_state": {
                     "archive": "../../task_0/moldft/response_lih_beta.restartdata",
                     "bytes": 2089567,
-                    "fnv1a64": "1ab0afb2ced456b4",
+                    "fnv1a64": "ce956f83d52d470b",
                     "nparts": 1
                 },
                 "io": {
@@ -239,17 +239,17 @@
                             {
                                 "alpha": [
                                     [
-                                        22.155842466200863
+                                        22.154852244839695
                                     ]
                                 ],
                                 "converged": true,
                                 "directions": "z",
-                                "max_bsh_residual": 0.00029617541118012074,
+                                "max_bsh_residual": 0.00046931715840277296,
                                 "omega": 0.0,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "direction": "z",
                                         "source_protocol_key": "1e-04_k6"
@@ -264,15 +264,15 @@
                                 "A": "z",
                                 "B": "dipole_z",
                                 "C": "dipole_z",
-                                "beta": 315.7768172477556,
+                                "beta": 315.73085002835285,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.00029617541118012074,
+                                "max_bsh_residual": 0.00046931715840277296,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -280,7 +280,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -288,7 +288,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -348,16 +348,16 @@
                 },
                 "v3_timing": {
                     "assemble": {
-                        "cpu_s": 1.124575519002974,
-                        "wall_s": 1.1245739459991455
+                        "cpu_s": 1.0934337587095797,
+                        "wall_s": 1.0934321880340576
                     },
                     "plan_build": {
-                        "cpu_s": 9.760260581970215e-06,
-                        "wall_s": 6.9141387939453125e-06
+                        "cpu_s": 9.759794920682907e-06,
+                        "wall_s": 8.821487426757813e-06
                     },
                     "solve": {
-                        "cpu_s": 18.46918389480561,
-                        "wall_s": 18.46918296813965
+                        "cpu_s": 20.858331150840968,
+                        "wall_s": 20.858330965042114
                     }
                 },
                 "vbc_states": {
@@ -371,8 +371,8 @@
                                 "bytes": 6690816,
                                 "coeffs": 836352,
                                 "iters": 0,
-                                "rss_gb": 0.6573562622070313,
-                                "wall_s": 6.885123014450073
+                                "rss_gb": 0.6434364318847656,
+                                "wall_s": 9.185992956161499
                             },
                             "writer_nproc": 1
                         }
@@ -387,17 +387,17 @@
                             {
                                 "alpha": [
                                     [
-                                        22.155842466200863
+                                        22.154852244839695
                                     ]
                                 ],
                                 "converged": true,
                                 "directions": "z",
-                                "max_bsh_residual": 0.00029617541118012074,
+                                "max_bsh_residual": 0.00046931715840277296,
                                 "omega": 0.0,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "direction": "z",
                                         "source_protocol_key": "1e-04_k6"
@@ -412,15 +412,15 @@
                                 "A": "z",
                                 "B": "dipole_z",
                                 "C": "dipole_z",
-                                "beta": 315.7768172477556,
+                                "beta": 315.73085002835285,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.00029617541118012074,
+                                "max_bsh_residual": 0.00046931715840277296,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -428,7 +428,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -436,7 +436,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00029617541118012074,
+                                        "bsh_residual": 0.00046931715840277296,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",

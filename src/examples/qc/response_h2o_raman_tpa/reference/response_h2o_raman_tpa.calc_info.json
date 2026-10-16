@@ -95,7 +95,7 @@
                     "ndim": -1,
                     "size": 0
                 },
-                "energy": -76.06771285798408,
+                "energy": -76.06771285798406,
                 "gradient": {
                     "ndim": -1,
                     "size": 0
@@ -154,7 +154,7 @@
                         "ndim": -1,
                         "size": 0
                     },
-                    "energy": -76.06771285798408,
+                    "energy": -76.06771285798406,
                     "gradient": {
                         "ndim": -1,
                         "size": 0
@@ -168,11 +168,11 @@
                     "ndim": 1,
                     "size": 5,
                     "vals": [
-                        -20.554405602915637,
-                        -0.9911163047800189,
-                        -0.9911154226128613,
-                        -0.699561633208825,
-                        -0.5114216098648958
+                        -20.554405602915647,
+                        -0.9911163047802998,
+                        -0.9911154226131309,
+                        -0.6995616332087531,
+                        -0.5114216098651285
                     ]
                 },
                 "scf_eigenvalues_b": {
@@ -192,11 +192,11 @@
                 "ndim": 1,
                 "size": 5,
                 "vals": [
-                    -20.554405602915637,
-                    -0.9911163047800189,
-                    -0.9911154226128613,
-                    -0.699561633208825,
-                    -0.5114216098648958
+                    -20.554405602915647,
+                    -0.9911163047802998,
+                    -0.9911154226131309,
+                    -0.6995616332087531,
+                    -0.5114216098651285
                 ]
             },
             "scf_eigenvalues_b": {
@@ -218,44 +218,44 @@
                         "bundle_dir": "es__1e-04_k6",
                         "converged": true,
                         "diverged": false,
-                        "iter": 8,
+                        "iter": 10,
                         "metrics": {
-                            "bytes": 14736384,
-                            "coeffs": 1842048,
-                            "iters": 8,
-                            "rss_gb": 1.7231979370117188,
-                            "wall_s": 370.42383193969727
+                            "bytes": 14764032,
+                            "coeffs": 1845504,
+                            "iters": 10,
+                            "rss_gb": 1.6812744140625,
+                            "wall_s": 552.5921449661255
                         },
                         "n_roots": 2,
                         "roots": [
                             {
-                                "bsh_residual": 0.0021418186986190456,
-                                "bytes": 8045568,
-                                "coeffs": 1005696,
-                                "density_residual": 0.0011014209186216253,
+                                "bsh_residual": 0.000653919568830821,
+                                "bytes": 8073216,
+                                "coeffs": 1009152,
+                                "density_residual": 0.0002663132339600942,
                                 "display_name": "S1",
                                 "file": "root_0",
-                                "omega": 0.32242202608777737,
+                                "omega": 0.3223899462753981,
                                 "root_id": "es_root_0000",
                                 "slot": 0,
                                 "stable_index": 0,
                                 "stalled": false
                             },
                             {
-                                "bsh_residual": 0.0021801056850891,
+                                "bsh_residual": 0.001120422142181576,
                                 "bytes": 6690816,
                                 "coeffs": 836352,
-                                "density_residual": 0.0007405525591965306,
+                                "density_residual": 0.0004240601654660224,
                                 "display_name": "S2",
                                 "file": "root_1",
-                                "omega": 0.3833050914221285,
+                                "omega": 0.38329098893661634,
                                 "root_id": "es_root_0001",
                                 "slot": 1,
                                 "stable_index": 1,
                                 "stalled": false
                             }
                         ],
-                        "rss_gb": 1.7231979370117188,
+                        "rss_gb": 1.6812744140625,
                         "shell": "closed_shell",
                         "slot_permutation": [
                             0,
@@ -272,17 +272,17 @@
                                 "accepted": false,
                                 "archive": "dipole_x__1e-04_k6__f0.00000",
                                 "backend": "native",
-                                "bsh_residual": 0.0005139424096441576,
+                                "bsh_residual": 0.00034950183587239485,
                                 "converged": true,
                                 "diverged": false,
                                 "freq": 0.0,
-                                "iter": 9,
+                                "iter": 10,
                                 "metrics": {
                                     "bytes": 5598720,
                                     "coeffs": 699840,
-                                    "iters": 9,
-                                    "rss_gb": 0.955718994140625,
-                                    "wall_s": 56.58410692214966
+                                    "iters": 10,
+                                    "rss_gb": 0.9524345397949219,
+                                    "wall_s": 74.85008096694946
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -290,21 +290,21 @@
                                 "type": "static",
                                 "writer_nproc": 1
                             },
-                            "f0.16121": {
+                            "f0.16119": {
                                 "accepted": false,
-                                "archive": "dipole_x__1e-04_k6__f0.16121",
+                                "archive": "dipole_x__1e-04_k6__f0.16119",
                                 "backend": "native",
-                                "bsh_residual": 0.0015321123879946253,
+                                "bsh_residual": 0.0008467212736722914,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.16121101304388868,
-                                "iter": 10,
+                                "freq": 0.16119497313769904,
+                                "iter": 11,
                                 "metrics": {
                                     "bytes": 11473920,
                                     "coeffs": 1434240,
-                                    "iters": 10,
-                                    "rss_gb": 2.0574493408203125,
-                                    "wall_s": 98.70267701148987
+                                    "iters": 11,
+                                    "rss_gb": 2.002605438232422,
+                                    "wall_s": 161.66074109077454
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -316,17 +316,17 @@
                                 "accepted": false,
                                 "archive": "dipole_x__1e-04_k6__f0.19165",
                                 "backend": "native",
-                                "bsh_residual": 0.0019357007558518462,
+                                "bsh_residual": 0.001294591828168592,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.19165254571106424,
-                                "iter": 10,
+                                "freq": 0.19164549446830817,
+                                "iter": 11,
                                 "metrics": {
                                     "bytes": 11529216,
                                     "coeffs": 1441152,
-                                    "iters": 10,
-                                    "rss_gb": 1.9736824035644531,
-                                    "wall_s": 97.79901599884033
+                                    "iters": 11,
+                                    "rss_gb": 1.9427680969238281,
+                                    "wall_s": 162.21136903762817
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -342,17 +342,17 @@
                                 "accepted": false,
                                 "archive": "dipole_y__1e-04_k6__f0.00000",
                                 "backend": "native",
-                                "bsh_residual": 0.0012469422465421751,
+                                "bsh_residual": 0.00021007116555922422,
                                 "converged": true,
                                 "diverged": false,
                                 "freq": 0.0,
-                                "iter": 9,
+                                "iter": 12,
                                 "metrics": {
                                     "bytes": 6206976,
                                     "coeffs": 775872,
-                                    "iters": 9,
-                                    "rss_gb": 1.0012435913085938,
-                                    "wall_s": 60.129575967788696
+                                    "iters": 12,
+                                    "rss_gb": 0.9937515258789063,
+                                    "wall_s": 95.10809683799744
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -360,21 +360,21 @@
                                 "type": "static",
                                 "writer_nproc": 1
                             },
-                            "f0.16121": {
+                            "f0.16119": {
                                 "accepted": false,
-                                "archive": "dipole_y__1e-04_k6__f0.16121",
+                                "archive": "dipole_y__1e-04_k6__f0.16119",
                                 "backend": "native",
-                                "bsh_residual": 0.00216023907574597,
+                                "bsh_residual": 0.0009842797383651626,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.16121101304388868,
-                                "iter": 10,
+                                "freq": 0.16119497313769904,
+                                "iter": 12,
                                 "metrics": {
                                     "bytes": 12690432,
                                     "coeffs": 1586304,
-                                    "iters": 10,
-                                    "rss_gb": 1.8671798706054688,
-                                    "wall_s": 102.76069688796997
+                                    "iters": 12,
+                                    "rss_gb": 1.9427680969238281,
+                                    "wall_s": 187.22369194030762
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -386,17 +386,17 @@
                                 "accepted": false,
                                 "archive": "dipole_y__1e-04_k6__f0.19165",
                                 "backend": "native",
-                                "bsh_residual": 0.002729012227335836,
+                                "bsh_residual": 0.0011363048867899389,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.19165254571106424,
-                                "iter": 10,
+                                "freq": 0.19164549446830817,
+                                "iter": 12,
                                 "metrics": {
                                     "bytes": 12690432,
                                     "coeffs": 1586304,
-                                    "iters": 10,
-                                    "rss_gb": 1.8685188293457031,
-                                    "wall_s": 102.52370500564575
+                                    "iters": 12,
+                                    "rss_gb": 1.9427680969238281,
+                                    "wall_s": 186.7437391281128
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -412,17 +412,17 @@
                                 "accepted": false,
                                 "archive": "dipole_z__1e-04_k6__f0.00000",
                                 "backend": "native",
-                                "bsh_residual": 0.0008194753722047564,
+                                "bsh_residual": 0.00047486106295234525,
                                 "converged": true,
                                 "diverged": false,
                                 "freq": 0.0,
-                                "iter": 9,
+                                "iter": 11,
                                 "metrics": {
                                     "bytes": 5930496,
                                     "coeffs": 741312,
-                                    "iters": 9,
-                                    "rss_gb": 1.0012359619140625,
-                                    "wall_s": 56.067599058151245
+                                    "iters": 11,
+                                    "rss_gb": 0.9964065551757813,
+                                    "wall_s": 86.30644488334656
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -430,21 +430,21 @@
                                 "type": "static",
                                 "writer_nproc": 1
                             },
-                            "f0.16121": {
+                            "f0.16119": {
                                 "accepted": false,
-                                "archive": "dipole_z__1e-04_k6__f0.16121",
+                                "archive": "dipole_z__1e-04_k6__f0.16119",
                                 "backend": "native",
-                                "bsh_residual": 0.0018271204398797789,
+                                "bsh_residual": 0.0009967122962610347,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.16121101304388868,
-                                "iter": 10,
+                                "freq": 0.16119497313769904,
+                                "iter": 13,
                                 "metrics": {
-                                    "bytes": 12082176,
-                                    "coeffs": 1510272,
-                                    "iters": 10,
-                                    "rss_gb": 1.8685188293457031,
-                                    "wall_s": 102.74596190452576
+                                    "bytes": 12137472,
+                                    "coeffs": 1517184,
+                                    "iters": 13,
+                                    "rss_gb": 1.9067268371582031,
+                                    "wall_s": 203.57358813285828
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -456,17 +456,17 @@
                                 "accepted": false,
                                 "archive": "dipole_z__1e-04_k6__f0.19165",
                                 "backend": "native",
-                                "bsh_residual": 0.0025515445266488814,
+                                "bsh_residual": 0.0009410734619484114,
                                 "converged": true,
                                 "diverged": false,
-                                "freq": 0.19165254571106424,
-                                "iter": 10,
+                                "freq": 0.19164549446830817,
+                                "iter": 13,
                                 "metrics": {
-                                    "bytes": 12358656,
-                                    "coeffs": 1544832,
-                                    "iters": 10,
-                                    "rss_gb": 1.8701019287109375,
-                                    "wall_s": 101.29054999351501
+                                    "bytes": 12469248,
+                                    "coeffs": 1558656,
+                                    "iters": 13,
+                                    "rss_gb": 1.8579025268554688,
+                                    "wall_s": 202.98806500434875
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -482,17 +482,17 @@
                                 "accepted": false,
                                 "archive": "nuc_0_z__1e-04_k6__f0.00000",
                                 "backend": "native",
-                                "bsh_residual": 0.004397105162009056,
+                                "bsh_residual": 0.002620681765920998,
                                 "converged": true,
                                 "diverged": false,
                                 "freq": 0.0,
-                                "iter": 12,
+                                "iter": 22,
                                 "metrics": {
                                     "bytes": 61337088,
                                     "coeffs": 7667136,
-                                    "iters": 12,
-                                    "rss_gb": 2.2143325805664063,
-                                    "wall_s": 122.69204998016357
+                                    "iters": 22,
+                                    "rss_gb": 2.214111328125,
+                                    "wall_s": 333.146950006485
                                 },
                                 "seed": "zero",
                                 "shell": "closed_shell",
@@ -506,7 +506,7 @@
                 "ground_state": {
                     "archive": "../../task_0/moldft/response_h2o_raman_tpa.restartdata",
                     "bytes": 6953411,
-                    "fnv1a64": "f16db06ab8c97c6c",
+                    "fnv1a64": "824aadfca6c0b326",
                     "nparts": 1
                 },
                 "io": {
@@ -519,43 +519,43 @@
                             {
                                 "alpha": [
                                     [
-                                        7.828627059517205,
-                                        -8.466252834427382e-11,
-                                        -5.547328882073721e-05
+                                        7.828796717929502,
+                                        -2.526703409488299e-10,
+                                        -6.443685788013381e-05
                                     ],
                                     [
-                                        1.690354252028149e-07,
-                                        8.874469541264013,
-                                        4.4125130964078885e-06
+                                        1.082384275117611e-05,
+                                        8.871788932056292,
+                                        4.542844068200491e-06
                                     ],
                                     [
-                                        -5.448393488368747e-05,
-                                        4.279622075317735e-06,
-                                        8.29398088829956
+                                        -7.979830020061842e-05,
+                                        4.323069255574019e-06,
+                                        8.294461101070024
                                     ]
                                 ],
                                 "converged": true,
                                 "directions": "xyz",
-                                "max_bsh_residual": 0.0012469422465421751,
+                                "max_bsh_residual": 0.00047486106295234525,
                                 "omega": 0.0,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "direction": "x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "direction": "y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "direction": "z",
                                         "source_protocol_key": "1e-04_k6"
@@ -570,15 +570,15 @@
                                 "A": "x",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 1.2403705561803229,
+                                "beta": 1.2385067327802441,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -586,7 +586,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -594,7 +594,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -610,15 +610,15 @@
                                 "A": "y",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 2.954632874344198e-07,
+                                "beta": 1.9041838052647687e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -626,7 +626,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -634,7 +634,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -650,15 +650,15 @@
                                 "A": "z",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 0.0003368031887485283,
+                                "beta": 0.0002666342241054559,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -666,7 +666,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -674,7 +674,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -690,15 +690,15 @@
                                 "A": "x",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": -1.4732634056165973e-06,
+                                "beta": -9.486537315918401e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -706,7 +706,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -714,7 +714,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -730,15 +730,15 @@
                                 "A": "y",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": 5.251033682568115,
+                                "beta": 5.219228384900475,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -746,7 +746,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -754,7 +754,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -770,15 +770,15 @@
                                 "A": "z",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": 4.188062917104215e-06,
+                                "beta": 3.5197717015920577e-06,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -786,7 +786,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -794,7 +794,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -810,15 +810,15 @@
                                 "A": "x",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 0.00018153693238915616,
+                                "beta": -7.339414931824923e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -826,7 +826,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -834,7 +834,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -850,15 +850,15 @@
                                 "A": "y",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 4.4474699107937415e-06,
+                                "beta": 4.566349160392558e-06,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -866,7 +866,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -874,7 +874,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -890,15 +890,15 @@
                                 "A": "z",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 4.351907688930436,
+                                "beta": 4.35117179183004,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -906,7 +906,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -914,7 +914,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -931,122 +931,122 @@
                     "tpa": {
                         "1e-04_k6": [
                             {
-                                "D_circular": 3.731807446114558,
-                                "D_linear": 2.487871786669814,
-                                "Df": 4.677803255930237e-08,
-                                "Dg": 0.6219679232784372,
-                                "R": 1.499999905987855,
+                                "D_circular": 3.741138612611864,
+                                "D_linear": 2.4940930678237923,
+                                "Df": 1.9782476481429518e-07,
+                                "Dg": 0.6235231680435657,
+                                "R": 1.4999996034134264,
                                 "S": [
                                     [
-                                        -0.0008951535624969976,
-                                        -0.001589190319710889,
-                                        3.054425589568097
+                                        0.0012410831654244736,
+                                        0.001998198571469719,
+                                        3.058241589794272
                                     ],
                                     [
-                                        -0.001589190319710889,
-                                        0.0003241365747875947,
-                                        -1.214538076739575e-06
+                                        0.001998198571469719,
+                                        0.0012565795064302982,
+                                        -0.0005871761697320252
                                     ],
                                     [
-                                        3.054425589568097,
-                                        -1.214538076739575e-06,
-                                        -0.0006136099479876843
+                                        3.058241589794272,
+                                        -0.0005871761697320252,
+                                        -6.152988720840634e-05
                                     ]
                                 ],
                                 "converged": true,
-                                "delta_parallel": 2.487871786669814,
+                                "delta_parallel": 2.4940930678237923,
                                 "es_root_id": 0,
-                                "max_bsh_residual": 0.00216023907574597,
-                                "omega": 0.32242202608777737,
-                                "omega_ev": 8.773550286088529,
+                                "max_bsh_residual": 0.0009967122962610347,
+                                "omega": 0.3223899462753981,
+                                "omega_ev": 8.772677349923176,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0015321123879946253,
+                                        "bsh_residual": 0.0008467212736722914,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00216023907574597,
+                                        "bsh_residual": 0.0009842797383651626,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0018271204398797789,
+                                        "bsh_residual": 0.0009967122962610347,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_z",
                                         "source_protocol_key": "1e-04_k6"
                                     }
                                 ],
-                                "sigma_circular_gm": 0.2104744031062042,
-                                "sigma_linear_gm": 0.14031627753175893,
+                                "sigma_circular_gm": 0.21095869655121205,
+                                "sigma_linear_gm": 0.1406391682178786,
                                 "source_files": [],
                                 "writer_nproc": 1
                             },
                             {
-                                "D_circular": 31.52004866953603,
-                                "D_linear": 21.01337153692592,
-                                "Df": 1.7271705698978327e-06,
-                                "Dg": 5.253342020646195,
-                                "R": 1.4999995890305926,
+                                "D_circular": 31.50484249008311,
+                                "D_linear": 21.00323514334965,
+                                "Df": 2.044988272537991e-06,
+                                "Dg": 5.250807763343276,
+                                "R": 1.4999995131730282,
                                 "S": [
                                     [
-                                        0.0031246365482947786,
-                                        8.876942655635641,
-                                        0.0027044934147194507
+                                        0.004345297771434458,
+                                        8.874801334507067,
+                                        0.0015941683012681682
                                     ],
                                     [
-                                        8.876942655635641,
-                                        0.0018500059972768373,
-                                        -0.0017374588646345709
+                                        8.874801334507067,
+                                        0.0016100036414152855,
+                                        -0.001637930978134445
                                     ],
                                     [
-                                        0.0027044934147194507,
-                                        -0.0017374588646345709,
-                                        0.0022236292676440384
+                                        0.0015941683012681682,
+                                        -0.001637930978134445,
+                                        0.0018773002096087702
                                     ]
                                 ],
                                 "converged": true,
-                                "delta_parallel": 21.01337153692592,
+                                "delta_parallel": 21.00323514334965,
                                 "es_root_id": 1,
-                                "max_bsh_residual": 0.002729012227335836,
-                                "omega": 0.3833050914221285,
-                                "omega_ev": 10.430262892741279,
+                                "max_bsh_residual": 0.001294591828168592,
+                                "omega": 0.38329098893661634,
+                                "omega_ev": 10.42987914456098,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0019357007558518462,
+                                        "bsh_residual": 0.001294591828168592,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.002729012227335836,
+                                        "bsh_residual": 0.0011363048867899389,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0025515445266488814,
+                                        "bsh_residual": 0.0009410734619484114,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_z",
                                         "source_protocol_key": "1e-04_k6"
                                     }
                                 ],
-                                "sigma_circular_gm": 2.512503697608185,
-                                "sigma_linear_gm": 1.6750029239887625,
+                                "sigma_circular_gm": 2.5111068069555302,
+                                "sigma_linear_gm": 1.6740717479592062,
                                 "source_files": [],
                                 "writer_nproc": 1
                             }
@@ -1127,7 +1127,7 @@
                             "items": [
                                 {
                                     "action": "fresh",
-                                    "id": "fd:dipole_x@f0.16121",
+                                    "id": "fd:dipole_x@f0.16119",
                                     "thresh": 0.0001
                                 },
                                 {
@@ -1137,7 +1137,7 @@
                                 },
                                 {
                                     "action": "fresh",
-                                    "id": "fd:dipole_y@f0.16121",
+                                    "id": "fd:dipole_y@f0.16119",
                                     "thresh": 0.0001
                                 },
                                 {
@@ -1147,7 +1147,7 @@
                                 },
                                 {
                                     "action": "fresh",
-                                    "id": "fd:dipole_z@f0.16121",
+                                    "id": "fd:dipole_z@f0.16119",
                                     "thresh": 0.0001
                                 },
                                 {
@@ -1166,16 +1166,16 @@
                 },
                 "v3_timing": {
                     "assemble": {
-                        "cpu_s": 653.3237964333966,
-                        "wall_s": 653.3237948417664
+                        "cpu_s": 971.8472485099919,
+                        "wall_s": 971.8472471237183
                     },
                     "plan_build": {
-                        "cpu_s": 2.7599744498729706e-05,
-                        "wall_s": 2.7179718017578125e-05
+                        "cpu_s": 2.547958865761757e-05,
+                        "wall_s": 2.47955322265625e-05
                     },
                     "solve": {
-                        "cpu_s": 1447.7489444809034,
-                        "wall_s": 1447.7489438056946
+                        "cpu_s": 2489.724866946228,
+                        "wall_s": 2489.724867105484
                     }
                 },
                 "vbc_states": {
@@ -1186,11 +1186,11 @@
                             "converged": true,
                             "diverged": false,
                             "metrics": {
-                                "bytes": 101578752,
-                                "coeffs": 12697344,
+                                "bytes": 101246976,
+                                "coeffs": 12655872,
                                 "iters": 0,
-                                "rss_gb": 2.058917999267578,
-                                "wall_s": 55.68379807472229
+                                "rss_gb": 2.0967483520507813,
+                                "wall_s": 77.40120601654053
                             },
                             "writer_nproc": 1
                         }
@@ -1202,11 +1202,11 @@
                             "converged": true,
                             "diverged": false,
                             "metrics": {
-                                "bytes": 97846272,
-                                "coeffs": 12230784,
+                                "bytes": 97072128,
+                                "coeffs": 12134016,
                                 "iters": 0,
-                                "rss_gb": 2.083118438720703,
-                                "wall_s": 56.424938917160034
+                                "rss_gb": 1.994964599609375,
+                                "wall_s": 78.71779799461365
                             },
                             "writer_nproc": 1
                         }
@@ -1218,11 +1218,11 @@
                             "converged": true,
                             "diverged": false,
                             "metrics": {
-                                "bytes": 111559680,
-                                "coeffs": 13944960,
+                                "bytes": 111863808,
+                                "coeffs": 13982976,
                                 "iters": 0,
-                                "rss_gb": 2.0922775268554688,
-                                "wall_s": 58.38242697715759
+                                "rss_gb": 2.0113182067871094,
+                                "wall_s": 81.31115221977234
                             },
                             "writer_nproc": 1
                         }
@@ -1237,43 +1237,43 @@
                             {
                                 "alpha": [
                                     [
-                                        7.828627059517205,
-                                        -8.466252834427382e-11,
-                                        -5.547328882073721e-05
+                                        7.828796717929502,
+                                        -2.526703409488299e-10,
+                                        -6.443685788013381e-05
                                     ],
                                     [
-                                        1.690354252028149e-07,
-                                        8.874469541264013,
-                                        4.4125130964078885e-06
+                                        1.082384275117611e-05,
+                                        8.871788932056292,
+                                        4.542844068200491e-06
                                     ],
                                     [
-                                        -5.448393488368747e-05,
-                                        4.279622075317735e-06,
-                                        8.29398088829956
+                                        -7.979830020061842e-05,
+                                        4.323069255574019e-06,
+                                        8.294461101070024
                                     ]
                                 ],
                                 "converged": true,
                                 "directions": "xyz",
-                                "max_bsh_residual": 0.0012469422465421751,
+                                "max_bsh_residual": 0.00047486106295234525,
                                 "omega": 0.0,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "direction": "x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "direction": "y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "direction": "z",
                                         "source_protocol_key": "1e-04_k6"
@@ -1288,15 +1288,15 @@
                                 "A": "x",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 1.2403705561803229,
+                                "beta": 1.2385067327802441,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1304,7 +1304,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1312,7 +1312,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1328,15 +1328,15 @@
                                 "A": "y",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 2.954632874344198e-07,
+                                "beta": 1.9041838052647687e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1344,7 +1344,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1352,7 +1352,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1368,15 +1368,15 @@
                                 "A": "z",
                                 "B": "dipole_x",
                                 "C": "nuc_0_z",
-                                "beta": 0.0003368031887485283,
+                                "beta": 0.0002666342241054559,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1384,7 +1384,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1392,7 +1392,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1408,15 +1408,15 @@
                                 "A": "x",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": -1.4732634056165973e-06,
+                                "beta": -9.486537315918401e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1424,7 +1424,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1432,7 +1432,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1448,15 +1448,15 @@
                                 "A": "y",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": 5.251033682568115,
+                                "beta": 5.219228384900475,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1464,7 +1464,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1472,7 +1472,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1488,15 +1488,15 @@
                                 "A": "z",
                                 "B": "dipole_y",
                                 "C": "nuc_0_z",
-                                "beta": 4.188062917104215e-06,
+                                "beta": 3.5197717015920577e-06,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1504,7 +1504,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1512,7 +1512,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1528,15 +1528,15 @@
                                 "A": "x",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 0.00018153693238915616,
+                                "beta": -7.339414931824923e-05,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0005139424096441576,
+                                        "bsh_residual": 0.00034950183587239485,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_x",
@@ -1544,7 +1544,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1552,7 +1552,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1568,15 +1568,15 @@
                                 "A": "y",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 4.4474699107937415e-06,
+                                "beta": 4.566349160392558e-06,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0012469422465421751,
+                                        "bsh_residual": 0.00021007116555922422,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_y",
@@ -1584,7 +1584,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1592,7 +1592,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1608,15 +1608,15 @@
                                 "A": "z",
                                 "B": "dipole_z",
                                 "C": "nuc_0_z",
-                                "beta": 4.351907688930436,
+                                "beta": 4.35117179183004,
                                 "converged": true,
                                 "freq_b": 0.0,
                                 "freq_c": 0.0,
-                                "max_bsh_residual": 0.004397105162009056,
+                                "max_bsh_residual": 0.002620681765920998,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1624,7 +1624,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0008194753722047564,
+                                        "bsh_residual": 0.00047486106295234525,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "dipole_z",
@@ -1632,7 +1632,7 @@
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.004397105162009056,
+                                        "bsh_residual": 0.002620681765920998,
                                         "converged": true,
                                         "freq": 0.0,
                                         "input": "nuc_0_z",
@@ -1649,122 +1649,122 @@
                     "tpa": {
                         "1e-04_k6": [
                             {
-                                "D_circular": 3.731807446114558,
-                                "D_linear": 2.487871786669814,
-                                "Df": 4.677803255930237e-08,
-                                "Dg": 0.6219679232784372,
-                                "R": 1.499999905987855,
+                                "D_circular": 3.741138612611864,
+                                "D_linear": 2.4940930678237923,
+                                "Df": 1.9782476481429518e-07,
+                                "Dg": 0.6235231680435657,
+                                "R": 1.4999996034134264,
                                 "S": [
                                     [
-                                        -0.0008951535624969976,
-                                        -0.001589190319710889,
-                                        3.054425589568097
+                                        0.0012410831654244736,
+                                        0.001998198571469719,
+                                        3.058241589794272
                                     ],
                                     [
-                                        -0.001589190319710889,
-                                        0.0003241365747875947,
-                                        -1.214538076739575e-06
+                                        0.001998198571469719,
+                                        0.0012565795064302982,
+                                        -0.0005871761697320252
                                     ],
                                     [
-                                        3.054425589568097,
-                                        -1.214538076739575e-06,
-                                        -0.0006136099479876843
+                                        3.058241589794272,
+                                        -0.0005871761697320252,
+                                        -6.152988720840634e-05
                                     ]
                                 ],
                                 "converged": true,
-                                "delta_parallel": 2.487871786669814,
+                                "delta_parallel": 2.4940930678237923,
                                 "es_root_id": 0,
-                                "max_bsh_residual": 0.00216023907574597,
-                                "omega": 0.32242202608777737,
-                                "omega_ev": 8.773550286088529,
+                                "max_bsh_residual": 0.0009967122962610347,
+                                "omega": 0.3223899462753981,
+                                "omega_ev": 8.772677349923176,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0015321123879946253,
+                                        "bsh_residual": 0.0008467212736722914,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.00216023907574597,
+                                        "bsh_residual": 0.0009842797383651626,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0018271204398797789,
+                                        "bsh_residual": 0.0009967122962610347,
                                         "converged": true,
-                                        "freq": 0.16121101304388868,
+                                        "freq": 0.16119497313769904,
                                         "input": "dipole_z",
                                         "source_protocol_key": "1e-04_k6"
                                     }
                                 ],
-                                "sigma_circular_gm": 0.2104744031062042,
-                                "sigma_linear_gm": 0.14031627753175893,
+                                "sigma_circular_gm": 0.21095869655121205,
+                                "sigma_linear_gm": 0.1406391682178786,
                                 "source_files": [],
                                 "writer_nproc": 1
                             },
                             {
-                                "D_circular": 31.52004866953603,
-                                "D_linear": 21.01337153692592,
-                                "Df": 1.7271705698978327e-06,
-                                "Dg": 5.253342020646195,
-                                "R": 1.4999995890305926,
+                                "D_circular": 31.50484249008311,
+                                "D_linear": 21.00323514334965,
+                                "Df": 2.044988272537991e-06,
+                                "Dg": 5.250807763343276,
+                                "R": 1.4999995131730282,
                                 "S": [
                                     [
-                                        0.0031246365482947786,
-                                        8.876942655635641,
-                                        0.0027044934147194507
+                                        0.004345297771434458,
+                                        8.874801334507067,
+                                        0.0015941683012681682
                                     ],
                                     [
-                                        8.876942655635641,
-                                        0.0018500059972768373,
-                                        -0.0017374588646345709
+                                        8.874801334507067,
+                                        0.0016100036414152855,
+                                        -0.001637930978134445
                                     ],
                                     [
-                                        0.0027044934147194507,
-                                        -0.0017374588646345709,
-                                        0.0022236292676440384
+                                        0.0015941683012681682,
+                                        -0.001637930978134445,
+                                        0.0018773002096087702
                                     ]
                                 ],
                                 "converged": true,
-                                "delta_parallel": 21.01337153692592,
+                                "delta_parallel": 21.00323514334965,
                                 "es_root_id": 1,
-                                "max_bsh_residual": 0.002729012227335836,
-                                "omega": 0.3833050914221285,
-                                "omega_ev": 10.430262892741279,
+                                "max_bsh_residual": 0.001294591828168592,
+                                "omega": 0.38329098893661634,
+                                "omega_ev": 10.42987914456098,
                                 "row_accuracy": [
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0019357007558518462,
+                                        "bsh_residual": 0.001294591828168592,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_x",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.002729012227335836,
+                                        "bsh_residual": 0.0011363048867899389,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_y",
                                         "source_protocol_key": "1e-04_k6"
                                     },
                                     {
                                         "accepted": false,
-                                        "bsh_residual": 0.0025515445266488814,
+                                        "bsh_residual": 0.0009410734619484114,
                                         "converged": true,
-                                        "freq": 0.19165254571106424,
+                                        "freq": 0.19164549446830817,
                                         "input": "dipole_z",
                                         "source_protocol_key": "1e-04_k6"
                                     }
                                 ],
-                                "sigma_circular_gm": 2.512503697608185,
-                                "sigma_linear_gm": 1.6750029239887625,
+                                "sigma_circular_gm": 2.5111068069555302,
+                                "sigma_linear_gm": 1.6740717479592062,
                                 "source_files": [],
                                 "writer_nproc": 1
                             }

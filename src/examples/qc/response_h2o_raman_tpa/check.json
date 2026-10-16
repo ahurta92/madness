@@ -1,5 +1,5 @@
 {
-  "description": "Water at the DALTON HF/aug-cc-pVQZ optimized geometry, HF, one rung (protocol 1e-4, k 6): alpha(0) xyz, the Raman component d alpha_zz/d z_O (raman.nuc_atom 0, axis 2) = 4.352445 au (row 8, A=z B=dipole_z C=nuc_0_z), two RPA excited states (omega 0.322421, 0.383335) and their 2PA D_linear (2.487983, 21.026868). The response block runs dconv 1e-3, not 1e-4: the FD gate is bsh < 5*dconv ABSOLUTE and the nuclear-displacement leg's response is ~1e3 larger than a dipole leg's, so at 5e-4 it plateaus near 4e-3, stalls, and Raman is dropped from the output entirely. DALTON d-aug-cc-pVQZ at this geometry (refs h2o_hfopt): alpha diag 7.830/8.877/8.292, and the finite-difference d alpha_zz/d z_O is 4.28802 at protocol 1e-6/k8 -- both for reading, not asserted; nothing here is a converged number. Reference: RelWithDebInfo, TBB, 1 rank x 7 threads, Seawulf Milan long-96core-shared, 2026-09-21, commit f43678a96 (job 2193262), wall 1942 s. Nightly tier.",
+  "description": "Water at the DALTON HF/aug-cc-pVQZ optimized geometry, HF, one rung (protocol 1e-4, k 6): alpha(0) xyz, the Raman component d alpha_zz/d z_O (raman.nuc_atom 0, axis 2) = 4.351172 au (row 8, A=z B=dipole_z C=nuc_0_z), two RPA excited states (omega 0.322390, 0.383291) and their 2PA D_linear (2.494093, 21.003235). Response dconv 1e-4 under the relative FD gate (||dx|| <= atol + 5 dconv ||x||): the ~1e3-norm nuclear-displacement leg converges in 22 iterations (bsh 2.6e-3 against its relative gate) instead of plateauing under the earlier absolute gate, which needed dconv 1e-3 here; per-leg iteration caps are 30. The derived 2PA legs sit at omega_f/2, so their metadata keys follow the roots (f0.16119, f0.19165). Against the dconv 1e-3 absolute-gate reference: alpha diag +1.7e-4 / -2.7e-3 / +4.8e-4, Raman -0.017 %, omega -3.2e-5 / -1.4e-5, D_linear +0.25 % / -0.05 %. DALTON d-aug-cc-pVQZ at this geometry (refs h2o_hfopt): alpha diag 7.830/8.877/8.292, and the finite-difference d alpha_zz/d z_O is 4.28802 at protocol 1e-6/k8 -- for reading, not asserted; nothing here is a converged number. Reference: RelWithDebInfo, Pthreads, ArmPL, 1 rank x 10 threads, dd (Neoverse-N1), 2026-10-16, madqc/checkpoint-publication-raman at 2a3d92920 + regenerated references, wall 3502 s (concurrent with three other jobs). Nightly tier.",
   "requires": {
     "threads": 4
   },
@@ -317,7 +317,7 @@
         "fd_states",
         "dipole_x",
         "1e-04_k6",
-        "f0.16121",
+        "f0.16119",
         "iter"
       ],
       "max": 30
@@ -356,7 +356,7 @@
         "fd_states",
         "dipole_y",
         "1e-04_k6",
-        "f0.16121",
+        "f0.16119",
         "iter"
       ],
       "max": 30
@@ -395,7 +395,7 @@
         "fd_states",
         "dipole_z",
         "1e-04_k6",
-        "f0.16121",
+        "f0.16119",
         "iter"
       ],
       "max": 30
