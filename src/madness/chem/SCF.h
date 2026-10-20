@@ -40,6 +40,7 @@
 #ifndef MADNESS_CHEM_SCF_H__INCLUDED
 #define MADNESS_CHEM_SCF_H__INCLUDED
 
+#include <madness/chem/FunctionResidual.h>
 #include <memory>
 
 #include<madness/chem/molecular_functors.h>
@@ -397,11 +398,13 @@ public:
         functionT comparison_alpha, comparison_beta;
         double comparison_energy, comparison_kinetic;
         int comparison_iteration;
+        FunctionResidualBlocks previous_function_residuals;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;
         double energy, kinetic, bsh_residual;
         tensorT dipole;
+        FunctionResidualBlocks function_residuals;
     };
     /// Evaluate current closed-shell, all-electron HF orbitals without an update.
     /// This diagnostic does not touch acceleration history or convergence flags.
@@ -534,7 +537,8 @@ public:
                       double& maxabsval) const;
 
     vecfuncT compute_residual(World& world, tensorT& occ, tensorT& fock,
-                              const vecfuncT& psi, vecfuncT& Vpsi, double& err);
+                              const vecfuncT& psi, vecfuncT& Vpsi, double& err,
+                              std::vector<double>* component_norms = nullptr);
 
     /// BSH-apply executors for compute_residual, selected by the bsh_apply parameter.
     /// All three consume Vpsi and return the new orbitals (not yet orthonormalized).
@@ -615,7 +619,8 @@ public:
                          vecfuncT& Vpsia, vecfuncT& Vpsib,
                          tensorT& focka, tensorT& fockb,
                          subspaceT& subspace, tensorT& Q,
-                         double& bsh_residual, double& update_residual);
+                         double& bsh_residual, double& update_residual,
+                         FunctionResidualBlocks* components = nullptr);
 
     /// perform step restriction following the KAIN solver
 

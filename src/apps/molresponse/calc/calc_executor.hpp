@@ -587,7 +587,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   }
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
-  solver.record_function_kinetics(bool(ctx.checkpoint_observer));
+  solver.record_function_metrics(bool(ctx.checkpoint_observer));
 
   // The protocol + ground state + target are already set up above for `thresh`.
   // iterate_protocol calls prepare() before the (single) step; re-doing the
@@ -619,6 +619,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     }
     // Reprojection begins a new comparison segment, even for a loaded seed.
     st.kinetic_history.clear();
+    st.bsh_history.clear();
+    st.function_residuals.clear();
     detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
                                  FunctionDefaults<3>::get_thresh());
   };

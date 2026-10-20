@@ -42,6 +42,7 @@
 // =========================================================================
 
 #include "function_kinetics.hpp"
+#include "function_residuals.hpp"
 #include "../kernels/exchange_ctx.hpp"  // exch::assemble_theta_tensor (--fd-tensor gate)
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
 #include "../kernels/static.hpp"   // Kernels<Static, ClosedShell>
@@ -77,6 +78,8 @@ public:
     // Scalars only. History belongs to this solve/rung/reference and is reset
     // on continuation; the function archives remain the source of state.
     std::vector<FunctionKineticSample> kinetic_history;
+    std::vector<FunctionResidualSample> bsh_history;
+    std::vector<madness::FunctionResidualBlocks> function_residuals;
     std::vector<FunctionKinetics> function_kinetics;
     std::vector<double>                     last_bsh_residual;
     std::vector<madness::real_function_3d>  rho_alpha_prev;
@@ -153,7 +156,7 @@ public:
         madness::FunctionDefaults<3>::get_thresh());
   }
   const ConvergencePolicy::Targets& targets() const { return targets_; }
-  void record_function_kinetics(bool enabled) { record_function_kinetics_ = enabled; }
+  void record_function_metrics(bool enabled) { record_function_metrics_ = enabled; }
 
   /// <z|(A-w)|z> for the operator this solver actually solves, formed directly.
   ///
@@ -585,8 +588,9 @@ public:
     State out;
     out.iter      = in.iter + 1;
     out.responses = in.responses;
-    if (record_function_kinetics_) {
+    if (record_function_metrics_) {
       out.kinetic_history = std::move(in.kinetic_history);
+      out.bsh_history = std::move(in.bsh_history);
       if (out.kinetic_history.empty()) {
         FunctionKineticSample initial{in.iter, {}};
         for (const auto& response : in.responses)
@@ -628,9 +632,15 @@ public:
       out.last_bsh_residual[r] =
           K::compute_residual_norm(world_, in.responses[r], x_new);
 
+      // Capture the raw fixed-point difference before KAIN changes the output.
+      if (record_function_metrics_)
+        out.function_residuals.push_back(measure_function_residuals(world_, in.responses[r], x_new));
       out.responses[r]      = std::move(x_new);
       out.rho_alpha_prev[r] = std::move(rho);
     }
+
+    if (record_function_metrics_)
+      out.bsh_history.push_back({in.iter, out.function_residuals, out.last_bsh_residual});
 
     // ---- KAIN + step restriction (over flat in/out responses) ------------
     // diag_level pulled from print_level_; gated uniformly across ranks
@@ -652,7 +662,7 @@ public:
     for (int r = 0; r < M; ++r)
       out.last_property[r] = source_overlap(world_, out.responses[r],
                                             target_.responses[r]);
-    if (record_function_kinetics_) {
+    if (record_function_metrics_) {
       FunctionKineticSample sample{out.iter, {}};
       for (const auto& response : out.responses)
         sample.channels.push_back(measure_function_kinetics(world_, response));
@@ -672,7 +682,7 @@ public:
     evidence.iter = saved.iter;
     for (int r = 0; r < target_.n_responses(); ++r) {
       auto response = saved.responses[r].copy(world_);
-      if (record_function_kinetics_)
+      if (record_function_metrics_)
         evidence.function_kinetics.push_back(measure_function_kinetics(world_, response));
       auto rho = K::compute_density(world_, target_.gs, response);
       evidence.last_rho_norm.push_back(rho.norm2());
@@ -681,6 +691,8 @@ public:
       double theta_norm = 0.0;
       auto next = raw_fixed_point(response, rho, r, theta_norm);
       evidence.last_bsh_residual.push_back(K::compute_residual_norm(world_, response, next));
+      if (record_function_metrics_)
+        evidence.function_residuals.push_back(measure_function_residuals(world_, response, next));
       evidence.last_x_norm.push_back(storage_norm(world_, response));
     }
     return evidence;
@@ -779,7 +791,7 @@ private:
   std::string                log_prefix_;   // F2d: per-subworld tag ("" = none)
   std::string                log_path_;
   bool                       log_header_written_ = false;
-  bool                       record_function_kinetics_ = false;
+  bool                       record_function_metrics_ = false;
 };
 
 // Call-site shape (cf. ESSolver):

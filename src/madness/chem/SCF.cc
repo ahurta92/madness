@@ -2011,12 +2011,15 @@ SCF::RestrictedHFEvaluation SCF::evaluate_restricted_hf(World& world) {
         for (long j = 0; j < i; ++j)
             if ((occ[i] == 1.0) != (occ[j] == 1.0)) fock(i,j) = fock(j,i) = 0.0;
     double residual = 0.0;
-    compute_residual(world, occ, fock, psi, vpsi, residual);
-    return {alpha, energy, 2.0 * kinetic, residual, dipole(world, rho)};
+    std::vector<double> components;
+    compute_residual(world, occ, fock, psi, vpsi, residual, &components);
+    return {alpha, energy, 2.0 * kinetic, residual, dipole(world, rho),
+            {{"alpha", std::move(components)}}};
 }
 
 vecfuncT SCF::compute_residual(World& world, tensorT& occ, tensorT& fock,
-                               const vecfuncT& psi, vecfuncT& Vpsi, double& err) {
+                               const vecfuncT& psi, vecfuncT& Vpsi, double& err,
+                               std::vector<double>* component_norms) {
 
     START_TIMER(world);
     PROFILE_MEMBER_FUNC(SCF);
@@ -2090,7 +2093,8 @@ vecfuncT SCF::compute_residual(World& world, tensorT& occ, tensorT& fock,
 
     START_TIMER(world);
     vecfuncT r = sub(world, psi, new_psi);
-    std::vector<double> rnorm = norm2s(world, r);
+    std::vector<double> rnorm = function_residual_norms(world, r);
+    if (component_norms) *component_norms = rnorm;
     if (world.rank() == 0 and (param.print_level() > 1))
         print("residuals", rnorm);
     double rms, maxval;
@@ -2588,7 +2592,8 @@ void SCF::kain_trim(subspaceT& subspace, tensorT& Q) const {
 
 void SCF::update_subspace(World& world, vecfuncT& Vpsia, vecfuncT& Vpsib,
                           tensorT& focka, tensorT& fockb, subspaceT& subspace, tensorT& Q,
-                          double& bsh_residual, double& update_residual) {
+                          double& bsh_residual, double& update_residual,
+                          FunctionResidualBlocks* components) {
     PROFILE_MEMBER_FUNC(SCF);
     double aerr = 0.0, berr = 0.0;
 
@@ -2618,7 +2623,9 @@ void SCF::update_subspace(World& world, vecfuncT& Vpsia, vecfuncT& Vpsib,
         }
     }
 
-    vecfuncT rm = compute_residual(world, aocc, focka, amo, Vpsia, aerr);
+    if (components) components->clear();
+    vecfuncT rm = compute_residual(world, aocc, focka, amo, Vpsia, aerr,
+                                  components ? &(*components)["alpha"] : nullptr);
     if (param.nbeta() != 0 && !param.spin_restricted()) {
         for (int i = 0; i < param.nmo_beta(); i++) {
             for (int j = 0; j < i; j++) {
@@ -2629,7 +2636,8 @@ void SCF::update_subspace(World& world, vecfuncT& Vpsia, vecfuncT& Vpsib,
             }
         }
 
-        vecfuncT br = compute_residual(world, bocc, fockb, bmo, Vpsib, berr);
+        vecfuncT br = compute_residual(world, bocc, fockb, bmo, Vpsib, berr,
+                                      components ? &(*components)["beta"] : nullptr);
         vm.insert(vm.end(), bmo.begin(), bmo.end());
         rm.insert(rm.end(), br.begin(), br.end());
     }
@@ -2783,6 +2791,7 @@ void SCF::solve(World& world) {
     const double trantol = vtol / std::min(30.0, double(amo.size()));
     //const double tolloc = 1e-6; // was std::min(1e-6,0.01*dconv) but now trying to avoid unnecessary change // moved to localizer.h
     double update_residual = 0.0, bsh_residual = 0.0;
+    FunctionResidualBlocks function_residuals; // reset at each protocol rung
     double previous_energy = 0.0, previous_kinetic = 0.0;
     subspaceT subspace;
     tensorT Q;
@@ -3185,19 +3194,22 @@ void SCF::solve(World& world) {
                 if (checkpoint_observer)
                     checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                         etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1});
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals});
                 break;
             }
 
         }
 
         const double previous_bsh_residual = bsh_residual;
+        // The historical aggregate lags this update by one iteration.
+        const auto previous_function_residuals = function_residuals;
         update_subspace(world, Vpsia, Vpsib, focka, fockb, subspace, Q,
-                        bsh_residual, update_residual);
+                        bsh_residual, update_residual,
+                        checkpoint_observer ? &function_residuals : nullptr);
         if (checkpoint_observer)
             checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                 etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter});
+                arho, brho, etot, ekinetic, iter, previous_function_residuals});
 
     }
     // save the converged fock matix

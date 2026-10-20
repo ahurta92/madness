@@ -49,13 +49,32 @@ class ResponseCheckpoint {
           // fresh solve. This check runs both before loading and publication,
           // so a diverged solve cannot replace the previous usable generation.
           require(!e.value("diverged", false), "invalid response state: diverged");
+          auto validate_bsh = [&](const json& metric) {
+            if (metric.contains("per_function"))
+              require(madness::valid_function_residual_record(metric.at("per_function")),
+                      "invalid response state: per-function BSH measurement");
+          };
           auto validate_kinetic = [&](const json& measurements) {
+            if (measurements.contains("bsh_residual")) validate_bsh(measurements.at("bsh_residual"));
             if (measurements.contains("kinetic_energy"))
               require(molresponse_v3::valid_function_kinetic_record(measurements.at("kinetic_energy")),
                       "invalid response state: per-function kinetic measurement");
           };
           if (e.contains("convergence_measurements")) validate_kinetic(e.at("convergence_measurements"));
           if (e.contains("saved_state_validation")) validate_kinetic(e.at("saved_state_validation").at("measurements"));
+          if (e.contains("function_bsh_history")) {
+            const auto& history = e.at("function_bsh_history");
+            require(history.is_array(), "invalid response state: per-function BSH history");
+            for (const auto& sample : history) {
+              require(sample.contains("per_function") && sample.contains("value") &&
+                      sample.at("value").is_number() && sample.value("availability", "") == "measured",
+                      "invalid response state: per-function BSH history");
+              const double value = sample.at("value").get<double>();
+              require(std::isfinite(value) && value >= 0.0,
+                      "invalid response state: per-function BSH history aggregate");
+              validate_bsh(sample);
+            }
+          }
           if (e.contains("function_kinetic_history"))
             for (const auto& sample : e.at("function_kinetic_history"))
               require(molresponse_v3::valid_function_kinetic_record(sample),

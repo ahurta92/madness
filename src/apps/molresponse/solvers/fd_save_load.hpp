@@ -256,6 +256,8 @@ void save_fd_state(madness::World &world,
       auto bsh = measured(first(state.last_bsh_residual), !state.last_bsh_residual.empty(),
           "response_amplitude_L2_atomic_units", checkpoint_targets ? checkpoint_targets->bsh_residual : 0.0,
           first(state.last_x_norm));
+      if (!state.function_residuals.empty())
+        bsh["per_function"] = madness::function_residual_record(state.function_residuals.at(0));
       bsh["reduction"] = "quadrature_over_orbitals_and_response_blocks";
       bsh["normalization_phase"] = "solver_step_output_after_acceleration";
       auto density = measured(first(state.last_density_residual),
@@ -270,6 +272,21 @@ void save_fd_state(madness::World &world,
               {"active_gate", false}, {"reason", "ground_reference_evidence_required"}}},
           {"delta_kinetic_energy", {{"value", nullptr}, {"availability", "unavailable"},
               {"active_gate", false}, {"reason", "response_block_weights_and_normalization_not_defined"}}}};
+      if (!state.bsh_history.empty()) {
+        entry["function_bsh_history"] = nlohmann::json::array();
+        for (const auto& sample : state.bsh_history) {
+          const double value = sample.aggregates.at(0);
+          entry["function_bsh_history"].push_back({
+              {"value", std::isfinite(value) ? nlohmann::json(value) : nlohmann::json(nullptr)},
+              {"availability", std::isfinite(value) ? "measured" : "invalid"},
+              {"units", bsh.at("units")}, {"reduction", bsh.at("reduction")},
+              {"phase", "solver_step_input_before_acceleration"},
+              {"active_gate", false}, {"valid_for_saved_state", false},
+              {"per_function", madness::function_residual_record(sample.channels.at(0))},
+              {"sample", {{"attempt_directory", dir}, {"iteration", sample.iteration},
+                          {"threshold", thresh}, {"k", k_now}}}});
+        }
+      }
       if (!state.kinetic_history.empty()) {
         entry["function_kinetic_history"] = nlohmann::json::array();
         for (const auto& sample : state.kinetic_history)
@@ -294,6 +311,8 @@ void save_fd_state(madness::World &world,
         auto density_saved = measured(first(v.last_density_residual), !v.last_density_residual.empty(),
             "kernel_induced_density_L2_atomic_units", checkpoint_targets->density_residual, first(v.last_rho_norm));
         bsh_saved["reduction"] = bsh["reduction"];
+        if (!v.function_residuals.empty())
+          bsh_saved["per_function"] = madness::function_residual_record(v.function_residuals.at(0));
         density_saved["reduction"] = density["reduction"];
         auto measurements = entry["convergence_measurements"];
         measurements["bsh_residual"] = bsh_saved;

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/FunctionResidualReport.h>
 
 namespace named_stages {
 namespace fs = std::filesystem;
@@ -30,6 +31,9 @@ class MoldftCheckpoint {
     if (!metrics.contains("convergence_report")) return;
     const auto& report = metrics.at("convergence_report");
     auto validate = [&](const json& measurements) {
+      if (measurements.contains("bsh_residual") && measurements.at("bsh_residual").contains("per_function"))
+        require(madness::valid_function_residual_record(measurements.at("bsh_residual").at("per_function")),
+                "invalid ground-state measurement: per-function BSH");
       for (const auto& metric : measurements.items())
         require(metric.value().value("availability", "") != "invalid",
                 "invalid ground-state measurement: " + metric.key());
@@ -164,6 +168,8 @@ public:
         "raw_fixed_point_difference_before_previous_update", !scf.param.get<bool>("conv_only_dens"),
         nullptr, 5.0 * effective, step.iteration - 1);
     evidence["bsh_residual"]["reduction"] = "maximum_over_orbital_and_spin_L2_norms";
+    if (step.has_previous && !step.previous_function_residuals.empty())
+      evidence["bsh_residual"]["per_function"] = madness::function_residual_record(step.previous_function_residuals);
     evidence["energy_change"] = measured(step.energy_change, "hartree",
         "successive_iteration_energy_evaluations", false, scf.param.econv(), scf.param.econv(), step.iteration);
     evidence["delta_kinetic_energy"] = measured(step.kinetic_change, "hartree",
@@ -225,6 +231,8 @@ public:
       m.erase("sample");
       m.erase("components");
     }
+    // Replace historical components with evidence from the actual saved orbitals.
+    evidence["bsh_residual"]["per_function"] = madness::function_residual_record(evaluation.function_residuals);
     metrics["convergence_report"]["saved_state_validation"] = {
         {"affects_stopping", false}, {"measurements", evidence},
         {"energy", energy}, {"kinetic_energy", evaluation.kinetic},

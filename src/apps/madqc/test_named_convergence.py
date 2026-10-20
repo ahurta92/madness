@@ -2,6 +2,7 @@
 """Check scientific evidence survives publication and continuation, not just results."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -37,13 +38,32 @@ def run(label, root, text=deck, resume=False, success=True):
 def manifests(root, stage):
     return [json.loads(f.read_text()) for f in (root / stage / 'checkpoints').glob('*/manifest.json')]
 
+def check_function_bsh(metric, reduction):
+    record = metric['per_function']
+    assert record['quantity'] == 'raw_fixed_point_function_L2'
+    assert record['availability'] == 'measured'
+    assert record['normalization'] == 'none' and record['reduction'] == 'none'
+    assert record['active_gate'] is False
+    values = []
+    for functions in record['blocks'].values():
+        for index, function in enumerate(functions):
+            assert function['function_index'] == index
+            assert function['availability'] == 'measured'
+            assert math.isfinite(function['value']) and function['value'] >= 0
+            values.append(function['value'])
+    assert values
+    expected = max(values) if reduction == 'max' else math.sqrt(sum(v*v for v in values))
+    assert abs(metric['value'] - expected) < 1e-10
+
 fresh = work / 'Fresh'
 stages = run('fresh', fresh)
 gs, response = stages
 assert 'convergence_report' in gs, 'ground convergence measurement report missing'
 g = gs['convergence_report']
 assert set(g['measurements']) == {'density_change', 'bsh_residual', 'energy_change', 'delta_kinetic_energy'}
+check_function_bsh(g['measurements']['bsh_residual'], 'max')
 validation = g['saved_state_validation']
+check_function_bsh(validation['measurements']['bsh_residual'], 'max')
 assert validation['state_id'] == gs['state_id']
 assert validation['affects_stopping'] is False
 for name, m in validation['measurements'].items():
@@ -75,10 +95,21 @@ for c in r['channels']:
     assert m['bsh_residual']['valid_for_saved_state'] is False
     assert m['energy_change']['availability'] == 'not_applicable'
     assert m['delta_kinetic_energy']['availability'] == 'not_applicable'
+    check_function_bsh(m['bsh_residual'], 'quadrature')
+    history = c['function_bsh_history']
+    assert len(history) == c['iterations_at_save']
+    assert [sample['sample']['iteration'] for sample in history] == list(range(c['iterations_at_save']))
+    for sample in history:
+        check_function_bsh(sample, 'quadrature')
+        assert sample['valid_for_saved_state'] is False
+    check_function_bsh(c['saved_state_validation']['measurements']['bsh_residual'], 'quadrature')
     kinetics = c['function_kinetic_history']
     assert len(kinetics) == c['iterations_at_save'] + 1
     assert [k['sample']['iteration'] for k in kinetics] == list(range(c['iterations_at_save'] + 1))
     blocks = {'x_alpha'} if c['frequency'] == 0 else {'x_alpha', 'y_alpha'}
+    for sample in history:
+        assert set(sample['per_function']['blocks']) == blocks
+    assert set(c['saved_state_validation']['measurements']['bsh_residual']['per_function']['blocks']) == blocks
     for k in kinetics:
         assert k['reduction'] == 'none' and k['active_gate'] is False
         assert set(k['blocks']) == blocks
@@ -105,6 +136,8 @@ first = [m for m in manifests(fresh, 'gs') if m['position'].get('iteration') == 
 assert len(first) == 2
 for m in first:
     evidence = m['metrics']['convergence_report']['measurements']
+    assert evidence['bsh_residual']['availability'] == 'unavailable'
+    assert 'per_function' not in evidence['bsh_residual']
     for name in ('energy_change', 'density_change', 'delta_kinetic_energy'):
         assert evidence[name]['availability'] == 'unavailable' and evidence[name]['value'] is None
 # Reported changes must agree with independently differenced saved samples.
@@ -116,6 +149,8 @@ for samples in by_rung.values():
     samples.sort(key=lambda m: m['position']['iteration'])
     for before, after in zip(samples, samples[1:]):
         values = after['metrics']['convergence_report']['measurements']
+        check_function_bsh(values['bsh_residual'], 'max')
+        assert values['bsh_residual']['sample']['iteration'] == before['position']['iteration']
         delta = abs(after['metrics']['energy']['value'] - before['metrics']['energy']['value'])
         assert abs(values['energy_change']['value'] - delta) < 1e-14
         delta_t = abs(after['metrics']['kinetic_energy']['value'] - before['metrics']['kinetic_energy']['value'])
@@ -155,6 +190,11 @@ assert all(c['measurements']['density_change']['value'] is None
            for c in un['convergence_report']['channels'])
 resumed = run('resume', partial, resume=True)[1]
 assert resumed['status'] == 'completed' and resumed['iterations_this_run'] > 0
+for channel in resumed['convergence_report']['channels']:
+    history = channel['function_bsh_history']
+    assert [sample['sample']['iteration'] for sample in history] == list(range(channel['iterations_at_save']))
+    for sample in history:
+        check_function_bsh(sample, 'quadrature')
 # Independent check: an N=1 saved output is the input of step 2 in an N=2
 # solve from the same initial reference. Its raw BSH and density differences
 # must match the ordinary solver's next historical samples (static and full).
@@ -176,6 +216,12 @@ for one, two in zip(point_reports[0]['convergence_report']['channels'],
         for a, b in zip(saved['blocks'][block], next_input['blocks'][block]):
             assert a['function_index'] == b['function_index']
             assert abs(a['value'] - b['value']) < 1e-10
+    a = one['saved_state_validation']['measurements']['bsh_residual']['per_function']['blocks']
+    b = two['measurements']['bsh_residual']['per_function']['blocks']
+    for block in a:
+        for x, y in zip(a[block], b[block]):
+            assert x['function_index'] == y['function_index']
+            assert abs(x['value'] - y['value']) < 1e-10
     assert one['frequency'] == two['frequency']
     for metric in ('bsh_residual', 'density_change'):
         saved = one['saved_state_validation']['measurements'][metric]['value']
@@ -193,6 +239,10 @@ for count in (1, 3):
 one = ground_reports[0]['convergence_report']['saved_state_validation']['measurements']
 three = ground_reports[1]['convergence_report']['measurements']
 assert abs(one['bsh_residual']['value'] - three['bsh_residual']['value']) < 1e-9
+for x, y in zip(one['bsh_residual']['per_function']['blocks']['alpha'],
+                three['bsh_residual']['per_function']['blocks']['alpha']):
+    assert x['function_index'] == y['function_index']
+    assert abs(x['value'] - y['value']) < 1e-9
 step2 = next(m for m in manifests(work / 'GroundSteps3', 'gs') if m['position'].get('iteration') == 1)
 for metric in ('density_change', 'energy_change', 'delta_kinetic_energy'):
     expected = step2['metrics']['convergence_report']['measurements'][metric]['value']
@@ -263,6 +313,84 @@ for location in ('history', 'saved'):
     run('invalid-function-kinetic-' + location, root, resume=True, success=False)
     assert 'invalid response state: per-function kinetic' in (work / ('invalid-function-kinetic-' + location + '.log')).read_text()
     assert (store / 'latest').read_text() == latest
+# Reject corrupt component values in both historical and saved-state evidence.
+for stage in ('gs', 'optical'):
+    for location in ('historical', 'saved'):
+        root = work / ('InvalidFunctionBSH-' + stage + '-' + location)
+        shutil.copytree(fresh, root)
+        store = root / stage / 'checkpoints'
+        latest = (store / 'latest').read_text()
+        mfile = store / json.loads(latest)['generation'] / 'manifest.json'
+        manifest = json.loads(mfile.read_text())
+        if stage == 'gs':
+            entry = manifest['metrics']['convergence_report']
+            measurements = entry['measurements']
+        else:
+            channels = manifest['numerical']['engine_metadata']['fd_states']
+            entry = next(iter(next(iter(next(iter(channels.values())).values())).values()))
+            measurements = entry['convergence_measurements']
+        if location == 'saved':
+            measurements = entry['saved_state_validation']['measurements']
+        blocks = measurements['bsh_residual']['per_function']['blocks']
+        next(iter(blocks.values()))[0]['value'] = None
+        mfile.write_text(json.dumps(manifest))
+        label = 'invalid-function-bsh-' + stage + '-' + location
+        run(label, root, resume=True, success=False)
+        assert 'per-function BSH' in (work / (label + '.log')).read_text()
+        assert (store / 'latest').read_text() == latest
+
+# History contains its own aggregate as well as components; validate both.
+for corrupt in ('aggregate', 'component'):
+    root = work / ('InvalidBSHHistory-' + corrupt)
+    shutil.copytree(fresh, root)
+    store = root / 'optical/checkpoints'
+    latest = (store / 'latest').read_text()
+    mfile = store / json.loads(latest)['generation'] / 'manifest.json'
+    manifest = json.loads(mfile.read_text())
+    channels = manifest['numerical']['engine_metadata']['fd_states']
+    entry = next(iter(next(iter(next(iter(channels.values())).values())).values()))
+    sample = entry['function_bsh_history'][0]
+    if corrupt == 'aggregate':
+        sample['value'] = None
+    else:
+        sample['per_function']['blocks']['x_alpha'][0]['value'] = None
+    mfile.write_text(json.dumps(manifest))
+    label = 'invalid-bsh-history-' + corrupt
+    run(label, root, resume=True, success=False)
+    assert 'per-function BSH' in (work / (label + '.log')).read_text()
+    assert (store / 'latest').read_text() == latest
+
+# Aggregates from before this extension remain usable without invented components.
+legacy = work / 'LegacyAggregates'
+shutil.copytree(fresh, legacy)
+for stage in ('gs', 'optical'):
+    store = legacy / stage / 'checkpoints'
+    mfile = store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json'
+    manifest = json.loads(mfile.read_text())
+    if stage == 'gs':
+        report = manifest['metrics']['convergence_report']
+        report['measurements']['bsh_residual'].pop('per_function')
+        report['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
+    else:
+        for channel in manifest['numerical']['engine_metadata']['fd_states'].values():
+            for rung in channel.values():
+                for entry in rung.values():
+                    entry['convergence_measurements']['bsh_residual'].pop('per_function')
+                    entry['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
+                    entry.pop('function_bsh_history')
+    mfile.write_text(json.dumps(manifest))
+legacy_results = run('legacy-aggregates', legacy, resume=True)
+assert all(s['iterations_this_run'] == 0 for s in legacy_results)
+legacy_ground = legacy_results[0]['convergence_report']
+assert legacy_ground['measurements']['bsh_residual']['availability'] == 'measured'
+assert 'per_function' not in legacy_ground['measurements']['bsh_residual']
+assert 'per_function' not in legacy_ground['saved_state_validation']['measurements']['bsh_residual']
+for channel in legacy_results[1]['convergence_report']['channels']:
+    assert channel['measurements']['bsh_residual']['availability'] == 'measured'
+    assert 'per_function' not in channel['measurements']['bsh_residual']
+    assert 'per_function' not in channel['saved_state_validation']['measurements']['bsh_residual']
+    assert 'function_bsh_history' not in channel
+
 # Old generations stay reusable but cannot acquire invented measurements.
 old = work / 'Old'
 shutil.copytree(fresh, old)
@@ -279,12 +407,13 @@ for stage in ('gs', 'optical'):
                     e.pop('convergence_measurements')
                     e.pop('saved_state_validation', None)
                     e.pop('function_kinetic_history', None)
+                    e.pop('function_bsh_history', None)
     mfile.write_text(json.dumps(m))
 old_results = run('old', old, resume=True)
 assert all(s['iterations_this_run'] == 0 for s in old_results)
 assert old_results[0]['convergence_report']['measurements']['energy_change']['value'] is None
 assert old_results[1]['convergence_report']['channels'][0]['measurements']['bsh_residual']['value'] is None
 assert 'saved_state_validation' not in old_results[0]['convergence_report']
-assert all('saved_state_validation' not in c and 'function_kinetic_history' not in c
+assert all('saved_state_validation' not in c and 'function_kinetic_history' not in c and 'function_bsh_history' not in c
            for c in old_results[1]['convergence_report']['channels'])
 print('named convergence reporting, saved-state validation and continuation passed', flush=True)

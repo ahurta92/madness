@@ -28,6 +28,8 @@ set(MADCHEM_HEADERS
     GuessFactory.h
     IntegratorXX.h
     KineticEnergy.h
+    FunctionResidual.h
+    FunctionResidualReport.h
     localizer.h
     lowrankfunction.h
     masks_and_boxes.h

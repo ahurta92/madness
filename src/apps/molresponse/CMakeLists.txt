@@ -332,4 +332,16 @@ if(BUILD_TESTING)
     set_tests_properties(madness/test/molresponse/test_function_kinetics/mpi2
       PROPERTIES LABELS "response;medium" TIMEOUT 120)
   endif()
+
+  add_mad_executable(test_function_residuals "tests/test_function_residuals.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_function_residuals/run COMMAND test_function_residuals)
+  set_tests_properties(madness/test/molresponse/test_function_residuals/run
+    PROPERTIES LABELS "response;medium" TIMEOUT 120)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/molresponse/test_function_residuals/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_function_residuals> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(madness/test/molresponse/test_function_residuals/mpi2
+      PROPERTIES LABELS "response;medium" TIMEOUT 120)
+  endif()
 endif()

@@ -53,6 +53,8 @@ inline nlohmann::json response_convergence_report(const nlohmann::json& metadata
             {"state_id", state_id}, {"outcome", outcome}, {"iterations_at_save", entry.at("iter")},
             {"convention", entry.value("measurement_convention", json::object())},
             {"measurements", measurements}});
+        if (entry.contains("function_bsh_history"))
+          report["channels"].back()["function_bsh_history"] = entry.at("function_bsh_history");
         if (entry.contains("function_kinetic_history"))
           report["channels"].back()["function_kinetic_history"] = entry.at("function_kinetic_history");
         if (entry.contains("saved_state_validation")) {

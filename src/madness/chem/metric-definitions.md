@@ -32,6 +32,31 @@ the total-energy evaluation combines spins (doubling the restricted result).
 The response reporter instead records every stored X/Y function separately.
 Neither operation changes the definition of the underlying T_ii.
 
+## Shared per-function BSH definition
+
+`FunctionResidual.h` defines `r_i = ||f_i - F_i(f)||_L2`, where `F` is the
+application's raw fixed-point update before acceleration or damping. Every
+stored function carries one scalar. No occupation/spin weight, amplitude
+normalization or reduction is applied. `FunctionResidualReport.h` supplies
+common serialization and validation; the parent aggregate carries units and
+sample provenance. The application still owns its fixed-point equation.
+
+SCF uses its already computed residual functions and norms. The observer's
+components follow its historical aggregate from the previous update. Named
+response measures the raw input/update pair before KAIN, on independent copies,
+and records `function_bsh_history` for each solve/rung. Restricted ground state
+has `alpha`; static response has `x_alpha`; full response also has `y_alpha`.
+The helper supports explicit beta blocks without inventing restricted partners.
+
+The existing aggregates remain maximum over SCF functions/spins and quadrature
+over response functions/blocks. Existing response relative gates retain their
+output-state normalization; the new raw components are not normalized by it.
+Saved-state validation recomputes the fixed-point difference on the archived
+state independently. Historical function indices refer to the sampled working
+basis; they do not establish correspondence across orbital rotations or rungs.
+Older checkpoints without these optional fields remain usable, with no inferred
+components. Invalid individual scalars are rejected before reuse/publication.
+
 ## Current measurements
 
 | Measurement | moldft | Named driven response |
@@ -83,3 +108,10 @@ scaling), source-function nonmutation, empty input, response versus actual SCF
 matrix diagonals, an analytic off-diagonal, and SCF's actual occupation-weighted
 Fock-builder total. It also compares the explicit-operator helper with SCF for
 `ble` and `bspline` derivatives. Tests run in serial and on two MPI ranks.
+
+`test_function_residuals` checks analytic differences [3,0] and [0,4], input
+preservation, empty/mismatched inputs, and invalid component rejection, in
+serial and on two MPI ranks. Named convergence acceptance reconstructs both
+existing aggregates from their components, compares independent saved-state
+checks with the next actual solver evaluation, exercises continuation and
+rejects corrupted evidence while retaining the previous publication.

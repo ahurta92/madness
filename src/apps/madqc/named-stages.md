@@ -248,3 +248,26 @@ Per-function differences or trend-based stopping are separate future policy.
 
 The shared numerical definitions and current application-specific reductions are
 recorded in [metric-definitions.md](../../madness/chem/metric-definitions.md).
+
+## Per-function BSH residuals
+
+Ground and response `measurements.bsh_residual.per_function` now records the
+raw scalar `||f_i - F_i(f)||_L2` for each stored function, using the shared
+`madness/chem/FunctionResidual.h` definition. Its `blocks` map contains arrays
+of `{function_index, value, availability}`: `alpha` (and explicit `beta`) for
+SCF, `x_alpha` and any stored Y/beta blocks for response. Values have no
+occupation weights, normalization or per-function stopping gate. Units and
+sample identity are inherited from the containing BSH measurement.
+
+Ground components follow the same previous-update phase as its existing maximum
+residual. Response components are measured before KAIN and retained in
+`convergence_report.channels[].function_bsh_history`; there is one sample per
+raw solver update, indexed by its input iteration. Independent saved-state
+components live under `saved_state_validation.measurements.bsh_residual`.
+Historical components describe the sampled working basis, not necessarily the
+orbital ordering after a later rotation. Histories restart at each solve/rung.
+
+The existing ground maximum and response quadrature aggregates and all stopping
+rules are unchanged. Checkpoints predating these optional fields stay reusable
+without fabricated component evidence. Present invalid components or response
+history aggregates are rejected before reuse or publication.
