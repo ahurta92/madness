@@ -20,6 +20,7 @@
 // =========================================================================
 
 #include <madness/mra/mra.h>
+#include <madness/chem/KineticEnergy.h>
 #include <madness/tensor/tensor.h>
 #include <madness/tensor/tensor_lapack.h>
 
@@ -408,17 +409,7 @@ inner(const std::vector<State> &a, const std::vector<State> &b) {
 /// Work on copies because Function handles share their underlying trees.
 inline std::vector<double> kinetic_diagonal(
     madness::World& world, const madness::vector_real_function_3d& functions) {
-  std::vector<double> values(functions.size(), 0.0);
-  if (functions.empty()) return values;
-  auto input = madness::copy(world, functions);
-  for (int axis = 0; axis < 3; ++axis) {
-    madness::real_derivative_3d derivative(world, axis);
-    auto gradients = apply(world, derivative, input);
-    const auto norms = madness::norm2s(world, gradients);
-    for (std::size_t i = 0; i < values.size(); ++i)
-      values[i] += 0.5 * norms[i] * norms[i];
-  }
-  return values;
+  return madness::kinetic_energy_diagonal(world, functions);
 }
 
 /// Kinetic block of the subspace matrix in GRADIENT form,

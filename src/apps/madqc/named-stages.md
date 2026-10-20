@@ -245,3 +245,6 @@ These values are diagnostic (`active_gate: false`). The previous response-wide
 `delta_kinetic_energy` placeholder becomes `not_applicable` when per-function
 values are present: no channel-wide scalar reduction has been selected.
 Per-function differences or trend-based stopping are separate future policy.
+
+The shared numerical definitions and current application-specific reductions are
+recorded in [metric-definitions.md](../../madness/chem/metric-definitions.md).

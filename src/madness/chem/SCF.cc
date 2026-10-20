@@ -41,6 +41,7 @@
 #include <madness/world/ranks_and_hosts.h>
 #include <madness.h>
 #include <madness/chem/SCF.h>
+#include <madness/chem/KineticEnergy.h>
 #include <madness/chem/Restart.h>
 #include <madness/chem/StageCheckpoint.h>
 #include <madchem.h>
@@ -777,8 +778,6 @@ void SCF::analyze_vectors(World& world, const vecfuncT& mo,
 // this version is faster than the previous version on BG/Q
 distmatT SCF::kinetic_energy_matrix(World& world, const vecfuncT& v) const {
     PROFILE_MEMBER_FUNC(SCF);
-    int n = v.size();
-    distmatT r = column_distributed_matrix<double>(world, n, n);
     START_TIMER(world);
     reconstruct(world, v);
     END_TIMER(world, "KEmat reconstruct");
@@ -800,11 +799,8 @@ distmatT SCF::kinetic_energy_matrix(World& world, const vecfuncT& v) const {
     world.gop.fence();
     END_TIMER(world, "KEmat compress");
     START_TIMER(world);
-    r += matrix_inner(r.distribution(), dvx, dvx, true);
-    r += matrix_inner(r.distribution(), dvy, dvy, true);
-    r += matrix_inner(r.distribution(), dvz, dvz, true);
+    auto r = kinetic_energy_matrix_from_gradients(world, {dvx, dvy, dvz});
     END_TIMER(world, "KEmat inner products");
-    r *= 0.5;
     //tensorT p(v.size(),v.size());
     //r.copy_to_replicated(p);
     return r;

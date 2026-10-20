@@ -27,6 +27,7 @@ set(MADCHEM_HEADERS
     gth_pseudopotential.h
     GuessFactory.h
     IntegratorXX.h
+    KineticEnergy.h
     localizer.h
     lowrankfunction.h
     masks_and_boxes.h
