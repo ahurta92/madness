@@ -41,6 +41,7 @@
 // the storage. Plan the Kernels API so this plugs in cleanly.
 // =========================================================================
 
+#include "function_kinetics.hpp"
 #include "../kernels/exchange_ctx.hpp"  // exch::assemble_theta_tensor (--fd-tensor gate)
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
 #include "../kernels/static.hpp"   // Kernels<Static, ClosedShell>
@@ -73,6 +74,10 @@ public:
 
   struct State {
     std::vector<Storage>                    responses;
+    // Scalars only. History belongs to this solve/rung/reference and is reset
+    // on continuation; the function archives remain the source of state.
+    std::vector<FunctionKineticSample> kinetic_history;
+    std::vector<FunctionKinetics> function_kinetics;
     std::vector<double>                     last_bsh_residual;
     std::vector<madness::real_function_3d>  rho_alpha_prev;
     std::vector<double>                     last_density_residual;
@@ -148,6 +153,7 @@ public:
         madness::FunctionDefaults<3>::get_thresh());
   }
   const ConvergencePolicy::Targets& targets() const { return targets_; }
+  void record_function_kinetics(bool enabled) { record_function_kinetics_ = enabled; }
 
   /// <z|(A-w)|z> for the operator this solver actually solves, formed directly.
   ///
@@ -495,6 +501,50 @@ private:
     }
   }
 
+  // Shared by iteration and saved-state diagnostics. This is the raw map:
+  // it never touches acceleration history, iteration counters or stop flags.
+  Storage raw_fixed_point(const Storage& response, const madness::real_function_3d& rho,
+                          int r, double& theta_norm) {
+    const double thr = madness::FunctionDefaults<3>::get_thresh();
+    // θ = V0x − E0x + γ. Gate 1 (policy_.exchange_tensor, --fd-tensor): the
+    // fused tensor-exchange assembly (exch::, ClosedShell Static/Full only);
+    // gate 0 (default) = the per-op reference path, streamed via Storage::axpy,
+    // UNTOUCHED. doc 28 §4 Inc 1; A/B-to-thresh between the two gates.
+    typename K::State theta;
+    bool tensor_done = false;
+    if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                  std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+      if (policy_.exchange_tensor) {
+        theta = exch::assemble_theta_tensor(world_, target_.gs,
+                                            response, rho,
+                                            policy_.exchange_tile);
+        tensor_done = true;
+      }
+    }
+    if (!tensor_done) {
+      theta = K::compute_V0x(world_, target_.gs, response);
+      {
+        auto E0x = K::compute_E0x(world_, target_.gs, response);
+        theta.axpy(world_, -1.0, E0x);                        // theta -= E0x
+      }
+      {
+        auto gamma = K::compute_gamma(world_, target_.gs,
+                                      response, rho);
+        theta.axpy(world_, +1.0, gamma);                      // theta += γ
+      }
+    }
+    add_perturbation_source(world_, theta, target_.responses[r]); // theta += V_p
+    theta.truncate_all(world_, thr);
+    // The constant in the error bound docs/guides/convergence.md states,
+    // |d alpha| <= |c| ||theta|| ||r_B||. Until now nothing evaluated it, so
+    // the bound was documented and uncheckable; theta is already in hand here.
+    theta_norm = storage_norm(world_, theta);
+
+    // BSH apply
+    return K::bsh_apply(world_, target_.gs, response,
+                              theta, target_.responses[r].omega);
+  }
+
 public:
   void print_final(const State &s, bool converged) const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
@@ -535,6 +585,15 @@ public:
     State out;
     out.iter      = in.iter + 1;
     out.responses = in.responses;
+    if (record_function_kinetics_) {
+      out.kinetic_history = std::move(in.kinetic_history);
+      if (out.kinetic_history.empty()) {
+        FunctionKineticSample initial{in.iter, {}};
+        for (const auto& response : in.responses)
+          initial.channels.push_back(measure_function_kinetics(world_, response));
+        out.kinetic_history.push_back(std::move(initial));
+      }
+    }
     const int M   = target_.n_responses();
     const double thr = madness::FunctionDefaults<3>::get_thresh();
 
@@ -565,43 +624,7 @@ public:
         out.last_density_residual[r] = drho.norm2();
       }
 
-      // θ = V0x − E0x + γ. Gate 1 (policy_.exchange_tensor, --fd-tensor): the
-      // fused tensor-exchange assembly (exch::, ClosedShell Static/Full only);
-      // gate 0 (default) = the per-op reference path, streamed via Storage::axpy,
-      // UNTOUCHED. doc 28 §4 Inc 1; A/B-to-thresh between the two gates.
-      typename K::State theta;
-      bool tensor_done = false;
-      if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
-                    std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
-        if (policy_.exchange_tensor) {
-          theta = exch::assemble_theta_tensor(world_, target_.gs,
-                                              in.responses[r], rho,
-                                              policy_.exchange_tile);
-          tensor_done = true;
-        }
-      }
-      if (!tensor_done) {
-        theta = K::compute_V0x(world_, target_.gs, in.responses[r]);
-        {
-          auto E0x = K::compute_E0x(world_, target_.gs, in.responses[r]);
-          theta.axpy(world_, -1.0, E0x);                        // theta -= E0x
-        }
-        {
-          auto gamma = K::compute_gamma(world_, target_.gs,
-                                        in.responses[r], rho);
-          theta.axpy(world_, +1.0, gamma);                      // theta += γ
-        }
-      }
-      add_perturbation_source(world_, theta, target_.responses[r]); // theta += V_p
-      theta.truncate_all(world_, thr);
-      // The constant in the error bound docs/guides/convergence.md states,
-      // |d alpha| <= |c| ||theta|| ||r_B||. Until now nothing evaluated it, so
-      // the bound was documented and uncheckable; theta is already in hand here.
-      out.last_theta_norm[r] = storage_norm(world_, theta);
-
-      // BSH apply
-      auto x_new = K::bsh_apply(world_, target_.gs, in.responses[r],
-                                theta, target_.responses[r].omega);
+      auto x_new = raw_fixed_point(in.responses[r], rho, r, out.last_theta_norm[r]);
       out.last_bsh_residual[r] =
           K::compute_residual_norm(world_, in.responses[r], x_new);
 
@@ -629,11 +652,38 @@ public:
     for (int r = 0; r < M; ++r)
       out.last_property[r] = source_overlap(world_, out.responses[r],
                                             target_.responses[r]);
+    if (record_function_kinetics_) {
+      FunctionKineticSample sample{out.iter, {}};
+      for (const auto& response : out.responses)
+        sample.channels.push_back(measure_function_kinetics(world_, response));
+      out.kinetic_history.push_back(std::move(sample));
+    }
     update_stall(out, in);
 
     print_iter_banner(out);
     append_convergence_log(out);
     return out;
+  }
+
+  /// Evaluate the serialized output without taking an extra solver step.
+  /// rho_alpha_prev is the last genuine step input, including a one-step run.
+  State evaluate_saved_state(const State& saved) {
+    State evidence;
+    evidence.iter = saved.iter;
+    for (int r = 0; r < target_.n_responses(); ++r) {
+      auto response = saved.responses[r].copy(world_);
+      if (record_function_kinetics_)
+        evidence.function_kinetics.push_back(measure_function_kinetics(world_, response));
+      auto rho = K::compute_density(world_, target_.gs, response);
+      evidence.last_rho_norm.push_back(rho.norm2());
+      if (!saved.rho_alpha_prev.empty())
+        evidence.last_density_residual.push_back((rho - saved.rho_alpha_prev[r]).norm2());
+      double theta_norm = 0.0;
+      auto next = raw_fixed_point(response, rho, r, theta_norm);
+      evidence.last_bsh_residual.push_back(K::compute_residual_norm(world_, response, next));
+      evidence.last_x_norm.push_back(storage_norm(world_, response));
+    }
+    return evidence;
   }
 
   /// Every leg within its relative gate (review C1): ||dx|| <= atol + rtol ||x||
@@ -729,6 +779,7 @@ private:
   std::string                log_prefix_;   // F2d: per-subworld tag ("" = none)
   std::string                log_path_;
   bool                       log_header_written_ = false;
+  bool                       record_function_kinetics_ = false;
 };
 
 // Call-site shape (cf. ESSolver):

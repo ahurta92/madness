@@ -70,6 +70,7 @@ void help(const std::string &wf) {
   print("Usage: madqc [options] [input_file]");
   print("Named decks: molecule H2 / moldft gs / molresponse optical (see named-stages.md).");
   print("  --prefix=<new-directory>    : output root for a fresh named-stage run");
+  print("  --continue                  : load/resume named moldft checkpoints in --prefix");
   print("\nOptions:");
   print("  --help=<workflow>           : show this help message");
   print("  --print_parameters=<group>  : print all parameters and exit");

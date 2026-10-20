@@ -113,3 +113,59 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
       PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
   endif()
 endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_checkpoint_e2e/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_checkpoint_e2e.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_checkpoint_e2e/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 1200)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_checkpoint_e2e/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_checkpoint_e2e.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_checkpoint_e2e/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 1200)
+  endif()
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE AND MADNESS_ENABLE_HDF5)
+  add_test(NAME madness/test/madqc/test_named_checkpoint_hdf5/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_checkpoint_hdf5.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_checkpoint_hdf5/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_response_checkpoint/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_response_checkpoint.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_response_checkpoint/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 1800)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_response_checkpoint/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_response_checkpoint.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_response_checkpoint/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 1800)
+  endif()
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_convergence/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_convergence.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_convergence/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 1200)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_convergence/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_convergence.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_convergence/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 1200)
+  endif()
+endif()

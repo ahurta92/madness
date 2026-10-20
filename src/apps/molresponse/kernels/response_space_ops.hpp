@@ -402,6 +402,25 @@ inner(const std::vector<State> &a, const std::vector<State> &b) {
   return inner(ra, rb);
 }
 
+/// Diagonal kinetic contributions for individual functions, as in SCF's
+/// kinetic_energy_matrix: K_ii = 1/2 sum_d <D_d f_i | D_d f_i>.
+/// No occupation/spin factor, normalization, or reduction over functions.
+/// Work on copies because Function handles share their underlying trees.
+inline std::vector<double> kinetic_diagonal(
+    madness::World& world, const madness::vector_real_function_3d& functions) {
+  std::vector<double> values(functions.size(), 0.0);
+  if (functions.empty()) return values;
+  auto input = madness::copy(world, functions);
+  for (int axis = 0; axis < 3; ++axis) {
+    madness::real_derivative_3d derivative(world, axis);
+    auto gradients = apply(world, derivative, input);
+    const auto norms = madness::norm2s(world, gradients);
+    for (std::size_t i = 0; i < values.size(); ++i)
+      values[i] += 0.5 * norms[i] * norms[i];
+  }
+  return values;
+}
+
 /// Kinetic block of the subspace matrix in GRADIENT form,
 ///   T_ij = ½ Σ_d ⟨∂_d a_i | ∂_d a_j⟩   (Euclidean over every block the State
 ///   carries: x, y, β — the same flattening as rs::inner),

@@ -104,6 +104,9 @@ namespace molresponse_v3 {
 /// state. `ExecutorContext` inherits these, so every `ctx.<knob>` access in this
 /// file resolves to an inherited member and is unchanged by the split.
 struct ExecutorSettings {
+  // Named stages publish a consistent snapshot after a complete FD protocol step.
+  // Empty for legacy callers; this does not change solver steps or stopping tests.
+  std::function<void(madness::World&, const nlohmann::json&)> checkpoint_observer;
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
   std::string       calc_dir;      // holds response_metadata.json + archives
@@ -584,6 +587,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   }
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
+  solver.record_function_kinetics(bool(ctx.checkpoint_observer));
 
   // The protocol + ground state + target are already set up above for `thresh`.
   // iterate_protocol calls prepare() before the (single) step; re-doing the
@@ -613,6 +617,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
       solv.set_target(std::move(nt));
       prepared_t = new_t;
     }
+    // Reprojection begins a new comparison segment, even for a loaded seed.
+    st.kinetic_history.clear();
     detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
                                  FunctionDefaults<3>::get_thresh());
   };
@@ -640,13 +646,25 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     const bool strict   = converged_now(st, solv);
     const bool accepted = accepted_now(st, solv);
     const double wall_s = madness::wall_time() - step_w0;   // R1b
+    // Diagnostics are opt-in through named checkpointing and do not advance
+    // the solver. The legacy application incurs no additional operator work.
+    typename Solver::State validation;
+    if (ctx.checkpoint_observer) validation = solv.evaluate_saved_state(st);
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
                                /*converged=*/strict || accepted,
                                /*seed=*/seed_kind, /*accepted=*/accepted,
                                /*wall_s=*/wall_s,
                                /*metadata_shard=*/ctx.metadata_shard,
                                /*log_prefix=*/ctx.log_prefix,
-                               /*log_group=*/ctx.log_group);
+                               /*log_group=*/ctx.log_group,
+                               /*checkpoint_native=*/bool(ctx.checkpoint_observer),
+                               /*checkpoint_dconv=*/ctx.policy.dconv_user,
+                               /*checkpoint_targets=*/&solv.targets(),
+                               /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation : nullptr);
+    if (ctx.checkpoint_observer)
+      ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
+          {"frequency", freq}, {"protocol", protocol_key()},
+          {"iterations", st.iter}, {"seed", seed_kind}});
   };
 
   solvers::IterateProtocolPolicy pp;

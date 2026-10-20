@@ -141,7 +141,11 @@ void save_fd_state(madness::World &world,
                    double wall_s = 0.0,     // R1b: point-solve wall time
                    const std::string &metadata_shard = std::string(),
                    const std::string &log_prefix = std::string(),  // F2d
-                   int log_group = -1) {                            // F2d
+                   int log_group = -1,
+                   bool checkpoint_native = false,
+                   double checkpoint_dconv = 0.0,
+                   const ConvergencePolicy::Targets* checkpoint_targets = nullptr,
+                   const typename FDSolver<Type, Shell>::State* checkpoint_validation = nullptr) {                            // F2d
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
   // subworlds never race the canonical file; rank 0 merges them after the fence.
@@ -149,9 +153,10 @@ void save_fd_state(madness::World &world,
   // distinct files keyed by pert/freq and always land in the shared dir.
   MADNESS_CHECK(state.responses.size() == 1);
 
-  if (world.rank() == 0) {
+  madness::checkpoint::detail::on_root(world, [&] {
     std::filesystem::create_directories(dir);
-  }
+    return std::string{};
+  });
   world.gop.fence();
 
   const double      thresh = madness::FunctionDefaults<3>::get_thresh();
@@ -166,15 +171,16 @@ void save_fd_state(madness::World &world,
   // The returned backend is recorded in the metadata entry so load opens the
   // SAME physical file family (a stale twin from a backend toggle can never
   // shadow this state). save() also removed the other backend's twin.
-  const IoBackend backend = state.responses[0].save(world, archive_path);
+  const IoBackend backend = state.responses[0].save(world, archive_path,
+      checkpoint_native ? IoBackend::Native : IoBackend::AutoDetect);
 
   // (1b) Collective per-state metrics (coeffs/bytes/rss/iters/wall) — every rank.
   StateMetrics metrics =
       measure_state(world, state.responses[0], state.iter);
   metrics.wall_s = wall_s;   // R1b (measure_state is collective; this is local)
 
-  // (2) Rank-0 metadata upsert.
-  if (world.rank() == 0) {
+  // Root filesystem failures must reach every rank before publication.
+  madness::checkpoint::detail::on_root(world, [&] {
     const std::string meta_path =
         dir + "/response_metadata" +
         (metadata_shard.empty() ? "" : ".group" + metadata_shard) + ".json";
@@ -221,6 +227,98 @@ void save_fd_state(madness::World &world,
         {"writer_nproc", static_cast<int>(world.size())},
         {"metrics",      metrics.to_json()},
     };
+    if (checkpoint_native) {
+      entry["checkpoint_dconv"] = checkpoint_dconv;
+      entry["measurement_phase"] = "solver_step_before_acceleration";
+      // These residuals were sampled on the input to the last BSH/KAIN step.
+      // The serialized functions are its output; do not certify that output
+      // using a residual which was never measured there.
+      auto measured = [&](double value, bool available, const char* units,
+                          double absolute_limit, double norm) {
+        const bool finite = std::isfinite(value) && std::isfinite(norm);
+        const double relative = checkpoint_targets ? checkpoint_targets->rtol : 0.0;
+        const double limit = fd_gate(absolute_limit, relative, norm);
+        return nlohmann::json{
+            {"value", available && finite ? nlohmann::json(value) : nlohmann::json(nullptr)},
+            {"availability", !available ? "unavailable" : finite ? "measured" : "invalid"},
+            {"reason", available ? "" : "no_comparable_previous_sample"},
+            {"units", units}, {"phase", "solver_step_input_before_acceleration"},
+            {"active_gate", true}, {"target", checkpoint_dconv},
+            {"absolute_limit", checkpoint_targets ? nlohmann::json(absolute_limit) : nlohmann::json(nullptr)},
+            {"relative_factor", relative}, {"normalization_scale", norm},
+            {"effective_limit", checkpoint_targets && finite ? nlohmann::json(limit) : nlohmann::json(nullptr)},
+            {"satisfied", available && finite && checkpoint_targets ? nlohmann::json(value <= limit) : nlohmann::json(nullptr)},
+            {"valid_for_saved_state", false},
+            {"sample", {{"attempt_directory", dir}, {"iteration", state.iter - 1},
+                        {"threshold", thresh}, {"k", k_now}}}};
+      };
+      const auto first = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v.front(); };
+      auto bsh = measured(first(state.last_bsh_residual), !state.last_bsh_residual.empty(),
+          "response_amplitude_L2_atomic_units", checkpoint_targets ? checkpoint_targets->bsh_residual : 0.0,
+          first(state.last_x_norm));
+      bsh["reduction"] = "quadrature_over_orbitals_and_response_blocks";
+      bsh["normalization_phase"] = "solver_step_output_after_acceleration";
+      auto density = measured(first(state.last_density_residual),
+          state.iter > 1 && !state.last_density_residual.empty(),
+          "kernel_induced_density_L2_atomic_units", checkpoint_targets ? checkpoint_targets->density_residual : 0.0,
+          first(state.last_rho_norm));
+      density["reduction"] = "kernel_induced_density_L2_norm";
+      density["normalization_phase"] = "solver_step_input_before_acceleration";
+      entry["convergence_measurements"] = {
+          {"bsh_residual", bsh}, {"density_change", density},
+          {"energy_change", {{"value", nullptr}, {"availability", "not_applicable"},
+              {"active_gate", false}, {"reason", "ground_reference_evidence_required"}}},
+          {"delta_kinetic_energy", {{"value", nullptr}, {"availability", "unavailable"},
+              {"active_gate", false}, {"reason", "response_block_weights_and_normalization_not_defined"}}}};
+      if (!state.kinetic_history.empty()) {
+        entry["function_kinetic_history"] = nlohmann::json::array();
+        for (const auto& sample : state.kinetic_history)
+          entry["function_kinetic_history"].push_back(function_kinetic_record(
+              sample.channels.at(0), sample.iteration, dir, thresh, k_now,
+              sample.iteration == state.iter,
+              sample.iteration == 0 ? "initial_solver_iterate" : "solver_iterate_after_acceleration"));
+        // The penultimate sample is the input to the last update. The final
+        // sample belongs to the saved output and also gets independent validation.
+        const auto& input = state.kinetic_history.at(state.kinetic_history.size() - 2);
+        entry["convergence_measurements"]["kinetic_energy"] = function_kinetic_record(
+            input.channels.at(0), input.iteration, dir, thresh, k_now, false,
+            "solver_step_input_before_acceleration");
+        entry["convergence_measurements"]["delta_kinetic_energy"] = {
+            {"value", nullptr}, {"availability", "not_applicable"}, {"active_gate", false},
+            {"reason", "kinetic_values_reported_per_function_without_scalar_reduction"}};
+      }
+      if (checkpoint_validation) {
+        const auto& v = *checkpoint_validation;
+        auto bsh_saved = measured(first(v.last_bsh_residual), !v.last_bsh_residual.empty(),
+            "response_amplitude_L2_atomic_units", checkpoint_targets->bsh_residual, first(v.last_x_norm));
+        auto density_saved = measured(first(v.last_density_residual), !v.last_density_residual.empty(),
+            "kernel_induced_density_L2_atomic_units", checkpoint_targets->density_residual, first(v.last_rho_norm));
+        bsh_saved["reduction"] = bsh["reduction"];
+        density_saved["reduction"] = density["reduction"];
+        auto measurements = entry["convergence_measurements"];
+        measurements["bsh_residual"] = bsh_saved;
+        measurements["density_change"] = density_saved;
+        for (const char* name : {"bsh_residual", "density_change"}) {
+          auto& m = measurements[name];
+          m["phase"] = "saved_response_before_archive";
+          m["normalization_phase"] = "saved_response_before_archive";
+          m["valid_for_saved_state"] = m["availability"] == "measured";
+          m["active_gate"] = false;
+          m["sample"]["iteration"] = state.iter;
+        }
+        if (!v.function_kinetics.empty())
+          measurements["kinetic_energy"] = function_kinetic_record(
+              v.function_kinetics.at(0), state.iter, dir, thresh, k_now, true,
+              "saved_response_before_archive");
+        entry["saved_state_validation"] = {{"affects_stopping", false},
+            {"measurements", measurements},
+            {"comparison", {{"attempt_directory", dir}, {"iteration", state.iter - 1},
+                            {"threshold", thresh}, {"k", k_now}}}};
+      }
+      entry["measurement_convention"] = {{"perturbation", pdesc},
+          {"model", detail_fd_save_load::type_tag<Type>()},
+          {"shell", detail_fd_save_load::shell_tag<Shell>()}, {"normalization", "native_kernel_no_size_scaling"}};
+    }
     meta.set_fd_state(pdesc, key, fkey, entry);
     meta.save();
 
@@ -254,7 +352,8 @@ void save_fd_state(madness::World &world,
       madness::print("MEMORY_HWM  kind=fd  protocol=", key,
                      "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
                      "  wall_s=", wall_s, "  id=", pdesc, "@", fkey);
-  }
+    return std::string{};
+  });
   world.gop.fence();
 }
 

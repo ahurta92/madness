@@ -181,7 +181,9 @@ struct molresponse_v3_lib {
   run_response(madness::World &world, const Params &params,
                const std::shared_ptr<madness::SCF> &scf_calc,
                const std::filesystem::path &outdir,
-               const std::filesystem::path &reference_prefix = {}) {
+               const std::filesystem::path &reference_prefix = {},
+               const std::function<void(madness::World&, const nlohmann::json&)>
+                   &checkpoint_observer = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
@@ -361,6 +363,7 @@ struct molresponse_v3_lib {
     // above to resolve the ground archive relative to this cwd.)
     in.settings.calc_dir = reference_prefix.empty() ? "." : outdir.string();
     in.settings.max_iters = static_cast<int>(rp.maxiter());
+    in.settings.checkpoint_observer = checkpoint_observer;
     // excited.maxiter / guess_max_iter / maxsub (review C2), when the deck sets them.
     apply_deck_es_knobs(rp, in.settings);
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the
@@ -450,7 +453,14 @@ struct molresponse_v3_lib {
     // Native was still preferred by from_archive, so nothing was mis-loaded,
     // but a native-less consumer would have read the seed. The preserved twin
     // lives under <prefix>.gs_seed.restartdata.h5.
-    if (hdf5_io_enabled()) gs.save_archive_hdf5(world, archive + ".h5");
+    if (hdf5_io_enabled()) {
+      // An explicit reference may be an immutable checkpoint generation.
+      // The response-prepared mirror belongs to this response attempt.
+      const auto mirror = reference_prefix.empty()
+          ? archive + ".h5"
+          : (outdir / "reference.restartdata.h5").string();
+      gs.save_archive_hdf5(world, mirror);
+    }
 #endif
 
     // Deck `dalton.dir <path>` — the seed-from-directory import contract

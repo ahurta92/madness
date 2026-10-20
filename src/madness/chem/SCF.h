@@ -53,6 +53,7 @@
 #include<madness/chem/molecularbasis.h>
 #include<madness/chem/corepotential.h>
 #include<madness/chem/xcfunctional.h>
+#include <functional>
 #include<madness/chem/potentialmanager.h>
 #include<madness/chem/gth_pseudopotential.h>
 #include<madness/chem/SCFOperators.h>
@@ -377,6 +378,38 @@ public:
     bool is_spin_restricted() const { return param.get<bool>("spin_restricted"); }
 
     void save_mos(World& world);
+
+    /// Write only the numerical restart payload at an explicit archive basename.
+    /// All ranks call; return the local checked-close error for collective publication.
+    std::string write_mos(World& world, const std::string& basename,
+                          const RestartMetadata& metadata) const;
+    RestartMetadata orbital_metadata() const;
+
+    struct IterationCheckpoint {
+        int iteration;
+        double threshold, input_energy, density_alpha, density_beta, previous_bsh_residual;
+        bool has_previous, final_rotation;
+        // Consecutive evaluation samples within this solve/protocol rung only.
+        // Diagnostic evidence; these do not add energy or kinetic stopping gates.
+        double input_kinetic, energy_change, kinetic_change;
+        // A genuine iteration-input comparison, before any final rotation.
+        // Densities are independent functions and remain immutable here.
+        functionT comparison_alpha, comparison_beta;
+        double comparison_energy, comparison_kinetic;
+        int comparison_iteration;
+    };
+    struct RestrictedHFEvaluation {
+        functionT alpha_density;
+        double energy, kinetic, bsh_residual;
+        tensorT dipole;
+    };
+    /// Evaluate current closed-shell, all-electron HF orbitals without an update.
+    /// This diagnostic does not touch acceleration history or convergence flags.
+    RestrictedHFEvaluation evaluate_restricted_hf(World& world);
+    /// Optional collective observer. Called after an update or final rotation;
+    /// energy/density evidence describes the iteration input, not the saved output.
+    /// Installing it changes neither the solver equations nor its stopping test.
+    std::function<void(World&, const SCF&, const IterationCheckpoint&)> checkpoint_observer;
 
     /// @param[in]	allow_fewer	pad the virtuals from the atomic guess when the archive
     ///							holds fewer orbitals than requested; otherwise that throws

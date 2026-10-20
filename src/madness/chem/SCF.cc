@@ -42,6 +42,7 @@
 #include <madness.h>
 #include <madness/chem/SCF.h>
 #include <madness/chem/Restart.h>
+#include <madness/chem/StageCheckpoint.h>
 #include <madchem.h>
 
 #if defined(__has_include)
@@ -295,11 +296,7 @@ void SCF::copy_data(World& world, const SCF& other) {
     at_nbf = other.at_nbf;
 }
 
-void SCF::save_mos(World& world) {
-    PROFILE_MEMBER_FUNC(SCF);
-    auto archivename=param.prefix()+".restartdata";
-    archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(world, archivename.c_str(), param.get<int>("nio"));
-
+RestartMetadata SCF::orbital_metadata() const {
     // The header layout lives in RestartMetadata (chem/Restart.h) -- do not
     // open-code it here. Adding a field there is enough; this call and
     // load_mos() below both follow.
@@ -317,16 +314,29 @@ void SCF::save_mos(World& world) {
     meta.ncf = restart_ncf;
     meta.eprec = molecule.parameters.eprec();
     meta.madness_version = MADNESS_PACKAGE_VERSION;
-    meta.write(ar);
+    return meta;
+}
 
-    ar & (unsigned int) (amo.size());
+std::string SCF::write_mos(World& world, const std::string& basename,
+                           const RestartMetadata& meta) const {
+    archive::ParallelOutputArchive<> ar(world, basename, param.get<int>("nio"));
+    meta.write(ar);
+    ar & static_cast<unsigned int>(amo.size());
     ar & aeps & aocc & aset;
-    for (unsigned int i = 0; i < amo.size(); ++i) ar & amo[i];
+    for (const auto& orbital : amo) ar & orbital;
     if (!param.spin_restricted()) {
-        ar & (unsigned int) (bmo.size());
+        ar & static_cast<unsigned int>(bmo.size());
         ar & beps & bocc & bset;
-        for (unsigned int i = 0; i < bmo.size(); ++i) ar & bmo[i];
+        for (const auto& orbital : bmo) ar & orbital;
     }
+    return checkpoint::close_archive(ar);
+}
+
+void SCF::save_mos(World& world) {
+    PROFILE_MEMBER_FUNC(SCF);
+    const auto error = write_mos(world, param.prefix()+".restartdata", orbital_metadata());
+    // The legacy writer also checks buffered write failures before proceeding.
+    checkpoint::detail::collective_error(world, error);
 
     // Do not make a restartaodata file if nwchem orbitals used,
     // as no aoamo/aobmo overlap matrix can be computed
@@ -1978,6 +1988,37 @@ vecfuncT SCF::apply_bsh_plain(World& world, vecfuncT& Vpsi, const tensorT& eps,
     return new_psi;
 }
 
+SCF::RestrictedHFEvaluation SCF::evaluate_restricted_hf(World& world) {
+    MADNESS_CHECK_THROW(param.spin_restricted() && param.nalpha() == param.nbeta()
+                       && molecule.parameters.pure_ae() && !xc.is_dft(),
+                       "saved-state evaluation requires closed-shell all-electron HF");
+    // Function handles are shallow copies. Work on independent orbitals so
+    // applying operators cannot change the functions about to be archived.
+    auto psi = copy(world, amo);
+    auto occ = copy(aocc);
+    auto alpha = make_density(world, occ, psi);
+    auto rho = copy(alpha);
+    rho.scale(2.0);
+    rho.truncate();
+    auto vcoul = make_coulomb_potential(rho);
+    auto vnuc = potentialmanager->vnuclear();
+    auto vlocal = vcoul + vnuc;
+    vlocal.truncate();
+    double exchange = 0.0, nonlocal = 0.0, kinetic = 0.0;
+    auto vpsi = apply_potential(world, occ, psi, vlocal, exchange, nonlocal, 0);
+    auto fock = make_fock_matrix(world, psi, vpsi, occ, kinetic);
+    const double energy = 2.0 * kinetic + inner(rho, vnuc) +
+        0.5 * inner(rho, vcoul) + exchange + 2.0 * nonlocal + molecule.nuclear_repulsion_energy();
+    // Use the same occupied/virtual decoupling as update_subspace, without
+    // rotating orbitals or adding a KAIN entry.
+    for (long i = 0; i < occ.size(); ++i)
+        for (long j = 0; j < i; ++j)
+            if ((occ[i] == 1.0) != (occ[j] == 1.0)) fock(i,j) = fock(j,i) = 0.0;
+    double residual = 0.0;
+    compute_residual(world, occ, fock, psi, vpsi, residual);
+    return {alpha, energy, 2.0 * kinetic, residual, dipole(world, rho)};
+}
+
 vecfuncT SCF::compute_residual(World& world, tensorT& occ, tensorT& fock,
                                const vecfuncT& psi, vecfuncT& Vpsi, double& err) {
 
@@ -2736,12 +2777,17 @@ void SCF::orthonormalize(World& world, vecfuncT& amo_new) const {
 // For given protocol, solve the DFT/HF/response equations
 void SCF::solve(World& world) {
     PROFILE_MEMBER_FUNC(SCF);
+    // Loading can restore a prior convergence claim even when the restart plan
+    // requires iteration. Once we change the orbitals, that claim is stale.
+    converged_for_thresh = 1.e10;
+    converged_for_dconv = 1.e10;
     functionT arho_old, brho_old;
     const double dconv = std::max(FunctionDefaults<3>::get_thresh(),
                                   param.dconv());
     const double trantol = vtol / std::min(30.0, double(amo.size()));
     //const double tolloc = 1e-6; // was std::min(1e-6,0.01*dconv) but now trying to avoid unnecessary change // moved to localizer.h
     double update_residual = 0.0, bsh_residual = 0.0;
+    double previous_energy = 0.0, previous_kinetic = 0.0;
     subspaceT subspace;
     tensorT Q;
     bool do_this_iter = true;
@@ -2895,6 +2941,9 @@ void SCF::solve(World& world) {
         }
 
         START_TIMER(world);
+        // Preserve the preceding input: comparing only a final rotation would
+        // produce a misleading near-zero density/energy change.
+        const auto comparison_alpha = arho_old, comparison_beta = brho_old;
         arho_old = arho;
         brho_old = brho;
         functionT rho = arho + brho;
@@ -2974,6 +3023,12 @@ void SCF::solve(World& world) {
         double exc = exca + excb;
         double etot = ekinetic + enuclear + ecoulomb + exc + enrep + enonlocal + epcm + edisp;
         current_energy = etot;
+        const double energy_change = std::abs(etot - previous_energy);
+        const double kinetic_change = std::abs(ekinetic - previous_kinetic);
+        const double comparison_energy = previous_energy;
+        const double comparison_kinetic = previous_kinetic;
+        previous_energy = etot;
+        previous_kinetic = ekinetic;
         //esol = etot;
 
         if (world.rank() == 0 and (param.print_level() > 1)) {
@@ -3131,13 +3186,22 @@ void SCF::solve(World& world) {
                             beps[i] = fockb(i, i);
                 }
 
+                if (checkpoint_observer)
+                    checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
+                        etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1});
                 break;
             }
 
         }
 
+        const double previous_bsh_residual = bsh_residual;
         update_subspace(world, Vpsia, Vpsib, focka, fockb, subspace, Q,
                         bsh_residual, update_residual);
+        if (checkpoint_observer)
+            checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
+                etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
+                arho, brho, etot, ekinetic, iter});
 
     }
     // save the converged fock matix

@@ -35,6 +35,7 @@
 
 #include <madness/mra/mra.h>
 #include <madness/world/parallel_archive.h>
+#include <madness/chem/StageCheckpoint.h>
 
 #include <array>
 #include <cstddef>
@@ -122,9 +123,9 @@ inline void remove_h5_twin_rank0(const std::string &filename) {
 /// can record it.
 template <class StoreCb>
 inline IoBackend save_state(World &world, const std::string &filename,
-                            StoreCb &&cb) {
+                            StoreCb &&cb, [[maybe_unused]] IoBackend backend = IoBackend::AutoDetect) {
 #ifdef MADNESS_HAS_HDF5
-  if (hdf5_io_enabled()) {  // opt-in (deck response.hdf5 / env MADRESPONSE_IO_HDF5)
+  if (backend != IoBackend::Native && hdf5_io_enabled()) {  // opt-in (deck response.hdf5 / env MADRESPONSE_IO_HDF5)
     save_parallel_archive_hdf5(world, filename + ".h5", 0, cb);  // atomic (tmp+rename)
     if (world.rank() == 0) remove_native_twin_rank0(filename);
     world.gop.fence();
@@ -142,9 +143,10 @@ inline IoBackend save_state(World &world, const std::string &filename,
     archive::ParallelOutputArchive<archive::BinaryFstreamOutputArchive> ar(
         world, (filename + ".tmp").c_str(), 1);
     cb(ar);
+    checkpoint::detail::collective_error(world, checkpoint::close_archive(ar));
   }
   world.gop.fence();
-  if (world.rank() == 0) {
+  checkpoint::detail::on_root(world, [&] {
     namespace fs = std::filesystem;
     const fs::path fp(filename);
     const fs::path dir = fp.has_parent_path() ? fp.parent_path() : fs::path(".");
@@ -159,7 +161,8 @@ inline IoBackend save_state(World &world, const std::string &filename,
       fs::rename(e.path(), dir / (base + suffix));
     }
     remove_h5_twin_rank0(filename);
-  }
+    return std::string{};
+  });
   world.gop.fence();
   return IoBackend::Native;
 }
@@ -305,12 +308,13 @@ struct ResponseStateX<ClosedShell> {
     state_ops::from_flat(*this, v);
   }
 
-  IoBackend save(World &world, const std::string &filename) const {
+  IoBackend save(World &world, const std::string &filename,
+                 IoBackend backend = IoBackend::AutoDetect) const {
     return detail_state_io::save_state(world, filename, [&](auto &ar) {
       const std::size_t na = x_alpha.size();
       ar & na;
       for (const auto &f : x_alpha) ar & f;
-    });
+    }, backend);
   }
 
   static ResponseStateX load(World &world, const std::string &filename,
@@ -363,14 +367,15 @@ struct ResponseStateX<OpenShell> {
     state_ops::from_flat(*this, v);
   }
 
-  IoBackend save(World &world, const std::string &filename) const {
+  IoBackend save(World &world, const std::string &filename,
+                 IoBackend backend = IoBackend::AutoDetect) const {
     return detail_state_io::save_state(world, filename, [&](auto &ar) {
       const std::size_t na = x_alpha.size();
       const std::size_t nb = x_beta.size();
       ar & na & nb;
       for (const auto &f : x_alpha) ar & f;
       for (const auto &f : x_beta)  ar & f;
-    });
+    }, backend);
   }
 
   static ResponseStateX load(World &world, const std::string &filename,
@@ -424,13 +429,14 @@ struct ResponseStateXY<ClosedShell> {
     state_ops::from_flat(*this, v);
   }
 
-  IoBackend save(World &world, const std::string &filename) const {
+  IoBackend save(World &world, const std::string &filename,
+                 IoBackend backend = IoBackend::AutoDetect) const {
     return detail_state_io::save_state(world, filename, [&](auto &ar) {
       const std::size_t na = x_alpha.size();
       ar & na;
       for (const auto &f : x_alpha) ar & f;
       for (const auto &f : y_alpha) ar & f;
-    });
+    }, backend);
   }
 
   static ResponseStateXY load(World &world, const std::string &filename,
@@ -487,7 +493,8 @@ struct ResponseStateXY<OpenShell> {
     state_ops::from_flat(*this, v);
   }
 
-  IoBackend save(World &world, const std::string &filename) const {
+  IoBackend save(World &world, const std::string &filename,
+                 IoBackend backend = IoBackend::AutoDetect) const {
     return detail_state_io::save_state(world, filename, [&](auto &ar) {
       const std::size_t na = x_alpha.size();
       const std::size_t nb = x_beta.size();
@@ -496,7 +503,7 @@ struct ResponseStateXY<OpenShell> {
       for (const auto &f : y_alpha) ar & f;
       for (const auto &f : x_beta)  ar & f;
       for (const auto &f : y_beta)  ar & f;
-    });
+    }, backend);
   }
 
   static ResponseStateXY load(World &world, const std::string &filename,
