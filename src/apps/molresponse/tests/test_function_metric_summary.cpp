@@ -1,5 +1,6 @@
 // Pure scalar diagnostics: no World, numerical solver or external fixture.
 #include <madness/chem/FunctionMetricSummary.h>
+#include <madness/chem/ExplicitCriteria.h>
 #include "../solvers/function_metric_diagnostics.hpp"
 #include <cstdio>
 #include <limits>
@@ -20,8 +21,34 @@ json blocks(std::initializer_list<double> values) {
 }
 }
 int main() {
+    const json targets = {{"trace_change", {{"value", 0.1}, {"units", "hartree"}}}};
+    json measurements = {{"trace_change", {{"value", 0.05}, {"units", "hartree"}, {"availability", "measured"}}}};
+    expect(madness::evaluate_explicit_criteria(measurements, targets).at("status") == "satisfied",
+           "explicit criterion evaluates supplied target");
+    measurements["trace_change"]["value"] = 0.2;
+    expect(madness::evaluate_explicit_criteria(measurements, targets).at("status") == "unmet",
+           "unmet explicit criterion is not success");
+    expect(madness::evaluate_explicit_criteria(json::object(), targets).at("status") == "unavailable",
+           "missing required criterion is not successful accuracy");
+    measurements["trace_change"]["units"] = "dimensionless";
+    expect(madness::evaluate_explicit_criteria(measurements, targets).at("status") == "invalid",
+           "incompatible criterion units rejected");
+    expect(madness::evaluate_explicit_criteria(measurements, json::object()).at("status") == "not_requested",
+           "no explicit targets introduces no numerical default");
     using madness::function_metric_maximum;
     using madness::function_metric_absolute_change;
+    using madness::function_metric_trace;
+    using madness::function_metric_trace_change;
+    auto trace = function_metric_trace(blocks({1., 3.}));
+    expect(trace.value("value", -1.) == 4., "unweighted trace sums diagonal contributions");
+    expect(function_metric_trace_change(blocks({2., 2.}), blocks({1., 3.})).value("value", -1.) == 0.,
+           "unitary redistribution preserves trace change");
+    expect(function_metric_trace_change(blocks({2., 3.}), blocks({1., 3.})).value("value", -1.) == 1.,
+           "changed subspace trace is detected");
+    expect(function_metric_trace_change(blocks({4.}), blocks({1., 3.})).value("availability", "") == "unavailable",
+           "equal trace cannot compare different dimensions");
+    expect(function_metric_trace(blocks({std::numeric_limits<double>::infinity()})).value("availability", "") == "invalid",
+           "nonfinite trace contribution rejected");
     auto r = function_metric_maximum(blocks({3., 4.}));
     expect(r.value("value", -1.) == 4., "maximum differs from quadrature (5) and RMS");
     expect(r.value("limiting_function", json()) == json({{"block", "x_alpha"}, {"function_index", 1}}),
@@ -51,6 +78,12 @@ int main() {
     expect(function_metric_maximum(bad).value("availability", "") == "invalid", "null is not zero");
     expect(function_metric_maximum(json::array()).value("availability", "") == "invalid", "malformed block collection rejected");
 
+    auto density = molresponse_v3::density_history_record(0.125, true, 0.01, 0.1, 2.0,
+        {{"iteration", 1}, {"attempt_directory", "a"}});
+    expect(density.at("value") == 0.125 && std::abs(density.at("effective_limit").get<double>() - 0.21) < 1e-15,
+           "density history keeps full precision and contemporaneous normalization");
+    expect(molresponse_v3::density_history_record(0., false, 0.01, 0.1, 2., json::object()).at("value").is_null(),
+           "first density comparison remains unavailable");
     using molresponse_v3::kinetic_change_record;
     using molresponse_v3::bsh_maximum_comparison;
     json previous = {{"blocks", blocks({1., 3.})}, {"availability", "measured"},
@@ -62,7 +95,7 @@ int main() {
     current["sample"]["iteration"] = 1;
     current["phase"] = "solver_iterate_after_acceleration";
     auto change = kinetic_change_record(current, previous);
-    expect(change.value("value", -1.) == 1., "response adapter compares adjacent states");
+    expect(change.value("value", -1.) == 0., "response adapter compares adjacent traces, invariant to rotation");
     expect(change.value("active_gate", true) == false && change.contains("target") && change["target"].is_null(),
            "kinetic comparison has no invented target or active gate");
     expect(kinetic_change_record(previous).value("availability", "") == "unavailable", "first sample has no temporal difference");
@@ -73,6 +106,9 @@ int main() {
         expect(kinetic_change_record(current, other).value("availability", "") == "unavailable",
                "changed attempt or representation invalidates comparison");
     }
+    auto wrong_phase = current; wrong_phase["phase"] = "unrelated_evaluation";
+    expect(kinetic_change_record(wrong_phase, previous).value("availability", "") == "unavailable",
+           "incompatible current sampling phase cannot compare traces");
     auto other = previous; other["units"] = "different";
     expect(kinetic_change_record(current, other).value("availability", "") == "unavailable", "different units cannot be compared");
     auto metric = json{{"per_function", {{"blocks", blocks({3., 4.})}}},
@@ -100,6 +136,10 @@ int main() {
     using molresponse_v3::valid_metric_diagnostics;
     metric["effective_limit"] = 4.;
     metric["maximum_comparison"] = bsh_maximum_comparison(metric);
+    json density_entry = {{"density_history", json::array({density})}};
+    expect(valid_metric_diagnostics(density_entry), "density history round-trips");
+    density_entry["density_history"][0]["effective_limit"] = 99.;
+    expect(!valid_metric_diagnostics(density_entry), "corrupted density limit is rejected");
     json entry = {{"function_bsh_history", json::array({metric})}};
     expect(valid_metric_diagnostics(entry), "valid counterfactual round-trips");
     entry["function_bsh_history"][0]["maximum_comparison"]["value"] = 0.;
@@ -108,8 +148,8 @@ int main() {
     current["change_from_previous"] = kinetic_change_record(current, previous);
     entry = {{"function_kinetic_history", json::array({previous, current})}};
     expect(valid_metric_diagnostics(entry), "valid kinetic history round-trips");
-    entry["function_kinetic_history"][1]["change_from_previous"]["blocks"]["x_alpha"][0]["value"] = 99.;
-    expect(!valid_metric_diagnostics(entry), "tampered per-function change rejected");
+    entry["function_kinetic_history"][1]["change_from_previous"]["current_trace"] = 99.;
+    expect(!valid_metric_diagnostics(entry), "tampered trace change rejected");
     entry["function_kinetic_history"][1]["change_from_previous"] = kinetic_change_record(current, previous);
     entry["function_kinetic_history"][1]["sample"]["k"] = 8;
     expect(!valid_metric_diagnostics(entry), "changed segment cannot retain measured differences");

@@ -48,6 +48,54 @@ inline nlohmann::json function_metric_maximum(const nlohmann::json& blocks) {
     return result;
 }
 
+// One positive, unweighted trace over the explicitly listed blocks. This is
+// invariant under unitary rotations inside this collection, unlike a maximum
+// diagonal or occupation-weighted physical kinetic energy.
+inline nlohmann::json function_metric_trace(const nlohmann::json& blocks) {
+    auto result = function_metric_maximum(blocks);
+    result.erase("limiting_function");
+    result["reduction"] = "sum";
+    result["weighting"] = "none";
+    result["collection"] = nlohmann::json::object();
+    if (result.at("availability") != "measured") return result;
+    double sum = 0.0;
+    for (const auto& block : blocks.items()) {
+        result["collection"][block.key()] = block.value().size();
+        for (const auto& component : block.value())
+            sum += component.at("value").get<double>();
+    }
+    if (!std::isfinite(sum)) {
+        result["availability"] = "invalid";
+        result["reason"] = "nonfinite_trace";
+        result["value"] = nullptr;
+    } else result["value"] = sum;
+    return result;
+}
+
+// Caller establishes equation, state identity, representation and phase.
+// Dimensions/block membership must agree, but orbital alignment is unnecessary.
+inline nlohmann::json function_metric_trace_change(const nlohmann::json& current,
+                                                  const nlohmann::json& previous) {
+    auto result = function_metric_trace(current);
+    const auto prior = function_metric_trace(previous);
+    result["reduction"] = "absolute_difference_of_traces";
+    result["current_trace"] = result.at("value");
+    result["previous_trace"] = prior.at("value");
+    result["value"] = nullptr;
+    if (result.at("availability") == "invalid" || prior.at("availability") == "invalid") {
+        result["availability"] = "invalid";
+        result["reason"] = "invalid_component";
+    } else if (result.at("availability") != "measured" || prior.at("availability") != "measured") {
+        result["availability"] = "unavailable";
+        result["reason"] = "empty_collection";
+    } else if (result.at("collection") != prior.at("collection")) {
+        result["availability"] = "unavailable";
+        result["reason"] = "incomparable_function_layout";
+    } else result["value"] = std::abs(result.at("current_trace").get<double>() -
+                                     result.at("previous_trace").get<double>());
+    return result;
+}
+
 // Only call after establishing physical correspondence (same reference,
 // equation, representation and sampling convention). Equal array sizes alone
 // do not establish orbital identity across rotations or different solves.

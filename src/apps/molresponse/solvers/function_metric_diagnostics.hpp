@@ -5,14 +5,35 @@
 #include <limits>
 
 namespace molresponse_v3 {
+inline nlohmann::json density_history_record(double value, bool available,
+    double absolute, double relative, double norm, const nlohmann::json& sample) {
+    using json = nlohmann::json;
+    const double limit = absolute + relative * norm;
+    const bool valid = std::isfinite(value) && value >= 0.0 &&
+        std::isfinite(absolute) && absolute >= 0.0 && std::isfinite(relative) && relative >= 0.0 &&
+        std::isfinite(norm) && norm >= 0.0 && std::isfinite(limit);
+    return {{"quantity", "kernel_induced_density_L2_change"},
+        {"value", available && valid ? json(value) : json(nullptr)},
+        {"availability", !valid ? "invalid" : available ? "measured" : "unavailable"},
+        {"reason", !valid ? "invalid_density_evidence" : available ? "" : "no_comparable_previous_sample"},
+        {"units", "kernel_induced_density_L2_atomic_units"},
+        {"phase", "solver_step_input_before_acceleration"},
+        {"normalization_phase", "solver_step_input_before_acceleration"},
+        {"reduction", "kernel_induced_density_L2_norm"},
+        {"absolute_limit", absolute}, {"relative_factor", relative},
+        {"normalization_scale", norm}, {"effective_limit", valid ? json(limit) : json(nullptr)},
+        {"satisfied", available && valid ? json(value <= limit) : json(nullptr)},
+        {"active_gate", true}, {"valid_for_saved_state", false}, {"sample", sample}};
+}
+
 // The containing response entry supplies channel/equation/reference identity.
 // The caller must keep comparisons inside that entry's unchanged solve segment;
 // preparation clears histories on restart, reference change and each new rung.
 inline nlohmann::json kinetic_change_record(const nlohmann::json& current,
                                             const nlohmann::json& previous = nullptr) {
     using json = nlohmann::json;
-    json result = {{"quantity", "maximum_absolute_per_function_kinetic_change"},
-        {"units", current.at("units")}, {"reduction", "maximum"},
+    json result = {{"quantity", "absolute_kinetic_trace_change"},
+        {"units", current.at("units")}, {"reduction", "absolute_difference_of_traces"},
         {"weighting", "none"}, {"active_gate", false}, {"target", nullptr},
         {"satisfied", nullptr}, {"availability", "unavailable"},
         {"reason", "no_comparable_previous_sample"}, {"value", nullptr},
@@ -31,8 +52,10 @@ inline nlohmann::json kinetic_change_record(const nlohmann::json& current,
     // Prior samples are genuine iterates, never a second measurement of output.
     comparable = comparable && (previous.at("phase") == "initial_solver_iterate" ||
                                  previous.at("phase") == "solver_iterate_after_acceleration");
+    comparable = comparable && (current.at("phase") == "solver_iterate_after_acceleration" ||
+                                  current.at("phase") == "saved_response_before_archive");
     if (!comparable) return result;
-    result.update(madness::function_metric_absolute_change(current.at("blocks"), previous.at("blocks")));
+    result.update(madness::function_metric_trace_change(current.at("blocks"), previous.at("blocks")));
     result["valid_for_saved_state"] = current.at("valid_for_saved_state").get<bool>() &&
                                       result.at("availability") == "measured";
     return result;
@@ -97,6 +120,17 @@ inline bool valid_metric_diagnostics(const nlohmann::json& entry) {
         if (entry.contains("function_bsh_history"))
             for (const auto& sample : entry.at("function_bsh_history"))
                 if (!check_bsh(sample)) return false;
+        if (entry.contains("density_history")) {
+            if (!entry.at("density_history").is_array()) return false;
+            for (const auto& sample : entry.at("density_history")) {
+                const bool available = sample.at("availability") == "measured";
+                if (!available && sample.at("availability") != "unavailable") return false;
+                const auto expected = density_history_record(available ? sample.at("value").get<double>() : 0.,
+                    available, sample.at("absolute_limit").get<double>(), sample.at("relative_factor").get<double>(),
+                    sample.at("normalization_scale").get<double>(), sample.at("sample"));
+                if (expected.at("availability") == "invalid" || sample != expected) return false;
+            }
+        }
         const auto history = entry.value("function_kinetic_history", json::array());
         if (!history.is_array()) return false;
         json previous = nullptr;
@@ -113,7 +147,7 @@ inline bool valid_metric_diagnostics(const nlohmann::json& entry) {
                 !check_bsh(measurements.at("bsh_residual"))) return false;
             if (!measurements.contains("delta_kinetic_energy")) return true;
             const auto& delta = measurements.at("delta_kinetic_energy");
-            if (delta.value("quantity", "") != "maximum_absolute_per_function_kinetic_change")
+            if (delta.value("quantity", "") != "absolute_kinetic_trace_change")
                 return true; // older reporting convention
             if (history.size() < 2) return false;
             const auto& input = history.at(history.size() - 2);

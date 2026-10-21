@@ -31,6 +31,7 @@ set(MADCHEM_HEADERS
     DensityChanges.h
     FunctionResidual.h
     FunctionResidualReport.h
+    ExplicitCriteria.h
     FunctionMetricSummary.h
     localizer.h
     lowrankfunction.h
