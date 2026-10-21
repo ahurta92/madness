@@ -12,6 +12,7 @@
 #include <string>
 #include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <typeindex>
 #include <map>
 #include <set>
@@ -420,6 +421,10 @@ namespace madness {
         /// of \c commandlineparser::set_keyval_keep_case.
         virtual std::set<std::string> case_sensitive_keys() const { return {}; }
 
+        /// Supplied floating-point controls that require lossless storage.
+        /// Other parameters retain their historical formatting convention.
+        virtual std::set<std::string> full_precision_keys() const { return {}; }
+
         bool keeps_case(const std::string& key) const {
             const auto keys = case_sensitive_keys();
             return keys.find(key) != keys.end();
@@ -469,14 +474,19 @@ namespace madness {
     public:
 
         template <typename... Types>
-        bool try_set_from_json(QCParameter& parameter, const nlohmann::json& value) {
+        bool try_set_from_json(QCParameter& parameter, const nlohmann::json& value, const std::string& key) {
             bool success = false;
             (void)std::initializer_list<int>{
                 (parameter.get_type() == std::type_index(typeid(Types)).name()
-                    ? (parameter.set_user_defined_value(QCCalculationParametersBase::tostring(value.get<Types>())), success = true, 0)
+                    ? (parameter.set_user_defined_value(key.empty() ? tostring(value.get<Types>()) : to_stored_string(key, value.get<Types>())), success = true, 0)
                     : 0)...
             };
             return success;
+        }
+
+        template <typename... Types>
+        bool try_set_from_json(QCParameter& parameter, const nlohmann::json& value) {
+            return try_set_from_json<Types...>(parameter, value, "");
         }
 
         void from_json(const json& j) {
@@ -486,7 +496,7 @@ namespace madness {
                 using all_types = all_parameter_types;
                 bool ok = false;
                 std::apply([&](auto&&... args) {
-                    ok = try_set_from_json<std::decay_t<decltype(args)>...>(parameter, value);
+                    ok = try_set_from_json<std::decay_t<decltype(args)>...>(parameter, value, key);
                 }, all_types{});
                 if (!ok) {
                     throw std::runtime_error("Unsupported parameter type for key: " + key);
@@ -562,6 +572,14 @@ namespace madness {
         std::string to_stored_string(const std::string& key, const T& value) const {
             if constexpr (std::is_same<T, std::string>::value) {
                 if (keeps_case(key)) return value;
+            }
+            if constexpr (std::is_floating_point<T>::value) {
+                const auto precise = full_precision_keys();
+                if (precise.count(key)) {
+                    std::ostringstream stream;
+                    stream << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+                    return stream.str();
+                }
             }
             return tostring(value);
         }

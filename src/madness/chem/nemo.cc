@@ -198,6 +198,9 @@ Nemo::Nemo(World &world, const CalculationParameters &param,
 };
 
 double Nemo::value(const Tensor<double> &x) {
+  MADNESS_CHECK_THROW(!get_calc_param().is_user_defined("progress.window") &&
+                     !get_calc_param().is_user_defined("progress.minimum_relative_improvement"),
+                     "configured progress controls are not yet supported for Nemo");
   for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
     MADNESS_CHECK_THROW(!get_calc_param().is_user_defined(std::string("accuracy.") + metric),
                        "explicit accuracy controls are not yet supported for Nemo");

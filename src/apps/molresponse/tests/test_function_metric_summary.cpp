@@ -6,6 +6,7 @@
 #include "../solvers/convergence_policy.hpp"
 #include <cstdio>
 #include <limits>
+#include <tuple>
 using nlohmann::json;
 namespace {
 int failed = 0;
@@ -62,6 +63,16 @@ int main() {
            "incompatible criterion units rejected");
     expect(madness::evaluate_explicit_criteria(measurements, json::object()).at("status") == "not_requested",
            "no explicit targets introduces no numerical default");
+    madness::validate_progress_configuration(0, -1.0, false, false);
+    expect(true, "disabled progress requires no scientific threshold");
+    for (const auto& configuration : std::vector<std::tuple<int, double, bool, bool>>{
+            {-1, -1.0, false, true}, {1, -1.0, false, true}, {1, 0.1, true, false}}) {
+        bool rejected = false;
+        try { madness::validate_progress_configuration(std::get<0>(configuration), std::get<1>(configuration),
+                    std::get<2>(configuration), std::get<3>(configuration)); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        expect(rejected, "invalid progress configuration rejected independently of solver execution");
+    }
     const json stalled_history = json::array({
         {{"metric", {{"status", "unmet"}, {"value", 2.0}, {"target", {{"value", 1.0}}}}}},
         {{"metric", {{"status", "unmet"}, {"value", 2.0}, {"target", {{"value", 1.0}}}}}}});

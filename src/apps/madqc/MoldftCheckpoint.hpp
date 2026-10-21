@@ -46,8 +46,14 @@ class MoldftCheckpoint {
   }
 
   static void validate_measurements(const json& metrics, const std::string& stage, const json& numerical) {
-    if (!metrics.contains("convergence_report")) return;
+    const bool has_progress_controls = numerical.value("parameters", json::object()).value("parameters", json::object()).contains("progress.window");
+    if (!metrics.contains("convergence_report")) {
+      require(!has_progress_controls, "invalid ground-state measurement: missing configured progress report");
+      return;
+    }
     const auto& report = metrics.at("convergence_report");
+    require(!has_progress_controls || report.contains("configured_progress"),
+            "invalid ground-state measurement: missing configured progress");
     auto validate = [&](const json& measurements) {
       if (measurements.contains("bsh_residual") && measurements.at("bsh_residual").contains("per_function"))
         require(madness::valid_function_residual_record(measurements.at("bsh_residual").at("per_function")),
@@ -98,7 +104,7 @@ class MoldftCheckpoint {
     };
     if (metrics.contains("kinetic_trace")) check_trace(metrics.at("kinetic_trace"), "iteration_input_before_rotation_and_update");
     if (report.contains("iteration_history")) {
-      json previous = json::object(), previous_sample = nullptr;
+      json previous = json::object(), previous_sample = nullptr, progress_history = json::array();
       for (const auto& iteration : report.at("iteration_history")) {
         validate(iteration.at("measurements"));
         check_accuracy(iteration);
@@ -111,7 +117,36 @@ class MoldftCheckpoint {
             sample.at("k") == previous_sample.at("k") && sample.at("run_id") == previous_sample.at("run_id");
         require(sample.at("iteration").get<int>() == (same_segment ? previous_sample.at("iteration").get<int>() + 1 : 0),
                 "invalid ground-state measurement: nonconsecutive history");
-        if (!same_segment) previous = json::object();
+        if (!same_segment) {
+          previous = json::object();
+          progress_history = json::array();
+        }
+        require(!has_progress_controls || iteration.contains("configured_progress"),
+                "invalid ground-state measurement: missing configured progress history");
+        if (iteration.contains("configured_progress")) {
+          progress_history.push_back(iteration.at("explicit_accuracy").at("criteria"));
+          const auto& progress = iteration.at("configured_progress");
+          const auto& controls = numerical.at("parameters").at("parameters");
+          const int window = controls.at("progress.window").get<int>();
+          const double improvement = controls.at("progress.minimum_relative_improvement").get<double>();
+          madness::validate_progress_configuration(window, improvement, improvement != -1.0,
+              !iteration.at("explicit_accuracy").at("criteria").empty());
+          const int diagnostic = controls.at("diagnostic.iterations_per_rung").get<int>();
+          require(report.at("diagnostic_iterations_per_rung") == diagnostic,
+                  "invalid ground-state measurement: diagnostic configuration");
+          bool has_next = false;
+          const auto& protocol = numerical.at("protocol");
+          for (std::size_t rung = 0; rung + 1 < protocol.size(); ++rung)
+            has_next = has_next || protocol.at(rung) == sample.at("threshold");
+          auto expected = window == 0
+              ? json{{"status", "disabled"}, {"action", "continue"}}
+              : madness::explicit_progress(progress_history, window, improvement, has_next, false);
+          expected["has_next_supplied_rung"] = has_next;
+          expected["action_applied"] = expected.at("status") == "stalled" &&
+              diagnostic == 0;
+          require(expected.at("action") != "stop_invalid" && expected == progress,
+                  "invalid ground-state measurement: configured progress");
+        }
         check_change(iteration.at("measurements").at("delta_kinetic_energy"), trace.at("blocks"), previous);
         previous = trace.at("blocks");
         previous_sample = sample;
@@ -119,6 +154,9 @@ class MoldftCheckpoint {
     }
     if (metrics.contains("kinetic_trace")) {
       const auto& trace = metrics.at("kinetic_trace");
+      if (report.contains("configured_progress"))
+        require(report.at("configured_progress") == report.at("iteration_history").back().at("configured_progress"),
+                "invalid ground-state measurement: latest configured progress");
       require(!report.at("iteration_history").empty() && trace == report.at("iteration_history").back().at("kinetic_trace"),
               "invalid ground-state measurement: latest trace history");
       require(trace.at("sample").at("threshold") == numerical.at("threshold") &&
@@ -191,6 +229,7 @@ public:
   // prefix without ever changing an immutable generation or using an AO
   // sidecar.
   void prepare(madness::SCF &scf, bool continuing) {
+    scf.validate_progress_controls();
     physical_ = physical(scf);
     if (!continuing)
       return;
@@ -319,11 +358,11 @@ public:
     previous_kinetic_blocks_ = current_blocks;
     iteration_history_.push_back({{"measurements", evidence}, {"kinetic_trace", metrics.at("kinetic_trace")},
         {"occupation_weighted_physical_kinetic_energy", metrics.at("occupation_weighted_physical_kinetic_energy")},
-        {"explicit_accuracy", step.explicit_accuracy}});
+        {"explicit_accuracy", step.explicit_accuracy}, {"configured_progress", step.configured_progress}});
     metrics["convergence_report"] = {{"schema", "madqc.convergence.v1"},
         {"gate_policy", step.explicit_accuracy.value("status", "not_requested") == "not_requested"
             ? "existing_engine" : "existing_engine_and_explicit_accuracy"},
-        {"explicit_accuracy", step.explicit_accuracy}, {"diagnostic_iterations_per_rung", scf.param.get<int>("diagnostic.iterations_per_rung")}, {"measurements", evidence}, {"iteration_history", iteration_history_}};
+        {"explicit_accuracy", step.explicit_accuracy}, {"configured_progress", step.configured_progress}, {"diagnostic_iterations_per_rung", scf.param.get<int>("diagnostic.iterations_per_rung")}, {"measurements", evidence}, {"iteration_history", iteration_history_}};
     publish(scf, false, json::array(), metrics,
             {{"iteration", step.iteration},
              {"iterations_this_run", iterations},

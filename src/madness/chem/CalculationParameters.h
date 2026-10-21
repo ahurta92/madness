@@ -53,6 +53,10 @@ struct CalculationParameters : public QCCalculationParametersBase {
 
   // A prefix may include an explicit output directory on a case-sensitive filesystem.
   std::set<std::string> case_sensitive_keys() const override { return {"prefix"}; }
+  std::set<std::string> full_precision_keys() const override {
+      return {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
+              "accuracy.kinetic_trace_change", "progress.minimum_relative_improvement"};
+  }
 
 	CalculationParameters(const CalculationParameters& other) = default;
 
@@ -95,6 +99,9 @@ struct CalculationParameters : public QCCalculationParametersBase {
 		initialize<int>   ("maxiter",25,"maximum number of iterations");
         initialize<int>("diagnostic.iterations_per_rung", 0,
                         "Explicit fixed iteration count per supplied rung; zero disables diagnostics");
+        initialize<int>("progress.window", 0, "Explicit progress lookback; zero disables stall exits");
+        initialize<double>("progress.minimum_relative_improvement", -1.0,
+            "Explicit experimental minimum improvement fraction; requires progress.window and accuracy targets");
         for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
             initialize<double>(std::string("accuracy.") + metric, -1.0,
                 "Explicit absolute accuracy target, additionally required for convergence; unset by default");

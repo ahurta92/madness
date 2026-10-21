@@ -56,6 +56,20 @@ assert report['saved_state_validation']['explicit_accuracy']['status'] == 'satis
 repeat = run('repeat', fresh, resume=True)
 assert repeat['iterations_this_run'] == 0 and repeat['state_id'] == result['state_id']
 
+# Exact reuse must validate new configuration even when it would solve zero iterations.
+for label, extra, base in (
+        ('negative-window', '  progress.window -1\n', deck),
+        ('missing-improvement', '  progress.window 1\n', deck),
+        ('missing-targets', '  progress.window 1\n  progress.minimum_relative_improvement 0.1\n', deck.replace(controls, ''))):
+    root = work / ('Invalid-' + label)
+    shutil.copytree(fresh, root)
+    store, pointer, _ = latest(root)
+    run(label, root, text=base.replace('moldft gs\n', 'moldft gs\n' + extra), resume=True, success=False)
+    expected = ('progress.window must be nonnegative' if label == 'negative-window'
+                else 'progress requires explicit accuracy targets')
+    assert expected in (work / (label + '.log')).read_text()
+    assert (store / 'latest').read_text() == pointer
+
 for location in ('input_phase', 'history_phase', 'saved_phase', 'accuracy_flag',
                  'comparison_threshold', 'comparison_k', 'comparison_run_id',
                  'comparison_stage', 'comparison_iteration', 'comparison_trace',

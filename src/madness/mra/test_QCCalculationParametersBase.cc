@@ -14,9 +14,12 @@ using namespace madness;
 
 class Parameters : public QCCalculationParametersBase {
 public:
+    [[nodiscard]] std::set<std::string> full_precision_keys() const override { return {"precise"}; }
+    void read_text(World& world, std::string input) { read_internal(world, input, "mp3"); }
 	Parameters() : QCCalculationParametersBase() {
 
 		// initialize with: key, value, comment (optional), allowed values (optional)
+        initialize<double>("precise", -1.0);
 		initialize<double>("econv",1.e-5,"recommended values: 1.e-4 < econv < 1.e-8");
 		initialize<double>("dconv",3.e-4,"recommended values: 1.e-4 < econv < 1.e-8");
 		initialize<int>("maxiter",15);
@@ -502,6 +505,24 @@ bool test_derived(World& world) {
 
 
 
+void test_full_precision_controls(World& world) {
+    constexpr double value = 0.99999999;
+    Parameters parameter;
+    parameter.set_user_defined_value("precise", value);
+    test_same(parameter.get<double>("precise"), value);
+    Parameters from_json;
+    from_json.from_json(parameter.to_json().at("parameters"));
+    test_same(from_json.get<double>("precise"), value);
+    Parameters from_input;
+    from_input.read_text(world, "mp3\nprecise 0.99999999\nend\n");
+    test_same(from_input.get<double>("precise"), value);
+    Parameters from_printed;
+    from_printed.read_text(world, "mp3\n" + from_input.print_to_string() + "end\n");
+    test_same(from_printed.get<double>("precise"), value);
+    parameter.set_user_defined_value("econv", 0.123456789);
+    test_same(parameter.econv(), 0.12346); // unopted legacy values are unchanged
+}
+
 int main(int argc, char** argv) {
 	initialize(argc, argv);
 	World world(SafeMPI::COMM_WORLD);
@@ -510,6 +531,7 @@ int main(int argc, char** argv) {
 
 	int success=0;
 	try {
+        test_full_precision_controls(world);
 		test_serialize(world);
 		test_type_conversion1(world);
 		test_type_conversion2(world);

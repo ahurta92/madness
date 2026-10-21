@@ -2783,6 +2783,13 @@ void SCF::orthonormalize(World& world, vecfuncT& amo_new) const {
 }
 
 
+void SCF::validate_progress_controls() const {
+    const auto targets = requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless", "hartree");
+    validate_progress_configuration(param.get<int>("progress.window"),
+        param.get<double>("progress.minimum_relative_improvement"),
+        param.is_user_defined("progress.minimum_relative_improvement"), !targets.empty());
+}
+
 // For given protocol, solve the DFT/HF/response equations
 void SCF::solve(World& world) {
     PROFILE_MEMBER_FUNC(SCF);
@@ -2818,6 +2825,13 @@ void SCF::solve(World& world) {
     tensorT fockb_json(param.nmo_beta(), param.nmo_beta());
 
     const auto explicit_targets = requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless", "hartree");
+    const int progress_window = param.get<int>("progress.window");
+    const double progress_improvement = param.get<double>("progress.minimum_relative_improvement");
+    validate_progress_controls();
+    const auto supplied_protocol = param.protocol();
+    const auto rung = std::find(supplied_protocol.begin(), supplied_protocol.end(), FunctionDefaults<3>::get_thresh());
+    const bool has_next_supplied_rung = rung != supplied_protocol.end() && std::next(rung) != supplied_protocol.end();
+    json progress_history = json::array();
     const int diagnostic_iterations = param.get<int>("diagnostic.iterations_per_rung");
     MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
     const int iteration_limit = diagnostic_iterations ? diagnostic_iterations : param.maxiter();
@@ -3123,6 +3137,15 @@ void SCF::solve(World& world) {
         const auto explicit_accuracy = evaluate_explicit_criteria(explicit_measurements, explicit_targets);
         MADNESS_CHECK_THROW(explicit_accuracy.at("status") != "invalid", "invalid explicitly requested SCF accuracy measurement");
 
+        progress_history.push_back(explicit_accuracy.at("criteria"));
+        auto configured_progress = progress_window > 0
+            ? explicit_progress(progress_history, progress_window, progress_improvement, has_next_supplied_rung, false)
+            : json{{"status", "disabled"}, {"action", "continue"}};
+        MADNESS_CHECK_THROW(configured_progress.at("action") != "stop_invalid", "invalid configured SCF progress evidence");
+        const bool stalled = configured_progress.at("status") == "stalled" && diagnostic_iterations == 0;
+        configured_progress["has_next_supplied_rung"] = has_next_supplied_rung;
+        configured_progress["action_applied"] = stalled;
+
         if (iter > 0) {
             //print("##convergence criteria: density delta=", da < dconv * molecule.natom() && db < dconv * molecule.natom(), ", bsh_residual=", (param.conv_only_dens || bsh_residual < 5.0*dconv));
             if (da < dconv * std::max(size_t(5), molecule.natom()) && db < dconv * std::max(size_t(5), molecule.natom())
@@ -3135,7 +3158,7 @@ void SCF::solve(World& world) {
             //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
 
             // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
-            if (converged || iter == iteration_limit - 1) {
+            if (converged || stalled || iter == iteration_limit - 1) {
                 // record what we converged *to*, on every rank and independent of
                 // the print level: the restart logic keys off these two fields.
                 // The values are the thresholds of this protocol level, not
@@ -3247,7 +3270,7 @@ void SCF::solve(World& world) {
                 if (checkpoint_observer)
                     checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                         etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy});
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy, configured_progress});
                 break;
             }
 
@@ -3262,7 +3285,7 @@ void SCF::solve(World& world) {
         if (checkpoint_observer)
             checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                 etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy});
+                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy, configured_progress});
 
     }
     // save the converged fock matix

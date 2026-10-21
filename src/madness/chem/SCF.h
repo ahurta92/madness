@@ -386,6 +386,8 @@ public:
                           const RestartMetadata& metadata) const;
     RestartMetadata orbital_metadata() const;
 
+    void validate_progress_controls() const;
+
     struct IterationCheckpoint {
         int iteration;
         double threshold, input_energy, density_alpha, density_beta, previous_bsh_residual;
@@ -403,7 +405,7 @@ public:
         // Available only with has_previous; they do not change the SCF gates.
         double density_charge = 0.0, density_spin = 0.0;
         FunctionResidualBlocks input_kinetic_diagonal, comparison_kinetic_diagonal;
-        nlohmann::json explicit_accuracy;
+        nlohmann::json explicit_accuracy, configured_progress;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;
@@ -681,6 +683,7 @@ public:
             MADNESS_CHECK_THROW(!calc.param.is_user_defined(std::string("accuracy.") + metric) ||
                                 bool(calc.checkpoint_observer),
                                 "explicit accuracy controls currently require a named moldft stage");
+        calc.validate_progress_controls();
         double xsq = x.sumsq();
         if (xsq == coords_sum) {
             return calc.current_energy;

@@ -357,3 +357,19 @@ The explicit controls currently require named `moldft` evaluation. Response and
 Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify
 unmet explicit accuracy.
+
+### Experimental configured progress
+
+Named SCF stages may set `progress.window` (a positive iteration lookback) and
+`progress.minimum_relative_improvement` (an explicitly supplied fraction strictly
+between zero and one), together with at least one `accuracy.*` target. Omitting
+them preserves the existing iteration policy. There is no default scientific
+stall threshold. A criterion still improving prevents a stall; unavailable or
+invalid measurements cannot justify promotion. History resets at every rung.
+
+A stalled nonfinal solve ends at its complete iteration boundary and the existing
+protocol loop advances to the immediate next supplied rung. At the final rung,
+the usable generation is retained with unmet accuracy. `configured_progress`
+records the decision separately from engine convergence and explicit accuracy.
+Forced iteration diagnostics record that decision but suppress its early exit;
+`action_applied` distinguishes the recorded recommendation from execution.

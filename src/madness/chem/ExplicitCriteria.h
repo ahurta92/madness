@@ -87,6 +87,17 @@ nlohmann::json requested_accuracy_targets(const Parameters& parameters,
     return targets;
 }
 
+// Validate even when restart can reuse a solved state without entering a loop.
+inline void validate_progress_configuration(int window, double improvement,
+                                            bool improvement_supplied, bool has_targets) {
+    if (window < 0) throw std::invalid_argument("progress.window must be nonnegative");
+    if (improvement_supplied && window == 0)
+        throw std::invalid_argument("progress improvement requires a positive window");
+    if (window > 0 && (!has_targets || !improvement_supplied || !std::isfinite(improvement) ||
+                      improvement <= 0.0 || improvement >= 1.0))
+        throw std::invalid_argument("progress requires explicit accuracy targets and a supplied improvement fraction strictly between zero and one");
+}
+
 // History contains evaluate_explicit_criteria(...)["criteria"] snapshots
 // from one comparable solve segment. The caller resets it at every change of
 // representation/reference and supplies whether an immediate next rung exists.
