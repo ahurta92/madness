@@ -100,7 +100,8 @@
         "response_metadata": "hdf5-analysis/response-run/response_metadata.json",
         "calc_info": "hdf5-analysis/response-run/out.calc_info.json"
       },
-      "metrics": {}
+      "metrics": {},
+      "status": "completed"
     },
     {
       "run_id": "h2-response-hdf5-excited-coarse",
@@ -121,7 +122,8 @@
         "response_metadata": "hdf5-analysis/response-run/response_metadata.json",
         "analysis": "hdf5-analysis/response-run/es_analysis__1e-04_k6.json"
       },
-      "metrics": {}
+      "metrics": {},
+      "status": "completed"
     },
     {
       "run_id": "lih-response-hdf5-ordinary",
