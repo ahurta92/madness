@@ -48,7 +48,10 @@
       "workflow": "moldft",
       "source_branch": "madqc/step4-astra",
       "ground_state_endpoint": null,
-      "protocol": {"threshold": 0.0001, "k": 6},
+      "protocol": {
+        "threshold": 0.0001,
+        "k": 6
+      },
       "phase": "ground_state_endpoint",
       "sampling_phase": "exhausted_rung",
       "classification": "forced",
@@ -64,7 +67,10 @@
       "workflow": "moldft",
       "source_branch": "madqc/step4-astra",
       "ground_state_endpoint": null,
-      "protocol": {"threshold": 0.000001, "k": 8},
+      "protocol": {
+        "threshold": 1e-06,
+        "k": 8
+      },
       "phase": "ground_state_endpoint",
       "sampling_phase": "exhausted_rung",
       "classification": "forced",
@@ -80,7 +86,12 @@
       "workflow": "response",
       "source_branch": "madqc/step4-astra",
       "ground_state_endpoint": "h2-gs-coarse-hdf5",
-      "protocol": {"threshold": 0.0001, "k": 6, "frequency": 0.0, "state": "static_dipole_z"},
+      "protocol": {
+        "threshold": 0.0001,
+        "k": 6,
+        "frequency": 0.0,
+        "state": "static_dipole_z"
+      },
       "phase": "response_iteration",
       "sampling_phase": "ordinary",
       "classification": "ordinary",
@@ -97,7 +108,11 @@
       "workflow": "response",
       "source_branch": "madqc/step4-astra",
       "ground_state_endpoint": "h2-gs-coarse-hdf5",
-      "protocol": {"threshold": 0.0001, "k": 6, "state": "es_full"},
+      "protocol": {
+        "threshold": 0.0001,
+        "k": 6,
+        "state": "es_full"
+      },
       "phase": "response_iteration",
       "sampling_phase": "ordinary",
       "classification": "ordinary",
@@ -107,9 +122,60 @@
         "analysis": "hdf5-analysis/response-run/es_analysis__1e-04_k6.json"
       },
       "metrics": {}
+    },
+    {
+      "run_id": "lih-response-hdf5-ordinary",
+      "molecule": "LiH",
+      "workflow": "response",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": "lih-gs-1e-04",
+      "protocol": {
+        "thresholds": [
+          0.0001
+        ]
+      },
+      "phase": "response_iteration",
+      "sampling_phase": "ordinary",
+      "classification": "ordinary",
+      "artifacts": {
+        "output_dir": "evidence-runs/lih-ordinary-hdf5",
+        "native_ground_hdf5": "evidence-runs/lih-ordinary-hdf5/out.restartdata.h5",
+        "native_response_hdf5": "evidence-runs/lih-ordinary-hdf5/out/task_1/molresponse/dipole_z__1e-04_k6__f0.00000.h5",
+        "log": "evidence-runs/lih-ordinary-hdf5/run.log"
+      },
+      "metrics": {},
+      "status": "completed"
+    },
+    {
+      "run_id": "water-response-hdf5-partial",
+      "molecule": "H2O",
+      "workflow": "response",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": "water-gs-1e-04-partial",
+      "protocol": {
+        "thresholds": [
+          0.0001,
+          1e-06
+        ]
+      },
+      "phase": "response_iteration",
+      "sampling_phase": "ordinary",
+      "classification": "ordinary",
+      "artifacts": {
+        "output_dir": "evidence-runs/water-ordinary-partial",
+        "log": "evidence-runs/water-ordinary-partial/run.log"
+      },
+      "metrics": {},
+      "status": "interrupted-time-budget",
+      "notes": "Stopped after fine-rung response progress; not a completed reference."
     }
   ],
   "field_comparisons": [
     "hdf5-analysis/h2-density-comparison.json"
-  ]
+  ],
+  "matrix_status": {
+    "h2": "completed from prior HDF5 run",
+    "lih": "completed with HDF5 backend",
+    "water": "partial; preserved log and checkpoint, no completed response reference"
+  }
 }

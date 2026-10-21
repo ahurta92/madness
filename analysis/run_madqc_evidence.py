@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -60,10 +61,10 @@ def plan_records(out_root: Path) -> list[dict]:
 
 def prepare_deck(source: Path, destination: Path) -> None:
     text = source.read_text()
-    if 'hdf5 false' in text:
-        text = text.replace('hdf5 false', 'hdf5 true', 1)
-    elif 'hdf5 true' not in text:
-        text = text.replace('response\n{', 'response\n{\n    hdf5 true', 1)
+    if re.search(r'\bhdf5\s+false\b', text):
+        text = re.sub(r'(\bhdf5\s+)false\b', r'\1true', text, count=1)
+    elif not re.search(r'^\s*hdf5\s+true\b', text, flags=re.MULTILINE):
+        text = re.sub(r'(^response\s*$)', r'\1\n    hdf5 true', text, count=1, flags=re.MULTILINE)
     destination.write_text(text)
 
 
