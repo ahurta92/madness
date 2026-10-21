@@ -106,6 +106,40 @@ static const ESRef* find_ref(long n_alpha) {
   return nullptr;
 }
 
+// Optional numerical audit, after ordinary result publication. It exercises
+// active locking and the all-locked return without changing the solver defaults
+// or treating freshly measured kinetics as freshly measured residuals.
+template<class Solver>
+void audit_locked_kinetics(Solver& solver, typename Solver::State state) {
+  auto policy = solver.convergence_policy();
+  policy.lock_converged = true;
+  policy.lock_min_pass = 1;
+  solver.set_convergence_policy(policy);
+  const auto all_locked = [&] {
+    return state.locked.size() == state.roots.size() &&
+        std::all_of(state.locked.begin(), state.locked.end(), [](char value) { return value != 0; });
+  };
+  for (int i = 0; i < 3 && !all_locked(); ++i) state = solver.step(std::move(state));
+  MADNESS_CHECK(all_locked());
+  const auto count = state.roots.size(), size = state.kinetic_history.size();
+  const int iteration = state.iter;
+  const auto residuals = state.last_bsh_residual;
+  const auto previous = state.kinetic_history;
+  state = solver.step(std::move(state));
+  MADNESS_CHECK(state.iter == iteration + 1 && state.last_bsh_residual == residuals);
+  MADNESS_CHECK(state.kinetic_history.size() == size + count);
+  for (std::size_t root = 0; root < count; ++root) {
+    const auto& sample = state.kinetic_history.at(size + root);
+    MADNESS_CHECK(valid_es_kinetic_evidence(sample));
+    MADNESS_CHECK(sample.at("root_locked") == true);
+    MADNESS_CHECK(sample.at("kinetic_energy").at("sample").at("iteration") == state.iter);
+    const double value = sample.at("kinetic_energy").at("trace").at("value").template get<double>();
+    const double before = previous.at(size - count + root).at("kinetic_energy").at("trace").at("value").template get<double>();
+    MADNESS_CHECK(std::abs(value - before) < 1e-12);
+  }
+  if (solver.world().rank() == 0) print("ES_LOCKED_KINETIC_AUDIT passed; fresh samples:", count);
+}
+
 int main(int argc, char **argv) {
   World &world = initialize(argc, argv);
   int rc = 0;
@@ -133,7 +167,7 @@ int main(int argc, char **argv) {
               "[--thresh=X | --protocol=th1,th2,...] [--k=N] "
               "[--tol=X] [--print-level=0..3] "
               "[--log-convergence=PATH] "
-              "[--stream-theta] [--es-batch] [--es-tensor] [--es-time] "
+              "[--stream-theta] [--es-batch] [--es-tensor] [--es-time] [--audit-locked-trace] "
               "[--tda-warmup-iters=N] [--cluster-unmix-factor=F] "
               "[--warmup-oversample=K] "
               "[--save-roots=DIR] [--load-roots=DIR] "
@@ -437,6 +471,7 @@ int main(int argc, char **argv) {
         if (world.rank() == 0)
           print("[SAVE] es_roots: wrote", num_roots,
                 "root(s) +/", save_roots_dir, "/roots.json");
+        if (parser.key_exists("audit-locked-trace")) audit_locked_kinetics(solver, std::move(sf));
       }
     } else if (restricted) {
       using Solver = ESSolver<TDA, ClosedShell>;
@@ -502,6 +537,7 @@ int main(int argc, char **argv) {
         if (world.rank() == 0)
           print("[SAVE] es_roots: wrote", num_roots,
                 "root(s) +/", save_roots_dir, "/roots.json");
+        if (parser.key_exists("audit-locked-trace")) audit_locked_kinetics(solver, std::move(sf));
       }
     } else {
       using Solver = ESSolver<TDA, OpenShell>;
@@ -553,6 +589,7 @@ int main(int argc, char **argv) {
         if (world.rank() == 0)
           print("[SAVE] es_roots: wrote", num_roots,
                 "root(s) +/", save_roots_dir, "/roots.json");
+        if (parser.key_exists("audit-locked-trace")) audit_locked_kinetics(solver, std::move(sf));
       }
     }
 

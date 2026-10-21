@@ -27,6 +27,8 @@
 #include "../kernels/tda_batch.hpp"  // tda_batch:: bundle-batched V0x/T0x/BSH
 #include "convergence_policy.hpp"
 #include "es_root_identity.hpp"
+#include "es_kinetic_evidence.hpp"
+#include "function_kinetics.hpp"
 #include "iterate.hpp"
 #include "response_state.hpp"
 #include "response_subspace_kain.hpp"
@@ -81,6 +83,7 @@ public:
 
   struct State {
     std::vector<Storage>                    roots;
+    nlohmann::json kinetic_history = nlohmann::json::array();
     madness::Tensor<double>                 omega;
     /// Stable identity per slot: stable_index[s] is the permanent
     /// identity of the root currently in roots[s]. Empty until assigned
@@ -363,11 +366,26 @@ public:
   ///     ~3-4M Storage peak. ~2× the per-iter kernel work but big
   ///     memory savings.
   State step(State in) {
-    if (policy_.lock_converged)            // workstream B: full-deflation locking
-      return step_rotate_pieces_locked(std::move(in));
-    return policy_.stream_theta
-        ? step_recompute_pieces(std::move(in))
-        : step_rotate_pieces(std::move(in));
+    auto history = std::move(in.kinetic_history);
+    State out = policy_.lock_converged ? step_rotate_pieces_locked(std::move(in)) :
+        policy_.stream_theta ? step_recompute_pieces(std::move(in)) : step_rotate_pieces(std::move(in));
+    // Measure all output roots, including locked ones: these are fresh kinetic
+    // samples, not a relabeling of their carried residuals or density values.
+    const double threshold = madness::FunctionDefaults<3>::get_thresh();
+    const int k = madness::FunctionDefaults<3>::get_k();
+    if (!history.empty() && history.back().at("identity").at("root_count") != out.roots.size())
+      history = nlohmann::json::array(); // a changed root inventory starts new diagnostic history
+    for (std::size_t slot = 0; slot < out.roots.size(); ++slot) {
+      const auto functions = function_kinetic_record(measure_function_kinetics(world_, out.roots[slot]),
+          out.iter, "", threshold, k, false, "solver_step_output");
+      history.push_back(es_kinetic_evidence(functions.at("blocks"), out.iter, static_cast<int>(slot), static_cast<int>(out.roots.size()),
+          slot < out.stable_index.size() ? out.stable_index[slot] : -1,
+          std::is_same_v<Type, TDA> ? "tda" : "full",
+          std::is_same_v<Shell, ClosedShell> ? "closed_shell" : "open_shell", threshold, k,
+          slot < out.locked.size() && out.locked[slot]));
+    }
+    out.kinetic_history = std::move(history);
+    return out;
   }
 
 private:

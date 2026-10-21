@@ -4,6 +4,8 @@
 #include <cmath>
 #include <numeric>
 #include "../solvers/function_kinetics.hpp"
+#include "../solvers/es_kinetic_evidence.hpp"
+#include "../solvers/response_state.hpp"
 #include <iostream>
 
 using namespace madness;
@@ -58,6 +60,18 @@ int main(int argc, char** argv) {
     MADNESS_CHECK(std::abs(record.at("trace").at("value").get<double>() - 8.25) < 4e-6);
     record["trace"]["value"] = 4.5;
     MADNESS_CHECK(!molresponse_v3::valid_function_kinetic_record(record));
+    // A Full excited-state vector has a positive X+Y kinetic trace, distinct
+    // from its signed RPA norm. No cross-root correspondence is inferred.
+    molresponse_v3::ResponseStateXY<molresponse_v3::ClosedShell> es;
+    es.x_alpha = {f};
+    es.y_alpha = {doubled};
+    const auto es_functions = molresponse_v3::function_kinetic_record(
+        molresponse_v3::measure_function_kinetics(world, es), 1, "", 1e-8, 8, false, "solver_step_output");
+    const auto es_report = molresponse_v3::es_kinetic_evidence(es_functions.at("blocks"),
+        1, 0, 1, 4, "full", "closed_shell", 1e-8, 8, false);
+    MADNESS_CHECK(molresponse_v3::valid_es_kinetic_evidence(es_report));
+    MADNESS_CHECK(std::abs(es_report.at("kinetic_energy").at("trace").at("value").get<double>() - 7.5) < 4e-6);
+    MADNESS_CHECK(es_report.at("delta_kinetic_energy").at("value").is_null());
     // Compare with moldft's real distributed matrix path, including its
     // off-diagonal entries. A wrong factor or an unintended normalization
     // must also fail the independent Gaussian expectations above.

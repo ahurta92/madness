@@ -321,6 +321,23 @@ endif (BUILD_TESTING)
 
 # Per-function kinetic diagonals: analytic functions, no external fixtures.
 if(BUILD_TESTING)
+  add_mad_executable(test_es_kinetic_archive "tests/test_es_kinetic_archive.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_es_kinetic_archive/run COMMAND test_es_kinetic_archive)
+  set_tests_properties(madness/test/molresponse/test_es_kinetic_archive/run
+    PROPERTIES LABELS "response;medium" TIMEOUT 120)
+  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+    add_test(NAME madness/test/molresponse/test_es_kinetic_archive/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_es_kinetic_archive> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(madness/test/molresponse/test_es_kinetic_archive/mpi2
+      PROPERTIES LABELS "response;medium" TIMEOUT 120)
+  endif()
+
+  add_mad_executable(test_es_kinetic_evidence "tests/test_es_kinetic_evidence.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_es_kinetic_evidence/run COMMAND test_es_kinetic_evidence)
+  set_tests_properties(madness/test/molresponse/test_es_kinetic_evidence/run
+    PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+
   add_mad_executable(test_fd_explicit_accuracy "tests/test_fd_explicit_accuracy.cpp" "MADchem")
   add_test(NAME madness/test/molresponse/test_fd_explicit_accuracy/run COMMAND test_fd_explicit_accuracy)
   set_tests_properties(madness/test/molresponse/test_fd_explicit_accuracy/run

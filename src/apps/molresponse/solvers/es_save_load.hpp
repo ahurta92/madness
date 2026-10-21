@@ -96,6 +96,15 @@ void save_es_roots(madness::World &world,
                    bool register_aggregate = true) {
   const int n_roots = static_cast<int>(state.roots.size());
   MADNESS_CHECK(n_roots > 0);
+  auto kinetic_history = state.kinetic_history;
+  for (auto& sample : kinetic_history) {
+    MADNESS_CHECK_THROW(valid_es_kinetic_evidence(sample) &&
+        sample.at("identity").at("model") == (std::is_same_v<Type, TDA> ? "tda" : "full") &&
+        sample.at("identity").at("shell") == (std::is_same_v<Shell, ClosedShell> ? "closed_shell" : "open_shell") &&
+        sample.at("identity").at("root_count") == n_roots, "invalid excited-state kinetic evidence");
+    auto& attempt = sample["kinetic_energy"]["sample"]["attempt_directory"];
+    if (attempt == "") attempt = dir;
+  }
 
   if (world.rank() == 0) {
     std::filesystem::create_directories(dir);
@@ -165,6 +174,7 @@ void save_es_roots(madness::World &world,
     j["thresh"]       = thresh;
     j["protocol_key"] = protocol_key(thresh, k_now);  // doc 13 join key
     j["iter"]         = state.iter;
+    j["kinetic_history"] = kinetic_history;
     j["converged"]    = converged;
     j["diverged"]     = state.diverged;
     j["stalled"]      = state.stalled;   // plateau detector (ConvergencePolicy::stall_*)
@@ -242,6 +252,7 @@ void save_es_roots(madness::World &world,
           {"diverged",         state.diverged},
           {"stalled",          state.stalled},
           {"slot_permutation", stable_index},
+          {"kinetic_history", kinetic_history},
           {"roots",            roots_arr},
           {"iter",             state.iter},
           {"rss_gb",           bundle_rss_gb},
@@ -290,6 +301,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   std::vector<double> bsh_residual_recorded;
   std::vector<double> drho_residual_recorded;
   std::vector<int> stable_index_recorded;
+  std::string kinetic_history_recorded = "[]";
 
   // Rank 0 decides the load status; the status is broadcast BEFORE anyone
   // throws so a bad/missing/mismatched roots.json fails COLLECTIVELY. A
@@ -317,6 +329,17 @@ load_es_roots(madness::World &world, const std::string &dir) {
             saved_shell + ", requested = " + want_type + "/" + want_shell);
       }
 
+      n_roots = j.value("n_roots", 0);
+      const auto kinetic = j.value("kinetic_history", nlohmann::json::array());
+      if (!kinetic.is_array()) throw std::runtime_error("invalid excited-state kinetic history");
+      for (const auto& sample : kinetic)
+        if (!valid_es_kinetic_evidence(sample) ||
+            sample.at("identity").at("model") != (std::is_same_v<Type, TDA> ? "tda" : "full") ||
+            sample.at("identity").at("shell") != (std::is_same_v<Shell, ClosedShell> ? "closed_shell" : "open_shell") ||
+            sample.at("identity").at("root_count") != n_roots ||
+            sample.at("kinetic_energy").at("sample").at("attempt_directory") == "")
+          throw std::runtime_error("invalid excited-state kinetic evidence");
+      kinetic_history_recorded = kinetic.dump();
       n_roots      = j.value("n_roots", 0);
       iter_at_save = j.value("iter", 0);
       writer_nproc = j.value("writer_nproc", 0);   // 0 = legacy bundle (no count)
@@ -367,6 +390,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
   world.gop.broadcast(iter_at_save, 0);
   world.gop.broadcast(writer_nproc, 0);
   world.gop.broadcast_serializable(backend_tag, 0);
+  world.gop.broadcast_serializable(kinetic_history_recorded, 0);
   if (world.rank() != 0) {
     omega_recorded         = madness::Tensor<double>(n_roots);
     bsh_residual_recorded  .assign(n_roots, 0.0);
@@ -426,6 +450,7 @@ load_es_roots(madness::World &world, const std::string &dir) {
                                                             backend));
   }
 
+  s.kinetic_history       = nlohmann::json::parse(kinetic_history_recorded);
   s.omega                 = std::move(omega_recorded);
   s.last_bsh_residual     = std::move(bsh_residual_recorded);
   s.last_density_residual = std::move(drho_residual_recorded);

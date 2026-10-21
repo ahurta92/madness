@@ -94,6 +94,32 @@ roots. The initial guess is `solid_harmonics` by default, or a projected DALTON
 eigenvector bundle when seeding. Parallel/subworld execution across roots:
 [`parallelism.md`](parallelism.md).
 
+## Kinetic trace diagnostics
+
+Native `roots.json` and the aggregate excited-state bundle include
+`kinetic_history`. Each row measures one root at `solver_step_output`, after
+that solver step returns. It records all stored alpha/beta and X/Y function
+contributions and their positive, unweighted sum. Units are
+`hartree_times_response_amplitude_scale_squared`; amplitudes are measured as
+stored without rescaling. This quantity is separate from excitation energy,
+physical total energy, and the signed RPA normalization.
+
+A unitary rotation within a root's fixed function collection preserves its
+trace. Mixing different roots, or a nonunitary RPA transformation, need not
+preserve an individual root's trace. The retained root indices are bookkeeping
+labels (a bookkeeping index of `-1` means no label had been assigned at the
+sample), so `delta_kinetic_energy` is explicitly unavailable with reason
+`state_correspondence_unvalidated`. These records add no convergence gate or
+threshold and do not establish state following or excited-state gradients.
+
+Locked roots receive fresh kinetic measurements; their carried density/BSH
+residuals are not relabeled as fresh measurements. Historical slots remain the
+slots at measurement time even after final sorting. Restart preserves records
+with their originating bundle directory; a changed root inventory starts a new
+history. Native bundles currently lack named reference-generation binding,
+which is recorded explicitly as unavailable. Aggregate/component consistency,
+model, shell, and root-count validation occur before loading archived roots.
+
 ## References
 
 - MADNESS linear-response / excited-state literature. *(full citations to add)*
