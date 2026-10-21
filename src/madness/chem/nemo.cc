@@ -198,6 +198,9 @@ Nemo::Nemo(World &world, const CalculationParameters &param,
 };
 
 double Nemo::value(const Tensor<double> &x) {
+  for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+    MADNESS_CHECK_THROW(!get_calc_param().is_user_defined(std::string("accuracy.") + metric),
+                       "explicit accuracy controls are not yet supported for Nemo");
 
   // fast return if the reference is already solved at this geometry
   if (check_converged(x))

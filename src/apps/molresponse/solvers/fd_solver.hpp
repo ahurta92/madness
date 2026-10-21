@@ -652,7 +652,9 @@ public:
       out.last_x_norm[r] = storage_norm(world_, out.responses[r]);
     if (record_function_metrics_)
       out.bsh_history.push_back({in.iter, out.function_residuals, out.last_bsh_residual,
-          out.last_x_norm, targets_.bsh_residual, targets_.rtol});
+          out.last_x_norm, targets_.bsh_residual, targets_.rtol,
+          out.last_density_residual, out.last_rho_norm, targets_.density_residual,
+          !in.rho_alpha_prev.empty()});
     for (int r = 0; r < M; ++r) {
       if (fd_exploded(out.last_bsh_residual[r], out.last_x_norm[r],
                       policy_.explosion_guard)) { out.diverged = true; break; }

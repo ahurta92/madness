@@ -182,8 +182,9 @@ inline std::vector<Stage> parse(madness::World &world,
   // scientific semantics have not yet been wired through the named adapter.
   const std::set<std::string> scf_keys = {
       "xc", "protocol", "dconv",    "econv",       "maxiter", "l",
-      "k",  "charge",   "localize", "print_level", "maxsub",  "maxrotn"};
-  const std::set<std::string> response_keys = {"dconv", "maxiter", "kain",
+      "k",  "charge",   "localize", "print_level", "maxsub",  "maxrotn", "diagnostic.iterations_per_rung",
+      "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change"};
+  const std::set<std::string> response_keys = {"dconv", "maxiter", "kain", "diagnostic.iterations_per_rung",
                                                "print_level"};
   for (const auto &b : blocks(text)) {
     std::set<std::string> seen;

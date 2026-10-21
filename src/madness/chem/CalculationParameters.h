@@ -93,6 +93,11 @@ struct CalculationParameters : public QCCalculationParametersBase {
 		initialize<std::vector<double> >("bocc",std::vector<double>(),"explicit beta occupations (0 or 1) by orbital index within the occupied span; a 0 is a hole");
 		initialize<int>   ("nopen",0,"number of unpaired electrons = nalpha-nbeta");
 		initialize<int>   ("maxiter",25,"maximum number of iterations");
+        initialize<int>("diagnostic.iterations_per_rung", 0,
+                        "Explicit fixed iteration count per supplied rung; zero disables diagnostics");
+        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+            initialize<double>(std::string("accuracy.") + metric, -1.0,
+                "Explicit absolute accuracy target, additionally required for convergence; unset by default");
 		initialize<int>   ("nio",1,"no. of io servers to use");
 		initialize<bool>  ("spin_restricted",true,"true if spin restricted");
 		initialize<int>   ("plotlo",0,"range of MOs to print (for both spins if polarized");

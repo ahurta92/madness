@@ -319,3 +319,41 @@ is twice the old single-spin norm. The original `density_change` and its gate
 remain visible for comparison. The new fields have no target, effective limit
 or pass/fail verdict. No new default thresholds or stopping rules are selected;
 reference tests set their existing numerical criteria explicitly.
+
+`diagnostic.iterations_per_rung N` is an explicit trajectory-study control on
+moldft and molresponse stages. Positive N requests that many iterations at each
+supplied rung even if the ordinary gates pass earlier; zero preserves the
+ordinary loop. Invalid/divergent states still stop. It supplies no accuracy
+threshold and does not turn an unmet final target into convergence. Reports keep
+ordinary scientific verdicts and full-precision density/trace histories. This
+experimental diagnostic is intended for fresh bounded protocol studies; it does
+not establish a new stopping default.
+
+### Explicit ground-state accuracy requests
+
+A named `moldft` stage can additionally require any of
+`accuracy.density_change`, `accuracy.bsh_residual`, `accuracy.energy_change`,
+and `accuracy.kinetic_trace_change`. Each takes a finite, nonnegative absolute
+limit. Omitted controls add no numerical target. These controls supplement the
+existing engine gate; satisfying an explicit scalar alone is not convergence.
+
+The density quantity is the L2 change of total charge density rho_alpha+rho_beta
+(`charge_density_change`, `a0^(-3/2)`), and BSH is the maximum raw orbital residual (dimensionless).
+Energy is the absolute consecutive total-energy change (hartree). Kinetics is
+the absolute difference of consecutive unweighted kinetic traces (hartree),
+with a restricted alpha orbital counted once. No occupation factor enters the
+trace. The explicit limits have no protocol floor or inferred relative factor.
+
+`convergence_report.explicit_accuracy` records the last iteration decision;
+`saved_state_validation.explicit_accuracy` evaluates the actual archived state.
+`requested_accuracy` reevaluates those saved measurements against the current
+request, including on zero-iteration reuse. A tighter unmet request resumes
+from compatible orbitals. Unmet final requests retain a generation with
+`unmet_requested_accuracy`, an unconverged result, and no dependent-stage
+execution. Historical kinetic evidence with another quantity definition cannot
+certify a new trace-change target, even when its units are also hartree.
+
+The explicit controls currently require named `moldft` evaluation. Response and
+Nemo explicit accuracy policies are not supplied by this interface yet. A
+forced-iteration diagnostic does not override invalid-state checks or certify
+unmet explicit accuracy.

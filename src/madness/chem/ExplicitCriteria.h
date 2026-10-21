@@ -28,8 +28,13 @@ inline nlohmann::json evaluate_explicit_criteria(const nlohmann::json& measureme
             const auto units = target.value().at("units").get<std::string>();
             if (!std::isfinite(limit) || limit < 0.0 || units.empty())
                 throw std::runtime_error("invalid_target");
+            if (measurements.contains(target.key()) &&
+                measurements.at(target.key()).value("availability", "") == "invalid")
+                throw std::runtime_error("invalid_measurement");
             if (!measurements.contains(target.key()) ||
-                measurements.at(target.key()).value("availability", "") == "unavailable") {
+                measurements.at(target.key()).value("availability", "") == "unavailable" ||
+                (target.value().contains("quantity") &&
+                 measurements.at(target.key()).value("quantity", "") != target.value().at("quantity").get<std::string>())) {
                 criterion["status"] = "unavailable";
                 unavailable = true;
             } else {
@@ -55,6 +60,33 @@ inline nlohmann::json evaluate_explicit_criteria(const nlohmann::json& measureme
         result["status"] = invalid ? "invalid" : unavailable ? "unavailable" : unmet ? "unmet" : "satisfied";
     return result;
 }
+// Numeric controls are opt-in. Sentinel defaults are never accuracy targets.
+// Units belong to the application's actual density/amplitude definitions.
+template <typename Parameters>
+nlohmann::json requested_accuracy_targets(const Parameters& parameters,
+    const std::string& density_units, const std::string& bsh_units,
+    const std::string& kinetic_units) {
+    using json = nlohmann::json;
+    json targets = json::object();
+    const json definitions = {
+        {"density_change", {{"metric", "charge_density_change"}, {"units", density_units}}},
+        {"bsh_residual", {{"metric", "bsh_residual"}, {"units", bsh_units}}},
+        {"energy_change", {{"metric", "energy_change"}, {"units", "hartree"}}},
+        {"kinetic_trace_change", {{"metric", "delta_kinetic_energy"}, {"units", kinetic_units}}}};
+    for (const auto& definition : definitions.items()) {
+        const auto name = "accuracy." + definition.key();
+        if (!parameters.is_user_defined(name)) continue;
+        const auto value = parameters.template get<double>(name);
+        if (!std::isfinite(value) || value < 0.0)
+            throw std::invalid_argument(name + " must be finite and nonnegative");
+        targets[definition.value().at("metric").template get<std::string>()] =
+            {{"value", value}, {"units", definition.value().at("units")}};
+    }
+    if (targets.contains("delta_kinetic_energy"))
+        targets["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
+    return targets;
+}
+
 // History contains evaluate_explicit_criteria(...)["criteria"] snapshots
 // from one comparable solve segment. The caller resets it at every change of
 // representation/reference and supplies whether an immediate next rung exists.

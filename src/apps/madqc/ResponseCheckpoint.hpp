@@ -179,6 +179,8 @@ public:
     request_ = {{"protocol", cp.protocol()}, {"frequencies", stage.frequencies},
                 {"components", stage.components},
                 {"dconv", stage.params.get<ResponseParameters>().dconv()}};
+    const int diagnostic = stage.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung");
+    if (diagnostic > 0) request_["diagnostic_iterations_per_rung"] = diagnostic;
   }
 
   // Return true only when the requested analysis itself is already complete.
@@ -198,7 +200,8 @@ public:
     reference_changed = latest_.reference != reference_;
     if (reference_changed) return false; // no old descendants enter this attempt
     restored_ = true;
-    loaded_ = latest_.stop_reason == "converged" &&
+    loaded_ = stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") == 0 &&
+              latest_.stop_reason == "converged" &&
               latest_.numerical.at("request") == request_ && !latest_.properties.empty();
     if (loaded_) { work = "loaded"; return true; }
 
@@ -271,7 +274,8 @@ private:
             continue;
           }
           // A tighter subset must not erase independent convergence evidence.
-          if (requested && e.at("checkpoint_dconv").get<double>() > target)
+          if (requested && (e.at("checkpoint_dconv").get<double>() > target ||
+              stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") > 0))
             e["converged"] = false;
           if (!e.at("converged").get<bool>()) {
             e["iteration_at_checkpoint"] = e.at("iter");

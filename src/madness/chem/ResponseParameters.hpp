@@ -28,6 +28,8 @@ struct ResponseParameters : public QCCalculationParametersBase {
                            "residual is below this (plain BSH steps above it; a DALTON-seeded "
                            "ES start at 20-25% residual otherwise derails on KAIN's first "
                            "extrapolation). 0 disables.");
+        initialize<int>("diagnostic.iterations_per_rung", 0,
+                        "Explicit diagnostic iteration count per supplied rung; 0 disables. Invalid states still stop.");
         initialize<int>("stall.window", 6,
                         "Plateau detector: stop a response/ES solve when its gated residuals "
                         "(FD: bsh, density; ES: density, |dw|) have not improved by "

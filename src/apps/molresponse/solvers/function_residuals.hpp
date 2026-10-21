@@ -13,6 +13,9 @@ struct FunctionResidualSample {
   std::vector<double> normalization_scales;
   double absolute_limit = 0.0;
   double relative_factor = 0.0;
+  std::vector<double> density_changes, density_norms;
+  double density_absolute_limit = 0.0;
+  bool density_comparable = false;
 };
 
 // Enumerate only stored blocks: static response has no Y; restricted has no beta.

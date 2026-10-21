@@ -1,6 +1,8 @@
 #pragma once
 
 #include <madness/chem/DensityChanges.h>
+#include <madness/chem/FunctionMetricSummary.h>
+#include <madness/chem/ExplicitCriteria.h>
 
 #include "NamedStages.hpp"
 #include <filesystem>
@@ -23,13 +25,27 @@ class MoldftCheckpoint {
   madness::checkpoint::Manifest latest_;
   bool has_latest_ = false;
   std::optional<madness::SCF::IterationCheckpoint> comparison_;
+  json previous_kinetic_blocks_ = json::object();
+  json iteration_history_ = json::array();
+  static json kinetic_blocks(const madness::FunctionResidualBlocks& values) {
+    return madness::function_residual_record(values).at("blocks");
+  }
+  static json trace_record(const madness::FunctionResidualBlocks& values) {
+    auto blocks = kinetic_blocks(values);
+    auto result = madness::function_metric_trace(blocks);
+    result["blocks"] = blocks;
+    result["quantity"] = "unweighted_kinetic_trace";
+    result["units"] = "hartree";
+    result["collection_definition"] = "stored alpha and optional unrestricted beta orbitals; restricted alpha counted once";
+    return result;
+  }
 
   static void require(bool condition, const std::string &message) {
     if (!condition)
       throw std::runtime_error("moldft checkpoint: " + message);
   }
 
-  static void validate_measurements(const json& metrics) {
+  static void validate_measurements(const json& metrics, const std::string& stage, const json& numerical) {
     if (!metrics.contains("convergence_report")) return;
     const auto& report = metrics.at("convergence_report");
     auto validate = [&](const json& measurements) {
@@ -53,6 +69,92 @@ class MoldftCheckpoint {
         require(metric.value().value("availability", "") != "invalid",
                 "invalid ground-state measurement: " + metric.key());
     };
+    const auto check_accuracy = [&](const json& entry) {
+      if (!entry.contains("explicit_accuracy")) return;
+      const auto& decision = entry.at("explicit_accuracy");
+      json targets = json::object();
+      for (const auto& criterion : decision.at("criteria").items())
+        targets[criterion.key()] = criterion.value().at("target");
+      const auto expected = madness::evaluate_explicit_criteria(entry.at("measurements"), targets);
+      require(expected.at("status") != "invalid" && expected == decision,
+              "invalid ground-state measurement: explicit accuracy decision");
+    };
+    check_accuracy(report);
+    const auto check_trace = [&](const json& trace, const std::string& expected_phase) {
+      require(trace.at("phase") == expected_phase,
+              "invalid ground-state measurement: kinetic trace phase");
+      require(trace.at("quantity") == "unweighted_kinetic_trace" && trace.at("units") == "hartree",
+              "invalid ground-state measurement: kinetic trace quantity or units");
+      const auto expected = madness::function_metric_trace(trace.at("blocks"));
+      require(expected.at("availability") == "measured", "invalid ground-state measurement: kinetic trace");
+      for (const auto& field : expected.items())
+        require(trace.at(field.key()) == field.value(), "invalid ground-state measurement: inconsistent kinetic trace");
+    };
+    const auto check_change = [&](const json& change, const json& current, const json& previous) {
+      if (change.value("quantity", "") != "absolute_kinetic_trace_change") return;
+      const auto expected = madness::function_metric_trace_change(current, previous);
+      for (const auto& field : expected.items())
+        require(change.at(field.key()) == field.value(), "invalid ground-state measurement: inconsistent kinetic trace change");
+    };
+    if (metrics.contains("kinetic_trace")) check_trace(metrics.at("kinetic_trace"), "iteration_input_before_rotation_and_update");
+    if (report.contains("iteration_history")) {
+      json previous = json::object(), previous_sample = nullptr;
+      for (const auto& iteration : report.at("iteration_history")) {
+        validate(iteration.at("measurements"));
+        check_accuracy(iteration);
+        const auto& trace = iteration.at("kinetic_trace");
+        check_trace(trace, "iteration_input_before_rotation_and_update");
+        const auto& sample = trace.at("sample");
+        require(sample.at("stage") == stage, "invalid ground-state measurement: history stage");
+        const bool same_segment = !previous_sample.is_null() &&
+            sample.at("threshold") == previous_sample.at("threshold") &&
+            sample.at("k") == previous_sample.at("k") && sample.at("run_id") == previous_sample.at("run_id");
+        require(sample.at("iteration").get<int>() == (same_segment ? previous_sample.at("iteration").get<int>() + 1 : 0),
+                "invalid ground-state measurement: nonconsecutive history");
+        if (!same_segment) previous = json::object();
+        check_change(iteration.at("measurements").at("delta_kinetic_energy"), trace.at("blocks"), previous);
+        previous = trace.at("blocks");
+        previous_sample = sample;
+      }
+    }
+    if (metrics.contains("kinetic_trace")) {
+      const auto& trace = metrics.at("kinetic_trace");
+      require(!report.at("iteration_history").empty() && trace == report.at("iteration_history").back().at("kinetic_trace"),
+              "invalid ground-state measurement: latest trace history");
+      require(trace.at("sample").at("threshold") == numerical.at("threshold") &&
+              trace.at("sample").at("k") == numerical.at("k"),
+              "invalid ground-state measurement: latest trace representation");
+    }
+    if (report.contains("saved_state_validation") && report.at("saved_state_validation").contains("kinetic_trace")) {
+      const auto& saved = report.at("saved_state_validation");
+      check_accuracy(saved);
+      check_trace(saved.at("kinetic_trace"), "saved_orbitals_before_archive");
+      json previous = json::object();
+      const auto& last_sample = metrics.at("kinetic_trace").at("sample");
+      require(saved.contains("comparison_boundary") &&
+              (saved.at("comparison_boundary") == "after_final_rotation" || saved.at("comparison_boundary") == "after_orbital_update"),
+              "invalid ground-state measurement: comparison boundary");
+      const int expected_iteration = last_sample.at("iteration").get<int>() -
+          (saved.at("comparison_boundary") == "after_final_rotation" ? 1 : 0);
+      require(saved.at("comparison").is_null() == (expected_iteration < 0),
+              "invalid ground-state measurement: missing comparison");
+      if (!saved.at("comparison").is_null()) {
+        const auto& comparison = saved.at("comparison");
+        auto expected_sample = last_sample;
+        expected_sample["iteration"] = expected_iteration;
+        for (const auto& field : expected_sample.items())
+          require(comparison.at(field.key()) == field.value(), "invalid ground-state measurement: comparison identity");
+        check_trace(comparison.at("kinetic_trace"), "iteration_input_before_rotation_and_update");
+        const auto& history = report.at("iteration_history");
+        const auto offset = saved.at("comparison_boundary") == "after_final_rotation" ? 2 : 1;
+        require(history.size() >= std::size_t(offset), "invalid ground-state measurement: missing comparison history");
+        const auto& source = history.at(history.size() - offset).at("kinetic_trace");
+        require(source.at("sample") == expected_sample && source.at("blocks") == comparison.at("kinetic_trace").at("blocks"),
+                "invalid ground-state measurement: comparison history mismatch");
+        previous = comparison.at("kinetic_trace").at("blocks");
+      }
+      check_change(saved.at("measurements").at("delta_kinetic_energy"), saved.at("kinetic_trace").at("blocks"), previous);
+    }
     validate(report.at("measurements"));
     if (report.contains("saved_state_validation"))
       validate(report.at("saved_state_validation").at("measurements"));
@@ -104,7 +206,13 @@ public:
     require(latest_.numerical.at("representation") == "mo",
             "unsupported representation");
     const auto &cp = scf.param;
+    const auto accuracy_targets = madness::requested_accuracy_targets(cp, "a0^(-3/2)", "dimensionless", "hartree");
+    const auto saved_measurements = latest_.metrics.value("convergence_report", json::object())
+        .value("saved_state_validation", json::object()).value("measurements", json::object());
+    const auto requested_accuracy = madness::evaluate_explicit_criteria(saved_measurements, accuracy_targets);
     const bool satisfied =
+        (accuracy_targets.empty() || requested_accuracy.at("status") == "satisfied") &&
+        cp.get<int>("diagnostic.iterations_per_rung") == 0 &&
         latest_.stop_reason == "converged" &&
         latest_.numerical.at("threshold").get<double>() <=
             cp.protocol().back() &&
@@ -115,7 +223,7 @@ public:
         latest_.targets.at("econv").get<double>() <= cp.econv();
     work = satisfied ? "loaded" : "resumed";
     madness::checkpoint::detail::on_root(world_, [&] {
-      validate_measurements(latest_.metrics);
+      validate_measurements(latest_.metrics, latest_.stage, latest_.numerical);
       const auto directory = store_ / latest_.generation;
       for (const auto &shard : latest_.archives[0].shards) {
         const auto suffix = shard.path.substr(std::string("state").size());
@@ -154,6 +262,11 @@ public:
     // after update/rotation. Keep that distinction even in a completed report.
     metrics["kinetic_energy"] = {{"value", step.input_kinetic}, {"units", "hartree"},
         {"phase", "iteration_kinetic_evaluation_before_update"}};
+    metrics["occupation_weighted_physical_kinetic_energy"] = metrics.at("kinetic_energy");
+    metrics["kinetic_trace"] = trace_record(step.input_kinetic_diagonal);
+    metrics["kinetic_trace"]["phase"] = "iteration_input_before_rotation_and_update";
+    metrics["kinetic_trace"]["sample"] = {{"run_id", run_id_}, {"stage", stage_.name},
+        {"threshold", step.threshold}, {"k", scf.amo.at(0).k()}, {"iteration", step.iteration}};
     const double effective = std::max(scf.param.dconv(), step.threshold);
     auto measured = [&](double value, const std::string& units,
                         const std::string& phase, bool active, json target,
@@ -199,9 +312,18 @@ public:
         "successive_iteration_energy_evaluations", false, scf.param.econv(), scf.param.econv(), step.iteration);
     evidence["delta_kinetic_energy"] = measured(step.kinetic_change, "hartree",
         "successive_iteration_kinetic_evaluations", false, nullptr, nullptr, step.iteration);
-    evidence["delta_kinetic_energy"]["reduction"] = "absolute_change_of_occupation_weighted_spin_sum";
+    const auto current_blocks = kinetic_blocks(step.input_kinetic_diagonal);
+    if (!step.has_previous) previous_kinetic_blocks_ = json::object();
+    evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(current_blocks, previous_kinetic_blocks_));
+    evidence["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
+    previous_kinetic_blocks_ = current_blocks;
+    iteration_history_.push_back({{"measurements", evidence}, {"kinetic_trace", metrics.at("kinetic_trace")},
+        {"occupation_weighted_physical_kinetic_energy", metrics.at("occupation_weighted_physical_kinetic_energy")},
+        {"explicit_accuracy", step.explicit_accuracy}});
     metrics["convergence_report"] = {{"schema", "madqc.convergence.v1"},
-        {"gate_policy", "existing_engine"}, {"measurements", evidence}};
+        {"gate_policy", step.explicit_accuracy.value("status", "not_requested") == "not_requested"
+            ? "existing_engine" : "existing_engine_and_explicit_accuracy"},
+        {"explicit_accuracy", step.explicit_accuracy}, {"diagnostic_iterations_per_rung", scf.param.get<int>("diagnostic.iterations_per_rung")}, {"measurements", evidence}, {"iteration_history", iteration_history_}};
     publish(scf, false, json::array(), metrics,
             {{"iteration", step.iteration},
              {"iterations_this_run", iterations},
@@ -263,15 +385,31 @@ public:
       m.erase("sample");
       m.erase("components");
     }
+    auto saved_trace = trace_record(evaluation.kinetic_diagonal);
+    saved_trace["phase"] = "saved_orbitals_before_archive";
+    const auto comparison_blocks = comparable ? kinetic_blocks(comparison_->comparison_kinetic_diagonal) : json::object();
+    evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(
+        saved_trace.at("blocks"), comparison_blocks));
+    evidence["delta_kinetic_energy"]["valid_for_saved_state"] =
+        evidence["delta_kinetic_energy"].at("availability") == "measured";
     // Replace historical components with evidence from the actual saved orbitals.
     evidence["bsh_residual"]["per_function"] = madness::function_residual_record(evaluation.function_residuals);
+    auto comparison_trace = comparable ? trace_record(comparison_->comparison_kinetic_diagonal) : json(nullptr);
+    if (comparable) comparison_trace["phase"] = "iteration_input_before_rotation_and_update";
     metrics["convergence_report"]["saved_state_validation"] = {
+        {"comparison_boundary", comparison_->final_rotation ? "after_final_rotation" : "after_orbital_update"},
         {"affects_stopping", false}, {"measurements", evidence},
         {"energy", energy}, {"kinetic_energy", evaluation.kinetic},
+        {"kinetic_trace", saved_trace},
         {"comparison", comparable ? json{{"run_id", run_id_}, {"stage", stage_.name},
             {"iteration", comparison_->comparison_iteration}, {"threshold", comparison_->threshold},
             {"k", scf.amo.at(0).k()}, {"energy", comparison_->comparison_energy},
-            {"kinetic_energy", comparison_->comparison_kinetic}} : json(nullptr)}};
+            {"kinetic_energy", comparison_->comparison_kinetic},
+            {"kinetic_trace", comparison_trace}} : json(nullptr)}};
+    const auto accuracy_targets = madness::requested_accuracy_targets(scf.param, "a0^(-3/2)", "dimensionless", "hartree");
+    const auto requested_accuracy = madness::evaluate_explicit_criteria(evidence, accuracy_targets);
+    metrics["convergence_report"]["saved_state_validation"]["explicit_accuracy"] = requested_accuracy;
+    if (!accuracy_targets.empty() && requested_accuracy.at("status") != "satisfied") converged = false;
     publish(scf, converged, properties, metrics,
             {{"phase", "final_properties_on_saved_orbitals"},
              {"iterations_this_run", iterations}},
@@ -303,15 +441,20 @@ private:
                  {"effective_dconv",
                   std::max(scf.param.dconv(),
                            madness::FunctionDefaults<3>::get_thresh())}};
+    m.targets["explicit_accuracy"] = madness::requested_accuracy_targets(scf.param, "a0^(-3/2)", "dimensionless", "hartree");
     m.stop_reason = converged   ? "converged"
                     : evaluated ? "iteration_limit"
                                 : "in_progress";
+    if (evaluated && !converged && !m.targets.at("explicit_accuracy").empty() &&
+        m.metrics.at("convergence_report").at("saved_state_validation")
+            .at("explicit_accuracy").at("status") != "satisfied")
+      m.stop_reason = "unmet_requested_accuracy";
     for (auto &p : properties)
       p["generation"] = m.generation;
     m.properties = properties;
     const auto directory = store_ / m.generation;
     checkpoint::detail::on_root(world_, [&] {
-      validate_measurements(m.metrics);
+      validate_measurements(m.metrics, m.stage, m.numerical);
       fs::create_directories(store_);
       require(fs::create_directory(directory), "generation already exists");
       return std::string{};

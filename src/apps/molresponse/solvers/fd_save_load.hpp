@@ -278,6 +278,7 @@ void save_fd_state(madness::World &world,
               {"active_gate", false}, {"reason", "no_comparable_previous_sample"}}}};
       if (!state.bsh_history.empty()) {
         entry["function_bsh_history"] = nlohmann::json::array();
+        entry["density_history"] = nlohmann::json::array();
         for (const auto& sample : state.bsh_history) {
           const double value = sample.aggregates.at(0);
           auto record = nlohmann::json{
@@ -296,6 +297,10 @@ void save_fd_state(madness::World &world,
               {"normalization_phase", "solver_step_output_after_acceleration"},
               {"effective_limit", limit}, {"satisfied", value <= limit}});
           record["maximum_comparison"] = bsh_maximum_comparison(record);
+          entry["density_history"].push_back(density_history_record(
+              sample.density_changes.at(0), sample.density_comparable,
+              sample.density_absolute_limit, sample.relative_factor, sample.density_norms.at(0),
+              record.at("sample")));
           entry["function_bsh_history"].push_back(std::move(record));
         }
       }

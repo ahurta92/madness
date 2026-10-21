@@ -67,18 +67,23 @@ def check_bsh_comparison(metric):
     assert comparison['phase'] == metric['phase']
 
 def check_kinetic_changes(channel):
+    density_history = channel['density_history']
+    assert len(density_history) == channel['iterations_at_save']
+    assert density_history[0]['availability'] == 'unavailable'
+    for sample in density_history[1:]:
+        assert sample['availability'] == 'measured'
+        assert sample['value'] >= 0.0
+        assert math.isclose(sample['effective_limit'], sample['absolute_limit'] + sample['relative_factor'] * sample['normalization_scale'], rel_tol=1e-15)
     history = channel['function_kinetic_history']
     first = history[0]['change_from_previous']
     assert first['availability'] == 'unavailable' and first['value'] is None
     for previous, current in zip(history, history[1:]):
         change = current['change_from_previous']
-        values = []
-        for block, functions in current['blocks'].items():
-            for i, function in enumerate(functions):
-                expected = abs(function['value'] - previous['blocks'][block][i]['value'])
-                assert change['blocks'][block][i]['value'] == expected
-                values.append(expected)
-        assert change['value'] == max(values)
+        now = sum(f['value'] for functions in current['blocks'].values() for f in functions)
+        before = sum(f['value'] for functions in previous['blocks'].values() for f in functions)
+        assert change['value'] == abs(now - before)
+        assert current['trace']['value'] == now
+        assert change['quantity'] == 'absolute_kinetic_trace_change'
         assert change['comparison'] == previous['sample']
         assert change['sample'] == current['sample']
         assert change['active_gate'] is False and change['target'] is None and change['satisfied'] is None
@@ -196,7 +201,7 @@ for samples in by_rung.values():
         assert values['bsh_residual']['sample']['iteration'] == before['position']['iteration']
         delta = abs(after['metrics']['energy']['value'] - before['metrics']['energy']['value'])
         assert abs(values['energy_change']['value'] - delta) < 1e-14
-        delta_t = abs(after['metrics']['kinetic_energy']['value'] - before['metrics']['kinetic_energy']['value'])
+        delta_t = abs(after['metrics']['kinetic_trace']['value'] - before['metrics']['kinetic_trace']['value'])
         assert abs(values['delta_kinetic_energy']['value'] - delta_t) < 1e-14
 # Final energy and kinetic differences must use the recorded prior iteration,
 # never the almost-identical state just before final diagonalization.
@@ -207,8 +212,14 @@ previous = next(m for m in manifests(fresh, 'gs')
                 and m['position'].get('iteration') == comparison['iteration'])
 assert comparison['energy'] == previous['metrics']['energy']['value']
 assert comparison['kinetic_energy'] == previous['metrics']['kinetic_energy']['value']
-for metric, key in [('energy_change', 'energy'), ('delta_kinetic_energy', 'kinetic_energy')]:
+for metric, key in [('energy_change', 'energy')]:
     assert abs(v['measurements'][metric]['value'] - abs(v[key] - comparison[key])) < 1e-14
+assert abs(v['measurements']['delta_kinetic_energy']['value'] -
+           abs(v['kinetic_trace']['value'] - comparison['kinetic_trace']['value'])) < 1e-14
+for sample in g['iteration_history']:
+    trace = sample['kinetic_trace']
+    assert trace['value'] == sum(f['value'] for block in trace['blocks'].values() for f in block)
+    assert trace['weighting'] == 'none'
 # Diagnostic evaluations must not add solver steps to the established H2 case.
 assert gs['iterations_this_run'] == 8
 assert response['iterations_this_run'] == 18
@@ -324,6 +335,31 @@ mfile.write_text(json.dumps(m))
 run('invalid-ground', invalid_gs, resume=True, success=False)
 assert 'invalid ground-state measurement' in (work / 'invalid-ground.log').read_text()
 assert (store / 'latest').read_text() == latest
+# Trace aggregates and temporal changes are scientific evidence, not trusted flags.
+for location in ('raw_trace', 'trace_change', 'history_trace', 'input_phase', 'history_phase', 'saved_phase'):
+    root = work / ('InvalidTrace-' + location)
+    shutil.copytree(fresh, root)
+    store = root / 'gs/checkpoints'
+    latest = (store / 'latest').read_text()
+    mfile = store / json.loads(latest)['generation'] / 'manifest.json'
+    m = json.loads(mfile.read_text())
+    report = m['metrics']['convergence_report']
+    if location == 'input_phase':
+        m['metrics']['kinetic_trace']['phase'] = 'incompatible_phase'
+    elif location == 'history_phase':
+        report['iteration_history'][0]['kinetic_trace']['phase'] = 'incompatible_phase'
+    elif location == 'saved_phase':
+        report['saved_state_validation']['kinetic_trace']['phase'] = 'incompatible_phase'
+    elif location == 'raw_trace':
+        m['metrics']['kinetic_trace']['value'] = 99.0
+    elif location == 'history_trace':
+        report['iteration_history'][0]['kinetic_trace']['value'] = 99.0
+    else:
+        report['saved_state_validation']['measurements']['delta_kinetic_energy']['value'] = 99.0
+    mfile.write_text(json.dumps(m))
+    run('invalid-trace-' + location, root, resume=True, success=False)
+    assert 'invalid ground-state measurement' in (work / ('invalid-trace-' + location + '.log')).read_text()
+    assert (store / 'latest').read_text() == latest
 # Invalid revalidation evidence must fail before replacing either publication.
 for stage in ('gs', 'optical'):
     root = work / ('InvalidValidation-' + stage)
@@ -372,7 +408,7 @@ for corrupt in ('maximum', 'kinetic_change', 'kinetic_sample', 'historical_kinet
     if corrupt == 'maximum':
         entry['function_bsh_history'][0]['maximum_comparison']['value'] = 0.0
     elif corrupt == 'kinetic_change':
-        entry['function_kinetic_history'][1]['change_from_previous']['blocks']['x_alpha'][0]['value'] = 99.0
+        entry['function_kinetic_history'][1]['change_from_previous']['current_trace'] = 99.0
     elif corrupt == 'historical_kinetic':
         entry['convergence_measurements']['kinetic_energy']['blocks']['x_alpha'][0]['value'] = 77.0
     elif corrupt == 'kinetic_sample':
@@ -381,7 +417,9 @@ for corrupt in ('maximum', 'kinetic_change', 'kinetic_sample', 'historical_kinet
         entry['function_bsh_history'][0]['effective_limit'] = 99.0
     mfile.write_text(json.dumps(manifest))
     run('invalid-comparison-' + corrupt, root, resume=True, success=False)
-    assert 'invalid response state: metric comparison' in (work / ('invalid-comparison-' + corrupt + '.log')).read_text()
+    expected_error = ('per-function kinetic measurement' if corrupt == 'historical_kinetic'
+                      else 'metric comparison')
+    assert 'invalid response state: ' + expected_error in (work / ('invalid-comparison-' + corrupt + '.log')).read_text()
     assert (store / 'latest').read_text() == latest
 
 # Reject corrupt component values in both historical and saved-state evidence.

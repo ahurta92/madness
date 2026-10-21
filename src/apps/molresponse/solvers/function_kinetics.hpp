@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../kernels/response_space_ops.hpp"
+#include <madness/chem/FunctionMetricSummary.h>
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <map>
@@ -52,6 +53,7 @@ inline nlohmann::json function_kinetic_record(const FunctionKinetics& values,
       {"reduction", "none"}, {"active_gate", false}, {"target", nullptr},
       {"satisfied", nullptr}, {"valid_for_saved_state", saved && valid},
       {"phase", phase}, {"blocks", blocks},
+      {"trace", madness::function_metric_trace(blocks)},
       {"sample", {{"attempt_directory", attempt}, {"iteration", iteration},
                   {"threshold", threshold}, {"k", k}}}};
 }
@@ -72,6 +74,10 @@ inline bool valid_function_kinetic_record(const nlohmann::json& record) {
       const double value = function.at("value").get<double>();
       if (!std::isfinite(value) || value < 0.0) return false;
     }
+  }
+  if (record.contains("trace")) {
+    const auto expected = madness::function_metric_trace(record.at("blocks"));
+    if (expected.at("availability") != "measured" || record.at("trace") != expected) return false;
   }
   return true;
 }

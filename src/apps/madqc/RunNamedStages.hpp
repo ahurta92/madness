@@ -206,6 +206,7 @@ inline bool run_if_named(madness::World &world,
                       std::max(cp.dconv(), cp.protocol().back());
       checkpoint.finish(*scf, converged);
       const auto &saved = checkpoint.latest();
+      converged = saved.stop_reason == "converged";
       state_id = saved.generation;
       state_ids.emplace(stage.name, state_id);
       reference_prefixes.emplace(stage.name, checkpoint.prefix());
@@ -217,6 +218,10 @@ inline bool run_if_named(madness::World &world,
       result["acceleration_history"] = continuing ? "reset" : "fresh";
       result["checkpoint_metrics"] = saved.metrics;
       result["convergence_report"] = ground_convergence_report(saved.metrics, state_id, converged);
+      const auto requested_targets = madness::requested_accuracy_targets(cp, "a0^(-3/2)", "dimensionless", "hartree");
+      result["convergence_report"]["requested_accuracy"] = madness::evaluate_explicit_criteria(
+          saved.metrics.value("convergence_report", json::object())
+              .value("saved_state_validation", json::object()).value("measurements", json::object()), requested_targets);
       reference_evidence[stage.name] = {{"stage", stage.name}, {"state_id", state_id},
           {"engine_converged", converged},
           {"energy_change", result["convergence_report"]["measurements"]["energy_change"]}};
@@ -308,8 +313,8 @@ inline bool run_if_named(madness::World &world,
     write_result(world, root / "results.json", index);
     if (!converged)
       throw std::runtime_error("stage " + stage.name +
-                               " did not satisfy the existing engine "
-                               "convergence test; see results.json");
+                               " did not satisfy its requested convergence "
+                               "criteria; see results.json");
   }
   if (world.rank() == 0)
     madness::print("Named-stage results:", (root / "results.json").string());

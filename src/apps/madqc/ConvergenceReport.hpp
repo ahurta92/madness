@@ -3,7 +3,7 @@
 #include <nlohmann/json.hpp>
 
 namespace named_stages {
-// Reporting only. The application engines retain their existing stopping rules.
+// Reporting only. Preserve the gate policy recorded by the application.
 // Older generations may lack samples; a successful engine verdict must never
 // manufacture missing measurement evidence.
 inline nlohmann::json unavailable_measurement(const char* reason) {
@@ -16,7 +16,7 @@ inline nlohmann::json ground_convergence_report(const nlohmann::json& metrics,
                                                 bool converged) {
   auto report = metrics.value("convergence_report", nlohmann::json::object());
   report["schema"] = "madqc.convergence.v1";
-  report["gate_policy"] = "existing_engine";
+  if (!report.contains("gate_policy")) report["gate_policy"] = "existing_engine";
   report["state_id"] = state_id;
   report["outcome"] = converged ? "converged" : "unfinished";
   if (report.contains("saved_state_validation"))
@@ -53,6 +53,8 @@ inline nlohmann::json response_convergence_report(const nlohmann::json& metadata
             {"state_id", state_id}, {"outcome", outcome}, {"iterations_at_save", entry.at("iter")},
             {"convention", entry.value("measurement_convention", json::object())},
             {"measurements", measurements}});
+        if (entry.contains("density_history"))
+          report["channels"].back()["density_history"] = entry.at("density_history");
         if (entry.contains("function_bsh_history"))
           report["channels"].back()["function_bsh_history"] = entry.at("function_bsh_history");
         if (entry.contains("function_kinetic_history"))

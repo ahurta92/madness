@@ -22,6 +22,11 @@ json blocks(std::initializer_list<double> values) {
     return result;
 }
 }
+struct AccuracyParameters {
+    json values;
+    [[nodiscard]] bool is_user_defined(const std::string& name) const { return values.contains(name); }
+    template <typename T> [[nodiscard]] T get(const std::string& name) const { return values.at(name).get<T>(); }
+};
 struct DiagnosticSolver {
     struct State { int iter = 0; bool diverged = false; };
     int diverge_at = 0;
@@ -84,6 +89,28 @@ int main() {
     satisfied_history[1]["metric"]["value"] = std::numeric_limits<double>::quiet_NaN();
     expect(madness::explicit_progress(satisfied_history, 1, 0.1, true, false).at("action") == "stop_invalid",
            "a satisfied flag cannot hide a nonfinite current quantity");
+    const AccuracyParameters supplied{{{"accuracy.kinetic_trace_change", 0.01}}};
+    const auto supplied_targets = madness::requested_accuracy_targets(supplied, "density", "amplitude", "hartree");
+    expect(supplied_targets.size() == 1 && supplied_targets.at("delta_kinetic_energy").at("value") == 0.01,
+           "only explicitly supplied accuracy controls become targets");
+    const auto charge_target = madness::requested_accuracy_targets(
+        AccuracyParameters{{{"accuracy.density_change", 0.75}}}, "density", "amplitude", "hartree");
+    expect(charge_target.contains("charge_density_change") && !charge_target.contains("density_change"),
+           "explicit density target names total charge rather than legacy spin maximum");
+    const json density_evidence = {{"density_change", {{"availability", "measured"}, {"units", "density"}, {"value", 0.5}}},
+        {"charge_density_change", {{"availability", "measured"}, {"units", "density"}, {"value", 1.0}}}};
+    expect(madness::evaluate_explicit_criteria(density_evidence, charge_target).at("status") == "unmet",
+           "restricted single-spin change below target cannot hide charge change above target");
+    const json legacy_kinetic = {{"delta_kinetic_energy", {{"availability", "measured"},
+        {"units", "hartree"}, {"value", 0.0}, {"quantity", "physical_energy_change"}}}};
+    expect(madness::evaluate_explicit_criteria(legacy_kinetic, supplied_targets).at("status") == "unavailable",
+           "historical physical energy cannot certify a new trace-change target");
+    expect(madness::requested_accuracy_targets(AccuracyParameters{json::object()}, "density", "amplitude", "kinetic").empty(),
+           "omitted accuracy controls create no thresholds");
+    bool rejected_target = false;
+    try { (void)madness::requested_accuracy_targets(AccuracyParameters{{{"accuracy.energy_change", -1.}}}, "d", "b", "k"); }
+    catch (const std::invalid_argument&) { rejected_target = true; }
+    expect(rejected_target, "explicitly supplied negative sentinel is rejected");
     using madness::function_metric_maximum;
     using madness::function_metric_absolute_change;
     using madness::function_metric_trace;

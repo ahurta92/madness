@@ -36,6 +36,9 @@
 
 
 #include <madness/chem/DensityChanges.h>
+#include <madness/chem/ExplicitCriteria.h>
+#include <madness/chem/FunctionMetricSummary.h>
+#include <madness/chem/FunctionResidualReport.h>
 #include "funcdefaults.h"
 #include "tensor_json.hpp"
 #include <madness/world/worldmem.h>
@@ -2015,7 +2018,8 @@ SCF::RestrictedHFEvaluation SCF::evaluate_restricted_hf(World& world) {
     std::vector<double> components;
     compute_residual(world, occ, fock, psi, vpsi, residual, &components);
     return {alpha, energy, 2.0 * kinetic, residual, dipole(world, rho),
-            {{"alpha", std::move(components)}}};
+            {{"alpha", std::move(components)}},
+            {{"alpha", kinetic_energy_diagonal(world, amo, gradop)}}};
 }
 
 vecfuncT SCF::compute_residual(World& world, tensorT& occ, tensorT& fock,
@@ -2794,6 +2798,7 @@ void SCF::solve(World& world) {
     double update_residual = 0.0, bsh_residual = 0.0;
     FunctionResidualBlocks function_residuals; // reset at each protocol rung
     double previous_energy = 0.0, previous_kinetic = 0.0;
+    FunctionResidualBlocks previous_kinetic_diagonal;
     subspaceT subspace;
     tensorT Q;
     bool do_this_iter = true;
@@ -2812,7 +2817,15 @@ void SCF::solve(World& world) {
     tensorT focka_json(param.nmo_alpha(), param.nmo_alpha());
     tensorT fockb_json(param.nmo_beta(), param.nmo_beta());
 
-    for (int iter = 0; iter < param.maxiter(); ++iter) {
+    const auto explicit_targets = requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless", "hartree");
+    const int diagnostic_iterations = param.get<int>("diagnostic.iterations_per_rung");
+    MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
+    const int iteration_limit = diagnostic_iterations ? diagnostic_iterations : param.maxiter();
+    if (diagnostic_iterations) {
+        converged_for_thresh = 1.e10;
+        converged_for_dconv = 1.e10;
+    }
+    for (int iter = 0; iter < iteration_limit; ++iter) {
         if (world.rank() == 0 and (param.print_level() > 1))
             printf("\nIteration %d at time %.1fs\n\n", iter, wall_time());
 
@@ -2943,7 +2956,7 @@ void SCF::solve(World& world) {
             db = (brho - brho_old).norm2();
             // Only observers request these diagnostics; the existing spin
             // gates below continue to use da/db and their original limits.
-            if (checkpoint_observer)
+            if (checkpoint_observer || explicit_targets.contains("charge_density_change"))
                 density_changes = density_change_norms(world, arho, brho, arho_old, brho_old);
             if (world.rank() == 0 and (param.print_level() > 2))
                 print("delta rho", da, db, "residuals", bsh_residual,
@@ -3006,6 +3019,14 @@ void SCF::solve(World& world) {
             enlb = enla;
         }
 
+        FunctionResidualBlocks input_kinetic_diagonal;
+        if (checkpoint_observer || explicit_targets.contains("delta_kinetic_energy")) {
+            input_kinetic_diagonal["alpha"] = kinetic_energy_diagonal(world, amo, gradop);
+            if (!param.spin_restricted() && !bmo.empty())
+                input_kinetic_diagonal["beta"] = kinetic_energy_diagonal(world, bmo, gradop);
+        }
+        const auto comparison_kinetic_diagonal = previous_kinetic_diagonal;
+        previous_kinetic_diagonal = input_kinetic_diagonal;
         double ekina = 0.0, ekinb = 0.0;
         tensorT focka = make_fock_matrix(world, amo, Vpsia, aocc, ekina);
         tensorT fockb = focka;
@@ -3033,6 +3054,10 @@ void SCF::solve(World& world) {
         double enonlocal = enla + enlb;
         double exc = exca + excb;
         double etot = ekinetic + enuclear + ecoulomb + exc + enrep + enonlocal + epcm + edisp;
+        if (diagnostic_iterations || checkpoint_observer || !explicit_targets.empty())
+            MADNESS_CHECK_THROW(std::isfinite(etot) && std::isfinite(ekinetic) &&
+                std::isfinite(da) && std::isfinite(db) && std::isfinite(bsh_residual),
+                "invalid SCF state during checkpointed or explicitly controlled iteration");
         current_energy = etot;
         const double energy_change = std::abs(etot - previous_energy);
         const double kinetic_change = std::abs(ekinetic - previous_kinetic);
@@ -3078,17 +3103,39 @@ void SCF::solve(World& world) {
         }
 
 
+        json explicit_measurements = json::object();
+        const auto accuracy_sample = [&](double value, const char* units) {
+            return json{{"value", iter > 0 && std::isfinite(value) ? json(value) : json(nullptr)},
+                {"availability", iter == 0 ? "unavailable" : std::isfinite(value) ? "measured" : "invalid"},
+                {"units", units}};
+        };
+        explicit_measurements["charge_density_change"] = accuracy_sample(density_changes.charge, "a0^(-3/2)");
+        explicit_measurements["bsh_residual"] = accuracy_sample(bsh_residual, "dimensionless");
+        explicit_measurements["energy_change"] = accuracy_sample(energy_change, "hartree");
+        if (explicit_targets.contains("delta_kinetic_energy")) {
+            auto trace_change = function_metric_trace_change(
+                function_residual_record(input_kinetic_diagonal).at("blocks"),
+                function_residual_record(comparison_kinetic_diagonal).at("blocks"));
+            trace_change["units"] = "hartree";
+            trace_change["quantity"] = "absolute_kinetic_trace_change";
+            explicit_measurements["delta_kinetic_energy"] = trace_change;
+        }
+        const auto explicit_accuracy = evaluate_explicit_criteria(explicit_measurements, explicit_targets);
+        MADNESS_CHECK_THROW(explicit_accuracy.at("status") != "invalid", "invalid explicitly requested SCF accuracy measurement");
+
         if (iter > 0) {
             //print("##convergence criteria: density delta=", da < dconv * molecule.natom() && db < dconv * molecule.natom(), ", bsh_residual=", (param.conv_only_dens || bsh_residual < 5.0*dconv));
             if (da < dconv * std::max(size_t(5), molecule.natom()) && db < dconv * std::max(size_t(5), molecule.natom())
                 && (param.get<bool>("conv_only_dens") || bsh_residual < 5.0 * dconv))
                 converged = true;
+            if (!explicit_targets.empty() && explicit_accuracy.at("status") != "satisfied") converged = false;
+            if (diagnostic_iterations && iter + 1 < diagnostic_iterations) converged = false;
             // previous conv was too tight for small systems
             // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
             //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
 
             // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
-            if (converged || iter == param.maxiter() - 1) {
+            if (converged || iter == iteration_limit - 1) {
                 // record what we converged *to*, on every rank and independent of
                 // the print level: the restart logic keys off these two fields.
                 // The values are the thresholds of this protocol level, not
@@ -3200,7 +3247,7 @@ void SCF::solve(World& world) {
                 if (checkpoint_observer)
                     checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                         etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin});
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy});
                 break;
             }
 
@@ -3215,7 +3262,7 @@ void SCF::solve(World& world) {
         if (checkpoint_observer)
             checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                 etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin});
+                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy});
 
     }
     // save the converged fock matix

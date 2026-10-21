@@ -399,6 +399,9 @@ struct molresponse_v3_lib {
               "sidesteps the question entirely on multi-node runs.");
     }
     in.settings.policy.dconv_user = rp.dconv();
+    const int diagnostic_iterations = rp.get<int>("diagnostic.iterations_per_rung");
+    MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
+    in.settings.policy.diagnostic_iterations_per_rung = diagnostic_iterations;
     // Deck overrides for the iteration policy (2026-09-10), applied only when
     // the deck SETS them: the deck default kain=false predates the solvers'
     // KAIN-on default, so honouring it unconditionally would switch KAIN off

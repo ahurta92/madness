@@ -402,12 +402,15 @@ public:
         // Diagnostic charge/spin field differences between consecutive inputs.
         // Available only with has_previous; they do not change the SCF gates.
         double density_charge = 0.0, density_spin = 0.0;
+        FunctionResidualBlocks input_kinetic_diagonal, comparison_kinetic_diagonal;
+        nlohmann::json explicit_accuracy;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;
         double energy, kinetic, bsh_residual;
         tensorT dipole;
         FunctionResidualBlocks function_residuals;
+        FunctionResidualBlocks kinetic_diagonal;
     };
     /// Evaluate current closed-shell, all-electron HF orbitals without an update.
     /// This diagnostic does not touch acceleration history or convergence flags.
@@ -674,6 +677,10 @@ public:
     bool provides_gradient() const { return true; }
 
     double value(const Tensor<double>& x) {
+        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+            MADNESS_CHECK_THROW(!calc.param.is_user_defined(std::string("accuracy.") + metric) ||
+                                bool(calc.checkpoint_observer),
+                                "explicit accuracy controls currently require a named moldft stage");
         double xsq = x.sumsq();
         if (xsq == coords_sum) {
             return calc.current_energy;

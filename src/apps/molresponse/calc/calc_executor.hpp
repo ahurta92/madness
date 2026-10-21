@@ -640,8 +640,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // A plateau (State::stalled, ConvergencePolicy::stall_*) is treated exactly
   // like exhausting max_iters: same acceptance rule, fewer wasted iterations.
   auto accepted_now = [&](const typename Solver::State &st, const Solver &sv) {
-    return ctx.accept_at_maxiter && !st.diverged &&
-           (st.iter >= ctx.max_iters || st.stalled) && !converged_now(st, sv);
+    const int diagnostic = ctx.policy.diagnostic_iterations_per_rung;
+    return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged &&
+           (st.iter >= (diagnostic > 0 ? diagnostic : ctx.max_iters) || st.stalled) && !converged_now(st, sv);
   };
 
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
@@ -671,6 +672,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.max_iters;
+  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -829,6 +831,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
 
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
+  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -1024,6 +1027,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
 
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
+  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);

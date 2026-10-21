@@ -2,6 +2,8 @@
 #include <madness/chem/KineticEnergy.h>
 #include <madness/chem/SCF.h>
 #include <cmath>
+#include <numeric>
+#include "../solvers/function_kinetics.hpp"
 #include <iostream>
 
 using namespace madness;
@@ -43,6 +45,19 @@ int main(int argc, char** argv) {
       MADNESS_CHECK(std::abs(values[i] - expected[i]) < 2e-6);
       MADNESS_CHECK((functions[i] - before[i]).norm2() < 1e-12);
     }
+    // A unitary rotation redistributes diagonal entries but preserves trace.
+    auto rotated = copy(world, vector_real_function_3d{f, g});
+    rotated[0] = (f + g) * (1.0/std::sqrt(2.0));
+    rotated[1] = (f - g) * (1.0/std::sqrt(2.0));
+    const auto rotated_diagonal = molresponse_v3::rs::kinetic_diagonal(world, rotated);
+    MADNESS_CHECK(std::abs(rotated_diagonal[0] + rotated_diagonal[1] - values[0] - values[2]) < 2e-6);
+    MADNESS_CHECK(std::abs(rotated_diagonal[0] - values[0]) > 1e-2);
+    auto record = molresponse_v3::function_kinetic_record({{"x_alpha", values}}, 0, "rotation-test", 1e-8, 8,
+        true, "saved_response_before_archive");
+    MADNESS_CHECK(molresponse_v3::valid_function_kinetic_record(record));
+    MADNESS_CHECK(std::abs(record.at("trace").at("value").get<double>() - 8.25) < 4e-6);
+    record["trace"]["value"] = 4.5;
+    MADNESS_CHECK(!molresponse_v3::valid_function_kinetic_record(record));
     // Compare with moldft's real distributed matrix path, including its
     // off-diagonal entries. A wrong factor or an unintended normalization
     // must also fail the independent Gaussian expectations above.
@@ -75,7 +90,14 @@ int main(int argc, char** argv) {
       }
     }
     MADNESS_CHECK(molresponse_v3::rs::kinetic_diagonal(world, {}).empty());
-    if (world.rank() == 0) std::cout << "per-function kinetic diagonals passed\n";
+    if (world.rank() == 0) {
+      std::cout << "KINETIC_TRACE_EVIDENCE " << nlohmann::json{
+          {"units", "hartree"}, {"diagonals", values}, {"unweighted_trace", values[0]+values[1]+values[2]},
+          {"occupation_weighted_energy_per_spin", total}, {"rotated_diagonals", rotated_diagonal},
+          {"rotation_trace_error", rotated_diagonal[0]+rotated_diagonal[1]-values[0]-values[2]}}
+          .dump() << '\n';
+      std::cout << "per-function kinetic diagonals passed\n";
+    }
   }
   finalize();
   return result;

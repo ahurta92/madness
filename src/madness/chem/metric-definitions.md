@@ -152,3 +152,23 @@ spin gates remain unchanged. Tests specify protocol, dconv, econv and iteration
 budget explicitly in their reference decks; these existing controls must not be
 silently reinterpreted as total-charge or spin-density targets. Future policies
 need explicit case-appropriate criteria, not universal inferred defaults.
+
+
+## Kinetic trace contract (2026-10-20)
+
+The unweighted collection trace is `K = sum_i (1/2) sum_a <d_a f_i|d_a f_i>`.
+The change criterion is `abs(K_n - K_previous)`, distinct from both the raw
+trace and the maximum of per-function changes. Unitary rotation within a fixed
+collection preserves this trace; no orbital matching is needed. The collection,
+state/root, equation, protocol, representation, and sampling phase must still
+match. Different collection dimensions and missing previous samples are
+unavailable, never zero convergence evidence.
+
+Named moldft counts its stored alpha orbitals once, plus stored beta orbitals
+only when unrestricted. Restricted spin multiplicity and occupations do not
+enter this trace. The occupation-weighted physical kinetic energy remains
+separate. Each driven response channel counts its stored X/Y and alpha/beta
+blocks positively, without combining independent channels or states and without
+using the signed RPA norm. Response units retain the response amplitude scale.
+All individual diagonals remain diagnostics. No trace threshold or gate is
+implied by reporting. Derived trace evidence is checked against its components.
