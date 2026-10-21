@@ -55,4 +55,76 @@ inline nlohmann::json evaluate_explicit_criteria(const nlohmann::json& measureme
         result["status"] = invalid ? "invalid" : unavailable ? "unavailable" : unmet ? "unmet" : "satisfied";
     return result;
 }
+// History contains evaluate_explicit_criteria(...)["criteria"] snapshots
+// from one comparable solve segment. The caller resets it at every change of
+// representation/reference and supplies whether an immediate next rung exists.
+// This helper never declares engine convergence or creates a protocol rung.
+inline nlohmann::json explicit_progress(const nlohmann::json& history,
+                                       int window, double minimum_relative_improvement,
+                                       bool has_next_supplied_rung, bool invalid_state) {
+    using json = nlohmann::json;
+    json result = {{"status", "progressing"}, {"action", "continue"},
+                   {"accuracy_satisfied", false}, {"window", window},
+                   {"minimum_relative_improvement", minimum_relative_improvement}};
+    const auto finish = [&](const char* status, const char* action) {
+        auto output = result;
+        output["status"] = status;
+        output["action"] = action;
+        return output;
+    };
+    if (invalid_state) return finish("invalid", "stop_invalid");
+    if (window < 0 || !std::isfinite(minimum_relative_improvement) ||
+        minimum_relative_improvement <= 0.0 || minimum_relative_improvement >= 1.0)
+        return finish("invalid_configuration", "stop_invalid");
+    if (window == 0) return finish("disabled", "continue");
+    if (!history.is_array()) return finish("invalid_history", "stop_invalid");
+    if (history.empty()) return finish("insufficient_history", "continue");
+    try {
+        const auto& current = history.back();
+        if (!current.is_object() || current.empty()) return finish("insufficient_history", "continue");
+        bool all_satisfied = true;
+        for (const auto& metric : current.items()) {
+            const auto status = metric.value().at("status").get<std::string>();
+            if (status == "invalid") return finish("invalid", "stop_invalid");
+            if (status != "satisfied" && status != "unmet")
+                return finish("insufficient_history", "continue");
+            const double value = metric.value().at("value").get<double>();
+            const double target = metric.value().at("target").at("value").get<double>();
+            if (!std::isfinite(value) || value < 0.0 || !std::isfinite(target) || target < 0.0 ||
+                ((value <= target) != (status == "satisfied")))
+                return finish("invalid", "stop_invalid");
+            all_satisfied = all_satisfied && status == "satisfied";
+        }
+        if (all_satisfied) {
+            result["accuracy_satisfied"] = true;
+            result["status"] = "criteria_satisfied";
+            return result; // engine eligibility remains a separate decision
+        }
+        if (history.size() <= static_cast<std::size_t>(window))
+            return finish("insufficient_history", "continue");
+        const auto& previous = history.at(history.size() - 1 - window);
+        if (!previous.is_object() || previous.size() != current.size())
+            return finish("insufficient_history", "continue");
+        for (const auto& metric : current.items()) {
+            const auto& now = metric.value();
+            if (!previous.contains(metric.key())) return finish("insufficient_history", "continue");
+            const auto& before = previous.at(metric.key());
+            if (before.at("target") != now.at("target"))
+                return finish("insufficient_history", "continue");
+            const auto prior_status = before.at("status").get<std::string>();
+            if (prior_status == "invalid") return finish("invalid", "stop_invalid");
+            if (prior_status != "satisfied" && prior_status != "unmet")
+                return finish("insufficient_history", "continue");
+            const double value = now.at("value").get<double>();
+            const double prior = before.at("value").get<double>();
+            if (!std::isfinite(value) || !std::isfinite(prior) || value < 0.0 || prior < 0.0)
+                return finish("invalid", "stop_invalid");
+            if (now.at("status") == "unmet" && value <= (1.0 - minimum_relative_improvement) * prior)
+                return result;
+        }
+        return finish("stalled", has_next_supplied_rung ? "advance_supplied_rung" : "retain_unmet");
+    } catch (const std::exception&) {
+        return finish("invalid_history", "stop_invalid");
+    }
+}
 } // namespace madness

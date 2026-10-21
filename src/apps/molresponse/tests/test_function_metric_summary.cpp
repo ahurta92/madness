@@ -26,7 +26,7 @@ struct DiagnosticSolver {
     struct State { int iter = 0; bool diverged = false; };
     int diverge_at = 0;
     bool reported_converged = false;
-    State step(State s) const { ++s.iter; s.diverged = s.iter == diverge_at; return s; }
+    [[nodiscard]] State step(State s) const { ++s.iter; s.diverged = s.iter == diverge_at; return s; }
     [[nodiscard]] static bool converged(const State& s) { return s.iter >= 2; }
     void print_final(const State&, bool converged) { reported_converged = converged; }
 };
@@ -57,6 +57,33 @@ int main() {
            "incompatible criterion units rejected");
     expect(madness::evaluate_explicit_criteria(measurements, json::object()).at("status") == "not_requested",
            "no explicit targets introduces no numerical default");
+    const json stalled_history = json::array({
+        {{"metric", {{"status", "unmet"}, {"value", 2.0}, {"target", {{"value", 1.0}}}}}},
+        {{"metric", {{"status", "unmet"}, {"value", 2.0}, {"target", {{"value", 1.0}}}}}}});
+    expect(madness::explicit_progress(stalled_history, 1, 0.1, true, false).at("action") == "advance_supplied_rung",
+           "usable explicit stall advances only when a supplied rung exists");
+    expect(madness::explicit_progress(stalled_history, 1, 0.1, false, false).at("action") == "retain_unmet",
+           "final explicit stall retains state without successful accuracy");
+    expect(madness::explicit_progress(stalled_history, 1, 0.1, true, true).at("action") == "stop_invalid",
+           "invalid state cannot be promoted by a stall");
+    auto improving_history = stalled_history;
+    improving_history[1]["metric"]["value"] = 1.5;
+    expect(madness::explicit_progress(improving_history, 1, 0.1, true, false).at("action") == "continue",
+           "improving unmet quantity is not a stall");
+    expect(madness::explicit_progress(stalled_history, 0, 0.1, true, false).at("status") == "disabled",
+           "no stall window supplies no invented default");
+    auto missing_history = stalled_history;
+    missing_history[0]["metric"]["status"] = "unavailable";
+    expect(madness::explicit_progress(missing_history, 1, 0.1, true, false).at("status") == "insufficient_history",
+           "missing old measurements cannot establish a stall");
+    auto satisfied_history = stalled_history;
+    satisfied_history[1]["metric"].update({{"value", 0.5}, {"status", "satisfied"}});
+    const auto accuracy = madness::explicit_progress(satisfied_history, 1, 0.1, true, false);
+    expect(accuracy.at("accuracy_satisfied") == true && accuracy.at("action") == "continue",
+           "satisfied criteria still defer to engine eligibility");
+    satisfied_history[1]["metric"]["value"] = std::numeric_limits<double>::quiet_NaN();
+    expect(madness::explicit_progress(satisfied_history, 1, 0.1, true, false).at("action") == "stop_invalid",
+           "a satisfied flag cannot hide a nonfinite current quantity");
     using madness::function_metric_maximum;
     using madness::function_metric_absolute_change;
     using madness::function_metric_trace;
