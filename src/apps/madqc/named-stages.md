@@ -353,10 +353,35 @@ from compatible orbitals. Unmet final requests retain a generation with
 execution. Historical kinetic evidence with another quantity definition cannot
 certify a new trace-change target, even when its units are also hartree.
 
-The explicit controls currently require named `moldft` evaluation. Response and
 Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify
 unmet explicit accuracy.
+
+### Explicit driven-response accuracy requests
+
+Named `molresponse` FD stages support `accuracy.density_change`,
+`accuracy.bsh_residual`, and `accuracy.kinetic_trace_change`. Limits are finite,
+nonnegative, absolute and explicitly supplied. Density is the L2 change in the
+kernel's induced charge density (`kernel_induced_density_L2_atomic_units`).
+BSH is the maximum raw residual over all stored orbital functions and X/Y
+blocks (`response_amplitude_L2_atomic_units`). Kinetics is the absolute change
+in the unweighted positive trace over those blocks
+(`hartree_times_response_amplitude_scale_squared`). Per-function values remain
+diagnostics. These response quantities include the perturbation amplitude
+scale and must not be interpreted as a ground-state energy or density.
+`accuracy.energy_change` is rejected because a local driven-response energy
+has not been established.
+
+Both the last genuine input and independently reassessed saved output must
+satisfy requested criteria, in addition to existing engine eligibility. The
+legacy quadrature gate remains separate from the requested maximum. Explicit
+requests disable best-effort acceptance and the inherited plateau shortcut;
+no universal stall threshold is introduced. A tighter request reuses compatible
+amplitudes, reevaluates evidence, and invalidates dependent properties until
+satisfied. Forced diagnostics exhaust the specified iterations per supplied
+rung without certifying unmet accuracy. Checkpoints preserve raw histories,
+comparison identities and reconstructed decisions; missing or incompatible
+historical evidence cannot certify a newly requested criterion.
 
 ### Experimental configured progress
 

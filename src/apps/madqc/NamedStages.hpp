@@ -5,6 +5,7 @@
 
 #include <apps/molresponse/ResponseProtocol.hpp>
 #include <apps/molresponse/solvers/response_metadata.hpp>
+#include <apps/molresponse/solvers/fd_explicit_accuracy.hpp>
 #include <cmath>
 #include <map>
 #include <set>
@@ -186,6 +187,7 @@ inline std::vector<Stage> parse(madness::World &world,
       "progress.window", "progress.minimum_relative_improvement",
       "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change"};
   const std::set<std::string> response_keys = {"dconv", "maxiter", "kain", "diagnostic.iterations_per_rung",
+      "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change",
                                                "print_level"};
   for (const auto &b : blocks(text)) {
     std::set<std::string> seen;
@@ -244,6 +246,9 @@ inline std::vector<Stage> parse(madness::World &world,
       else
         fail(line, "unsupported parameter " + k + " in " + b.kind);
     }
+
+    if (b.kind == "molresponse")
+      molresponse_v3::fd_requested_accuracy_targets(rp); // validate before any stage executes
 
     // Bind the molecule/reference and translate property requests.
     stage.properties =

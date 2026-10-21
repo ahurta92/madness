@@ -42,6 +42,8 @@
 // =========================================================================
 
 #include "function_kinetics.hpp"
+#include "function_metric_diagnostics.hpp"
+#include "fd_explicit_accuracy.hpp"
 #include "function_residuals.hpp"
 #include "../kernels/exchange_ctx.hpp"  // exch::assemble_theta_tensor (--fd-tensor gate)
 #include "../kernels/full.hpp"     // Kernels<Full, ClosedShell>
@@ -112,6 +114,9 @@ public:
     /// (ConvergencePolicy::stall_*). converged() returns true on it so the
     /// loop exits; the executor records it and applies best-effort acceptance.
     bool                                    stalled = false;
+    bool                                    rung_exhausted = false;
+    nlohmann::json explicit_accuracy = nlohmann::json::array();
+    nlohmann::json saved_explicit_accuracy = nlohmann::json::array();
   };
 
   FDSolver(madness::World &world, FDProblem<Type, Shell> target,
@@ -121,6 +126,7 @@ public:
       : world_(world), target_(std::move(target)),
         policy_(policy), kain_(world, policy),
         print_level_(print_level), log_prefix_(std::move(log_prefix)) {
+    record_function_metrics_ = !policy_.explicit_accuracy_targets.empty();
     refresh_convergence_targets();
     print_header();
   }
@@ -156,7 +162,7 @@ public:
         madness::FunctionDefaults<3>::get_thresh());
   }
   const ConvergencePolicy::Targets& targets() const { return targets_; }
-  void record_function_metrics(bool enabled) { record_function_metrics_ = enabled; }
+  void record_function_metrics(bool enabled) { record_function_metrics_ = enabled || !policy_.explicit_accuracy_targets.empty(); }
 
   /// <z|(A-w)|z> for the operator this solver actually solves, formed directly.
   ///
@@ -464,7 +470,9 @@ private:
     out.gate_history[0].push_back(g_bsh);
     out.gate_history[1].push_back(out.iter > 1 ? g_rho
                                    : std::numeric_limits<double>::infinity());
-    out.stalled = !out.diverged && policy_.plateau(out.gate_history);
+    // Explicit criteria have no inherited plateau policy. Configured progress
+    // is separate; the legacy default cannot stop a still-improving criterion.
+    out.stalled = policy_.explicit_accuracy_targets.empty() && !out.diverged && policy_.plateau(out.gate_history);
     if (out.stalled && print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
       const std::size_t n = out.gate_history[0].size();
       const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
@@ -671,6 +679,19 @@ public:
       out.kinetic_history.push_back(std::move(sample));
     }
     update_stall(out, in);
+    if (!policy_.explicit_accuracy_targets.empty()) {
+      out.explicit_accuracy = evaluate_requested_accuracy(out);
+      for (const auto& criterion : out.explicit_accuracy)
+        MADNESS_CHECK_THROW(criterion.at("status") != "invalid", "invalid explicit FD accuracy evidence");
+      const bool input_satisfied = std::all_of(out.explicit_accuracy.begin(), out.explicit_accuracy.end(),
+          [](const auto& criterion) { return criterion.at("status") == "satisfied"; });
+      if (!out.diverged && !out.stalled && input_satisfied && legacy_converged(out)) {
+        const auto saved = evaluate_saved_state(out);
+        out.saved_explicit_accuracy = evaluate_requested_accuracy(out, &saved);
+        for (const auto& criterion : out.saved_explicit_accuracy)
+          MADNESS_CHECK_THROW(criterion.at("status") != "invalid", "invalid saved FD accuracy evidence");
+      }
+    }
 
     print_iter_banner(out);
     append_convergence_log(out);
@@ -700,6 +721,48 @@ public:
     return evidence;
   }
 
+  /// Apply only requested criteria to the genuine input or reassessed output.
+  nlohmann::json evaluate_requested_accuracy(const State& state, const State* validation = nullptr) const {
+    using json = nlohmann::json;
+    json results = json::array();
+    const auto& measured = validation ? *validation : state;
+    for (int channel = 0; channel < target_.n_responses(); ++channel) {
+      const auto index = static_cast<std::size_t>(channel);
+      const auto scalar = [&](const std::vector<double>& values, bool available, const char* units) {
+        const bool present = index < values.size();
+        const bool valid = present && std::isfinite(values[index]) && values[index] >= 0.0;
+        return json{{"value", available && valid ? json(values[index]) : json(nullptr)},
+                    {"availability", present && !valid ? "invalid" : available && valid ? "measured" : "unavailable"},
+                    {"units", units}};
+      };
+      json metrics;
+      metrics["bsh_residual"] = scalar(measured.last_bsh_residual, true, "response_amplitude_L2_atomic_units");
+      if (index < measured.function_residuals.size())
+        metrics["bsh_residual"]["per_function"] = madness::function_residual_record(measured.function_residuals[index]);
+      metrics["density_change"] = scalar(measured.last_density_residual, validation || state.iter > 1,
+          "kernel_induced_density_L2_atomic_units");
+      metrics["density_change"]["reduction"] = "kernel_induced_density_L2_norm";
+      const double threshold = madness::FunctionDefaults<3>::get_thresh();
+      const int k = madness::FunctionDefaults<3>::get_k();
+      const auto history_record = [&](std::size_t sample) {
+        const auto& item = state.kinetic_history.at(sample);
+        return function_kinetic_record(item.channels.at(index), item.iteration, "", threshold, k, false,
+            item.iteration == 0 ? "initial_solver_iterate" : "solver_iterate_after_acceleration");
+      };
+      const auto count = state.kinetic_history.size();
+      if (validation && index < measured.function_kinetics.size()) {
+        const auto current = function_kinetic_record(measured.function_kinetics[index], state.iter, "", threshold, k,
+            true, "saved_response_before_archive");
+        metrics["delta_kinetic_energy"] = kinetic_change_record(current, count >= 2 ? history_record(count - 2) : json(nullptr));
+      } else if (!validation && count >= 2) {
+        metrics["delta_kinetic_energy"] = kinetic_change_record(history_record(count - 2),
+            count >= 3 ? history_record(count - 3) : json(nullptr));
+      }
+      results.push_back(madness::evaluate_explicit_criteria(fd_accuracy_measurements(metrics), policy_.explicit_accuracy_targets));
+    }
+    return results;
+  }
+
   /// Every leg within its relative gate (review C1): ||dx|| <= atol + rtol ||x||
   /// and ||drho|| <= atol + rtol ||rho1|| (fd_leg_within). No iteration rule and
   /// no diverged/stalled check. This residual-only diagnostic is not a strict
@@ -718,7 +781,7 @@ public:
   /// them), or every leg converged by fd_leg_converged: at least two
   /// iterations, so the density change has been measured, and both relative
   /// gates hold.
-  bool converged(const State &s) const {
+  bool legacy_converged(const State &s) const {
     if (s.diverged) return true;
     if (s.stalled)  return true;   // exit; executor reads State::stalled
     if (s.iter < policy_.min_iters_before_conv) return false;
@@ -729,6 +792,18 @@ public:
                             rho_norm(s, c), targets_))
         return false;
     }
+    return true;
+  }
+
+  bool converged(const State& state) const {
+    if (state.diverged || state.stalled) return true; // loop exit, never eligibility
+    if (!legacy_converged(state)) return false;
+    if (policy_.explicit_accuracy_targets.empty()) return true;
+    if (state.explicit_accuracy.size() != state.responses.size() ||
+        state.saved_explicit_accuracy.size() != state.responses.size()) return false;
+    for (const auto* evidence : {&state.explicit_accuracy, &state.saved_explicit_accuracy})
+      for (const auto& criterion : *evidence)
+        if (criterion.at("status") != "satisfied") return false;
     return true;
   }
 

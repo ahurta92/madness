@@ -548,6 +548,25 @@ for stage in ('gs', 'optical'):
                     e.pop('function_kinetic_history', None)
                     e.pop('function_bsh_history', None)
     mfile.write_text(json.dumps(m))
+# Optional legacy reports remain optional only when no explicit policy needs them.
+for control in ('accuracy', 'progress', 'progress-only'):
+    required = work / ('RequiredEvidence-' + control)
+    shutil.copytree(old, required)
+    store = required / 'gs/checkpoints'
+    pointer = (store / 'latest').read_text()
+    mfile = store / json.loads(pointer)['generation'] / 'manifest.json'
+    manifest = json.loads(mfile.read_text())
+    controls = manifest['numerical']['parameters']['parameters']
+    if control != 'progress-only':
+        controls['accuracy.kinetic_trace_change'] = 0.0
+    if control.startswith('progress'):
+        controls['progress.window'] = 1
+        controls['progress.minimum_relative_improvement'] = 0.1
+    mfile.write_text(json.dumps(manifest))
+    run('required-evidence-' + control, required, resume=True, success=False)
+    assert (store / 'latest').read_text() == pointer
+    assert 'missing configured accuracy/progress report' in (work / ('required-evidence-' + control + '.log')).read_text()
+
 old_results = run('old', old, resume=True)
 assert all(s['iterations_this_run'] == 0 for s in old_results)
 assert old_results[0]['convergence_report']['measurements']['energy_change']['value'] is None

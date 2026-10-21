@@ -1,6 +1,8 @@
 #ifndef MOLRESPONSE_V3_MADQC_ADAPTER_HPP
 #define MOLRESPONSE_V3_MADQC_ADAPTER_HPP
 
+#include "solvers/fd_explicit_accuracy.hpp"
+
 // -----------------------------------------------------------------------------
 // molresponse_v3_lib — madqc adapter (doc 16 R3 / doc 05 seam).
 //
@@ -399,6 +401,9 @@ struct molresponse_v3_lib {
               "sidesteps the question entirely on multi-node runs.");
     }
     in.settings.policy.dconv_user = rp.dconv();
+    in.settings.policy.explicit_accuracy_targets = fd_requested_accuracy_targets(rp);
+    MADNESS_CHECK_THROW(in.settings.policy.explicit_accuracy_targets.empty() || bool(checkpoint_observer),
+                        "explicit response accuracy currently requires a named molresponse stage");
     const int diagnostic_iterations = rp.get<int>("diagnostic.iterations_per_rung");
     MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
     in.settings.policy.diagnostic_iterations_per_rung = diagnostic_iterations;

@@ -506,7 +506,7 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
     // did not terminate. A re-solve of a plateaued state is deterministic;
     // there is nothing to gain by running it again.
     if (max_iters > 0 &&
-        (e->value("iter", 0) >= max_iters || e->value("stalled", false)))
+        (e->value("iter", 0) >= max_iters || e->value("stalled", false) || e->value("rung_exhausted", false)))
       return NodeAction::Skip;
     return NodeAction::Resume;
   }

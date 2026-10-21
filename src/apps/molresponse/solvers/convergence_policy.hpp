@@ -31,6 +31,7 @@
 // appropriate values.
 // =========================================================================
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -39,6 +40,9 @@
 namespace molresponse_v3 {
 
 struct ConvergencePolicy {
+  // Named FD only. These supplement legacy engine eligibility; no target is
+  // supplied implicitly and no driven-response energy is manufactured.
+  nlohmann::json explicit_accuracy_targets = nlohmann::json::object();
   int diagnostic_iterations_per_rung = 0; // explicit diagnostic, disabled by default
   // User-facing density-convergence target. The effective target at each
   // protocol is a multiple of max(thresh, dconv_user) — see

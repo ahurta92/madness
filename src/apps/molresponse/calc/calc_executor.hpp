@@ -621,6 +621,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     st.kinetic_history.clear();
     st.bsh_history.clear();
     st.function_residuals.clear();
+    st.explicit_accuracy = nlohmann::json::array();
+    st.saved_explicit_accuracy = nlohmann::json::array();
+    st.rung_exhausted = false;
     detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
                                  FunctionDefaults<3>::get_thresh());
   };
@@ -641,18 +644,24 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // like exhausting max_iters: same acceptance rule, fewer wasted iterations.
   auto accepted_now = [&](const typename Solver::State &st, const Solver &sv) {
     const int diagnostic = ctx.policy.diagnostic_iterations_per_rung;
+    if (!ctx.policy.explicit_accuracy_targets.empty()) return false;
     return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged &&
            (st.iter >= (diagnostic > 0 ? diagnostic : ctx.max_iters) || st.stalled) && !converged_now(st, sv);
   };
 
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
-    const bool strict   = converged_now(st, solv);
-    const bool accepted = accepted_now(st, solv);
     const double wall_s = madness::wall_time() - step_w0;   // R1b
     // Diagnostics are opt-in through named checkpointing and do not advance
     // the solver. The legacy application incurs no additional operator work.
     typename Solver::State validation;
     if (ctx.checkpoint_observer) validation = solv.evaluate_saved_state(st);
+    if (!ctx.policy.explicit_accuracy_targets.empty()) {
+      MADNESS_CHECK_THROW(bool(ctx.checkpoint_observer), "explicit FD accuracy requires saved-state validation");
+      st.saved_explicit_accuracy = solv.evaluate_requested_accuracy(st, &validation);
+      st.rung_exhausted = !st.diverged && ctx.policy.diagnostic_iterations_per_rung > 0;
+    }
+    const bool strict = converged_now(st, solv);
+    const bool accepted = accepted_now(st, solv);
     save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
                                /*converged=*/strict || accepted,
                                /*seed=*/seed_kind, /*accepted=*/accepted,
@@ -663,7 +672,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                /*checkpoint_native=*/bool(ctx.checkpoint_observer),
                                /*checkpoint_dconv=*/ctx.policy.dconv_user,
                                /*checkpoint_targets=*/&solv.targets(),
-                               /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation : nullptr);
+                               /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation : nullptr,
+                               /*checkpoint_accuracy_targets=*/&ctx.policy.explicit_accuracy_targets,
+                               /*checkpoint_diagnostic_iterations=*/ctx.policy.diagnostic_iterations_per_rung);
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
           {"frequency", freq}, {"protocol", protocol_key()},

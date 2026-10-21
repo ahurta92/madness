@@ -93,6 +93,8 @@ class ResponseCheckpoint {
             for (const auto& metric : e.at("convergence_measurements").items())
               require(metric.value().value("availability", "") != "invalid",
                       "invalid response state: nonfinite measurement");
+          require(molresponse_v3::valid_fd_explicit_accuracy(e, protocol.at("thresh"), protocol.at("k")),
+                  "invalid response state: explicit accuracy evidence");
           require(molresponse_v3::valid_metric_diagnostics(e),
                   "invalid response state: metric comparison");
           const double frequency = e.at("freq");
@@ -132,6 +134,12 @@ class ResponseCheckpoint {
         if (!states.contains(channel) || !states.at(channel).contains(key) ||
             !states.at(channel).at(key).contains(fkey)) return false;
         const auto& e = states.at(channel).at(key).at(fkey);
+        if (request.contains("accuracy_targets")) {
+          const auto measurements = e.value("saved_state_validation", json::object())
+              .value("measurements", json::object());
+          if (madness::evaluate_explicit_criteria(molresponse_v3::fd_accuracy_measurements(measurements),
+              request.at("accuracy_targets")).at("status") != "satisfied") return false;
+        }
         if (e.at("freq").get<double>() != frequency ||
             !e.at("converged").get<bool>() || e.value("accepted", false) ||
             e.value("diverged", false) ||
@@ -179,6 +187,8 @@ public:
     request_ = {{"protocol", cp.protocol()}, {"frequencies", stage.frequencies},
                 {"components", stage.components},
                 {"dconv", stage.params.get<ResponseParameters>().dconv()}};
+    const auto targets = molresponse_v3::fd_requested_accuracy_targets(stage.params.get<ResponseParameters>());
+    if (!targets.empty()) request_["accuracy_targets"] = targets;
     const int diagnostic = stage.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung");
     if (diagnostic > 0) request_["diagnostic_iterations_per_rung"] = diagnostic;
   }
@@ -274,13 +284,20 @@ private:
             continue;
           }
           // A tighter subset must not erase independent convergence evidence.
-          if (requested && (e.at("checkpoint_dconv").get<double>() > target ||
+          const auto accuracy = request_.value("accuracy_targets", json::object());
+          const auto saved = e.value("saved_state_validation", json::object()).value("measurements", json::object());
+          const bool explicit_unmet = !accuracy.empty() &&
+              (e.value("accepted", false) || madness::evaluate_explicit_criteria(
+                  molresponse_v3::fd_accuracy_measurements(saved), accuracy).at("status") != "satisfied");
+          if (requested && (explicit_unmet || e.at("checkpoint_dconv").get<double>() > target ||
               stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") > 0))
             e["converged"] = false;
           if (!e.at("converged").get<bool>()) {
-            e["iteration_at_checkpoint"] = e.at("iter");
+            e["iteration_at_checkpoint"] = e.value("checkpoint_iteration_count", e.at("iter"));
             e["iter"] = 0;
             e["stalled"] = false;
+            e["rung_exhausted"] = false;
+            if (e.contains("checkpoint_accuracy_targets")) e["continuation_pending"] = true;
           }
           ++point;
         }
@@ -318,7 +335,9 @@ private:
     m.position["iterations_this_run"] = iterations;
     if (!latest_.generation.empty()) m.position["previous_generation"] = latest_.generation;
     m.stop_reason = converged ? "converged" : analyzed ? "unfinished" : "in_progress";
-    if (analyzed)
+    // Keep analyzed values as diagnostics in engine_metadata, but an unmet
+    // explicit request cannot publish them as eligible stage properties.
+    if (analyzed && (converged || !request_.contains("accuracy_targets")))
       m.properties.push_back({{"name", "polarizability"}, {"generation", m.generation},
                               {"converged", converged}, {"value", metadata.at("properties")}});
     const auto directory = store_ / m.generation;

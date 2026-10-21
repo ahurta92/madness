@@ -5,6 +5,10 @@ using namespace madness;
 
 struct ResponseParameters : public QCCalculationParametersBase {
     static constexpr char const* tag = "response";
+    [[nodiscard]] std::set<std::string> full_precision_keys() const override {
+        return {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
+                "accuracy.kinetic_trace_change"};
+    }
     ResponseParameters(const ResponseParameters& other) = default;
     ResponseParameters(World& world, const commandlineparser& parser) : ResponseParameters() {
         read_input_and_commandline_options(world, parser, tag);
@@ -30,6 +34,9 @@ struct ResponseParameters : public QCCalculationParametersBase {
                            "extrapolation). 0 disables.");
         initialize<int>("diagnostic.iterations_per_rung", 0,
                         "Explicit diagnostic iteration count per supplied rung; 0 disables. Invalid states still stop.");
+        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+            initialize<double>(std::string("accuracy.") + metric, -1.0,
+                "Explicit named response accuracy target; omitted means inactive. Driven-response energy is unsupported.");
         initialize<int>("stall.window", 6,
                         "Plateau detector: stop a response/ES solve when its gated residuals "
                         "(FD: bsh, density; ES: density, |dw|) have not improved by "

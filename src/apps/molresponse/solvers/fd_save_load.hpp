@@ -147,7 +147,9 @@ void save_fd_state(madness::World &world,
                    bool checkpoint_native = false,
                    double checkpoint_dconv = 0.0,
                    const ConvergencePolicy::Targets* checkpoint_targets = nullptr,
-                   const typename FDSolver<Type, Shell>::State* checkpoint_validation = nullptr) {                            // F2d
+                   const typename FDSolver<Type, Shell>::State* checkpoint_validation = nullptr,
+                   const nlohmann::json* checkpoint_accuracy_targets = nullptr,
+                   int checkpoint_diagnostic_iterations = 0) {                            // F2d
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
   // subworlds never race the canonical file; rank 0 merges them after the fence.
@@ -364,6 +366,33 @@ void save_fd_state(madness::World &world,
             {"measurements", measurements},
             {"comparison", {{"attempt_directory", dir}, {"iteration", state.iter - 1},
                             {"threshold", thresh}, {"k", k_now}}}};
+      }
+      if (checkpoint_accuracy_targets && !checkpoint_accuracy_targets->empty()) {
+        MADNESS_CHECK_THROW(checkpoint_validation, "explicit FD accuracy requires saved-state validation");
+        entry["checkpoint_accuracy_targets"] = *checkpoint_accuracy_targets;
+        entry["checkpoint_iteration_count"] = state.iter;
+        entry["rung_exhausted"] = state.rung_exhausted;
+        entry["checkpoint_diagnostic_iterations"] = checkpoint_diagnostic_iterations;
+        entry["explicit_accuracy"] = madness::evaluate_explicit_criteria(
+            fd_accuracy_measurements(entry.at("convergence_measurements")), *checkpoint_accuracy_targets);
+        entry["saved_state_validation"]["explicit_accuracy"] = madness::evaluate_explicit_criteria(
+            fd_accuracy_measurements(entry.at("saved_state_validation").at("measurements")), *checkpoint_accuracy_targets);
+        MADNESS_CHECK_THROW(state.explicit_accuracy.size() == 1 &&
+            entry.at("explicit_accuracy") == state.explicit_accuracy.at(0), "FD input accuracy/report mismatch");
+        MADNESS_CHECK_THROW(state.saved_explicit_accuracy.size() == 1 &&
+            entry.at("saved_state_validation").at("explicit_accuracy") == state.saved_explicit_accuracy.at(0),
+            "FD saved accuracy/report mismatch");
+        entry["saved_state_validation"]["affects_stopping"] = true;
+        entry["explicit_accuracy_history"] = nlohmann::json::array();
+        for (std::size_t i = 0; i < entry.at("function_bsh_history").size(); ++i) {
+          const auto& bsh_sample = entry.at("function_bsh_history").at(i);
+          const nlohmann::json measurements = {{"bsh_residual", bsh_sample},
+              {"density_change", entry.at("density_history").at(i)},
+              {"delta_kinetic_energy", entry.at("function_kinetic_history").at(i).at("change_from_previous")}};
+          entry["explicit_accuracy_history"].push_back({{"sample", bsh_sample.at("sample")},
+              {"criteria", madness::evaluate_explicit_criteria(fd_accuracy_measurements(measurements),
+                  *checkpoint_accuracy_targets)}});
+        }
       }
       entry["measurement_convention"] = {{"perturbation", pdesc},
           {"model", detail_fd_save_load::type_tag<Type>()},

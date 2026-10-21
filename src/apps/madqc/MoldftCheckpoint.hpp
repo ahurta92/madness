@@ -46,9 +46,15 @@ class MoldftCheckpoint {
   }
 
   static void validate_measurements(const json& metrics, const std::string& stage, const json& numerical) {
-    const bool has_progress_controls = numerical.value("parameters", json::object()).value("parameters", json::object()).contains("progress.window");
+    const auto configured = numerical.value("parameters", json::object()).value("parameters", json::object());
+    const bool has_progress_controls = configured.value("progress.window", 0) > 0;
+    bool has_accuracy_controls = false;
+    for (const char* name : {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
+                             "accuracy.kinetic_trace_change"})
+      has_accuracy_controls = has_accuracy_controls || configured.value(name, -1.0) >= 0.0;
     if (!metrics.contains("convergence_report")) {
-      require(!has_progress_controls, "invalid ground-state measurement: missing configured progress report");
+      require(!has_progress_controls && !has_accuracy_controls,
+              "invalid ground-state measurement: missing configured accuracy/progress report");
       return;
     }
     const auto& report = metrics.at("convergence_report");
