@@ -23,19 +23,37 @@
 // See solvers/convergence_policy.hpp.
 // =========================================================================
 
+#include <stdexcept>
+
 namespace molresponse_v3::solvers {
 
 struct IteratePolicy {
   int max_iters = 25;
+  // Explicit diagnostic only: zero preserves the ordinary convergence loop.
+  int forced_iterations = 0;
 };
+
+template <typename State>
+auto iteration_diverged(const State& state, int) -> decltype(bool(state.diverged)) { return state.diverged; }
+template <typename State>
+bool iteration_diverged(const State&, long) { return false; }
+template <typename State>
+auto iteration_stalled(const State& state, int) -> decltype(bool(state.stalled)) { return state.stalled; }
+template <typename State>
+bool iteration_stalled(const State&, long) { return false; }
 
 template <typename Solver>
 auto iterate(Solver &solver, typename Solver::State state,
              const IteratePolicy &policy) -> typename Solver::State {
+  if (policy.forced_iterations < 0) throw std::invalid_argument("forced_iterations must be nonnegative");
   bool converged = false;
-  for (int k = 0; k < policy.max_iters; ++k) {
+  const int count = policy.forced_iterations ? policy.forced_iterations : policy.max_iters;
+  for (int k = 0; k < count; ++k) {
     state = solver.step(state);
-    if (solver.converged(state)) { converged = true; break; }
+    if (policy.forced_iterations) {
+      if (iteration_diverged(state, 0)) { converged = false; break; }
+      converged = !iteration_stalled(state, 0) && solver.converged(state);
+    } else if (solver.converged(state)) { converged = true; break; }
   }
   solver.print_final(state, converged);
   return state;

@@ -2,6 +2,8 @@
 #include <madness/chem/FunctionMetricSummary.h>
 #include <madness/chem/ExplicitCriteria.h>
 #include "../solvers/function_metric_diagnostics.hpp"
+#include "../solvers/iterate.hpp"
+#include "../solvers/convergence_policy.hpp"
 #include <cstdio>
 #include <limits>
 using nlohmann::json;
@@ -20,7 +22,27 @@ json blocks(std::initializer_list<double> values) {
     return result;
 }
 }
+struct DiagnosticSolver {
+    struct State { int iter = 0; bool diverged = false; };
+    int diverge_at = 0;
+    bool reported_converged = false;
+    State step(State s) const { ++s.iter; s.diverged = s.iter == diverge_at; return s; }
+    [[nodiscard]] static bool converged(const State& s) { return s.iter >= 2; }
+    void print_final(const State&, bool converged) { reported_converged = converged; }
+};
 int main() {
+    expect(molresponse_v3::fd_exploded(std::numeric_limits<double>::quiet_NaN(), 1., 2.),
+           "nonfinite BSH evidence trips invalid-state protection");
+    DiagnosticSolver solver;
+    molresponse_v3::solvers::IteratePolicy forced;
+    forced.max_iters = 8;
+    forced.forced_iterations = 4;
+    expect(molresponse_v3::solvers::iterate(solver, DiagnosticSolver::State{}, forced).iter == 4,
+           "forced diagnostic executes exactly supplied iteration count");
+    solver.diverge_at = 3;
+    expect(molresponse_v3::solvers::iterate(solver, DiagnosticSolver::State{}, forced).iter == 3,
+           "forced diagnostic cannot bypass divergent-state protection");
+    expect(!solver.reported_converged, "divergent diagnostic cannot retain an earlier convergence verdict");
     const json targets = {{"trace_change", {{"value", 0.1}, {"units", "hartree"}}}};
     json measurements = {{"trace_change", {{"value", 0.05}, {"units", "hartree"}, {"availability", "measured"}}}};
     expect(madness::evaluate_explicit_criteria(measurements, targets).at("status") == "satisfied",

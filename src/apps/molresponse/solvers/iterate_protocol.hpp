@@ -36,6 +36,7 @@ namespace molresponse_v3::solvers {
 
 struct IterateProtocolPolicy {
   int max_iters_per_step = 25;
+  int forced_iterations_per_step = 0;
 };
 
 /// SFINAE helper: call solver.sort_state_by_omega(state) if the solver
@@ -82,7 +83,7 @@ auto iterate_protocol(Solver &solver,
     solver.refresh_convergence_targets();
     state = solvers::iterate(
         solver, std::move(state),
-        IteratePolicy{policy.max_iters_per_step});
+        IteratePolicy{policy.max_iters_per_step, policy.forced_iterations_per_step});
     post_step(thresh, solver, state);
     if (state.diverged) break;  // bail rather than tighten on garbage
   }

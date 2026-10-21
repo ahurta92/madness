@@ -39,6 +39,7 @@
 namespace molresponse_v3 {
 
 struct ConvergencePolicy {
+  int diagnostic_iterations_per_rung = 0; // explicit diagnostic, disabled by default
   // User-facing density-convergence target. The effective target at each
   // protocol is a multiple of max(thresh, dconv_user) — see
   // effective_for_thresh.
@@ -335,7 +336,8 @@ inline bool fd_leg_converged(int iter, double bsh, double x_norm, double drho,
 /// The FD explosion guard, relative to the leg: ||dx|| > guard * max(1, ||x||).
 /// For a leg of norm <= 1 it is the absolute guard as before.
 inline bool fd_exploded(double bsh, double x_norm, double guard) {
-  return bsh > guard * std::max(1.0, x_norm);
+  return !std::isfinite(bsh) || !std::isfinite(x_norm) || bsh < 0.0 || x_norm < 0.0 ||
+         bsh > guard * std::max(1.0, x_norm);
 }
 
 /// The step-restriction cap for a function (or state) of norm `x_norm`:
