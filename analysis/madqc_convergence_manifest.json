@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "created": "2026-10-21",
+  "purpose": "Portable evidence manifest for MADQC convergence analysis; forced runs are diagnostic.",
+  "constraints": {
+    "source_worktrees_unchanged": true,
+    "forced_runs_are_calibration_references": false,
+    "missing_measurements_are_null": true
+  },
+  "provenance": {
+    "analysis_repository": "/home/ahurtado/repos/madness-checkpoint",
+    "source_worktree": "/home/ahurtado/repos/madness-step4-astra",
+    "source_branch": "madqc/step4-astra",
+    "hdf5_build": "/tmp/madness-hdf5-analysis",
+    "pymra_commit": "1ab3cf3a3f339f0b4e37759941e3c5e977b2ae41",
+    "python_environment": "qca070"
+  },
+  "portable_evidence": [
+    {
+      "path": "/home/ahurtado/vaults/research/Sessions/MADNESS/2026-10-12-madqc-safe-slice/parallel-implementations/2026-10-20/astra/evidence/2026-10-21-scf-progress-study.json",
+      "molecule": "H2",
+      "workflow": "moldft",
+      "classification": "configured-progress"
+    },
+    {
+      "path": "/home/ahurtado/vaults/research/Sessions/MADNESS/2026-10-12-madqc-safe-slice/parallel-implementations/2026-10-20/astra/evidence/2026-10-20-forced-h2.json",
+      "molecule": "H2",
+      "workflow": "response",
+      "classification": "forced"
+    },
+    {
+      "path": "/home/ahurtado/vaults/research/Sessions/MADNESS/2026-10-12-madqc-safe-slice/parallel-implementations/2026-10-20/astra/evidence/2026-10-20-forced-lih.json",
+      "molecule": "LiH",
+      "workflow": "response",
+      "classification": "forced"
+    },
+    {
+      "path": "/home/ahurtado/vaults/research/Sessions/MADNESS/2026-10-12-madqc-safe-slice/parallel-implementations/2026-10-20/astra/evidence/2026-10-21-fd-progress-trajectories.json",
+      "molecule": "H2",
+      "workflow": "response",
+      "classification": "configured-progress"
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "h2-gs-coarse-hdf5",
+      "molecule": "H2",
+      "workflow": "moldft",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": null,
+      "protocol": {"threshold": 0.0001, "k": 6},
+      "phase": "ground_state_endpoint",
+      "sampling_phase": "exhausted_rung",
+      "classification": "forced",
+      "artifacts": {
+        "native_restart": "hdf5-analysis/response-run/out.restartdata.h5",
+        "structured_orbital": "hdf5-analysis/h2-coarse/mo_0.mad.h5"
+      },
+      "metrics": {}
+    },
+    {
+      "run_id": "h2-gs-fine-hdf5",
+      "molecule": "H2",
+      "workflow": "moldft",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": null,
+      "protocol": {"threshold": 0.000001, "k": 8},
+      "phase": "ground_state_endpoint",
+      "sampling_phase": "exhausted_rung",
+      "classification": "forced",
+      "artifacts": {
+        "native_restart": "hdf5-analysis/h2-fine/archive/state.restartdata.00000",
+        "structured_orbital": "hdf5-analysis/h2-fine/mo_0.mad.h5"
+      },
+      "metrics": {}
+    },
+    {
+      "run_id": "h2-response-hdf5-static-coarse",
+      "molecule": "H2",
+      "workflow": "response",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": "h2-gs-coarse-hdf5",
+      "protocol": {"threshold": 0.0001, "k": 6, "frequency": 0.0, "state": "static_dipole_z"},
+      "phase": "response_iteration",
+      "sampling_phase": "ordinary",
+      "classification": "ordinary",
+      "artifacts": {
+        "native_response_hdf5": "hdf5-analysis/response-run/dipole_z__1e-04_k6__f0.00000.h5",
+        "response_metadata": "hdf5-analysis/response-run/response_metadata.json",
+        "calc_info": "hdf5-analysis/response-run/out.calc_info.json"
+      },
+      "metrics": {}
+    },
+    {
+      "run_id": "h2-response-hdf5-excited-coarse",
+      "molecule": "H2",
+      "workflow": "response",
+      "source_branch": "madqc/step4-astra",
+      "ground_state_endpoint": "h2-gs-coarse-hdf5",
+      "protocol": {"threshold": 0.0001, "k": 6, "state": "es_full"},
+      "phase": "response_iteration",
+      "sampling_phase": "ordinary",
+      "classification": "ordinary",
+      "artifacts": {
+        "native_response_hdf5": "hdf5-analysis/response-run/es_root_0.h5",
+        "response_metadata": "hdf5-analysis/response-run/response_metadata.json",
+        "analysis": "hdf5-analysis/response-run/es_analysis__1e-04_k6.json"
+      },
+      "metrics": {}
+    }
+  ],
+  "field_comparisons": [
+    "hdf5-analysis/h2-density-comparison.json"
+  ]
+}
