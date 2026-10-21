@@ -62,6 +62,31 @@ int main() {
     raw["blocks"]["x_alpha"][1]["value"] = -1.0;
     measurements["bsh_residual"]["per_function"] = raw;
     require(madness::evaluate_explicit_criteria(molresponse_v3::fd_accuracy_measurements(measurements), target).at("status") == "invalid", "invalid component hidden");
+    Controls progress_controls{{{"accuracy.bsh_residual", 0.0}, {"progress.window", 1},
+                                {"progress.minimum_relative_improvement", 0.99999999}}};
+    auto configuration = molresponse_v3::fd_requested_progress(progress_controls);
+    require(configuration.at("minimum_relative_improvement") == 0.99999999, "progress precision lost");
+    configuration["protocol"] = {1e-4, 1e-6};
+    auto progress_target = target;
+    progress_target["bsh_residual"]["value"] = 0.0;
+    json progress_history = json::array();
+    for (double value : {5.0, 4.0}) {
+      json metric = {{"bsh_residual", {{"quantity", "maximum_raw_fixed_point_function_L2"},
+          {"units", "response_amplitude_L2_atomic_units"}, {"availability", "measured"}, {"value", value}}}};
+      progress_history.push_back(madness::evaluate_explicit_criteria(metric, progress_target).at("criteria"));
+    }
+    const auto coarse = molresponse_v3::fd_progress_decision(progress_history, configuration, 1e-4, false, 0);
+    require(coarse.at("action") == "advance_supplied_rung" && coarse.at("action_applied") == true, "coarse stall action");
+    const auto fine = molresponse_v3::fd_progress_decision(progress_history, configuration, 1e-6, false, 0);
+    require(fine.at("action") == "retain_unmet", "final stall invented a rung");
+    require(molresponse_v3::fd_progress_decision(progress_history, configuration, 1e-4, false, 5).at("action_applied") == false,
+            "forced count acted on stall");
+    require(molresponse_v3::fd_progress_decision(progress_history, configuration, 1e-4, true, 0).at("action") == "stop_invalid",
+            "invalid state promoted");
+    bool missing_rung = false;
+    try { molresponse_v3::fd_progress_decision(progress_history, configuration, 1e-8, false, 0); }
+    catch (const std::invalid_argument&) { missing_rung = true; }
+    require(missing_rung, "unlisted rung accepted");
     std::cout << "FD explicit accuracy scalar tests passed\n";
     return 0;
   } catch (const std::exception& error) {

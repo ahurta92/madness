@@ -385,7 +385,7 @@ historical evidence cannot certify a newly requested criterion.
 
 ### Experimental configured progress
 
-Named SCF stages may set `progress.window` (a positive iteration lookback) and
+Named SCF and driven-response FD stages may set `progress.window` (a positive iteration lookback) and
 `progress.minimum_relative_improvement` (an explicitly supplied fraction strictly
 between zero and one), together with at least one `accuracy.*` target. Omitting
 them preserves the existing iteration policy. There is no default scientific
@@ -398,3 +398,11 @@ the usable generation is retained with unmet accuracy. `configured_progress`
 records the decision separately from engine convergence and explicit accuracy.
 Forced iteration diagnostics record that decision but suppress its early exit;
 `action_applied` distinguishes the recorded recommendation from execution.
+
+For FD, the policy carries the entire supplied protocol ladder into each
+single-channel solve. `configured_progress_history` records each input-side
+decision separately from saved-state accuracy. Checkpoint readers reconstruct
+the decisions from raw metric histories and the stored policy. A continued
+solve resets its scheduler count and starts new histories; archived decisions
+retain their original sample identity. No state marked invalid or divergent
+can be promoted or replace the prior usable generation.

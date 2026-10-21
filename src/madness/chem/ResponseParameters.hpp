@@ -7,7 +7,7 @@ struct ResponseParameters : public QCCalculationParametersBase {
     static constexpr char const* tag = "response";
     [[nodiscard]] std::set<std::string> full_precision_keys() const override {
         return {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
-                "accuracy.kinetic_trace_change"};
+                "accuracy.kinetic_trace_change", "progress.minimum_relative_improvement"};
     }
     ResponseParameters(const ResponseParameters& other) = default;
     ResponseParameters(World& world, const commandlineparser& parser) : ResponseParameters() {
@@ -37,6 +37,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
         for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
             initialize<double>(std::string("accuracy.") + metric, -1.0,
                 "Explicit named response accuracy target; omitted means inactive. Driven-response energy is unsupported.");
+        initialize<int>("progress.window", 0,
+                        "Explicit named FD progress lookback; 0 disables.");
+        initialize<double>("progress.minimum_relative_improvement", -1.0,
+                           "Explicit experimental improvement fraction strictly between zero and one; requires accuracy targets.");
         initialize<int>("stall.window", 6,
                         "Plateau detector: stop a response/ES solve when its gated residuals "
                         "(FD: bsh, density; ES: density, |dw|) have not improved by "

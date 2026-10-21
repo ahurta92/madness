@@ -2,6 +2,7 @@
 
 #include <madness/chem/ExplicitCriteria.h>
 #include <madness/chem/FunctionMetricSummary.h>
+#include <vector>
 
 namespace molresponse_v3 {
 // One channel/frequency only. These are opt-in criteria in addition to the
@@ -18,6 +19,39 @@ nlohmann::json fd_requested_accuracy_targets(const Parameters& parameters) {
   if (targets.contains("charge_density_change"))
     targets["charge_density_change"]["quantity"] = "kernel_induced_charge_density_change_L2";
   return targets;
+}
+
+// An absent policy adds no stall threshold. Validate before cached reuse too.
+template<class Parameters>
+nlohmann::json fd_requested_progress(const Parameters& parameters) {
+  const int window = parameters.template get<int>("progress.window");
+  const double improvement = parameters.template get<double>("progress.minimum_relative_improvement");
+  madness::validate_progress_configuration(window, improvement,
+      parameters.is_user_defined("progress.minimum_relative_improvement"),
+      !fd_requested_accuracy_targets(parameters).empty());
+  if (window == 0) return nlohmann::json::object();
+  return {{"window", window}, {"minimum_relative_improvement", improvement}};
+}
+
+inline nlohmann::json fd_progress_decision(const nlohmann::json& history,
+    const nlohmann::json& configuration, double threshold, bool invalid, int diagnostic) {
+  using json = nlohmann::json;
+  if (!configuration.at("window").is_number_integer())
+    throw std::invalid_argument("configured FD progress window must be an integer");
+  const auto protocol = configuration.at("protocol").get<std::vector<double>>();
+  auto current = protocol.end();
+  for (auto rung = protocol.begin(); rung != protocol.end(); ++rung) {
+    if (!std::isfinite(*rung) || *rung <= 0.0 || (rung != protocol.begin() && *rung >= *(rung - 1)))
+      throw std::invalid_argument("invalid configured FD progress protocol");
+    if (*rung == threshold) current = rung;
+  }
+  if (current == protocol.end()) throw std::invalid_argument("FD progress rung absent from supplied protocol");
+  const bool has_next = current + 1 != protocol.end();
+  auto decision = madness::explicit_progress(history, configuration.at("window"),
+      configuration.at("minimum_relative_improvement"), has_next, invalid);
+  decision["has_next_supplied_rung"] = has_next;
+  decision["action_applied"] = decision.at("status") == "stalled" && diagnostic == 0 && !invalid;
+  return decision;
 }
 
 // Input records retain their sample/phase identities. Missing components are
@@ -90,6 +124,8 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
   try {
     if (!entry.contains("checkpoint_accuracy_targets"))
       return !entry.contains("explicit_accuracy") && !entry.contains("explicit_accuracy_history") &&
+          !entry.contains("checkpoint_progress") && !entry.contains("configured_progress") &&
+          !entry.contains("configured_progress_history") &&
           !entry.value("saved_state_validation", json::object()).contains("explicit_accuracy");
     const auto& targets = entry.at("checkpoint_accuracy_targets");
     if (!targets.is_object() || targets.empty()) return false;
@@ -101,6 +137,9 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
       if (!definitions.contains(target.key()) || target.value().at("quantity") != definitions.at(target.key()).at("quantity") ||
           target.value().at("units") != definitions.at(target.key()).at("units")) return false;
     }
+    if (!entry.at("checkpoint_iteration_count").is_number_integer() ||
+        !entry.at("checkpoint_diagnostic_iterations").is_number_integer() ||
+        !entry.at("iter").is_number_integer()) return false;
     const int iterations = entry.at("checkpoint_iteration_count").get<int>();
     const bool pending = entry.value("continuation_pending", false);
     if (iterations < 1 || entry.at("iter") != (pending ? 0 : iterations)) return false;
@@ -162,6 +201,26 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
       const auto& measured = saved.at("measurements").at(name);
       if (!sample_valid(measured.at("sample"), iterations) ||
           measured.at("phase") != "saved_response_before_archive" || measured.at("valid_for_saved_state") != true) return false;
+    }
+    if (entry.contains("checkpoint_progress")) {
+      const auto& configuration = entry.at("checkpoint_progress");
+      const int window = configuration.at("window").get<int>();
+      const double improvement = configuration.at("minimum_relative_improvement").get<double>();
+      madness::validate_progress_configuration(window, improvement, true, !targets.empty());
+      if (window == 0 || configuration.size() != 3) return false;
+      const auto& decisions = entry.at("configured_progress_history");
+      if (!decisions.is_array() || decisions.size() != criteria.size()) return false;
+      json prefix = json::array();
+      for (std::size_t i = 0; i < criteria.size(); ++i) {
+        prefix.push_back(criteria.at(i).at("criteria").at("criteria"));
+        const auto expected = fd_progress_decision(prefix, configuration, threshold, false, diagnostic);
+        if (expected.at("action") == "stop_invalid" || decisions.at(i) != expected) return false;
+        if (expected.at("action_applied") == true && i + 1 != criteria.size()) return false;
+      }
+      if (entry.at("configured_progress") != decisions.back() ||
+          entry.at("stalled") != (!pending && decisions.back().at("action_applied").get<bool>())) return false;
+    } else if (entry.contains("configured_progress") || entry.contains("configured_progress_history")) {
+      return false;
     }
     if (entry.value("accepted", false)) return false;
     if (entry.value("converged", false) && (input.at("status") != "satisfied" || output.at("status") != "satisfied")) return false;

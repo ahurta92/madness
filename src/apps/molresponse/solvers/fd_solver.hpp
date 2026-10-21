@@ -117,6 +117,9 @@ public:
     bool                                    rung_exhausted = false;
     nlohmann::json explicit_accuracy = nlohmann::json::array();
     nlohmann::json saved_explicit_accuracy = nlohmann::json::array();
+    nlohmann::json progress_criteria_history = nlohmann::json::array();
+    nlohmann::json configured_progress_history = nlohmann::json::array();
+    nlohmann::json configured_progress = nlohmann::json::object();
   };
 
   FDSolver(madness::World &world, FDProblem<Type, Shell> target,
@@ -127,6 +130,8 @@ public:
         policy_(policy), kain_(world, policy),
         print_level_(print_level), log_prefix_(std::move(log_prefix)) {
     record_function_metrics_ = !policy_.explicit_accuracy_targets.empty();
+    MADNESS_CHECK_THROW(policy_.explicit_progress_configuration.empty() || target_.n_responses() == 1,
+        "configured FD progress requires one named channel per solve");
     refresh_convergence_targets();
     print_header();
   }
@@ -565,6 +570,8 @@ public:
     if (s.diverged)       plog("Stopped at iter", s.iter,
                                 "(diverged — residual exceeded "
                                 "explosion guard).");
+    else if (s.stalled && !policy_.explicit_progress_configuration.empty())
+      plog("Stopped at iter", s.iter, "(configured progress stalled; requested accuracy unmet).");
     else if (s.stalled)   plog("Stopped at iter", s.iter,
                                 "(stalled — residual plateau above the "
                                 "targets for", policy_.stall_window,
@@ -596,6 +603,8 @@ public:
     State out;
     out.iter      = in.iter + 1;
     out.responses = in.responses;
+    out.progress_criteria_history = std::move(in.progress_criteria_history);
+    out.configured_progress_history = std::move(in.configured_progress_history);
     if (record_function_metrics_) {
       out.kinetic_history = std::move(in.kinetic_history);
       out.bsh_history = std::move(in.bsh_history);
@@ -683,6 +692,16 @@ public:
       out.explicit_accuracy = evaluate_requested_accuracy(out);
       for (const auto& criterion : out.explicit_accuracy)
         MADNESS_CHECK_THROW(criterion.at("status") != "invalid", "invalid explicit FD accuracy evidence");
+      if (!policy_.explicit_progress_configuration.empty()) {
+        out.progress_criteria_history.push_back(out.explicit_accuracy.at(0).at("criteria"));
+        out.configured_progress = fd_progress_decision(out.progress_criteria_history,
+            policy_.explicit_progress_configuration, madness::FunctionDefaults<3>::get_thresh(),
+            out.diverged, policy_.diagnostic_iterations_per_rung);
+        MADNESS_CHECK_THROW(out.diverged || out.configured_progress.at("action") != "stop_invalid",
+            "invalid configured FD progress evidence");
+        out.configured_progress_history.push_back(out.configured_progress);
+        if (out.configured_progress.at("action_applied").template get<bool>()) out.stalled = true;
+      }
       const bool input_satisfied = std::all_of(out.explicit_accuracy.begin(), out.explicit_accuracy.end(),
           [](const auto& criterion) { return criterion.at("status") == "satisfied"; });
       if (!out.diverged && !out.stalled && input_satisfied && legacy_converged(out)) {

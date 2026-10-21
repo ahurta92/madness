@@ -402,6 +402,9 @@ struct molresponse_v3_lib {
     }
     in.settings.policy.dconv_user = rp.dconv();
     in.settings.policy.explicit_accuracy_targets = fd_requested_accuracy_targets(rp);
+    in.settings.policy.explicit_progress_configuration = fd_requested_progress(rp);
+    if (!in.settings.policy.explicit_progress_configuration.empty())
+      in.settings.policy.explicit_progress_configuration["protocol"] = protocol;
     MADNESS_CHECK_THROW(in.settings.policy.explicit_accuracy_targets.empty() || bool(checkpoint_observer),
                         "explicit response accuracy currently requires a named molresponse stage");
     const int diagnostic_iterations = rp.get<int>("diagnostic.iterations_per_rung");

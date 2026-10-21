@@ -149,7 +149,8 @@ void save_fd_state(madness::World &world,
                    const ConvergencePolicy::Targets* checkpoint_targets = nullptr,
                    const typename FDSolver<Type, Shell>::State* checkpoint_validation = nullptr,
                    const nlohmann::json* checkpoint_accuracy_targets = nullptr,
-                   int checkpoint_diagnostic_iterations = 0) {                            // F2d
+                   int checkpoint_diagnostic_iterations = 0,
+                   const nlohmann::json* checkpoint_progress = nullptr) {                            // F2d
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
   // subworlds never race the canonical file; rank 0 merges them after the fence.
@@ -373,6 +374,11 @@ void save_fd_state(madness::World &world,
         entry["checkpoint_iteration_count"] = state.iter;
         entry["rung_exhausted"] = state.rung_exhausted;
         entry["checkpoint_diagnostic_iterations"] = checkpoint_diagnostic_iterations;
+        if (checkpoint_progress && !checkpoint_progress->empty()) {
+          entry["checkpoint_progress"] = *checkpoint_progress;
+          entry["configured_progress"] = state.configured_progress;
+          entry["configured_progress_history"] = state.configured_progress_history;
+        }
         entry["explicit_accuracy"] = madness::evaluate_explicit_criteria(
             fd_accuracy_measurements(entry.at("convergence_measurements")), *checkpoint_accuracy_targets);
         entry["saved_state_validation"]["explicit_accuracy"] = madness::evaluate_explicit_criteria(

@@ -93,6 +93,22 @@ class ResponseCheckpoint {
             for (const auto& metric : e.at("convergence_measurements").items())
               require(metric.value().value("availability", "") != "invalid",
                       "invalid response state: nonfinite measurement");
+          // Bind progress evidence to the request that produced this attempt,
+          // including historical/pending entries retained by later requests.
+          const auto origins = metadata.value("checkpoint_requests", json::object());
+          const auto history = e.value("function_kinetic_history", json::array());
+          const std::string origin = history.empty() ? "" :
+              history.at(0).at("sample").value("attempt_directory", "");
+          require(!e.contains("checkpoint_progress") || origins.contains(origin),
+                  "invalid response state: missing originating progress request");
+          if (origins.contains(origin)) {
+            const auto& request = origins.at(origin);
+            json progress = request.value("progress", json::object());
+            if (!progress.empty()) progress["protocol"] = request.at("protocol");
+            require(progress.empty() ? !e.contains("checkpoint_progress") :
+                        e.value("checkpoint_progress", json::object()) == progress,
+                    "invalid response state: originating progress request mismatch");
+          }
           require(molresponse_v3::valid_fd_explicit_accuracy(e, protocol.at("thresh"), protocol.at("k")),
                   "invalid response state: explicit accuracy evidence");
           require(molresponse_v3::valid_metric_diagnostics(e),
@@ -153,6 +169,12 @@ class ResponseCheckpoint {
     require(m.stage == stage_.name && m.method == "TDHF" &&
             m.physical == json{{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}},
             "stage or response model mismatch");
+    if (m.numerical.at("request").contains("progress")) {
+      const auto origins = m.numerical.at("engine_metadata").value("checkpoint_requests", json::object());
+      const auto attempt = m.numerical.value("attempt_directory", "");
+      require(origins.contains(attempt) && origins.at(attempt) == m.numerical.at("request"),
+              "invalid response state: missing or inconsistent originating request registry");
+    }
     auto expected = members(m.numerical.at("engine_metadata"));
     std::vector<std::string> actual;
     for (const auto& a : m.archives) {
@@ -189,6 +211,8 @@ public:
                 {"dconv", stage.params.get<ResponseParameters>().dconv()}};
     const auto targets = molresponse_v3::fd_requested_accuracy_targets(stage.params.get<ResponseParameters>());
     if (!targets.empty()) request_["accuracy_targets"] = targets;
+    const auto progress = molresponse_v3::fd_requested_progress(stage.params.get<ResponseParameters>());
+    if (!progress.empty()) request_["progress"] = progress;
     const int diagnostic = stage.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung");
     if (diagnostic > 0) request_["diagnostic_iterations_per_rung"] = diagnostic;
   }
@@ -323,13 +347,22 @@ private:
   void publish(json metadata, bool analyzed, bool converged, const json& position) {
     namespace checkpoint = madness::checkpoint;
     if (!analyzed) metadata["properties"] = json::object();
+    // Native saves replace entries but preserve their sample attempt identity.
+    // Keep the corresponding request registry across intermediate publications.
+    auto origins = metadata.value("checkpoint_requests", json::object());
+    if (!latest_.generation.empty() && latest_.reference == reference_) {
+      const auto previous = latest_.numerical.at("engine_metadata").value("checkpoint_requests", json::object());
+      for (const auto& origin : previous.items()) origins[origin.key()] = origin.value();
+    }
+    origins[attempt_.string()] = request_;
+    metadata["checkpoint_requests"] = std::move(origins);
     Manifest m;
     m.stage = stage_.name;
     m.method = "TDHF";
     m.generation = "g-" + stage_.name + "-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
     m.reference = reference_;
-    m.numerical = {{"request", request_}, {"engine_metadata", metadata}};
+    m.numerical = {{"request", request_}, {"attempt_directory", attempt_.string()}, {"engine_metadata", metadata}};
     m.targets = {{"dconv", request_.at("dconv")}};
     m.position = position;
     m.position["iterations_this_run"] = iterations;

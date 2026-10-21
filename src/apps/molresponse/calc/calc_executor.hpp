@@ -623,6 +623,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     st.function_residuals.clear();
     st.explicit_accuracy = nlohmann::json::array();
     st.saved_explicit_accuracy = nlohmann::json::array();
+    st.progress_criteria_history = nlohmann::json::array();
+    st.configured_progress_history = nlohmann::json::array();
+    st.configured_progress = nlohmann::json::object();
     st.rung_exhausted = false;
     detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
                                  FunctionDefaults<3>::get_thresh());
@@ -674,7 +677,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                /*checkpoint_targets=*/&solv.targets(),
                                /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation : nullptr,
                                /*checkpoint_accuracy_targets=*/&ctx.policy.explicit_accuracy_targets,
-                               /*checkpoint_diagnostic_iterations=*/ctx.policy.diagnostic_iterations_per_rung);
+                               /*checkpoint_diagnostic_iterations=*/ctx.policy.diagnostic_iterations_per_rung,
+                               /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration);
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
           {"frequency", freq}, {"protocol", protocol_key()},
