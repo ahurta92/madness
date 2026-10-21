@@ -28,8 +28,10 @@ set(MADCHEM_HEADERS
     GuessFactory.h
     IntegratorXX.h
     KineticEnergy.h
+    DensityChanges.h
     FunctionResidual.h
     FunctionResidualReport.h
+    FunctionMetricSummary.h
     localizer.h
     lowrankfunction.h
     masks_and_boxes.h
@@ -209,6 +211,10 @@ if(BUILD_TESTING)
   endif(MADNESS_HAS_DFTD3)
 
   add_unittests(chem "${CHEM_TEST_SOURCES_SHORT}" "MADchem;MADgtest" "unittests;short")
+  add_unittests(chem "test_density_changes.cc" "MADchem" "unittests;short")
+  if(ENABLE_MPI)
+    add_mpi_tests(chem test_density_changes "2" "MADchem" "unittests;short")
+  endif()
   # Checkpoint storage exercises the runtime archives without a chemistry solve.
   add_unittests(chem "test_stage_checkpoint.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   set_tests_properties(madness/test/chem/test_stage_checkpoint/run PROPERTIES TIMEOUT 60)

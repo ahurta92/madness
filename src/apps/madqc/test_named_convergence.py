@@ -55,12 +55,50 @@ def check_function_bsh(metric, reduction):
     expected = max(values) if reduction == 'max' else math.sqrt(sum(v*v for v in values))
     assert abs(metric['value'] - expected) < 1e-10
 
+def check_bsh_comparison(metric):
+    comparison = metric['maximum_comparison']
+    values = [f['value'] for block in metric['per_function']['blocks'].values() for f in block]
+    assert comparison['value'] == max(values)
+    assert comparison['active_gate'] is False
+    assert comparison['effective_limit'] == metric['effective_limit']
+    assert comparison['satisfied'] == (max(values) <= metric['effective_limit'])
+    assert math.isclose(metric['effective_limit'], metric['absolute_limit'] + metric['relative_factor'] * metric['normalization_scale'], rel_tol=1e-15, abs_tol=0.0)
+    assert comparison['sample'] == metric['sample']
+    assert comparison['phase'] == metric['phase']
+
+def check_kinetic_changes(channel):
+    history = channel['function_kinetic_history']
+    first = history[0]['change_from_previous']
+    assert first['availability'] == 'unavailable' and first['value'] is None
+    for previous, current in zip(history, history[1:]):
+        change = current['change_from_previous']
+        values = []
+        for block, functions in current['blocks'].items():
+            for i, function in enumerate(functions):
+                expected = abs(function['value'] - previous['blocks'][block][i]['value'])
+                assert change['blocks'][block][i]['value'] == expected
+                values.append(expected)
+        assert change['value'] == max(values)
+        assert change['comparison'] == previous['sample']
+        assert change['sample'] == current['sample']
+        assert change['active_gate'] is False and change['target'] is None and change['satisfied'] is None
+    final = channel['saved_state_validation']['measurements']['delta_kinetic_energy']
+    assert final['valid_for_saved_state'] is True
+    assert final['comparison'] == history[-2]['sample']
+    assert abs(final['value'] - history[-1]['change_from_previous']['value']) < 1e-10
+    # Step-input evidence must use its own preceding iterate, not the saved output.
+    historical = channel['measurements']['delta_kinetic_energy']
+    assert historical == history[-2]['change_from_previous']
+
 fresh = work / 'Fresh'
 stages = run('fresh', fresh)
+# Exact reuse later overwrites Fresh/results.json with zero work counts. Keep
+# the original fresh result for numerical comparisons and portable reporting.
+(work / 'fresh-results.json').write_text(json.dumps({'stages': stages}, indent=2) + '\n')
 gs, response = stages
 assert 'convergence_report' in gs, 'ground convergence measurement report missing'
 g = gs['convergence_report']
-assert set(g['measurements']) == {'density_change', 'bsh_residual', 'energy_change', 'delta_kinetic_energy'}
+assert set(g['measurements']) == {'density_change', 'charge_density_change', 'spin_density_change', 'bsh_residual', 'energy_change', 'delta_kinetic_energy'}
 check_function_bsh(g['measurements']['bsh_residual'], 'max')
 validation = g['saved_state_validation']
 check_function_bsh(validation['measurements']['bsh_residual'], 'max')
@@ -94,15 +132,20 @@ for c in r['channels']:
     assert m['density_change']['effective_limit'] > 0
     assert m['bsh_residual']['valid_for_saved_state'] is False
     assert m['energy_change']['availability'] == 'not_applicable'
-    assert m['delta_kinetic_energy']['availability'] == 'not_applicable'
+    assert m['delta_kinetic_energy']['availability'] == 'measured'
     check_function_bsh(m['bsh_residual'], 'quadrature')
+    check_bsh_comparison(m['bsh_residual'])
+    check_kinetic_changes(c)
     history = c['function_bsh_history']
     assert len(history) == c['iterations_at_save']
     assert [sample['sample']['iteration'] for sample in history] == list(range(c['iterations_at_save']))
     for sample in history:
         check_function_bsh(sample, 'quadrature')
+        check_bsh_comparison(sample)
+        assert sample['normalization_phase'] == 'solver_step_output_after_acceleration'
         assert sample['valid_for_saved_state'] is False
     check_function_bsh(c['saved_state_validation']['measurements']['bsh_residual'], 'quadrature')
+    check_bsh_comparison(c['saved_state_validation']['measurements']['bsh_residual'])
     kinetics = c['function_kinetic_history']
     assert len(kinetics) == c['iterations_at_save'] + 1
     assert [k['sample']['iteration'] for k in kinetics] == list(range(c['iterations_at_save'] + 1))
@@ -130,7 +173,7 @@ for c in r['channels']:
         v = validation['measurements'][name]
         assert v['availability'] == 'measured' and v['valid_for_saved_state'] is True
         assert v['value'] >= 0 and v['effective_limit'] > 0
-    assert validation['measurements']['delta_kinetic_energy']['availability'] == 'not_applicable'
+    assert validation['measurements']['delta_kinetic_energy']['availability'] == 'measured'
 # First differences at every SCF rung must be unavailable, never invented zeros.
 first = [m for m in manifests(fresh, 'gs') if m['position'].get('iteration') == 0]
 assert len(first) == 2
@@ -138,7 +181,7 @@ for m in first:
     evidence = m['metrics']['convergence_report']['measurements']
     assert evidence['bsh_residual']['availability'] == 'unavailable'
     assert 'per_function' not in evidence['bsh_residual']
-    for name in ('energy_change', 'density_change', 'delta_kinetic_energy'):
+    for name in ('energy_change', 'density_change', 'charge_density_change', 'spin_density_change', 'delta_kinetic_energy'):
         assert evidence[name]['availability'] == 'unavailable' and evidence[name]['value'] is None
 # Reported changes must agree with independently differenced saved samples.
 by_rung = {}
@@ -191,10 +234,13 @@ assert all(c['measurements']['density_change']['value'] is None
 resumed = run('resume', partial, resume=True)[1]
 assert resumed['status'] == 'completed' and resumed['iterations_this_run'] > 0
 for channel in resumed['convergence_report']['channels']:
+    check_kinetic_changes(channel)
     history = channel['function_bsh_history']
     assert [sample['sample']['iteration'] for sample in history] == list(range(channel['iterations_at_save']))
     for sample in history:
         check_function_bsh(sample, 'quadrature')
+        check_bsh_comparison(sample)
+        assert sample['normalization_phase'] == 'solver_step_output_after_acceleration'
 # Independent check: an N=1 saved output is the input of step 2 in an N=2
 # solve from the same initial reference. Its raw BSH and density differences
 # must match the ordinary solver's next historical samples (static and full).
@@ -244,7 +290,7 @@ for x, y in zip(one['bsh_residual']['per_function']['blocks']['alpha'],
     assert x['function_index'] == y['function_index']
     assert abs(x['value'] - y['value']) < 1e-9
 step2 = next(m for m in manifests(work / 'GroundSteps3', 'gs') if m['position'].get('iteration') == 1)
-for metric in ('density_change', 'energy_change', 'delta_kinetic_energy'):
+for metric in ('density_change', 'charge_density_change', 'spin_density_change', 'energy_change', 'delta_kinetic_energy'):
     expected = step2['metrics']['convergence_report']['measurements'][metric]['value']
     assert abs(one[metric]['value'] - expected) < 1e-9, (metric, one[metric]['value'], expected)
 # A corrupt scientific verdict must not trigger an implicit new solve.
@@ -313,6 +359,31 @@ for location in ('history', 'saved'):
     run('invalid-function-kinetic-' + location, root, resume=True, success=False)
     assert 'invalid response state: per-function kinetic' in (work / ('invalid-function-kinetic-' + location + '.log')).read_text()
     assert (store / 'latest').read_text() == latest
+# Derived diagnostics must be checked against their actual source samples.
+for corrupt in ('maximum', 'kinetic_change', 'kinetic_sample', 'historical_kinetic', 'bsh_limit'):
+    root = work / ('InvalidComparison-' + corrupt)
+    shutil.copytree(fresh, root)
+    store = root / 'optical/checkpoints'
+    latest = (store / 'latest').read_text()
+    mfile = store / json.loads(latest)['generation'] / 'manifest.json'
+    manifest = json.loads(mfile.read_text())
+    channels = manifest['numerical']['engine_metadata']['fd_states']
+    entry = next(iter(next(iter(next(iter(channels.values())).values())).values()))
+    if corrupt == 'maximum':
+        entry['function_bsh_history'][0]['maximum_comparison']['value'] = 0.0
+    elif corrupt == 'kinetic_change':
+        entry['function_kinetic_history'][1]['change_from_previous']['blocks']['x_alpha'][0]['value'] = 99.0
+    elif corrupt == 'historical_kinetic':
+        entry['convergence_measurements']['kinetic_energy']['blocks']['x_alpha'][0]['value'] = 77.0
+    elif corrupt == 'kinetic_sample':
+        entry['function_kinetic_history'][1]['sample']['k'] += 2
+    else:
+        entry['function_bsh_history'][0]['effective_limit'] = 99.0
+    mfile.write_text(json.dumps(manifest))
+    run('invalid-comparison-' + corrupt, root, resume=True, success=False)
+    assert 'invalid response state: metric comparison' in (work / ('invalid-comparison-' + corrupt + '.log')).read_text()
+    assert (store / 'latest').read_text() == latest
+
 # Reject corrupt component values in both historical and saved-state evidence.
 for stage in ('gs', 'optical'):
     for location in ('historical', 'saved'):
@@ -376,7 +447,9 @@ for stage in ('gs', 'optical'):
             for rung in channel.values():
                 for entry in rung.values():
                     entry['convergence_measurements']['bsh_residual'].pop('per_function')
+                    entry['convergence_measurements']['bsh_residual'].pop('maximum_comparison', None)
                     entry['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
+                    entry['saved_state_validation']['measurements']['bsh_residual'].pop('maximum_comparison', None)
                     entry.pop('function_bsh_history')
     mfile.write_text(json.dumps(manifest))
 legacy_results = run('legacy-aggregates', legacy, resume=True)
@@ -390,6 +463,34 @@ for channel in legacy_results[1]['convergence_report']['channels']:
     assert 'per_function' not in channel['measurements']['bsh_residual']
     assert 'per_function' not in channel['saved_state_validation']['measurements']['bsh_residual']
     assert 'function_bsh_history' not in channel
+
+# Reporting-only generations from before metric comparisons retain their raw
+# histories, without acquiring fabricated comparisons during exact reuse.
+legacy = work / 'LegacyComparisons'
+shutil.copytree(fresh, legacy)
+store = legacy / 'optical/checkpoints'
+mfile = store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json'
+manifest = json.loads(mfile.read_text())
+for channel in manifest['numerical']['engine_metadata']['fd_states'].values():
+    for rung in channel.values():
+        for entry in rung.values():
+            for measurements in (entry['convergence_measurements'], entry['saved_state_validation']['measurements']):
+                measurements['bsh_residual'].pop('maximum_comparison')
+                measurements['delta_kinetic_energy'] = dict(value=None, availability='not_applicable', active_gate=False,
+                    reason='kinetic_values_reported_per_function_without_scalar_reduction')
+            for sample in entry['function_kinetic_history']:
+                sample.pop('change_from_previous')
+            for sample in entry['function_bsh_history']:
+                for key in ('maximum_comparison', 'absolute_limit', 'relative_factor', 'normalization_scale',
+                            'normalization_phase', 'effective_limit', 'satisfied'):
+                    sample.pop(key)
+mfile.write_text(json.dumps(manifest))
+legacy_results = run('legacy-comparisons', legacy, resume=True)
+assert all(stage['iterations_this_run'] == 0 for stage in legacy_results)
+for channel in legacy_results[1]['convergence_report']['channels']:
+    assert 'maximum_comparison' not in channel['measurements']['bsh_residual']
+    assert all('change_from_previous' not in sample for sample in channel['function_kinetic_history'])
+    assert all('effective_limit' not in sample for sample in channel['function_bsh_history'])
 
 # Old generations stay reusable but cannot acquire invented measurements.
 old = work / 'Old'

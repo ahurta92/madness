@@ -399,6 +399,9 @@ public:
         double comparison_energy, comparison_kinetic;
         int comparison_iteration;
         FunctionResidualBlocks previous_function_residuals;
+        // Diagnostic charge/spin field differences between consecutive inputs.
+        // Available only with has_previous; they do not change the SCF gates.
+        double density_charge = 0.0, density_spin = 0.0;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;

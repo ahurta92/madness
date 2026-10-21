@@ -1,6 +1,8 @@
 #ifndef MOLRESPONSE_V3_SOLVERS_FD_SAVE_LOAD_HPP
 #define MOLRESPONSE_V3_SOLVERS_FD_SAVE_LOAD_HPP
 
+#include "function_metric_diagnostics.hpp"
+
 // =========================================================================
 // FD save/load (Inc 13c-i: save only; load + restart precedence land in
 // 13c-ii / 13c-iii).
@@ -260,6 +262,8 @@ void save_fd_state(madness::World &world,
         bsh["per_function"] = madness::function_residual_record(state.function_residuals.at(0));
       bsh["reduction"] = "quadrature_over_orbitals_and_response_blocks";
       bsh["normalization_phase"] = "solver_step_output_after_acceleration";
+      if (bsh.contains("per_function"))
+        bsh["maximum_comparison"] = bsh_maximum_comparison(bsh);
       auto density = measured(first(state.last_density_residual),
           state.iter > 1 && !state.last_density_residual.empty(),
           "kernel_induced_density_L2_atomic_units", checkpoint_targets ? checkpoint_targets->density_residual : 0.0,
@@ -271,12 +275,12 @@ void save_fd_state(madness::World &world,
           {"energy_change", {{"value", nullptr}, {"availability", "not_applicable"},
               {"active_gate", false}, {"reason", "ground_reference_evidence_required"}}},
           {"delta_kinetic_energy", {{"value", nullptr}, {"availability", "unavailable"},
-              {"active_gate", false}, {"reason", "response_block_weights_and_normalization_not_defined"}}}};
+              {"active_gate", false}, {"reason", "no_comparable_previous_sample"}}}};
       if (!state.bsh_history.empty()) {
         entry["function_bsh_history"] = nlohmann::json::array();
         for (const auto& sample : state.bsh_history) {
           const double value = sample.aggregates.at(0);
-          entry["function_bsh_history"].push_back({
+          auto record = nlohmann::json{
               {"value", std::isfinite(value) ? nlohmann::json(value) : nlohmann::json(nullptr)},
               {"availability", std::isfinite(value) ? "measured" : "invalid"},
               {"units", bsh.at("units")}, {"reduction", bsh.at("reduction")},
@@ -284,25 +288,37 @@ void save_fd_state(madness::World &world,
               {"active_gate", false}, {"valid_for_saved_state", false},
               {"per_function", madness::function_residual_record(sample.channels.at(0))},
               {"sample", {{"attempt_directory", dir}, {"iteration", sample.iteration},
-                          {"threshold", thresh}, {"k", k_now}}}});
+                          {"threshold", thresh}, {"k", k_now}}}};
+          const double norm = sample.normalization_scales.at(0);
+          const double limit = fd_gate(sample.absolute_limit, sample.relative_factor, norm);
+          record.update({{"absolute_limit", sample.absolute_limit},
+              {"relative_factor", sample.relative_factor}, {"normalization_scale", norm},
+              {"normalization_phase", "solver_step_output_after_acceleration"},
+              {"effective_limit", limit}, {"satisfied", value <= limit}});
+          record["maximum_comparison"] = bsh_maximum_comparison(record);
+          entry["function_bsh_history"].push_back(std::move(record));
         }
       }
-      if (!state.kinetic_history.empty()) {
+      if (state.kinetic_history.size() >= 2) {
         entry["function_kinetic_history"] = nlohmann::json::array();
-        for (const auto& sample : state.kinetic_history)
-          entry["function_kinetic_history"].push_back(function_kinetic_record(
+        auto& history = entry["function_kinetic_history"];
+        for (const auto& sample : state.kinetic_history) {
+          auto record = function_kinetic_record(
               sample.channels.at(0), sample.iteration, dir, thresh, k_now,
               sample.iteration == state.iter,
-              sample.iteration == 0 ? "initial_solver_iterate" : "solver_iterate_after_acceleration"));
+              sample.iteration == 0 ? "initial_solver_iterate" : "solver_iterate_after_acceleration");
+          record["change_from_previous"] = kinetic_change_record(
+              record, history.empty() ? nlohmann::json(nullptr) : history.back());
+          history.push_back(std::move(record));
+        }
         // The penultimate sample is the input to the last update. The final
         // sample belongs to the saved output and also gets independent validation.
         const auto& input = state.kinetic_history.at(state.kinetic_history.size() - 2);
         entry["convergence_measurements"]["kinetic_energy"] = function_kinetic_record(
             input.channels.at(0), input.iteration, dir, thresh, k_now, false,
             "solver_step_input_before_acceleration");
-        entry["convergence_measurements"]["delta_kinetic_energy"] = {
-            {"value", nullptr}, {"availability", "not_applicable"}, {"active_gate", false},
-            {"reason", "kinetic_values_reported_per_function_without_scalar_reduction"}};
+        entry["convergence_measurements"]["delta_kinetic_energy"] =
+            history.at(history.size() - 2).at("change_from_previous");
       }
       if (checkpoint_validation) {
         const auto& v = *checkpoint_validation;
@@ -325,10 +341,20 @@ void save_fd_state(madness::World &world,
           m["active_gate"] = false;
           m["sample"]["iteration"] = state.iter;
         }
-        if (!v.function_kinetics.empty())
+        if (measurements["bsh_residual"].contains("per_function"))
+          measurements["bsh_residual"]["maximum_comparison"] =
+              bsh_maximum_comparison(measurements["bsh_residual"]);
+        if (!v.function_kinetics.empty()) {
           measurements["kinetic_energy"] = function_kinetic_record(
               v.function_kinetics.at(0), state.iter, dir, thresh, k_now, true,
               "saved_response_before_archive");
+          // Compare the independently evaluated output with the genuine last
+          // input, never with a second evaluation of that same output.
+          const auto& history = entry.value("function_kinetic_history", nlohmann::json::array());
+          measurements["delta_kinetic_energy"] = kinetic_change_record(
+              measurements["kinetic_energy"], history.size() >= 2 ?
+                  history.at(history.size() - 2) : nlohmann::json(nullptr));
+        }
         entry["saved_state_validation"] = {{"affects_stopping", false},
             {"measurements", measurements},
             {"comparison", {{"attempt_directory", dir}, {"iteration", state.iter - 1},

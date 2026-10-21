@@ -49,6 +49,12 @@ class ResponseCheckpoint {
           // fresh solve. This check runs both before loading and publication,
           // so a diverged solve cannot replace the previous usable generation.
           require(!e.value("diverged", false), "invalid response state: diverged");
+          // Older executor verdicts could certify one update without a density
+          // comparison. Do not trust that flag on reuse, or certify a stall.
+          // Explicit best-effort acceptance remains a separate engine outcome.
+          if (e.value("converged", false) && !e.value("accepted", false))
+            require(e.value("iter", 0) >= 2 && !e.value("stalled", false),
+                    "invalid response state: ineligible strict convergence");
           auto validate_bsh = [&](const json& metric) {
             if (metric.contains("per_function"))
               require(madness::valid_function_residual_record(metric.at("per_function")),
@@ -87,6 +93,8 @@ class ResponseCheckpoint {
             for (const auto& metric : e.at("convergence_measurements").items())
               require(metric.value().value("availability", "") != "invalid",
                       "invalid response state: nonfinite measurement");
+          require(molresponse_v3::valid_metric_diagnostics(e),
+                  "invalid response state: metric comparison");
           const double frequency = e.at("freq");
           require(std::isfinite(frequency) &&
                   molresponse_v3::ResponseMetadata::freq_key(frequency) == point.key(),

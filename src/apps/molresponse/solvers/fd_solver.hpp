@@ -639,9 +639,6 @@ public:
       out.rho_alpha_prev[r] = std::move(rho);
     }
 
-    if (record_function_metrics_)
-      out.bsh_history.push_back({in.iter, out.function_residuals, out.last_bsh_residual});
-
     // ---- KAIN + step restriction (over flat in/out responses) ------------
     // diag_level pulled from print_level_; gated uniformly across ranks
     // inside ResponseSubspaceKain (collective work is unconditional).
@@ -653,6 +650,9 @@ public:
     // relative to it.
     for (int r = 0; r < M; ++r)
       out.last_x_norm[r] = storage_norm(world_, out.responses[r]);
+    if (record_function_metrics_)
+      out.bsh_history.push_back({in.iter, out.function_residuals, out.last_bsh_residual,
+          out.last_x_norm, targets_.bsh_residual, targets_.rtol});
     for (int r = 0; r < M; ++r) {
       if (fd_exploded(out.last_bsh_residual[r], out.last_x_norm[r],
                       policy_.explosion_guard)) { out.diverged = true; break; }
@@ -700,8 +700,8 @@ public:
 
   /// Every leg within its relative gate (review C1): ||dx|| <= atol + rtol ||x||
   /// and ||drho|| <= atol + rtol ||rho1|| (fd_leg_within). No iteration rule and
-  /// no diverged/stalled check: the executor's "converged now" verdict uses this
-  /// together with its own diverged test.
+  /// no diverged/stalled check. This residual-only diagnostic is not a strict
+  /// convergence verdict; callers must also respect the solver's eligibility.
   bool within_targets(const State &s) const {
     if (s.last_bsh_residual.empty()) return false;
     for (std::size_t c = 0; c < s.last_bsh_residual.size(); ++c) {

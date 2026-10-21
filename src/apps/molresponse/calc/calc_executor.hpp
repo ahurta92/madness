@@ -625,12 +625,12 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                  FunctionDefaults<3>::get_thresh());
   };
 
-  // Real convergence = not diverged AND residuals within this protocol's
-  // targets. A max-iters STALL must read as unconverged so it is neither
-  // skipped on restart nor fed to property assembly as if good.
+  // Use the solver's minimum-iteration rule as well as its residual gates:
+  // the first update has no preceding density sample. converged() also tells
+  // the iteration loop to stop on stall/divergence, so exclude those exits
+  // from the strict verdict saved for restart and property prerequisites.
   auto converged_now = [](const typename Solver::State &st, const Solver &sv) {
-    if (st.diverged) return false;
-    return sv.within_targets(st);   // the relative gate, as FDSolver::converged
+    return !st.diverged && !st.stalled && sv.converged(st);
   };
 
   // Best-effort acceptance (--accept-at-maxiter): a non-diverged solve that

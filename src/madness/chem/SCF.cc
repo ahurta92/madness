@@ -35,6 +35,7 @@
 
 
 
+#include <madness/chem/DensityChanges.h>
 #include "funcdefaults.h"
 #include "tensor_json.hpp"
 #include <madness/world/worldmem.h>
@@ -2936,9 +2937,14 @@ void SCF::solve(World& world) {
             print_meminfo(world.rank(), "Load balancing");
         }
         double da = 0.0, db = 0.0;
+        DensityChanges density_changes;
         if (iter > 0) {
             da = (arho - arho_old).norm2();
             db = (brho - brho_old).norm2();
+            // Only observers request these diagnostics; the existing spin
+            // gates below continue to use da/db and their original limits.
+            if (checkpoint_observer)
+                density_changes = density_change_norms(world, arho, brho, arho_old, brho_old);
             if (world.rank() == 0 and (param.print_level() > 2))
                 print("delta rho", da, db, "residuals", bsh_residual,
                       update_residual);
@@ -3194,7 +3200,7 @@ void SCF::solve(World& world) {
                 if (checkpoint_observer)
                     checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                         etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals});
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin});
                 break;
             }
 
@@ -3209,7 +3215,7 @@ void SCF::solve(World& world) {
         if (checkpoint_observer)
             checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                 etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter, previous_function_residuals});
+                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin});
 
     }
     // save the converged fock matix

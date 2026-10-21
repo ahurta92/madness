@@ -241,10 +241,20 @@ restarted solve begins a new history segment. Exact reuse preserves existing
 history; older checkpoints without it acquire no invented measurements.
 Invalid individual scalars or history records prevent named publication/reuse.
 
-These values are diagnostic (`active_gate: false`). The previous response-wide
-`delta_kinetic_energy` placeholder becomes `not_applicable` when per-function
-values are present: no channel-wide scalar reduction has been selected.
-Per-function differences or trend-based stopping are separate future policy.
+The raw values remain unreduced. Each history record additionally contains
+`change_from_previous`: matched per-function absolute changes and their maximum,
+`max_i abs(T_i(n)-T_i(n-1))`, without occupation/spin weights. The record retains
+component changes, the limiting function, and both sample identities. The initial
+sample is unavailable, not zero. Only adjacent iterates of the same response
+channel/reference/attempt/rung are compared; no SCF orbital matching is inferred.
+
+`measurements.delta_kinetic_energy` describes the last step's input relative to
+its genuine preceding iterate (unavailable for a one-step run). The corresponding
+saved-state field compares the independently evaluated output with the last
+input. It never differences two evaluations of the same state. These diagnostics
+have `active_gate: false`, `target: null`, and `satisfied: null`: no kinetic
+threshold or stopping criterion is selected. Derived evidence is validated
+against its source records when publishing or loading a checkpoint.
 
 The shared numerical definitions and current application-specific reductions are
 recorded in [metric-definitions.md](../../madness/chem/metric-definitions.md).
@@ -271,3 +281,41 @@ The existing ground maximum and response quadrature aggregates and all stopping
 rules are unchanged. Checkpoints predating these optional fields stay reusable
 without fabricated component evidence. Present invalid components or response
 history aggregates are rejected before reuse or publication.
+
+## Diagnostic comparison of response BSH reductions
+
+Every new `function_bsh_history` entry records that step's `absolute_limit`,
+`relative_factor`, `normalization_scale`, `normalization_phase`, `effective_limit`
+and existing scalar `satisfied` result. The raw residual is from the step input;
+the existing relative normalization uses the output after KAIN. Limits are
+captured during each step, never copied backward from the final iteration.
+
+Historical and saved BSH measurements also contain `maximum_comparison`. It
+reports the maximum raw component, its limiting block/index and whether it meets
+**the same recorded channel limit**, using the existing inclusive comparison.
+It changes only the residual reduction for this diagnostic; it retains the
+existing normalization. Its `active_gate` is false. Passing this one comparison
+is neither a complete convergence verdict nor a prediction of the trajectory
+under a different stopping policy. Older records without it remain usable.
+
+Response strict-convergence eligibility follows the existing solver rule: at
+least two updates within the current solve/rung are needed to measure a density
+change, and any configured minimum iteration count also applies. A stall or
+divergence is a loop exit, not strict convergence. In particular, a one-step run
+with residuals below deliberately loose targets remains unfinished and can be
+continued. Restarted functions seed a new comparison history; loading them does
+not supply a missing density sample. Named checkpoint validation rejects a
+record claiming strict convergence after fewer than two updates or while
+stalled. This corrects the executor's verdict; it does not change residual
+formulas, thresholds, or enable the proposed SCF charge/spin or kinetic gates.
+
+Ground-state measurement reports also include `charge_density_change` and
+`spin_density_change`: L2 changes of rho_alpha+rho_beta and rho_alpha-rho_beta,
+respectively, in a0^(-3/2). These use actual fields, not arithmetic on the
+separate spin norms. Historical and saved-state samples remain distinct;
+first differences without a comparable prior input are unavailable. In the
+current restricted-HF frontend, measured spin change is zero and charge change
+is twice the old single-spin norm. The original `density_change` and its gate
+remain visible for comparison. The new fields have no target, effective limit
+or pass/fail verdict. No new default thresholds or stopping rules are selected;
+reference tests set their existing numerical criteria explicitly.

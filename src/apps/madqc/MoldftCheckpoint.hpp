@@ -1,5 +1,7 @@
 #pragma once
 
+#include <madness/chem/DensityChanges.h>
+
 #include "NamedStages.hpp"
 #include <filesystem>
 #include <optional>
@@ -34,6 +36,19 @@ class MoldftCheckpoint {
       if (measurements.contains("bsh_residual") && measurements.at("bsh_residual").contains("per_function"))
         require(madness::valid_function_residual_record(measurements.at("bsh_residual").at("per_function")),
                 "invalid ground-state measurement: per-function BSH");
+      for (const auto* name : {"charge_density_change", "spin_density_change"}) {
+        if (!measurements.contains(name)) continue; // older reports lack these diagnostics
+        const auto& m = measurements.at(name);
+        const bool measured = m.value("availability", "") == "measured";
+        const bool valid_value = measured
+            ? m.at("value").is_number() && std::isfinite(m.at("value").get<double>()) &&
+              m.at("value").get<double>() >= 0.0
+            : m.value("availability", "") == "unavailable" && m.at("value").is_null();
+        require(valid_value && !m.at("active_gate").get<bool>() &&
+                m.at("target").is_null() && m.at("effective_limit").is_null() &&
+                m.at("satisfied").is_null(),
+                std::string("invalid ground-state measurement: ") + name);
+      }
       for (const auto& metric : measurements.items())
         require(metric.value().value("availability", "") != "invalid",
                 "invalid ground-state measurement: " + metric.key());
@@ -164,6 +179,16 @@ public:
     evidence["density_change"]["reduction"] = "maximum_over_spin_density_L2_norms";
     evidence["density_change"]["components"] = step.has_previous
         ? json{{"alpha", step.density_alpha}, {"beta", step.density_beta}} : json(nullptr);
+    // These candidate measures have no default or inferred threshold. Keep
+    // the existing spin-resolved gate beside them for an explicit comparison.
+    evidence["charge_density_change"] = measured(step.density_charge, "a0^(-3/2)",
+        "successive_iteration_input_densities", false, nullptr, nullptr, step.iteration);
+    evidence["spin_density_change"] = measured(step.density_spin, "a0^(-3/2)",
+        "successive_iteration_input_densities", false, nullptr, nullptr, step.iteration);
+    evidence["charge_density_change"]["density_definition"] = "rho_alpha + rho_beta";
+    evidence["spin_density_change"]["density_definition"] = "rho_alpha - rho_beta";
+    for (const auto* name : {"charge_density_change", "spin_density_change"})
+      evidence[name]["reduction"] = "L2_norm_of_field_difference";
     evidence["bsh_residual"] = measured(step.previous_bsh_residual, "dimensionless",
         "raw_fixed_point_difference_before_previous_update", !scf.param.get<bool>("conv_only_dens"),
         nullptr, 5.0 * effective, step.iteration - 1);
@@ -211,8 +236,15 @@ public:
     double density = 0.0;
     if (comparable)
       density = (evaluation.alpha_density - comparison_->comparison_alpha).norm2();
+    // This adapter is restricted HF: the evaluated beta density equals alpha.
+    // The comparison functions still identify the genuine preceding input.
+    const auto density_changes = comparable
+        ? madness::density_change_norms(world_, evaluation.alpha_density, evaluation.alpha_density,
+              comparison_->comparison_alpha, comparison_->comparison_beta)
+        : madness::DensityChanges{};
     const std::map<std::string, double> values = {
         {"bsh_residual", evaluation.bsh_residual}, {"density_change", density},
+        {"charge_density_change", density_changes.charge}, {"spin_density_change", density_changes.spin},
         {"energy_change", comparable ? std::abs(energy - comparison_->comparison_energy) : 0.0},
         {"delta_kinetic_energy", comparable ? std::abs(evaluation.kinetic - comparison_->comparison_kinetic) : 0.0}};
     for (auto& item : evidence.items()) {

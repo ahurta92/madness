@@ -169,3 +169,35 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
       PROPERTIES LABELS "applications;verylong" TIMEOUT 1200)
   endif()
 endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_response_eligibility/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_response_eligibility.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_response_eligibility/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_response_eligibility/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_response_eligibility.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_response_eligibility/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
+  endif()
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_named_density_changes/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_density_changes.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_named_density_changes/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 600)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_named_density_changes/mpi2
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_density_changes.py
+        --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+        --ranks 2 --mpiexec ${MPIEXEC_EXECUTABLE})
+    set_tests_properties(madness/test/madqc/test_named_density_changes/mpi2
+      PROPERTIES LABELS "applications;verylong" TIMEOUT 600)
+  endif()
+endif()

@@ -8,6 +8,11 @@ struct FunctionResidualSample {
   int iteration;
   std::vector<madness::FunctionResidualBlocks> channels;
   std::vector<double> aggregates;
+  // Existing gate evidence is captured at this step, not reconstructed from
+  // the final iterate when the history is serialized.
+  std::vector<double> normalization_scales;
+  double absolute_limit = 0.0;
+  double relative_factor = 0.0;
 };
 
 // Enumerate only stored blocks: static response has no Y; restricted has no beta.

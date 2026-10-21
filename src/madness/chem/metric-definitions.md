@@ -64,7 +64,7 @@ components. Invalid individual scalars are rejected before reuse/publication.
 | Density change | Maximum of alpha/beta L2 norms of successive input density differences; units a0^(-3/2). | L2 norm of successive kernel-induced density differences, per response channel. Static closed-shell density is 4 sum(phi_i X_i); full is 2 sum(phi_i (X_i+Y_i)). No cross-channel reduction. |
 | BSH residual | Maximum orbital/spin L2 norm of the raw fixed-point difference; normalized orbital convention, dimensionless. | Quadrature over stored orbital functions and response blocks of the raw fixed-point difference, per channel; response-amplitude L2 units. |
 | Energy change | Absolute change of successive total-energy scalars, hartree; currently reported without a new energy gate. | No local driven-state energy-change criterion; ground-reference evidence is carried separately. |
-| Kinetic value/change | Occupation/spin-weighted total and absolute change of successive total scalars, hartree. | Individual unnormalized T_ii values initially and after every iteration, plus independent saved-state evaluation. No aggregate scalar delta or kinetic gate. |
+| Kinetic value/change | Occupation/spin-weighted total and absolute change of successive total scalars, hartree. | Individual unnormalized T_ii values initially and after every iteration, plus independent saved-state evaluation. Matched absolute component changes and their maximum are also reported; no kinetic gate. |
 
 The two density and BSH reductions above are existing solver conventions, not
 interchangeable definitions. This refactor does not relabel them as equivalent
@@ -82,9 +82,17 @@ restart at a new solve/rung/reference; unrelated function identities must not be
 compared implicitly. Old missing measurements remain unavailable.
 
 The existing SCF gates and the response absolute/relative gate policy remain in
-force. Reported targets alone do not activate a new criterion. Selecting a
-per-function kinetic difference, aggregation, tolerance, alignment or stall rule
-requires an explicit scientific decision and numerical validation.
+force. Reported targets alone do not activate a new criterion. The approved
+kinetic diagnostic is the maximum of matched absolute per-function changes,
+without occupation/spin weights. `FunctionMetricSummary.h` owns the pure scalar
+maximum and component-wise difference operations; the response adapter owns
+comparison eligibility, units and sampling. Thresholds, SCF orbital alignment,
+and activation of a new stopping criterion remain separate scientific decisions.
+
+Each response BSH history entry now retains its own existing absolute/relative
+limits and output normalization. `maximum_comparison` replaces only the residual
+reduction for a counterfactual on that sample; it does not alter solver gates.
+Incomplete older histories are not backfilled from final-iteration evidence.
 
 ## Extension boundary
 
@@ -115,3 +123,32 @@ serial and on two MPI ranks. Named convergence acceptance reconstructs both
 existing aggregates from their components, compares independent saved-state
 checks with the next actual solver evaluation, exercises continuation and
 rejects corrupted evidence while retaining the previous publication.
+
+## SCF charge and spin density comparisons
+
+`DensityChanges.h` defines two diagnostic L2 norms from application-supplied
+physical spin-density fields, including their existing occupation factors:
+
+    charge = ||(rho_alpha(n)-rho_alpha(p)) + (rho_beta(n)-rho_beta(p))||_L2
+    spin   = ||(rho_alpha(n)-rho_alpha(p)) - (rho_beta(n)-rho_beta(p))||_L2
+
+The helper preserves input functions and applies no normalization or tolerance.
+These are field norms; sums/differences of the separate spin norms lose the
+cross term and cannot implement them. Restricted closed-shell charge change is
+twice the single-spin change and spin change is zero. Opposing spin changes can
+cancel in charge while remaining visible in spin. With no beta electrons, charge
+and spin changes are the same alpha-density norm.
+
+SCF computes these only when its collective checkpoint observer is installed.
+Named ground-state reports add `charge_density_change` and `spin_density_change`
+beside the existing spin-maximum `density_change`. They retain historical input
+and independently reevaluated saved-state phases; missing previous samples are
+unavailable. Saved-state evaluation in this frontend remains restricted HF.
+The shared field algebra itself does not impose a restricted-shell assumption.
+
+No new default convergence criteria are supplied: both diagnostics carry
+`active_gate=false` and null target, effective_limit and satisfied. Existing SCF
+spin gates remain unchanged. Tests specify protocol, dconv, econv and iteration
+budget explicitly in their reference decks; these existing controls must not be
+silently reinterpreted as total-charge or spin-density targets. Future policies
+need explicit case-appropriate criteria, not universal inferred defaults.

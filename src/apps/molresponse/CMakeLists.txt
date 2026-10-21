@@ -321,6 +321,11 @@ endif (BUILD_TESTING)
 
 # Per-function kinetic diagonals: analytic functions, no external fixtures.
 if(BUILD_TESTING)
+  add_mad_executable(test_function_metric_summary "tests/test_function_metric_summary.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_function_metric_summary/run COMMAND test_function_metric_summary)
+  set_tests_properties(madness/test/molresponse/test_function_metric_summary/run
+    PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+
   add_mad_executable(test_function_kinetics "tests/test_function_kinetics.cpp" "MADchem")
   add_test(NAME madness/test/molresponse/test_function_kinetics/run COMMAND test_function_kinetics)
   set_tests_properties(madness/test/molresponse/test_function_kinetics/run
