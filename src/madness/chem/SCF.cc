@@ -2824,7 +2824,11 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
     tensorT focka_json(param.nmo_alpha(), param.nmo_alpha());
     tensorT fockb_json(param.nmo_beta(), param.nmo_beta());
 
-    const auto explicit_targets = requested_targets(param);
+    // Written targets belong to named stages (DESIGN B8); the unnamed path
+    // keeps its engine-only behavior, without their extra measurements.
+    const auto explicit_targets = checkpoint_observer
+                                      ? requested_targets(param)
+                                      : nlohmann::json::object();
     // B8: both groups are evaluated every iteration; the switch says which one
     // stops the run.
     const auto decider = param.get<bool>(convergence::use_default_criteria_key)

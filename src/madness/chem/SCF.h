@@ -741,6 +741,10 @@ public:
                                 bool(calc.checkpoint_observer),
                                 "explicit accuracy controls currently require a named moldft stage");
         MADNESS_CHECK_THROW(
+            !calc.param.is_user_defined("progress.window")
+                || bool(calc.checkpoint_observer),
+            "progress controls currently require a named moldft stage");
+        MADNESS_CHECK_THROW(
             calc.param.get<bool>(convergence::use_default_criteria_key)
                 || bool(calc.checkpoint_observer),
             "letting the written targets decide convergence currently requires "
