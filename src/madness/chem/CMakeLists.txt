@@ -225,6 +225,8 @@ if(BUILD_TESTING)
   endif()
   # Pure continuation planning for named moldft stages (DESIGN B5, B6): no MPI, no files.
   add_unittests(chem "test_scf_continuation.cc" "MADworld" "unittests;short")
+  # Who decides convergence and the settings table (DESIGN B8, B9): pure.
+  add_unittests(chem "test_convergence_settings.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # the rotating operand only moves between ranks, so the distributed path needs more than one
   add_mpi_tests(chem test_exchange_asymmetric "2" "MADchem;MADgtest" "unittests;short")
   add_unittests(chem "${CHEM_TEST_SOURCES_LONG}" "MADchem;MADgtest" "unittests;long")
