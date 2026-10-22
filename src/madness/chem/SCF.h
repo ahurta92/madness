@@ -64,6 +64,7 @@
 #include<madness/chem/dispersion.h>
 #include<madness/chem/QCPropertyInterface.h>
 
+#include <madness/chem/ExplicitCriteria.h>
 #include <madness/chem/ScfContinuation.h>
 #include <madness/tensor/tensor_json.hpp>
 #include <memory>
@@ -390,6 +391,38 @@ public:
 
     void validate_progress_controls() const;
 
+    /// The SCF engine check at one protocol rung. The gate in solve() and the
+    /// settings table (DESIGN B9) read these same numbers.
+    struct EngineCheckLimits {
+        double dconv_effective; ///< max(dconv, thresh)
+        double density;         ///< limit for each spin-density change
+        double bsh;             ///< limit for the largest BSH residual
+        bool bsh_checked;       ///< false with conv_only_dens
+    };
+    /// The engine check's fixed factors (the values SCF::solve has always
+    /// used): the density limit grows with the atom count from this minimum,
+    /// and the BSH limit is this multiple of the effective dconv.
+    static constexpr std::size_t engine_density_atom_floor = 5;
+    static constexpr double engine_bsh_factor = 5.0;
+    [[nodiscard]] static EngineCheckLimits
+    engine_check_limits(double dconv, double thresh, std::size_t natom,
+                        bool conv_only_dens) {
+        const double effective = std::max(thresh, dconv);
+        const auto atoms
+            = static_cast<double>(std::max(engine_density_atom_floor, natom));
+        return {effective, effective * atoms, engine_bsh_factor * effective,
+                !conv_only_dens};
+    }
+
+    /// The targets written in this stage (DESIGN B8): dconv is the
+    /// charge-density-change target, econv the energy-change target, and
+    /// accuracy.bsh_residual / accuracy.kinetic_trace_change the others.
+    [[nodiscard]] static nlohmann::json
+    requested_targets(const CalculationParameters& param) {
+        return requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless",
+                                          "hartree", "dconv", "econv");
+    }
+
     struct IterationCheckpoint {
         int iteration;
         double threshold, input_energy, density_alpha, density_beta, previous_bsh_residual;
@@ -410,6 +443,8 @@ public:
         nlohmann::json explicit_accuracy, configured_progress;
         // How this rung ended, on the final-rotation sample only (B5).
         scf_continuation::RungStop rung_stop = scf_continuation::RungStop::in_progress;
+        // The engine check's verdict on this sample, applied or not (B8).
+        bool engine_check_passed = false;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;
@@ -701,10 +736,15 @@ public:
     }
 
     double value(const Tensor<double>& x) {
-        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+        for (const auto* metric : {"bsh_residual", "kinetic_trace_change"})
             MADNESS_CHECK_THROW(!calc.param.is_user_defined(std::string("accuracy.") + metric) ||
                                 bool(calc.checkpoint_observer),
                                 "explicit accuracy controls currently require a named moldft stage");
+        MADNESS_CHECK_THROW(
+            calc.param.get<bool>(convergence::use_default_criteria_key)
+                || bool(calc.checkpoint_observer),
+            "letting the written targets decide convergence currently requires "
+            "a named moldft stage");
         calc.validate_progress_controls();
         double xsq = x.sumsq();
         if (xsq == coords_sum) {

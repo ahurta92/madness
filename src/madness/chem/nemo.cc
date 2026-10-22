@@ -201,9 +201,13 @@ double Nemo::value(const Tensor<double> &x) {
   MADNESS_CHECK_THROW(!get_calc_param().is_user_defined("progress.window") &&
                      !get_calc_param().is_user_defined("progress.minimum_relative_improvement"),
                      "configured progress controls are not yet supported for Nemo");
-  for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+  for (const auto* metric : {"bsh_residual", "kinetic_trace_change"})
     MADNESS_CHECK_THROW(!get_calc_param().is_user_defined(std::string("accuracy.") + metric),
                        "explicit accuracy controls are not yet supported for Nemo");
+  MADNESS_CHECK_THROW(
+      get_calc_param().get<bool>(convergence::use_default_criteria_key),
+      "letting the written targets decide convergence is not yet supported for "
+      "Nemo");
 
   // fast return if the reference is already solved at this geometry
   if (check_converged(x))

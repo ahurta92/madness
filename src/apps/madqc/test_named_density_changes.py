@@ -107,6 +107,12 @@ m = json.loads(mf.read_text())
 r = m['metrics']['convergence_report']
 for measurements in [r['measurements'], r['saved_state_validation']['measurements']]:
     del measurements['charge_density_change'], measurements['spin_density_change']
+# Generations from before the charge-density measurement evaluated no written
+# targets either (a written dconv targets that measurement now, DESIGN B8):
+# their recorded evaluation is the empty one.
+not_requested = {'status': 'not_requested', 'criteria': {}, 'comparison_relation': 'less_than_or_equal'}
+for entry in [r, r['saved_state_validation']] + r['iteration_history']:
+    entry['explicit_accuracy'] = dict(not_requested)
 mf.write_text(json.dumps(m))
 old = run('legacy', legacy, resume=True)
 assert old['iterations_this_run'] == 0

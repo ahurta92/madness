@@ -40,6 +40,7 @@
 #ifndef MADNESS_CHEM_CALCULATIONPARAMETERS_H__INCLUDED
 #define MADNESS_CHEM_CALCULATIONPARAMETERS_H__INCLUDED
 
+#include <madness/chem/ConvergenceSettings.h>
 #include<madness/chem/molecule.h>
 #include<madness/chem/molecularbasis.h>
 #include<madness/mra/QCCalculationParametersBase.h>
@@ -54,8 +55,8 @@ struct CalculationParameters : public QCCalculationParametersBase {
   // A prefix may include an explicit output directory on a case-sensitive filesystem.
   std::set<std::string> case_sensitive_keys() const override { return {"prefix"}; }
   std::set<std::string> full_precision_keys() const override {
-      return {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
-              "accuracy.kinetic_trace_change", "progress.minimum_relative_improvement"};
+      return {"accuracy.bsh_residual", "accuracy.kinetic_trace_change",
+              "progress.minimum_relative_improvement"};
   }
 
 	CalculationParameters(const CalculationParameters& other) = default;
@@ -111,9 +112,13 @@ struct CalculationParameters : public QCCalculationParametersBase {
         initialize<int>("progress.window", 0, "Explicit progress lookback; zero disables stall exits");
         initialize<double>("progress.minimum_relative_improvement", -1.0,
             "Explicit experimental minimum improvement fraction; requires progress.window and accuracy targets");
-        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+        // Written targets (DESIGN B8): dconv and econv are the density- and
+        // energy-change targets; these two have no older keyword.
+        for (const auto* metric : {"bsh_residual", "kinetic_trace_change"})
             initialize<double>(std::string("accuracy.") + metric, -1.0,
-                "Explicit absolute accuracy target, additionally required for convergence; unset by default");
+                "Explicit absolute accuracy target; unset by default");
+        initialize<bool>(madness::convergence::use_default_criteria_key, true,
+            "Named stages: true, the engine check decides convergence; false, the written targets decide (DESIGN B8)");
 		initialize<int>   ("nio",1,"no. of io servers to use");
 		initialize<bool>  ("spin_restricted",true,"true if spin restricted");
 		initialize<int>   ("plotlo",0,"range of MOs to print (for both spins if polarized");

@@ -114,7 +114,7 @@ for name, m in validation['measurements'].items():
     assert m['valid_for_saved_state'] is True
     assert m['value'] >= 0
 assert validation['comparison']['iteration'] < g['measurements']['energy_change']['sample']['iteration']
-assert g['gate_policy'] == 'existing_engine'
+assert g['decided_by'] == 'engine_check'
 assert g['state_id'] == gs['state_id']
 for name, m in g['measurements'].items():
     assert m['availability'] == 'measured', (name, m)

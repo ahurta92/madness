@@ -66,7 +66,7 @@ assert energy['relation'] == 'less_than_or_equal' and energy['active_gate'] is F
 assert energy['satisfied'] == (energy['value'] <= 1e-6), energy
 saved = report['saved_state_validation']['measurements']['energy_change']
 assert saved['target'] == 1e-6 and saved['availability'] == 'measured', saved
-assert report['energy_change_request']['status'] in ('satisfied', 'unmet'), report['energy_change_request']
+assert report['requested_accuracy']['criteria']['energy_change']['status'] in ('satisfied', 'unmet'), report['requested_accuracy']
 assert manifest(fresh)['targets']['econv'] == 1e-6
 assert result(fresh)['targets']['econv'] == 1e-6
 
@@ -77,7 +77,7 @@ report = result(plain)['convergence_report']
 energy = report['measurements']['energy_change']
 assert energy['target'] is None and energy['satisfied'] is None, energy
 assert energy['set_by'] == 'engine_default_not_a_target', energy
-assert report['energy_change_request']['status'] == 'not_requested'
+assert 'energy_change' not in report['requested_accuracy']['criteria']
 assert 'econv' not in manifest(plain)['targets'] and 'econv' not in result(plain)['targets']
 # econv was never part of the engine check, so the solve itself is unchanged.
 assert result(plain)['iterations_this_run'] == result(fresh)['iterations_this_run']
@@ -89,7 +89,7 @@ loose = '%.1e' % max(1e-2, 10 * saved_change)
 reuse = copy(fresh, 'LooseReuse')
 run('loose-reuse', reuse, with_econv.replace('econv 1e-6', 'econv ' + loose), resume=True)
 assert result(reuse)['work'] == 'loaded' and result(reuse)['iterations_this_run'] == 0
-assert result(reuse)['convergence_report']['energy_change_request']['status'] == 'satisfied'
+assert result(reuse)['convergence_report']['requested_accuracy']['criteria']['energy_change']['status'] == 'satisfied'
 
 # A tighter econv than the saved evidence shows: in engine mode it can't be
 # enforced, so the saved state is loaded and the request reported unmet
@@ -97,10 +97,12 @@ assert result(reuse)['convergence_report']['energy_change_request']['status'] ==
 tight = copy(fresh, 'TightRequest')
 run('tight-request', tight, with_econv.replace('econv 1e-6', 'econv 1e-14'), resume=True)
 assert result(tight)['work'] == 'loaded' and result(tight)['iterations_this_run'] == 0
-request = result(tight)['convergence_report']['energy_change_request']
-assert request['status'] == 'unmet' and request['enforced'] is False, request
-assert request['outcome'] == 'unmet, not enforceable in engine mode', request
-assert request['criteria']['energy_change']['value'] == saved_change, request
+request = result(tight)['convergence_report']['requested_accuracy']
+energy_request = request['criteria']['energy_change']
+assert energy_request['status'] == 'unmet' and request['enforced'] is False, request
+assert energy_request['outcome'] == 'unmet, not enforceable in engine mode', request
+assert energy_request['value'] == saved_change, request
+assert 'energy_change' in result(tight)['continuation']['unmet_not_enforceable']
 
 # A run without econv can be continued with one; evidence still decides.
 later = copy(plain, 'LaterRequest')

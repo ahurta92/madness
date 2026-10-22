@@ -2,6 +2,7 @@
 
 // Load MRA function declarations before ResponseProtocol includes its operators.
 #include <madness/chem/ParameterManager.hpp>
+#include <madness/chem/SCF.h>
 
 #include <apps/molresponse/ResponseProtocol.hpp>
 #include <apps/molresponse/solvers/response_metadata.hpp>
@@ -181,11 +182,30 @@ inline std::vector<Stage> parse(madness::World &world,
   std::vector<Stage> stages;
   // This bounded allowlist prevents accepting settings whose outputs or
   // scientific semantics have not yet been wired through the named adapter.
-  const std::set<std::string> scf_keys = {
-      "xc", "protocol", "dconv",    "econv",       "maxiter", "l",
-      "k",  "charge",   "localize", "print_level", "maxsub",  "maxrotn", "diagnostic.iterations_per_rung",
-      "progress.window", "progress.minimum_relative_improvement",
-      "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change"};
+  const std::set<std::string> scf_keys
+      = {"xc",
+         "protocol",
+         "dconv",
+         "econv",
+         "maxiter",
+         "l",
+         "k",
+         "charge",
+         "localize",
+         "print_level",
+         "maxsub",
+         "maxrotn",
+         "diagnostic.iterations_per_rung",
+         "progress.window",
+         "progress.minimum_relative_improvement",
+         "accuracy.bsh_residual",
+         "accuracy.kinetic_trace_change",
+         madness::convergence::use_default_criteria_key};
+  // B8: dconv and econv are the density- and energy-change targets of a
+  // moldft stage; the older keywords point there.
+  const std::map<std::string, std::string> replaced_scf_keys
+      = {{"accuracy.density_change", "dconv (the density-change target)"},
+         {"accuracy.energy_change", "econv (the energy-change target)"}};
   const std::set<std::string> response_keys = {"dconv", "maxiter", "kain", "diagnostic.iterations_per_rung",
       "progress.window", "progress.minimum_relative_improvement",
       "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change",
@@ -237,6 +257,13 @@ inline std::vector<Stage> parse(madness::World &world,
       const auto k = key(line.text);
       if (!seen.insert(k).second)
         fail(line, "duplicate parameter " + k);
+      if (b.kind == "moldft" && replaced_scf_keys.contains(k))
+        fail(line, k + " is now " + replaced_scf_keys.at(k));
+      if (b.kind == "molresponse"
+          && k == madness::convergence::use_default_criteria_key)
+        fail(line, k
+                       + " is supported for moldft stages in this version; "
+                         "molresponse follows in the next change");
       if (k == "maxiter" && line.text.find('[') != std::string::npos) {
         // B5: "maxiter [30, 10]" gives each rung its own cap (moldft only).
         if (b.kind != "moldft")
@@ -366,6 +393,24 @@ inline std::vector<Stage> parse(madness::World &world,
           protocol_k(own_protocol.back()) > source_k)
         throw std::runtime_error(
             "response protocol is tighter than reference " + stage.reference);
+    }
+
+    if (b.kind == "moldft") {
+      // B8 (Q3, Q5): letting the written targets decide needs at least one,
+      // and the progress.* stall rules act on written targets, so they need
+      // the targets to decide.
+      const bool targets_decide
+          = !cp.get<bool>(madness::convergence::use_default_criteria_key);
+      if (targets_decide && madness::SCF::requested_targets(cp).empty())
+        throw std::runtime_error(
+            b.name + ": " + madness::convergence::use_default_criteria_key
+            + " false needs at least one written target (dconv, econv, "
+              "accuracy.bsh_residual, accuracy.kinetic_trace_change)");
+      if (!targets_decide && cp.is_user_defined("progress.window"))
+        throw std::runtime_error(
+            b.name
+            + ": progress.* stall rules act on your written targets; set "
+            + madness::convergence::use_default_criteria_key + " false");
     }
 
     // Derive electron counts/defaults, then apply the shared stage checks.

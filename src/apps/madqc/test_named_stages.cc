@@ -52,55 +52,85 @@ int main(int argc, char** argv) {
     collisions = response;
     collisions.replace(collisions.find("[1e-4]"), std::string("[1e-4]").size(), "[1.1e-4,1e-4]");
     rejects(geometry + gs + collisions, "protocol-key precision");
-    // D8: only a user-written econv is a request; it is judged on saved
-    // evidence and, in engine mode, reported but not enforced.
+    // D8, B8, B9: written values are targets; the settings table shows the
+    // engine defaults and whether each target is enforced.
     {
       using nlohmann::json;
+      namespace cv = madness::convergence;
       const auto saved = [](json value, const char* availability) {
         return json{{"energy_change",
                      {{"value", value},
                       {"availability", availability},
                       {"units", "hartree"}}}};
       };
-      const auto status = [](const json& report) {
-        return report.at("status").get<std::string>();
-      };
       CalculationParameters defaults;
       check(!named_stages::requested_econv(defaults),
             "engine default econv is not a request");
-      check(named_stages::energy_change_target(defaults).empty(),
-            "no econv, no energy target");
-      check(status(named_stages::energy_change_request_report(json::object(),
-                                                              defaults))
-                == "not_requested",
-            "no request needs no evidence");
+      const auto plain
+          = named_stages::moldft_convergence_settings("gs", defaults, 3);
+      check(plain.decider == cv::Decider::engine_check
+                && cv::requested_targets(plain).empty(),
+            "a default deck: engine check decides, nothing requested");
+      check(plain.metrics.at(0).set_by == cv::SetBy::engine_default
+                && plain.metrics.at(0).effective_limit
+                       == 5.0 * std::max(1e-4, defaults.dconv()),
+            "engine density row: engine default dconv and its derived limit");
+      check(plain.metrics.at(4).note.find("engine default econv")
+                != std::string::npos,
+            "the engine default econv is shown as one, not as a target");
       CalculationParameters requested;
       requested.set_user_defined_value("econv", 1e-6);
       check(named_stages::requested_econv(requested) == 1e-6,
             "user econv is the request");
-      const auto met = named_stages::energy_change_request_report(
-          saved(5e-7, "measured"), requested);
-      check(status(met) == "satisfied" && !met.contains("outcome"),
-            "met by evidence");
-      check(status(named_stages::energy_change_request_report(
-                saved(1e-6, "measured"), requested))
-                == "satisfied",
-            "met at equality (<=)");
-      const auto unmet = named_stages::energy_change_request_report(
-          saved(2e-6, "measured"), requested);
-      check(status(unmet) == "unmet" && unmet.at("enforced") == false
-                && unmet.at("outcome")
+      const auto engine_mode
+          = named_stages::moldft_convergence_settings("gs", requested, 3);
+      check(engine_mode.warnings.size() == 1
+                && engine_mode.warnings.front().find("econv 1.0e-06")
+                       != std::string::npos,
+            "engine mode warns about the unenforced econv");
+      const auto met = named_stages::requested_criteria_report(
+          saved(5e-7, "measured"), engine_mode);
+      check(met.at("status") == "satisfied" && met.at("enforced") == false,
+            "met by evidence, reported in engine mode");
+      const auto unmet = named_stages::requested_criteria_report(
+          saved(2e-6, "measured"), engine_mode);
+      check(unmet.at("status") == "unmet"
+                && unmet.at("criteria").at("energy_change").at("outcome")
                        == "unmet, not enforceable in engine mode",
-            "unmet evidence is reported, not enforced");
-      check(status(named_stages::energy_change_request_report(
-                saved(nullptr, "unavailable"), requested))
-                == "unavailable",
-            "unavailable evidence does not meet a request");
-      check(status(named_stages::energy_change_request_report(json::object(),
-                                                              requested))
+            "unmet evidence is reported, not enforced, in engine mode");
+      check(named_stages::requested_criteria_report(json::object(), engine_mode)
+                    .at("status")
                 == "unavailable",
             "missing evidence does not meet a request");
+      requested.set_user_defined_value(
+          std::string(cv::use_default_criteria_key), false);
+      const auto criteria_mode
+          = named_stages::moldft_convergence_settings("gs", requested, 3);
+      check(criteria_mode.decider == cv::Decider::requested_criteria
+                && named_stages::requested_criteria_report(
+                       saved(2e-6, "measured"), criteria_mode)
+                           .at("enforced")
+                       == true,
+            "criteria mode enforces the written targets");
+      check(criteria_mode.warnings.size() == 2,
+            "criteria mode warns about missing density and BSH targets");
     }
+    auto criteria_without_targets = gs;
+    criteria_without_targets.replace(
+        criteria_without_targets.find(" dconv 1e-5\n"),
+        std::string(" dconv 1e-5\n").size(),
+        " convergence.use_default_criteria false\n");
+    rejects(geometry + criteria_without_targets, "needs at least one written");
+    auto progress_engine = gs;
+    progress_engine.replace(progress_engine.find(" dconv 1e-5\n"), 0,
+                            " accuracy.kinetic_trace_change 1e-6\n"
+                            " progress.window 2\n"
+                            " progress.minimum_relative_improvement 0.1\n");
+    rejects(geometry + progress_engine, "progress.* stall rules");
+    auto old_energy = gs;
+    old_energy.replace(old_energy.find(" dconv 1e-5\n"), 0,
+                       " accuracy.energy_change 1e-6\n");
+    rejects(geometry + old_energy, "is now econv");
     // B5: maxiter takes one number or one per rung (moldft only).
     try {
       auto capped = gs;

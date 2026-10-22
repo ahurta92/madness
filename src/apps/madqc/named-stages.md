@@ -30,7 +30,7 @@ The first implementation supports these controls:
 | Block | Controls |
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
-| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
+| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
 | `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties [polarizability]`, `polarizability.frequencies`, `polarizability.frequency_units au`, `polarizability.components` |
 
 Ground states must be closed shell. Response frequencies and components must
@@ -100,11 +100,12 @@ The existing SCF gate uses `max(dconv, protocol threshold)`; both requested and
 effective targets are recorded. `econv` is the target of the energy-change
 metric, but only when the deck writes it; the engine's default `econv` is not a
 request and is recorded as `set_by: engine_default_not_a_target`. A written
-`econv` is reported against (`relation: less_than_or_equal`), not enforced: the
-SCF engine check alone stops the run. On `--continue` a written `econv` counts
-as met only when the energy change measured on the saved orbitals
-(`saved_state_validation.measurements.energy_change`) is at or below it;
-otherwise the stage resumes. The recorded `econv` number is never evidence.
+`econv` is judged (`relation: less_than_or_equal`) on the energy change
+measured on the saved orbitals (`saved_state_validation.measurements.energy_change`),
+never on the `econv` a generation recorded. Whether it is enforced depends on
+`convergence.use_default_criteria` (below): with the engine check deciding, it
+is reported only, and an unmet `econv` on `--continue` is reported "unmet, not
+enforceable in engine mode" instead of making the stage resume.
 
 On `--continue`, each response stage validates its own published generation.
 A completed identical request reuses its saved properties with zero response
@@ -336,29 +337,69 @@ ordinary scientific verdicts and full-precision density/trace histories. This
 experimental diagnostic is intended for fresh bounded protocol studies; it does
 not establish a new stopping default.
 
-### Explicit ground-state accuracy requests
+### Who decides convergence: `convergence.use_default_criteria`
 
-A named `moldft` stage can additionally require any of
-`accuracy.density_change`, `accuracy.bsh_residual`, `accuracy.energy_change`,
-and `accuracy.kinetic_trace_change`. Each takes a finite, nonnegative absolute
-limit. Omitted controls add no numerical target. These controls supplement the
-existing engine gate; satisfying an explicit scalar alone is not convergence.
+Every written convergence value of a named `moldft` stage is a **target** on
+its own metric (DESIGN B8):
 
-The density quantity is the L2 change of total charge density rho_alpha+rho_beta
-(`charge_density_change`, `a0^(-3/2)`), and BSH is the maximum raw orbital residual (dimensionless).
-Energy is the absolute consecutive total-energy change (hartree). Kinetics is
-the absolute difference of consecutive unweighted kinetic traces (hartree),
-with a restricted alpha orbital counted once. No occupation factor enters the
-trace. The explicit limits have no protocol floor or inferred relative factor.
+| Keyword | Metric | Quantity compared |
+|---|---|---|
+| `dconv` | `charge_density_change` | L2 change of the total charge density rho_alpha+rho_beta, `a0^(-3/2)` |
+| `econv` | `energy_change` | absolute change of the total energy, hartree |
+| `accuracy.bsh_residual` | `bsh_residual` | largest raw orbital BSH residual, dimensionless |
+| `accuracy.kinetic_trace_change` | `delta_kinetic_energy` | absolute change of the unweighted kinetic trace (restricted alpha counted once), hartree |
 
-`convergence_report.explicit_accuracy` records the last iteration decision;
-`saved_state_validation.explicit_accuracy` evaluates the actual archived state.
-`requested_accuracy` reevaluates those saved measurements against the current
-request, including on zero-iteration reuse. A tighter unmet request resumes
-from compatible orbitals. Unmet final requests retain a generation with
-`unmet_requested_accuracy`, an unconverged result, and no dependent-stage
-execution. Historical kinetic evidence with another quantity definition cannot
-certify a new trace-change target, even when its units are also hartree.
+Only a value the deck writes is a target; engine defaults are not (B3, D8).
+Requested targets compare with `<=` and have no protocol floor or hidden
+factor. `accuracy.density_change` and `accuracy.energy_change` are replaced by
+`dconv` and `econv` and are rejected with that message.
+
+One per-stage switch says which group stops the run:
+
+- `convergence.use_default_criteria true` (the default): the **engine check**
+  stops the run: both spin-density changes below `max(dconv, thresh) x max(5,
+  natom)` and the largest BSH residual below `5 x max(dconv, thresh)`
+  (`SCF::engine_check_limits`). The written targets are measured, recorded
+  and reported, not enforced; each one gets a warning at stage start saying
+  what the engine check does instead.
+- `convergence.use_default_criteria false`: only the **written targets** stop
+  the run; the engine check is still computed and recorded
+  (`engine_check_passed`) but not applied. A request without a density or BSH
+  target is accepted with a warning. A stage with no written target is
+  rejected before solving.
+
+There is no AND mode. Divergence and invalid states stop the run in both
+modes. The engine records its own restart claim (`converged_for_dconv`) only
+when its check passed.
+
+At stage start the run prints the settings table (every metric: target, who
+set it, enforced or reported only, relation, effective limit with its formula,
+the per-rung `maxiter` and warnings); at stage end it prints each metric's
+final value on the saved orbitals, the verdict and the limiting metric. Both
+tables are rendered from the struct that `results.json` records
+(`convergence_settings`, `convergence_report.convergence_outcome`), and the
+manifest carries `targets.decided_by`, `convergence_report.decided_by` and the
+settings.
+
+`convergence_report.explicit_accuracy` records the last iteration's evaluation
+of the written targets; `saved_state_validation.explicit_accuracy` evaluates the
+archived state; `requested_accuracy` re-evaluates the saved measurements
+against the current request, with `enforced` and, in engine mode, the outcome
+"unmet, not enforceable in engine mode" for an unmet target.
+
+On `--continue` (B6, B8): with the written targets deciding, a saved state is
+loaded only when its saved measurements meet every written target, whichever
+mode produced it; otherwise it resumes. With the engine check deciding, a
+saved state that passes the engine check for the current request is loaded,
+and written targets it doesn't meet are listed in
+`continuation.unmet_not_enforceable` instead of forcing a resume. Historical
+kinetic evidence with another quantity definition cannot certify a new
+trace-change target, even when its units are also hartree.
+
+Stop reasons (B5): `converged`, `stalled` (configured progress), and
+`iteration_limit`; with the written targets deciding,
+`unmet_requested_accuracy` means the final rung stopped on its targets but the
+saved orbitals no longer meet them.
 
 Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify
@@ -394,7 +435,9 @@ historical evidence cannot certify a newly requested criterion.
 
 Named SCF and driven-response FD stages may set `progress.window` (a positive iteration lookback) and
 `progress.minimum_relative_improvement` (an explicitly supplied fraction strictly
-between zero and one), together with at least one `accuracy.*` target. Omitting
+between zero and one), together with at least one written target. For `moldft`
+these stall rules act on the written targets, so they require
+`convergence.use_default_criteria false`. Omitting
 them preserves the existing iteration policy. There is no default scientific
 stall threshold. A criterion still improving prevents a stall; unavailable or
 invalid measurements cannot justify promotion. History resets at every rung.

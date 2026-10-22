@@ -2784,7 +2784,7 @@ void SCF::orthonormalize(World& world, vecfuncT& amo_new) const {
 
 
 void SCF::validate_progress_controls() const {
-    const auto targets = requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless", "hartree");
+    const auto targets = requested_targets(param);
     validate_progress_configuration(param.get<int>("progress.window"),
         param.get<double>("progress.minimum_relative_improvement"),
         param.is_user_defined("progress.minimum_relative_improvement"), !targets.empty());
@@ -2824,7 +2824,12 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
     tensorT focka_json(param.nmo_alpha(), param.nmo_alpha());
     tensorT fockb_json(param.nmo_beta(), param.nmo_beta());
 
-    const auto explicit_targets = requested_accuracy_targets(param, "a0^(-3/2)", "dimensionless", "hartree");
+    const auto explicit_targets = requested_targets(param);
+    // B8: both groups are evaluated every iteration; the switch says which one
+    // stops the run.
+    const auto decider = param.get<bool>(convergence::use_default_criteria_key)
+                             ? convergence::Decider::engine_check
+                             : convergence::Decider::requested_criteria;
     const int progress_window = param.get<int>("progress.window");
     const double progress_improvement = param.get<double>("progress.minimum_relative_improvement");
     validate_progress_controls();
@@ -3152,12 +3157,20 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         configured_progress["has_next_supplied_rung"] = has_next_supplied_rung;
         configured_progress["action_applied"] = stalled;
 
+        bool engine_check_passed = false;
         if (iter > 0) {
-            //print("##convergence criteria: density delta=", da < dconv * molecule.natom() && db < dconv * molecule.natom(), ", bsh_residual=", (param.conv_only_dens || bsh_residual < 5.0*dconv));
-            if (da < dconv * std::max(size_t(5), molecule.natom()) && db < dconv * std::max(size_t(5), molecule.natom())
-                && (param.get<bool>("conv_only_dens") || bsh_residual < 5.0 * dconv))
-                converged = true;
-            if (!explicit_targets.empty() && explicit_accuracy.at("status") != "satisfied") converged = false;
+            // The engine check, with the limits the settings table shows (B9).
+            const auto limits = engine_check_limits(
+                param.dconv(), FunctionDefaults<3>::get_thresh(),
+                molecule.natom(), param.get<bool>("conv_only_dens"));
+            engine_check_passed
+                = da < limits.density && db < limits.density
+                  && (!limits.bsh_checked || bsh_residual < limits.bsh);
+            const bool criteria_met
+                = !explicit_targets.empty()
+                  && explicit_accuracy.at("status") == "satisfied";
+            converged = convergence::converged(decider, engine_check_passed,
+                                               criteria_met);
             if (diagnostic_iterations && iter + 1 < diagnostic_iterations) converged = false;
             // previous conv was too tight for small systems
             // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
@@ -3165,12 +3178,14 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
 
             // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
             if (converged || stalled || iter == iteration_limit - 1) {
-                // record what we converged *to*, on every rank and independent of
-                // the print level: the restart logic keys off these two fields.
-                // The values are the thresholds of this protocol level, not
-                // param.econv()/param.dconv() -- at a loose level the latter
-                // over-claims, at the final level it under-claims.
-                if (converged) {
+                // record what we converged *to*, on every rank and independent
+                // of the print level: the restart logic keys off these two
+                // fields. The values are the thresholds of this protocol level,
+                // not param.econv()/param.dconv() -- at a loose level the
+                // latter over-claims, at the final level it under-claims. The
+                // engine's restart claim records its own check only, so a stop
+                // decided by the written targets never fakes it (Q6).
+                if (converged && engine_check_passed) {
                     converged_for_thresh=FunctionDefaults<3>::get_thresh();
                     converged_for_dconv=dconv;
                 }
@@ -3274,12 +3289,36 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
                 }
 
                 if (checkpoint_observer)
-                    checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
-                        etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy, configured_progress,
-                        converged ? scf_continuation::RungStop::converged
-                        : stalled ? scf_continuation::RungStop::stalled
-                                  : scf_continuation::RungStop::iteration_limit});
+                    checkpoint_observer(
+                        world, *this,
+                        {iter,
+                         FunctionDefaults<3>::get_thresh(),
+                         etot,
+                         da,
+                         db,
+                         bsh_residual,
+                         iter > 0,
+                         true,
+                         ekinetic,
+                         energy_change,
+                         kinetic_change,
+                         comparison_alpha,
+                         comparison_beta,
+                         comparison_energy,
+                         comparison_kinetic,
+                         iter - 1,
+                         function_residuals,
+                         density_changes.charge,
+                         density_changes.spin,
+                         input_kinetic_diagonal,
+                         comparison_kinetic_diagonal,
+                         explicit_accuracy,
+                         configured_progress,
+                         converged ? scf_continuation::RungStop::converged
+                         : stalled
+                             ? scf_continuation::RungStop::stalled
+                             : scf_continuation::RungStop::iteration_limit,
+                         engine_check_passed});
                 break;
             }
 
@@ -3292,11 +3331,32 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
                         bsh_residual, update_residual,
                         checkpoint_observer ? &function_residuals : nullptr);
         if (checkpoint_observer)
-            checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
-                etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy, configured_progress,
-                scf_continuation::RungStop::in_progress});
-
+            checkpoint_observer(world, *this,
+                                {iter,
+                                 FunctionDefaults<3>::get_thresh(),
+                                 etot,
+                                 da,
+                                 db,
+                                 previous_bsh_residual,
+                                 iter > 0,
+                                 false,
+                                 ekinetic,
+                                 energy_change,
+                                 kinetic_change,
+                                 arho,
+                                 brho,
+                                 etot,
+                                 ekinetic,
+                                 iter,
+                                 previous_function_residuals,
+                                 density_changes.charge,
+                                 density_changes.spin,
+                                 input_kinetic_diagonal,
+                                 input_kinetic_diagonal,
+                                 explicit_accuracy,
+                                 configured_progress,
+                                 scf_continuation::RungStop::in_progress,
+                                 engine_check_passed});
     }
     // save the converged fock matix
     //

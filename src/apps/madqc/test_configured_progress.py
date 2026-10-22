@@ -20,7 +20,11 @@ print('artifacts:', work, flush=True)
 deck = (Path(args.source) / 'named_h2.in').read_text().split('molresponse optical')[0]
 # Experimental fixtures: exact-zero remains unmet; the supplied near-one
 # improvement requirement makes the small study reach a stall promptly.
-deck = deck.replace('moldft gs\n', 'moldft gs\n  accuracy.kinetic_trace_change 0\n'
+# progress.* acts on written targets, so the targets decide (DESIGN B8, Q5);
+# the kinetic target is the only one, as dconv and econv are not written.
+deck = deck.replace('  dconv 1e-5\n', '').replace('  econv 1e-6\n', '')
+deck = deck.replace('moldft gs\n', 'moldft gs\n  convergence.use_default_criteria false\n'
+                    '  accuracy.kinetic_trace_change 0\n'
                     '  progress.window 1\n  progress.minimum_relative_improvement 0.99999999\n')
 deck = re.sub(r'(?m)^\s*maxiter\s+\d+', '  maxiter 12', deck)
 env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
@@ -28,7 +32,7 @@ env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_TH
 launch = [] if args.ranks == 1 else [args.mpiexec, '-n', str(args.ranks)]
 binary = str(Path(args.binary).resolve())
 
-def run(label, text):
+def run(label, text, stop_reason):
     inp = work / (label + '.in')
     inp.write_text(text)
     root = work / label
@@ -40,12 +44,13 @@ def run(label, text):
     assert stage['status'] == 'unconverged'
     store = root / 'gs/checkpoints'
     manifest = json.loads((store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json').read_text())
-    assert manifest['stop_reason'] == 'unmet_requested_accuracy' and manifest['archives']
+    # B5: the stop reason names the exit (stalled or iteration_limit).
+    assert manifest['stop_reason'] == stop_reason and manifest['archives'], manifest['stop_reason']
     report = stage['convergence_report']
     assert report['requested_accuracy']['status'] == 'unmet'
     return stage, report
 
-stage, report = run('Stalled', deck)
+stage, report = run('Stalled', deck, 'stalled')
 assert stage['iterations_this_run'] == 6
 history = report['iteration_history']
 assert len({row['kinetic_trace']['sample']['threshold'] for row in history}) == 2
@@ -72,7 +77,8 @@ with (work / 'invalid-progress.log').open('w') as log:
 assert proc.returncode != 0 and (store / 'latest').read_text() == pointer
 assert 'invalid ground-state measurement' in (work / 'invalid-progress.log').read_text()
 
-stage, report = run('Forced', deck.replace('moldft gs\n', 'moldft gs\n  diagnostic.iterations_per_rung 5\n'))
+stage, report = run('Forced', deck.replace('moldft gs\n', 'moldft gs\n  diagnostic.iterations_per_rung 5\n'),
+                    'iteration_limit')
 assert stage['iterations_this_run'] == 10
 assert not any(row['configured_progress']['action_applied'] for row in report['iteration_history'])
 print('configured progress acceptance passed', flush=True)

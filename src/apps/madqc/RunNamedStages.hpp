@@ -186,7 +186,18 @@ inline bool run_if_named(madness::World &world,
       cp.set_user_defined_value("save",
                                 false); // immutable adapter owns persistence
       auto scf = library.calc(world, stage.params);
-      MoldftCheckpoint checkpoint(world, stage, stage_directory, run_id);
+      // B9: the stage's convergence settings, built once and shown before the
+      // solve; the same struct feeds the record and the stopping decision.
+      auto settings
+          = moldft_convergence_settings(stage.name, cp, scf->molecule.natom());
+      if (world.rank() == 0)
+        std::cout << '\n'
+                  << madness::convergence::render_settings_table(settings)
+                  << '\n'
+                  << std::flush;
+      result["convergence_settings"] = madness::convergence::to_json(settings);
+      MoldftCheckpoint checkpoint(world, stage, stage_directory, run_id,
+                                  settings);
       checkpoint.prepare(*scf, continuing);
       scf->checkpoint_observer =
           [&](madness::World &, const madness::SCF &state,
@@ -199,17 +210,19 @@ inline bool run_if_named(madness::World &world,
       scf->work_dir = directory;
       references.emplace(stage.name, scf);
 
-      // Use the engine's existing convergence evidence. This adds no new
-      // residual definitions or stopping rules.
+      // The engine's own verdict at the final rung (it records its claim only
+      // when its check passed, Q6); finish() lets the selected group decide.
       converged = evidence.converged_for_thresh <= cp.protocol().back() &&
                   evidence.converged_for_dconv <=
                       std::max(cp.dconv(), cp.protocol().back());
       checkpoint.finish(*scf, converged);
       const auto &saved = checkpoint.latest();
-      // A state loaded with its cap used up and the request unmet is not
-      // converged for this request, whatever it was saved as (B5).
-      converged
-          = saved.stop_reason == "converged" && !checkpoint.loaded_unmet();
+      // A loaded state was judged against this request by prepare(); one
+      // loaded with its cap used up and the request unmet is not converged
+      // (B5). A solved state is converged when its stop reason says so.
+      converged = checkpoint.work == "loaded"
+                      ? !checkpoint.loaded_unmet()
+                      : saved.stop_reason == "converged";
       state_id = saved.generation;
       state_ids.emplace(stage.name, state_id);
       reference_prefixes.emplace(stage.name, checkpoint.prefix());
@@ -227,19 +240,24 @@ inline bool run_if_named(madness::World &world,
                          result["continuation"]["summary"].get<std::string>());
       }
       result["checkpoint_metrics"] = saved.metrics;
-      result["convergence_report"] = ground_convergence_report(saved.metrics, state_id, converged);
-      const auto requested_targets = madness::requested_accuracy_targets(cp, "a0^(-3/2)", "dimensionless", "hartree");
+      result["convergence_report"]
+          = ground_convergence_report(saved.metrics, state_id, converged);
       const auto saved_measurements
           = saved.metrics.value("convergence_report", json::object())
                 .value("saved_state_validation", json::object())
                 .value("measurements", json::object());
+      // The current request, judged on the saved state (B6, B8), also when the
+      // generation was reused from an earlier request.
       result["convergence_report"]["requested_accuracy"]
-          = madness::evaluate_explicit_criteria(saved_measurements,
-                                                requested_targets);
-      // The current econv request, judged on the saved state (D8), also when
-      // the generation was reused from an earlier request; reported only.
-      result["convergence_report"]["energy_change_request"]
-          = energy_change_request_report(saved_measurements, cp);
+          = requested_criteria_report(saved_measurements, settings);
+      result["convergence_report"]["convergence_outcome"]
+          = madness::convergence::outcome_to_json(
+              settings, saved_outcomes(saved_measurements));
+      if (world.rank() == 0)
+        std::cout << madness::convergence::render_outcome_table(
+            settings, saved_outcomes(saved_measurements), saved.stop_reason)
+                  << '\n'
+                  << std::flush;
       reference_evidence[stage.name] = {{"stage", stage.name}, {"state_id", state_id},
           {"engine_converged", converged},
           {"energy_change", result["convergence_report"]["measurements"]["energy_change"]}};

@@ -23,31 +23,136 @@ requested_econv(const CalculationParameters& parameters) {
   return parameters.econv();
 }
 
-// The econv request in the form evaluate_explicit_criteria() takes; empty when
-// the deck has no econv.
-[[nodiscard]] inline json
-energy_change_target(const CalculationParameters& parameters) {
-  json targets = json::object();
-  if (const auto econv = requested_econv(parameters))
-    targets["energy_change"] = {{"value", *econv}, {"units", "hartree"}};
-  return targets;
+namespace convergence = madness::convergence;
+
+// B9: one stage's convergence settings, built once from its parameters. The
+// engine-check rows use the engine's own limit function, and the written
+// targets come from SCF::requested_targets, the same source the engine
+// stops on, so the table shows exactly what is compared.
+[[nodiscard]] inline convergence::ConvergenceSettings
+moldft_convergence_settings(const std::string& stage,
+                            const CalculationParameters& cp,
+                            std::size_t natom) {
+  using convergence::Group;
+  using convergence::Relation;
+  using convergence::SetBy;
+  const auto text
+      = [](double value) { return convergence::detail::scientific(value); };
+  convergence::ConvergenceSettings settings;
+  settings.stage = stage;
+  settings.application = "moldft";
+  settings.decider = cp.get<bool>(convergence::use_default_criteria_key)
+                         ? convergence::Decider::engine_check
+                         : convergence::Decider::requested_criteria;
+  settings.decider_set_by_user
+      = cp.is_user_defined(convergence::use_default_criteria_key);
+  const double thresh = cp.protocol().back();
+  const auto limits = madness::SCF::engine_check_limits(
+      cp.dconv(), thresh, natom, cp.get<bool>("conv_only_dens"));
+  const auto dconv_by
+      = cp.is_user_defined("dconv") ? SetBy::user : SetBy::engine_default;
+  const std::string effective
+      = "max(dconv " + text(cp.dconv()) + ", thresh " + text(thresh) + ")";
+  settings.metrics.push_back(
+      {Group::engine_check, "spin density change (max)", "dconv",
+       "density_change", "", "a0^(-3/2)", cp.dconv(), dconv_by,
+       Relation::less_than, limits.density,
+       effective + " x max(5, natom " + std::to_string(natom) + ")", "", ""});
+  if (limits.bsh_checked)
+    settings.metrics.push_back({Group::engine_check, "BSH residual (max)",
+                                "dconv", "bsh_residual", "", "dimensionless",
+                                cp.dconv(), dconv_by, Relation::less_than,
+                                limits.bsh, "5 x " + effective, "", ""});
+  else
+    settings.metrics.push_back({Group::engine_check, "BSH residual (max)",
+                                "conv_only_dens", "bsh_residual", "",
+                                "dimensionless", std::nullopt, SetBy::user,
+                                Relation::less_than, std::nullopt, "",
+                                "not checked: conv_only_dens", ""});
+
+  // Written targets (B8): one row each, reported or enforced by the switch.
+  struct Requested {
+    const char *name, *keyword, *measurement, *quantity, *units;
+    std::string engine_instead, unset_note;
+  };
+  const std::vector<Requested> requested = {
+      {"charge density change", "dconv", "charge_density_change", "",
+       "a0^(-3/2)",
+       "compares spin-density change against " + text(limits.density), ""},
+      {"BSH residual (max)", "accuracy.bsh_residual", "bsh_residual", "",
+       "dimensionless",
+       limits.bsh_checked ? "compares BSH residual against " + text(limits.bsh)
+                          : std::string("does not check the BSH residual"),
+       ""},
+      {"energy change", "econv", "energy_change", "", "hartree",
+       "has no energy term",
+       "engine default econv " + text(cp.econv()) + " is not a target (D8)"},
+      {"kinetic trace change", "accuracy.kinetic_trace_change",
+       "delta_kinetic_energy", "absolute_kinetic_trace_change", "hartree",
+       "has no kinetic term", ""}};
+  const auto targets = madness::SCF::requested_targets(cp);
+  for (const auto& row : requested) {
+    const bool written = targets.contains(row.measurement);
+    settings.metrics.push_back(
+        {Group::requested_criteria, row.name, row.keyword, row.measurement,
+         row.quantity, row.units,
+         written ? std::optional<double>(
+                       targets.at(row.measurement).at("value").get<double>())
+                 : std::nullopt,
+         written ? SetBy::user : SetBy::not_set, Relation::less_than_or_equal,
+         std::nullopt, "", written ? std::string() : row.unset_note,
+         row.engine_instead});
+  }
+
+  const auto per_rung = cp.get<std::vector<int>>("maxiter_per_rung");
+  settings.iteration_caps
+      = {per_rung.empty() ? std::vector<int>{cp.maxiter()} : per_rung,
+         cp.is_user_defined("maxiter") || !per_rung.empty()
+             ? SetBy::user
+             : SetBy::engine_default};
+  settings.warnings = convergence::unenforced_target_warnings(settings);
+  for (auto& warning : convergence::incomplete_request_warnings(
+           settings, {"charge_density_change", "bsh_residual"}))
+    settings.warnings.push_back(std::move(warning));
+  return settings;
 }
 
-// D8 with B8 engine mode: a written econv is judged on the energy change
-// measured on the saved orbitals (never on the econv a generation recorded),
-// and reported. The engine check decides, so an unmet econv is not enforceable
-// and does not make --continue resume: resuming would stop on the engine check
+// B8: every written target judged on the saved state, and whether this mode
+// enforces it. In engine mode an unmet target is reported, not enforced, and
+// does not make --continue resume: resuming would stop on the engine check
 // again at once (Adrian, 2026-10-21).
 [[nodiscard]] inline json
-energy_change_request_report(const json& saved_measurements,
-                             const CalculationParameters& parameters) {
+requested_criteria_report(const json& saved_measurements,
+                          const convergence::ConvergenceSettings& settings) {
   auto report = madness::evaluate_explicit_criteria(
-      saved_measurements, energy_change_target(parameters));
-  report["enforced"] = false;
-  const auto status = report.at("status").get<std::string>();
-  if (status != "not_requested" && status != "satisfied")
-    report["outcome"] = status + ", not enforceable in engine mode";
+      saved_measurements, convergence::requested_targets(settings));
+  const bool enforced
+      = settings.decider == convergence::Decider::requested_criteria;
+  report["enforced"] = enforced;
+  for (auto& criterion : report["criteria"].items()) {
+    const auto status = criterion.value().at("status").get<std::string>();
+    if (!enforced && status != "satisfied")
+      criterion.value()["outcome"]
+          = status + ", not enforceable in engine mode";
+  }
   return report;
+}
+
+// The saved-state measurements as end-of-stage outcomes (B9).
+[[nodiscard]] inline std::vector<convergence::MetricOutcome>
+saved_outcomes(const json& saved_measurements) {
+  std::vector<convergence::MetricOutcome> outcomes;
+  for (const auto& item : saved_measurements.items()) {
+    const auto& record = item.value();
+    const auto availability = record.value("availability", "unavailable");
+    outcomes.push_back(
+        {item.key(),
+         availability == "measured" && record.at("value").is_number()
+             ? std::optional<double>(record.at("value").get<double>())
+             : std::nullopt,
+         availability});
+  }
+  return outcomes;
 }
 
 namespace continuation = madness::scf_continuation;
@@ -109,6 +214,12 @@ class MoldftCheckpoint {
   std::optional<madness::SCF::IterationCheckpoint> comparison_;
   json previous_kinetic_blocks_ = json::object();
   json iteration_history_ = json::array();
+  // The stage's convergence settings (B9), built once by the runner and kept
+  // as an immutable copy: observe() is an engine callback and needs them at
+  // every iteration (A7: owned, explicit, never changed).
+  const convergence::ConvergenceSettings settings_;
+  // The reuse decision on --continue (B6, B8).
+  convergence::ReuseDecision reuse_;
   // Where this run started (B6) and the rung of the latest sample (B5).
   continuation::Continuation continuation_;
   bool resumed_by_plan_ = false;
@@ -135,8 +246,8 @@ class MoldftCheckpoint {
     const auto configured = numerical.value("parameters", json::object()).value("parameters", json::object());
     const bool has_progress_controls = configured.value("progress.window", 0) > 0;
     bool has_accuracy_controls = false;
-    for (const char* name : {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
-                             "accuracy.kinetic_trace_change"})
+    for (const char* name :
+         {"accuracy.bsh_residual", "accuracy.kinetic_trace_change"})
       has_accuracy_controls = has_accuracy_controls || configured.value(name, -1.0) >= 0.0;
     if (!metrics.contains("convergence_report")) {
       require(!has_progress_controls && !has_accuracy_controls,
@@ -334,10 +445,11 @@ public:
   std::size_t iterations = 0;
   std::string work = "solved";
 
-  MoldftCheckpoint(madness::World &world, const Stage &stage,
-                   const fs::path &directory, std::string run_id)
+  MoldftCheckpoint(madness::World& world, const Stage& stage,
+                   const fs::path& directory, std::string run_id,
+                   convergence::ConvergenceSettings settings)
       : world_(world), stage_(stage), store_(directory / "checkpoints"),
-        run_id_(std::move(run_id)) {}
+        run_id_(std::move(run_id)), settings_(std::move(settings)) {}
 
   // Validate the complete selected generation before the engine opens an
   // archive. A private copy lets the existing restart planner use its ordinary
@@ -360,21 +472,31 @@ public:
     require(latest_.numerical.at("representation") == "mo",
             "unsupported representation");
     const auto &cp = scf.param;
-    const auto accuracy_targets = madness::requested_accuracy_targets(cp, "a0^(-3/2)", "dimensionless", "hartree");
-    const auto saved_measurements = latest_.metrics.value("convergence_report", json::object())
-        .value("saved_state_validation", json::object()).value("measurements", json::object());
-    const auto requested_accuracy = madness::evaluate_explicit_criteria(saved_measurements, accuracy_targets);
-    const bool satisfied
-        = (accuracy_targets.empty()
-           || requested_accuracy.at("status") == "satisfied")
-          && cp.get<int>("diagnostic.iterations_per_rung") == 0
-          && latest_.stop_reason == "converged"
+    const auto report
+        = latest_.metrics.value("convergence_report", json::object());
+    const auto saved_measurements
+        = report.value("saved_state_validation", json::object())
+              .value("measurements", json::object());
+    const auto requested = madness::evaluate_explicit_criteria(
+        saved_measurements, convergence::requested_targets(settings_));
+    // The saved engine verdict (recorded since the switch; before it, a
+    // converged stop meant the engine check passed), for the current request.
+    const bool saved_engine_passed = report.value(
+        "engine_check_passed", latest_.stop_reason == "converged");
+    const bool engine_passes_now
+        = saved_engine_passed
           && latest_.numerical.at("threshold").get<double>()
                  <= cp.protocol().back()
           && latest_.numerical.at("k").get<int>()
                  == (cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k())
           && latest_.targets.at("effective_dconv").get<double>()
                  <= std::max(cp.dconv(), cp.protocol().back());
+    // B6/B8: the deciding check, judged from saved evidence. Forced
+    // diagnostic iterations always iterate.
+    reuse_ = convergence::decide_reuse(settings_, engine_passes_now, requested);
+    const bool satisfied
+        = reuse_.action == convergence::ReuseAction::load
+          && cp.get<int>("diagnostic.iterations_per_rung") == 0;
     // B6: the adapter, not the engine's restart planner, decides where to
     // continue: load, or resume at a rung matched by value with the
     // iterations it already used (Q6).
@@ -430,6 +552,8 @@ public:
               {"k", start.k}}},
             {"iterations_done_at_rung", continuation_.iterations_done},
             {"why", continuation_.why},
+            {"reuse_why", reuse_.why},
+            {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
             {"unmet", continuation_.unmet.empty() ? json(nullptr)
                                                   : json(continuation_.unmet)},
             {"summary", continuation::describe(continuation_, ladder)}};
@@ -531,13 +655,24 @@ public:
     evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(current_blocks, previous_kinetic_blocks_));
     evidence["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
     previous_kinetic_blocks_ = current_blocks;
-    iteration_history_.push_back({{"measurements", evidence}, {"kinetic_trace", metrics.at("kinetic_trace")},
-        {"occupation_weighted_physical_kinetic_energy", metrics.at("occupation_weighted_physical_kinetic_energy")},
-        {"explicit_accuracy", step.explicit_accuracy}, {"configured_progress", step.configured_progress}});
-    metrics["convergence_report"] = {{"schema", "madqc.convergence.v1"},
-        {"gate_policy", step.explicit_accuracy.value("status", "not_requested") == "not_requested"
-            ? "existing_engine" : "existing_engine_and_explicit_accuracy"},
-        {"explicit_accuracy", step.explicit_accuracy}, {"configured_progress", step.configured_progress}, {"diagnostic_iterations_per_rung", scf.param.get<int>("diagnostic.iterations_per_rung")}, {"measurements", evidence}, {"iteration_history", iteration_history_}};
+    iteration_history_.push_back(
+        {{"measurements", evidence},
+         {"kinetic_trace", metrics.at("kinetic_trace")},
+         {"occupation_weighted_physical_kinetic_energy",
+          metrics.at("occupation_weighted_physical_kinetic_energy")},
+         {"explicit_accuracy", step.explicit_accuracy},
+         {"configured_progress", step.configured_progress},
+         {"engine_check_passed", step.engine_check_passed}});
+    metrics["convergence_report"]
+        = {{"schema", "madqc.convergence.v1"},
+           {"decided_by", convergence::to_string(settings_.decider)},
+           {"engine_check_passed", step.engine_check_passed},
+           {"explicit_accuracy", step.explicit_accuracy},
+           {"configured_progress", step.configured_progress},
+           {"diagnostic_iterations_per_rung",
+            scf.param.get<int>("diagnostic.iterations_per_rung")},
+           {"measurements", evidence},
+           {"iteration_history", iteration_history_}};
     publish(scf, false, json::array(), metrics,
             {{"iteration", step.iteration},
              {"iterations_this_run", iterations},
@@ -641,10 +776,24 @@ public:
             {"k", scf.amo.at(0).k()}, {"energy", comparison_->comparison_energy},
             {"kinetic_energy", comparison_->comparison_kinetic},
             {"kinetic_trace", comparison_trace}} : json(nullptr)}};
-    const auto accuracy_targets = madness::requested_accuracy_targets(scf.param, "a0^(-3/2)", "dimensionless", "hartree");
-    const auto requested_accuracy = madness::evaluate_explicit_criteria(evidence, accuracy_targets);
-    metrics["convergence_report"]["saved_state_validation"]["explicit_accuracy"] = requested_accuracy;
-    if (!accuracy_targets.empty() && requested_accuracy.at("status") != "satisfied") converged = false;
+    const auto requested_accuracy = madness::evaluate_explicit_criteria(
+        evidence, convergence::requested_targets(settings_));
+    auto& report = metrics["convergence_report"];
+    report["saved_state_validation"]["explicit_accuracy"] = requested_accuracy;
+    // B8: the selected group decides. `engine_converged` is the engine's own
+    // verdict at the final rung; the written targets decide only when the
+    // final rung stopped on them and the saved state still meets them.
+    const bool engine_converged = converged;
+    const bool criteria_converged
+        = current_rung_.value("stop", "") == "converged"
+          && requested_accuracy.at("status") == "satisfied";
+    converged = convergence::converged(settings_.decider, engine_converged,
+                                       criteria_converged);
+    report["engine_check_passed"] = engine_converged;
+    report["decided_by"] = convergence::to_string(settings_.decider);
+    report["convergence_settings"] = convergence::to_json(settings_);
+    report["convergence_outcome"]
+        = convergence::outcome_to_json(settings_, saved_outcomes(evidence));
     json position = {{"phase", "final_properties_on_saved_orbitals"},
                      {"iterations_this_run", iterations}};
     if (!current_rung_.is_null())
@@ -653,6 +802,24 @@ public:
   }
 
 private:
+  // B5: which exit ended the stage. "unmet_requested_accuracy" is the one
+  // extra case of criteria mode: the final rung stopped on the written
+  // targets, but the saved orbitals no longer meet them.
+  [[nodiscard]] std::string stop_reason(bool converged, bool evaluated) const {
+    if (converged)
+      return "converged";
+    if (!evaluated)
+      return "in_progress";
+    const auto stop = current_rung_.is_null()
+                          ? std::string("iteration_limit")
+                          : current_rung_.value("stop", "iteration_limit");
+    if (stop == "stalled")
+      return "stalled";
+    if (stop == "converged")
+      return "unmet_requested_accuracy";
+    return "iteration_limit";
+  }
+
   void publish(const madness::SCF &scf, bool converged, json properties,
                const json &metrics, const json &position, bool evaluated) {
     namespace checkpoint = madness::checkpoint;
@@ -678,14 +845,9 @@ private:
                            madness::FunctionDefaults<3>::get_thresh())}};
     if (const auto econv = requested_econv(scf.param)) // D8: user-written only
       m.targets["econv"] = *econv;
-    m.targets["explicit_accuracy"] = madness::requested_accuracy_targets(scf.param, "a0^(-3/2)", "dimensionless", "hartree");
-    m.stop_reason = converged   ? "converged"
-                    : evaluated ? "iteration_limit"
-                                : "in_progress";
-    if (evaluated && !converged && !m.targets.at("explicit_accuracy").empty() &&
-        m.metrics.at("convergence_report").at("saved_state_validation")
-            .at("explicit_accuracy").at("status") != "satisfied")
-      m.stop_reason = "unmet_requested_accuracy";
+    m.targets["explicit_accuracy"] = convergence::requested_targets(settings_);
+    m.targets["decided_by"] = convergence::to_string(settings_.decider);
+    m.stop_reason = stop_reason(converged, evaluated);
     for (auto &p : properties)
       p["generation"] = m.generation;
     m.properties = properties;

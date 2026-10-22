@@ -1,10 +1,11 @@
 #pragma once
 
-#include <nlohmann/json.hpp>
 #include <cmath>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace madness {
 // Evaluate only explicitly supplied targets, with no universal threshold or
@@ -62,25 +63,38 @@ inline nlohmann::json evaluate_explicit_criteria(const nlohmann::json& measureme
 }
 // Numeric controls are opt-in. Sentinel defaults are never accuracy targets.
 // Units belong to the application's actual density/amplitude definitions.
+// Only a value the user wrote is a target (B3, D8). The density and energy
+// targets come from the keywords the application names: SCF uses its own
+// dconv and econv (DESIGN B8, "written values are targets"); an empty
+// energy keyword means the application has no energy-change target.
 template <typename Parameters>
 nlohmann::json requested_accuracy_targets(const Parameters& parameters,
-    const std::string& density_units, const std::string& bsh_units,
-    const std::string& kinetic_units) {
+                                          const std::string& density_units,
+                                          const std::string& bsh_units,
+                                          const std::string& kinetic_units,
+                                          const std::string& density_keyword,
+                                          const std::string& energy_keyword) {
     using json = nlohmann::json;
+    struct Definition {
+        std::string keyword, metric, units;
+    };
+    std::vector<Definition> definitions
+        = {{density_keyword, "charge_density_change", density_units},
+           {"accuracy.bsh_residual", "bsh_residual", bsh_units},
+           {"accuracy.kinetic_trace_change", "delta_kinetic_energy",
+            kinetic_units}};
+    if (!energy_keyword.empty())
+        definitions.push_back({energy_keyword, "energy_change", "hartree"});
     json targets = json::object();
-    const json definitions = {
-        {"density_change", {{"metric", "charge_density_change"}, {"units", density_units}}},
-        {"bsh_residual", {{"metric", "bsh_residual"}, {"units", bsh_units}}},
-        {"energy_change", {{"metric", "energy_change"}, {"units", "hartree"}}},
-        {"kinetic_trace_change", {{"metric", "delta_kinetic_energy"}, {"units", kinetic_units}}}};
-    for (const auto& definition : definitions.items()) {
-        const auto name = "accuracy." + definition.key();
-        if (!parameters.is_user_defined(name)) continue;
-        const auto value = parameters.template get<double>(name);
+    for (const auto& definition : definitions) {
+        if (!parameters.is_user_defined(definition.keyword))
+            continue;
+        const auto value = parameters.template get<double>(definition.keyword);
         if (!std::isfinite(value) || value < 0.0)
-            throw std::invalid_argument(name + " must be finite and nonnegative");
-        targets[definition.value().at("metric").template get<std::string>()] =
-            {{"value", value}, {"units", definition.value().at("units")}};
+            throw std::invalid_argument(definition.keyword
+                                        + " must be finite and nonnegative");
+        targets[definition.metric]
+            = {{"value", value}, {"units", definition.units}};
     }
     if (targets.contains("delta_kinetic_energy"))
         targets["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";

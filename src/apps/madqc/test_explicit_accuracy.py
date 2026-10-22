@@ -19,9 +19,12 @@ work = Path(tempfile.mkdtemp(prefix='explicit-accuracy-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 binary = str(Path(args.binary).resolve())
 deck = (Path(args.source) / 'named_h2.in').read_text().split('molresponse optical')[0]
-# Deliberately loose experimental controls test opt-in plumbing, not calibration.
-controls = ''.join('  accuracy.' + name + ' 1000\n' for name in
-                   ('density_change', 'bsh_residual', 'energy_change', 'kinetic_trace_change'))
+# Deliberately loose experimental targets test opt-in plumbing, not
+# calibration. dconv and econv are the density- and energy-change targets
+# (DESIGN B8); here the written targets decide.
+deck = deck.replace('dconv 1e-5', 'dconv 1000').replace('econv 1e-6', 'econv 1000')
+controls = '  convergence.use_default_criteria false\n' + ''.join(
+    '  accuracy.' + name + ' 1000\n' for name in ('bsh_residual', 'kinetic_trace_change'))
 deck = deck.replace('moldft gs\n', 'moldft gs\n' + controls)
 env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
@@ -47,7 +50,7 @@ def latest(root):
 fresh = work / 'Fresh'
 result = run('fresh', fresh)
 report = result['convergence_report']
-assert report['gate_policy'] == 'existing_engine_and_explicit_accuracy'
+assert report['decided_by'] == 'requested_criteria'
 assert report['requested_accuracy']['status'] == 'satisfied'
 assert len(report['requested_accuracy']['criteria']) == 4
 assert 'charge_density_change' in report['requested_accuracy']['criteria']
@@ -66,6 +69,7 @@ for label, extra, base in (
     store, pointer, _ = latest(root)
     run(label, root, text=base.replace('moldft gs\n', 'moldft gs\n' + extra), resume=True, success=False)
     expected = ('progress.window must be nonnegative' if label == 'negative-window'
+                else 'progress.* stall rules act on your written targets' if label == 'missing-targets'
                 else 'progress requires explicit accuracy targets')
     assert expected in (work / (label + '.log')).read_text()
     assert (store / 'latest').read_text() == pointer
@@ -112,9 +116,11 @@ for location in ('input_phase', 'history_phase', 'saved_phase', 'accuracy_flag',
     assert 'invalid ground-state measurement' in (work / ('invalid-' + location + '.log')).read_text()
     assert (store / 'latest').read_text() == pointer
 
-# Loose explicit criteria cannot turn an unfinished engine into convergence.
+# When the engine check decides, loose written targets are only reported:
+# they cannot turn an unfinished engine into convergence (B8).
 root = work / 'EngineUnmet'
-short = re.sub(r'(?m)^\s*maxiter\s+\d+', '  maxiter 1', deck)
+short = re.sub(r'(?m)^\s*maxiter\s+\d+', '  maxiter 1',
+               deck.replace('  convergence.use_default_criteria false\n', ''))
 result = run('engine-unmet', root, text=short, success=False)
 assert result['status'] == 'unconverged'
 assert result['convergence_report']['requested_accuracy']['status'] == 'satisfied'
@@ -137,6 +143,6 @@ assert result['convergence_report']['requested_accuracy']['status'] == 'unmet'
 _, pointer, manifest_file = latest(root)
 assert pointer != original_pointer
 manifest = json.loads(manifest_file.read_text())
-assert manifest['stop_reason'] == 'unmet_requested_accuracy'
+assert manifest['stop_reason'] == 'iteration_limit'  # B5: the cap ended it
 assert manifest['archives']  # usable orbitals retained in an immutable generation
 print('explicit accuracy acceptance passed', flush=True)

@@ -16,7 +16,9 @@ inline nlohmann::json ground_convergence_report(const nlohmann::json& metrics,
                                                 bool converged) {
   auto report = metrics.value("convergence_report", nlohmann::json::object());
   report["schema"] = "madqc.convergence.v1";
-  if (!report.contains("gate_policy")) report["gate_policy"] = "existing_engine";
+  // Generations from before the switch were decided by the engine check.
+  if (!report.contains("decided_by"))
+    report["decided_by"] = "engine_check";
   report["state_id"] = state_id;
   report["outcome"] = converged ? "converged" : "unfinished";
   if (report.contains("saved_state_validation"))

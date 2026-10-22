@@ -11,9 +11,11 @@ template<class Parameters>
 nlohmann::json fd_requested_accuracy_targets(const Parameters& parameters) {
   if (parameters.is_user_defined("accuracy.energy_change"))
     throw std::invalid_argument("response accuracy.energy_change is not applicable: no local driven-response energy");
-  auto targets = madness::requested_accuracy_targets(parameters,
-      "kernel_induced_density_L2_atomic_units", "response_amplitude_L2_atomic_units",
-      "hartree_times_response_amplitude_scale_squared");
+  auto targets = madness::requested_accuracy_targets(
+      parameters, "kernel_induced_density_L2_atomic_units",
+      "response_amplitude_L2_atomic_units",
+      "hartree_times_response_amplitude_scale_squared",
+      "accuracy.density_change", "");
   if (targets.contains("bsh_residual"))
     targets["bsh_residual"]["quantity"] = "maximum_raw_fixed_point_function_L2";
   if (targets.contains("charge_density_change"))
