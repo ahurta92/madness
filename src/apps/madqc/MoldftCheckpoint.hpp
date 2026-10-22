@@ -50,6 +50,52 @@ energy_change_request_report(const json& saved_measurements,
   return report;
 }
 
+namespace continuation = madness::scf_continuation;
+
+// B5/B6: the requested protocol ladder, each rung identified by value and
+// given its iteration cap (maxiter, or one maxiter per rung).
+[[nodiscard]] inline std::vector<continuation::RequestedRung>
+requested_ladder(const CalculationParameters& parameters) {
+  const auto protocol = parameters.protocol();
+  const auto per_rung = parameters.get<std::vector<int>>("maxiter_per_rung");
+  std::vector<continuation::RequestedRung> ladder;
+  for (std::size_t i = 0; i < protocol.size(); ++i) {
+    const int k
+        = parameters.k() == -1 ? protocol_k(protocol[i]) : parameters.k();
+    const int cap = per_rung.empty()       ? parameters.maxiter()
+                    : per_rung.size() == 1 ? per_rung.front()
+                                           : per_rung.at(i);
+    ladder.push_back({{protocol[i], k}, cap});
+  }
+  return ladder;
+}
+
+// What a saved generation says about its rung (B6). Generations written
+// before the rung record existed are read from their representation and stop
+// reason, with no iterations counted.
+[[nodiscard]] inline continuation::SavedRung
+saved_rung(const madness::checkpoint::Manifest& manifest) {
+  if (manifest.position.contains("rung")) {
+    const auto& rung = manifest.position.at("rung");
+    return {{rung.at("thresh").get<double>(), rung.at("k").get<int>()},
+            rung.at("iterations_at_rung").get<int>(),
+            continuation::rung_stop_from_string(
+                rung.at("stop").get<std::string>())};
+  }
+  const auto phase = manifest.position.value("phase", "");
+  const bool finished = manifest.stop_reason == "converged"
+                        || phase == "after_final_rotation"
+                        || phase == "final_properties_on_saved_orbitals";
+  const auto stop = manifest.stop_reason == "converged"
+                        ? continuation::RungStop::converged
+                    : finished ? continuation::RungStop::iteration_limit
+                               : continuation::RungStop::in_progress;
+  return {{manifest.numerical.at("threshold").get<double>(),
+           manifest.numerical.at("k").get<int>()},
+          0,
+          stop};
+}
+
 // Application policy lives here; StageCheckpoint only checks physical storage.
 class MoldftCheckpoint {
   madness::World &world_;
@@ -63,6 +109,10 @@ class MoldftCheckpoint {
   std::optional<madness::SCF::IterationCheckpoint> comparison_;
   json previous_kinetic_blocks_ = json::object();
   json iteration_history_ = json::array();
+  // Where this run started (B6) and the rung of the latest sample (B5).
+  continuation::Continuation continuation_;
+  bool resumed_by_plan_ = false;
+  json current_rung_ = nullptr;
   static json kinetic_blocks(const madness::FunctionResidualBlocks& values) {
     return madness::function_residual_record(values).at("blocks");
   }
@@ -240,6 +290,29 @@ class MoldftCheckpoint {
       validate(report.at("saved_state_validation").at("measurements"));
   }
 
+  // B5/B6: the rung a sample belongs to, identified by value, with every
+  // iteration spent there, including earlier --continue runs, and how it
+  // ended (on the final-rotation sample).
+  [[nodiscard]] json
+  rung_record(const madness::SCF& scf,
+              const madness::SCF::IterationCheckpoint& step) const {
+    const continuation::Rung rung{step.threshold, scf.amo.at(0).k()};
+    const auto ladder = requested_ladder(scf.param);
+    std::size_t index = ladder.size();
+    for (std::size_t i = 0; i < ladder.size() && index == ladder.size(); ++i)
+      if (continuation::same_rung(ladder[i].rung, rung))
+        index = i;
+    require(index < ladder.size(), "sample rung is not in the protocol");
+    const int earlier = resumed_by_plan_ && index == continuation_.start_rung
+                            ? continuation_.iterations_done
+                            : 0;
+    return {{"index", index + 1},
+            {"thresh", rung.thresh},
+            {"k", rung.k},
+            {"iterations_at_rung", earlier + step.iteration + 1},
+            {"stop", continuation::to_string(step.rung_stop)}};
+  }
+
   static json physical(const madness::SCF &scf) {
     auto molecule = scf.molecule.to_json();
     // File provenance changes each attempt and is not molecular identity.
@@ -302,7 +375,14 @@ public:
                  == (cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k())
           && latest_.targets.at("effective_dconv").get<double>()
                  <= std::max(cp.dconv(), cp.protocol().back());
-    work = satisfied ? "loaded" : "resumed";
+    // B6: the adapter, not the engine's restart planner, decides where to
+    // continue: load, or resume at a rung matched by value with the
+    // iterations it already used (Q6).
+    const auto ladder = requested_ladder(cp);
+    continuation_ = continuation::plan_scf_continuation(saved_rung(latest_),
+                                                        ladder, satisfied);
+    const bool load = continuation_.action == continuation::Action::load;
+    work = load ? "loaded" : "resumed";
     madness::checkpoint::detail::on_root(world_, [&] {
       validate_measurements(latest_.metrics, latest_.stage, latest_.numerical);
       const auto directory = store_ / latest_.generation;
@@ -313,19 +393,54 @@ public:
       }
       return std::string{};
     });
-    // Explicit iteration cannot silently fall back to an atomic guess.
-    scf.param.set_user_defined_value(
-        "restart", satisfied ? std::string("auto") : std::string("iterate"));
+    // Explicit iteration cannot silently fall back to an atomic guess; a
+    // loaded state is read without iterating, whatever its convergence claim.
+    scf.param.set_user_defined_value("restart", load ? std::string("read_only")
+                                                     : std::string("iterate"));
+    if (!load) {
+      scf.param.set_user_defined_value(
+          "restart.start_rung", static_cast<int>(continuation_.start_rung));
+      scf.param.set_user_defined_value("restart.iterations_done",
+                                       continuation_.iterations_done);
+      resumed_by_plan_ = true;
+    }
     has_latest_ = true;
   }
 
   const madness::checkpoint::Manifest &latest() const { return latest_; }
+
+  /// Loaded on --continue although the request is unmet (B5: the final
+  /// rung used its iteration cap).
+  [[nodiscard]] bool loaded_unmet() const {
+    return continuation_.action == continuation::Action::load
+           && !continuation_.unmet.empty();
+  }
+
+  /// What --continue did and why (B6), for results.json and the manifest.
+  [[nodiscard]] json
+  continuation_record(const CalculationParameters& parameters) const {
+    const auto ladder = requested_ladder(parameters);
+    const auto& start = ladder.at(continuation_.start_rung).rung;
+    return {{"action", continuation_.action == continuation::Action::load
+                           ? "loaded"
+                           : "resumed"},
+            {"rung",
+             {{"index", continuation_.start_rung + 1},
+              {"thresh", start.thresh},
+              {"k", start.k}}},
+            {"iterations_done_at_rung", continuation_.iterations_done},
+            {"why", continuation_.why},
+            {"unmet", continuation_.unmet.empty() ? json(nullptr)
+                                                  : json(continuation_.unmet)},
+            {"summary", continuation::describe(continuation_, ladder)}};
+  }
   fs::path prefix() const { return store_ / latest_.generation / "state"; }
 
   void observe(const madness::SCF &scf,
                const madness::SCF::IterationCheckpoint &step) {
     ++iterations;
     comparison_ = step;
+    current_rung_ = rung_record(scf, step);
     json metrics = {
         {"energy",
          {{"value", step.input_energy},
@@ -427,7 +542,8 @@ public:
             {{"iteration", step.iteration},
              {"iterations_this_run", iterations},
              {"phase", step.final_rotation ? "after_final_rotation"
-                                           : "after_orbital_update"}},
+                                           : "after_orbital_update"},
+             {"rung", current_rung_}},
             false);
   }
 
@@ -529,10 +645,11 @@ public:
     const auto requested_accuracy = madness::evaluate_explicit_criteria(evidence, accuracy_targets);
     metrics["convergence_report"]["saved_state_validation"]["explicit_accuracy"] = requested_accuracy;
     if (!accuracy_targets.empty() && requested_accuracy.at("status") != "satisfied") converged = false;
-    publish(scf, converged, properties, metrics,
-            {{"phase", "final_properties_on_saved_orbitals"},
-             {"iterations_this_run", iterations}},
-            true);
+    json position = {{"phase", "final_properties_on_saved_orbitals"},
+                     {"iterations_this_run", iterations}};
+    if (!current_rung_.is_null())
+      position["rung"] = current_rung_;
+    publish(scf, converged, properties, metrics, position, true);
   }
 
 private:

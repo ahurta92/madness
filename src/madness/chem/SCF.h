@@ -64,8 +64,10 @@
 #include<madness/chem/dispersion.h>
 #include<madness/chem/QCPropertyInterface.h>
 
+#include <madness/chem/ScfContinuation.h>
 #include <madness/tensor/tensor_json.hpp>
 #include <memory>
+#include <optional>
 
 namespace madness {
 
@@ -406,6 +408,8 @@ public:
         double density_charge = 0.0, density_spin = 0.0;
         FunctionResidualBlocks input_kinetic_diagonal, comparison_kinetic_diagonal;
         nlohmann::json explicit_accuracy, configured_progress;
+        // How this rung ended, on the final-rotation sample only (B5).
+        scf_continuation::RungStop rung_stop = scf_continuation::RungStop::in_progress;
     };
     struct RestrictedHFEvaluation {
         functionT alpha_density;
@@ -651,7 +655,10 @@ public:
     void orthonormalize(World& world, vecfuncT& amo_new, int nocc) const;
 
     // For given protocol, solve the DFT/HF/response equations
-    void solve(World& world);
+    /// Solve at the current protocol rung. `iteration_cap`, when given, is the
+    /// number of iterations left at this rung (named stages, DESIGN B5);
+    /// otherwise maxiter applies.
+    void solve(World& world, std::optional<int> iteration_cap = std::nullopt);
 
     void output_calc_info_schema() const;
 
@@ -678,6 +685,21 @@ public:
 
     bool provides_gradient() const { return true; }
 
+    /// Named stages (DESIGN B5): iterations left at rung `proto`, from
+    /// maxiter (one number or one per rung) minus what earlier --continue runs
+    /// already spent at the starting rung. Nothing for the unnamed path, which
+    /// keeps maxiter per rung exactly as before.
+    std::optional<int> named_rung_cap(std::size_t proto, int start_rung) const {
+        const auto per_rung = calc.param.get<std::vector<int>>("maxiter_per_rung");
+        if (per_rung.empty() and start_rung < 0) return std::nullopt;
+        const int cap = per_rung.empty() ? calc.param.maxiter()
+                        : per_rung.size() == 1 ? per_rung.front()
+                                               : per_rung.at(proto);
+        const int done = int(proto) == start_rung
+                         ? calc.param.get<int>("restart.iterations_done") : 0;
+        return cap - done;
+    }
+
     double value(const Tensor<double>& x) {
         for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
             MADNESS_CHECK_THROW(!calc.param.is_user_defined(std::string("accuracy.") + metric) ||
@@ -699,6 +721,19 @@ public:
         RestartPlan plan = make_restart_plan(world, restart_mode_from_string(calc.param.restart()),
                 calc.param, calc.molecule, calc.restart_representation,
                 RestartCapabilities::all(), calc.restart_ncf);
+
+        // Named stages (DESIGN B6, Q6): on --continue the stage adapter decides
+        // the starting rung from the saved generation and passes it here; the
+        // restart planner still picks the orbital source, not the rung.
+        const int adapter_start_rung = calc.param.get<int>("restart.start_rung");
+        if (adapter_start_rung >= 0) {
+            MADNESS_CHECK_THROW(std::size_t(adapter_start_rung) < calc.param.protocol().size()
+                                and plan.source == RestartSource::restartdata,
+                                "restart.start_rung needs a restartdata archive and a rung of the protocol");
+            plan.protocol_start = adapter_start_rung;
+            plan.iterate = true;
+            plan.why = "starting rung chosen by the named-stage adapter";
+        }
 
         // set the target basis BEFORE reading, so load_mos reprojects straight
         // into the rung we are about to iterate at rather than into whatever k
@@ -841,6 +876,8 @@ public:
                     calc.current_energy = plan.stale_energy;
                     calc.solve_virtuals(world);
                 }
+                else if (const auto cap = named_rung_cap(proto, adapter_start_rung))
+                    calc.solve(world, cap);
                 else calc.solve(world);
 
                 if (calc.param.save())

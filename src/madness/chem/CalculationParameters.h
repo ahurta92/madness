@@ -97,6 +97,15 @@ struct CalculationParameters : public QCCalculationParametersBase {
 		initialize<std::vector<double> >("bocc",std::vector<double>(),"explicit beta occupations (0 or 1) by orbital index within the occupied span; a 0 is a hole");
 		initialize<int>   ("nopen",0,"number of unpaired electrons = nalpha-nbeta");
 		initialize<int>   ("maxiter",25,"maximum number of iterations");
+        // Named stages only (DESIGN B5, B6). A deck writes "maxiter [30, 10]";
+        // the parser stores the list here. The two restart.* values are set by
+        // the stage adapter on --continue, never by a deck.
+        initialize<std::vector<int>>("maxiter_per_rung", std::vector<int>(),
+            "Per-rung iteration caps (named stages); empty: maxiter at every rung");
+        initialize<int>("restart.start_rung", -1,
+            "Protocol rung index the stage adapter chose on --continue; -1: the restart planner chooses");
+        initialize<int>("restart.iterations_done", 0,
+            "Iterations already spent at restart.start_rung in earlier runs; they count toward its cap");
         initialize<int>("diagnostic.iterations_per_rung", 0,
                         "Explicit fixed iteration count per supplied rung; zero disables diagnostics");
         initialize<int>("progress.window", 0, "Explicit progress lookback; zero disables stall exits");

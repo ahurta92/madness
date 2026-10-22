@@ -126,7 +126,10 @@ shutil.copytree(fresh, root)
 _, original_pointer, _ = latest(root)
 tight = deck.replace('accuracy.kinetic_trace_change 1000', 'accuracy.kinetic_trace_change 0')
 # No universal stopping tolerance is inferred: exact-zero is deliberately unmet.
-tight = re.sub(r'(?m)^\s*maxiter\s+\d+', '  maxiter 3', tight)
+# maxiter counts every iteration at a rung across runs (B5): allow three more
+# than the saved state already spent at its rung.
+spent = json.loads(latest(root)[2].read_text())['position']['rung']['iterations_at_rung']
+tight = re.sub(r'(?m)^\s*maxiter\s+\d+', '  maxiter %d' % (spent + 3), tight)
 result = run('tightened', root, text=tight, resume=True, success=False)
 assert result['work'] == 'resumed' and result['iterations_this_run'] > 0
 assert result['status'] == 'unconverged'

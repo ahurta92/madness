@@ -237,7 +237,17 @@ inline std::vector<Stage> parse(madness::World &world,
       const auto k = key(line.text);
       if (!seen.insert(k).second)
         fail(line, "duplicate parameter " + k);
-      if (controls.parameter_exists(k))
+      if (k == "maxiter" && line.text.find('[') != std::string::npos) {
+        // B5: "maxiter [30, 10]" gives each rung its own cap (moldft only).
+        if (b.kind != "moldft")
+          fail(line, "a per-rung maxiter list is supported for moldft only "
+                     "(molresponse follows with the reuse planner); "
+                     "give one number");
+        read_value(world, cp,
+                   {line.number,
+                    "maxiter_per_rung"
+                        + line.text.substr(std::string("maxiter").size())});
+      } else if (controls.parameter_exists(k))
         read_value(world, controls, line);
       else if (k == "protocol" || (b.kind == "moldft" && scf_keys.count(k)))
         read_value(world, cp, line);
@@ -360,6 +370,15 @@ inline std::vector<Stage> parse(madness::World &world,
 
     // Derive electron counts/defaults, then apply the shared stage checks.
     valid_protocol(cp.protocol());
+    const auto per_rung = cp.get<std::vector<int>>("maxiter_per_rung");
+    if (b.kind == "moldft" && !per_rung.empty()
+        && (per_rung.size() != 1 && per_rung.size() != cp.protocol().size()))
+      throw std::runtime_error("maxiter list for " + b.name
+                               + " needs one number or one per protocol rung");
+    for (int cap : per_rung)
+      if (cap <= 0)
+        throw std::runtime_error("maxiter values must be positive in "
+                                 + b.name);
     if (!std::isfinite(cp.dconv()) || cp.dconv() <= 0 || cp.maxiter() <= 0)
       throw std::runtime_error(
           "positive finite dconv and positive maxiter required");

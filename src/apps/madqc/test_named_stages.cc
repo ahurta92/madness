@@ -101,6 +101,28 @@ int main(int argc, char** argv) {
                 == "unavailable",
             "missing evidence does not meet a request");
     }
+    // B5: maxiter takes one number or one per rung (moldft only).
+    try {
+      auto capped = gs;
+      capped.replace(capped.find(" dconv 1e-5\n"), 0, " maxiter [30, 10]\n");
+      const auto stages = named_stages::parse(world, geometry + capped);
+      check(stages[0].params.get<CalculationParameters>().get<std::vector<int>>(
+                "maxiter_per_rung")
+                == std::vector<int>{30, 10},
+            "per-rung maxiter list is kept per rung");
+    } catch (const std::exception& e) {
+      check(false, e.what());
+    }
+    auto wrong_length = gs;
+    wrong_length.replace(wrong_length.find(" dconv 1e-5\n"), 0,
+                         " maxiter [30, 10, 5]\n");
+    rejects(geometry + wrong_length, "one per protocol rung");
+    auto response_list = response;
+    response_list.replace(response_list.find(" dconv 2e-4\n"), 0,
+                          " maxiter [30]\n");
+    rejects(geometry + gs + response_list, "moldft only");
+    rejects(geometry + "moldft bad\n molecule H2\n restart.start_rung 1\nend\n",
+            "restart.start_rung");
     world.gop.sum(failures);
     if (world.rank() == 0) std::cout << "named-stage failures: " << failures << '\n';
     madness::finalize();

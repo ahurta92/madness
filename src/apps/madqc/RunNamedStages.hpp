@@ -206,7 +206,10 @@ inline bool run_if_named(madness::World &world,
                       std::max(cp.dconv(), cp.protocol().back());
       checkpoint.finish(*scf, converged);
       const auto &saved = checkpoint.latest();
-      converged = saved.stop_reason == "converged";
+      // A state loaded with its cap used up and the request unmet is not
+      // converged for this request, whatever it was saved as (B5).
+      converged
+          = saved.stop_reason == "converged" && !checkpoint.loaded_unmet();
       state_id = saved.generation;
       state_ids.emplace(stage.name, state_id);
       reference_prefixes.emplace(stage.name, checkpoint.prefix());
@@ -216,6 +219,13 @@ inline bool run_if_named(madness::World &world,
       result["work"] = checkpoint.work;
       result["iterations_this_run"] = checkpoint.iterations;
       result["acceleration_history"] = continuing ? "reset" : "fresh";
+      if (continuing) {
+        // B6: what --continue did and why.
+        result["continuation"] = checkpoint.continuation_record(cp);
+        if (world.rank() == 0)
+          madness::print("stage", stage.name, "continuation:",
+                         result["continuation"]["summary"].get<std::string>());
+      }
       result["checkpoint_metrics"] = saved.metrics;
       result["convergence_report"] = ground_convergence_report(saved.metrics, state_id, converged);
       const auto requested_targets = madness::requested_accuracy_targets(cp, "a0^(-3/2)", "dimensionless", "hartree");

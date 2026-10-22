@@ -2791,7 +2791,7 @@ void SCF::validate_progress_controls() const {
 }
 
 // For given protocol, solve the DFT/HF/response equations
-void SCF::solve(World& world) {
+void SCF::solve(World& world, std::optional<int> iteration_cap) {
     PROFILE_MEMBER_FUNC(SCF);
     // Loading can restore a prior convergence claim even when the restart plan
     // requires iteration. Once we change the orbitals, that claim is stale.
@@ -2834,7 +2834,13 @@ void SCF::solve(World& world) {
     json progress_history = json::array();
     const int diagnostic_iterations = param.get<int>("diagnostic.iterations_per_rung");
     MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
-    const int iteration_limit = diagnostic_iterations ? diagnostic_iterations : param.maxiter();
+    // Named stages pass the iterations left at this rung (B5: the cap counts
+    // every iteration at a rung, across --continue runs); otherwise maxiter.
+    MADNESS_CHECK_THROW(!iteration_cap || *iteration_cap > 0,
+                        "SCF::solve: the iteration cap for this rung is used up");
+    const int iteration_limit = diagnostic_iterations ? diagnostic_iterations
+                                : iteration_cap       ? *iteration_cap
+                                                      : param.maxiter();
     if (diagnostic_iterations) {
         converged_for_thresh = 1.e10;
         converged_for_dconv = 1.e10;
@@ -3270,7 +3276,10 @@ void SCF::solve(World& world) {
                 if (checkpoint_observer)
                     checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                         etot, da, db, bsh_residual, iter > 0, true, ekinetic, energy_change, kinetic_change,
-                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy, configured_progress});
+                        comparison_alpha, comparison_beta, comparison_energy, comparison_kinetic, iter - 1, function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, comparison_kinetic_diagonal, explicit_accuracy, configured_progress,
+                        converged ? scf_continuation::RungStop::converged
+                        : stalled ? scf_continuation::RungStop::stalled
+                                  : scf_continuation::RungStop::iteration_limit});
                 break;
             }
 
@@ -3285,7 +3294,8 @@ void SCF::solve(World& world) {
         if (checkpoint_observer)
             checkpoint_observer(world, *this, {iter, FunctionDefaults<3>::get_thresh(),
                 etot, da, db, previous_bsh_residual, iter > 0, false, ekinetic, energy_change, kinetic_change,
-                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy, configured_progress});
+                arho, brho, etot, ekinetic, iter, previous_function_residuals, density_changes.charge, density_changes.spin, input_kinetic_diagonal, input_kinetic_diagonal, explicit_accuracy, configured_progress,
+                scf_continuation::RungStop::in_progress});
 
     }
     // save the converged fock matix

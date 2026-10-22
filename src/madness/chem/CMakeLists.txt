@@ -223,6 +223,8 @@ if(BUILD_TESTING)
     add_mpi_tests(chem test_stage_checkpoint "2" "MADworld" "unittests;short")
     set_tests_properties(madness/test/chem/test_stage_checkpoint_mpi2/run PROPERTIES TIMEOUT 60)
   endif()
+  # Pure continuation planning for named moldft stages (DESIGN B5, B6): no MPI, no files.
+  add_unittests(chem "test_scf_continuation.cc" "MADworld" "unittests;short")
   # the rotating operand only moves between ranks, so the distributed path needs more than one
   add_mpi_tests(chem test_exchange_asymmetric "2" "MADchem;MADgtest" "unittests;short")
   add_unittests(chem "${CHEM_TEST_SOURCES_LONG}" "MADchem;MADgtest" "unittests;long")
