@@ -37,7 +37,16 @@ int main(int argc, char** argv) {
     rejects(geometry + "nemo foo\nend\n", "unsupported stage");
     rejects(geometry + response + gs, "reference");
     rejects(geometry + gs + "molresponse bad\n reference GS\n maxsub 4\nend\n", "maxsub");
-    rejects(geometry + gs + "molresponse bad\n reference absent\nend\n", "reference");
+    rejects(geometry + gs + "molresponse bad\nend\n", "reference");
+    rejects(geometry + gs + "molresponse bad\n reference H2\nend\n", "reference");
+    // DESIGN A1: a stage outside the deck is read from its published generation.
+    try {
+        auto alone = response;
+        alone.replace(alone.find("GS"), 2, "outside");
+        const auto stages = named_stages::parse(world, alone);
+        check(stages.size() == 1 && stages[0].reference == "outside", "reference outside the deck");
+        check(stages[0].params.get<Molecule>().natom() == 0, "nothing copied from a reference");
+    } catch (const std::exception& e) { check(false, e.what()); }
     rejects(geometry + "moldft bad\n molecule absent\nend\n", "molecule");
     rejects(geometry + "moldft ../bad\nend\n", "name");
     rejects(geometry + "moldft bad\n molecule H2\n dconv 2e-4junk\nend\n", "line");

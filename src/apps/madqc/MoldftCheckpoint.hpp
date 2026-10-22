@@ -424,6 +424,35 @@ class MoldftCheckpoint {
             {"stop", continuation::to_string(step.rung_stop)}};
   }
 
+  // DESIGN A1: everything a consuming stage needs about this ground state,
+  // besides the orbital archive, so it never reads a live engine object. The
+  // molecule is stored exactly as the engine used it (bohr, already
+  // oriented), so rebuilding it gives the same coordinates bit for bit.
+  static json consumer_context(const madness::SCF& scf) {
+    json molecule = {{"symbols", json::array()}, {"geometry", json::array()}};
+    molecule["parameters"] = scf.molecule.parameters.to_json()["parameters"];
+    molecule["parameters"]["units"] = "atomic";
+    molecule["parameters"]["no_orient"] = true;
+    // File provenance changes each attempt and is not molecular identity.
+    molecule["parameters"].erase("source_name");
+    molecule["parameters"].erase("source_type");
+    for (std::size_t i = 0; i < scf.molecule.natom(); ++i) {
+      const auto& atom = scf.molecule.get_atom(i);
+      molecule["symbols"].push_back(
+          madness::get_atomic_data(atom.atomic_number).symbol);
+      molecule["geometry"].push_back({atom.x, atom.y, atom.z});
+    }
+    return {{"schema", "madqc.moldft.consumer_context.v1"},
+            {"molecule", molecule},
+            {"charge", scf.param.charge()},
+            {"multiplicity", scf.param.nalpha() - scf.param.nbeta() + 1},
+            {"L", scf.param.L()},
+            {"functional", scf.param.xc()},
+            {"spin_restricted", scf.param.spin_restricted()},
+            {"thresh", madness::FunctionDefaults<3>::get_thresh()},
+            {"k", madness::FunctionDefaults<3>::get_k()}};
+  }
+
   static json physical(const madness::SCF &scf) {
     auto molecule = scf.molecule.to_json();
     // File provenance changes each attempt and is not molecular identity.
@@ -832,7 +861,8 @@ private:
                    {"k", madness::FunctionDefaults<3>::get_k()},
                    {"representation", "mo"},
                    {"protocol", scf.param.protocol()},
-                   {"parameters", scf.param.to_json()}};
+                   {"parameters", scf.param.to_json()},
+                   {"consumer_context", consumer_context(scf)}};
     m.working_orbitals = {{"state_id", m.generation},
                           {"ordering", "archive_order"}};
     m.position = position;

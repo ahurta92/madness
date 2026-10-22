@@ -12,15 +12,23 @@ The ground stage requests HF energy and dipole; the response stage requests
 example numerical settings, not new solver defaults.
 
 Named stages run in file order. Each `moldft` names an earlier molecule, and
-each `molresponse` names an earlier `moldft` reference. Names are case-sensitive,
+each `molresponse` names its `moldft` reference: an earlier stage of the deck,
+or a stage outside the deck whose published generation already exists in the
+output directory (run it there with `--continue`). Names are case-sensitive,
 start with a letter, and otherwise contain letters, digits, `_`, or `-`.
 All names must be unique. Each block ends with `end`; nested blocks are unsupported.
 The complete deck is checked before any stage starts.
 
 Every stage has its own typed parameters and directory. Two response stages
 can reference the same ground stage while requesting different frequencies
-and numerical settings. Geometry and the Hamiltonian come from that reference;
-response `protocol`, `dconv`, and `maxiter` belong to the response stage. Omitted
+and numerical settings. Geometry and the Hamiltonian come from that reference,
+and only from its published generation: the orbital archive and the
+`numerical.consumer_context` block of its manifest (the molecule as the SCF
+oriented it, in bohr; charge, multiplicity, cell `L`, functional, spin
+treatment, final `thresh` and `k`). Nothing is copied from the reference
+stage's input, and no engine object passes between stages, so running the
+reference alone and the response later gives the same results as one deck.
+Response `protocol`, `dconv`, and `maxiter` belong to the response stage. Omitted
 response protocol/maxiter use the existing parameter-group defaults; omitted
 response dconv uses the existing `100 * finest protocol threshold` derivation.
 No response setting silently tightens the upstream calculation.
@@ -38,7 +46,10 @@ be explicit; components are Cartesian pairs such as `[zz]` or `[xx, xy]`.
 The engine may calculate extra tensor elements needed to assemble the request;
 `properties.polarizability.values` selects the requested components. The raw
 engine evidence is retained alongside them. Response protocols finer than the
-reference threshold/order are rejected. A response `k` override is unsupported.
+reference threshold/order are rejected (before any stage runs for a reference
+in the deck, and against the published generation for every reference). A
+generation published before the consumer context existed cannot be a reference;
+run that stage again. A response `k` override is unsupported.
 Frequencies and response protocol rungs that collide at the engine's existing
 filename-key precision are rejected. Unknown controls and unsupported properties
 fail rather than being ignored.

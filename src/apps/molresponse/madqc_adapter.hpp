@@ -179,6 +179,10 @@ struct molresponse_v3_lib {
     nlohmann::json raman_spectra;         // full Raman only (raman.nuc_atom -1)
   };
 
+  /// The unnamed path: the reference is the live SCF of the same process. Its
+  /// archive is resolved from the SCF's work directory unless a prefix is
+  /// given, exactly as before; the response itself runs on the archive and
+  /// the molecule (run_response_on_reference).
   inline static Results
   run_response(madness::World &world, const Params &params,
                const std::shared_ptr<madness::SCF> &scf_calc,
@@ -186,6 +190,26 @@ struct molresponse_v3_lib {
                const std::filesystem::path &reference_prefix = {},
                const std::function<void(madness::World&, const nlohmann::json&)>
                    &checkpoint_observer = {}) {
+    const auto source_prefix
+        = reference_prefix.empty()
+              ? std::filesystem::proximate(scf_calc->work_dir, outdir)
+                    / params.get<CalculationParameters>().prefix()
+              : reference_prefix;
+    return run_response_on_reference(world, params, scf_calc->molecule, outdir,
+                                     source_prefix, checkpoint_observer);
+  }
+
+  /// DESIGN A1: the response on a saved reference alone: its orbital archive
+  /// (`reference_prefix` + ".restartdata") and its molecule. Named stages call
+  /// this with both read from the reference's published generation.
+  inline static Results run_response_on_reference(
+      madness::World& world, const Params& params,
+      const madness::Molecule& reference_molecule,
+      const std::filesystem::path& outdir,
+      const std::filesystem::path& reference_prefix,
+      const std::function<void(madness::World&, const nlohmann::json&)>&
+          checkpoint_observer
+      = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
@@ -231,14 +255,12 @@ struct molresponse_v3_lib {
     namespace fs = std::filesystem;
     const double L = cp.L();
     set_response_protocol(world, L, protocol.front());
-    const std::string prefix     = cp.prefix();
     // Named stages supply absolute paths and never change process cwd.
-    const fs::path source_prefix = reference_prefix.empty()
-        ? fs::proximate(scf_calc->work_dir, outdir) / prefix
-        : reference_prefix;
+    const fs::path& source_prefix = reference_prefix;
     const std::string archive = source_prefix.string() + ".restartdata";
     const std::string fock_json = source_prefix.string() + ".fock.json";
-    GroundState gs = GroundState::from_archive(world, archive, scf_calc->molecule);
+    GroundState gs
+        = GroundState::from_archive(world, archive, reference_molecule);
     const double thresh = FunctionDefaults<3>::get_thresh();
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
@@ -308,7 +330,7 @@ struct molresponse_v3_lib {
       r.frequencies = freqs;
       r.raman_nuc_atom = rp.raman_nuc_atom();
       r.raman_nuc_axis = rp.raman_nuc_axis();
-      const int natom = static_cast<int>(scf_calc->molecule.natom());
+      const int natom = static_cast<int>(reference_molecule.natom());
       if (r.raman_nuc_atom >= 0) {
         if (r.raman_nuc_axis < 0 || r.raman_nuc_axis > 2)
           throw std::runtime_error(
@@ -499,7 +521,7 @@ struct molresponse_v3_lib {
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
     if (!dalton_dir.empty()) {
-      run_dalton_import(world, gs, scf_calc->molecule, in.plan,
+      run_dalton_import(world, gs, reference_molecule, in.plan,
                         in.settings.calc_dir, dalton_dir, {}, {}, {}, 1e-4,
                         /*es_y_from_dalton=*/rp.seed_es_y() == "dalton");
     }

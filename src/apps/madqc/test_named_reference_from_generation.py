@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""The stage handoff is disk-only (DESIGN A1): a molresponse stage reads its
+reference only from the moldft stage's published generation (the orbital
+archive and the consumer context in its manifest). Running gs alone, then a
+deck holding only the response stage on that output directory, gives the same
+results as running both stages in one deck."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+p = argparse.ArgumentParser()
+p.add_argument('--binary', required=True)
+p.add_argument('--source', required=True)
+p.add_argument('--ranks', type=int, default=1)
+p.add_argument('--mpiexec', default='mpiexec')
+a = p.parse_args()
+binary = str(Path(a.binary).resolve())
+work = Path(tempfile.mkdtemp(prefix='named-reference-', dir=Path.cwd()))
+print('artifacts:', work, flush=True)
+env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
+           OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
+launch = [] if a.ranks == 1 else [a.mpiexec, '--bind-to', 'none', '-n', str(a.ranks)]
+# Off-centre and free to orient, so the SCF moves the molecule: the response
+# must use the geometry the SCF used, which only the published context holds.
+both = (Path(a.source) / 'named_h2.in').read_text()
+assert '  no_orient true\n' in both and '  H 0 0 -0.7\n  H 0 0 0.7\n' in both
+both = both.replace('  no_orient true\n', '').replace(
+    '  H 0 0 -0.7\n  H 0 0 0.7\n', '  H 0.3 0 -0.4\n  H 0.3 0 1.0\n')
+ground, response = both.split('molresponse optical')
+response = 'molresponse optical' + response
+
+
+def run(label, root, text, resume=False, success=True):
+    inp = work / (label + '.in')
+    inp.write_text(text)
+    log = work / (label + '.log')
+    with log.open('w') as out:
+        r = subprocess.run(launch + [binary, str(inp), '--prefix=' + str(root)] +
+                           (['--continue'] if resume else []), cwd=work, env=env,
+                           stdout=out, stderr=subprocess.STDOUT, timeout=900)
+    assert (r.returncode == 0) == success, log.read_text()[-6000:]
+    print(label, 'exit', r.returncode, flush=True)
+    return log.read_text()
+
+
+def result(root, stage):
+    return json.loads((root / stage / 'results.json').read_text())
+
+
+def manifest(root, stage):
+    store = root / stage / 'checkpoints'
+    generation = json.loads((store / 'latest').read_text())['generation']
+    return json.loads((store / generation / 'manifest.json').read_text())
+
+
+def close(x, y, tol=1e-10):
+    return abs(x - y) <= tol * max(1.0, abs(x), abs(y))
+
+
+# One deck, both stages.
+together = work / 'Together'
+run('together', together, both)
+
+# gs alone, then the response stage alone on the same output directory.
+split = work / 'Split'
+run('gs-alone', split, ground)
+gs_generation = manifest(split, 'gs')['generation']
+run('optical-alone', split, response, resume=True)
+
+# The consumer context: the molecule the SCF used, not the deck's.
+context = manifest(split, 'gs')['numerical']['consumer_context']
+assert context['schema'] == 'madqc.moldft.consumer_context.v1', context
+assert context['charge'] == 0 and context['multiplicity'] == 1, context
+assert context['spin_restricted'] is True and context['functional'] == 'hf', context
+assert context['thresh'] == 1e-6 and context['L'] == 20, context
+geometry = result(split, 'gs')['geometry']['geometry']
+assert context['molecule']['geometry'] == geometry, (context['molecule'], geometry)
+# The SCF centred and oriented the molecule (bond along an axis, origin between).
+assert all(abs(sum(atom[i] for atom in geometry)) < 1e-10 for i in range(3)), geometry
+assert sorted(abs(c) for c in geometry[0]) [-1] == max(abs(c) for c in geometry[1]), geometry
+assert any(abs(c) > 0.6 for c in geometry[0]) and geometry != [[0.3, 0, -0.4], [0.3, 0, 1.0]], geometry
+assert context == manifest(together, 'gs')['numerical']['consumer_context']
+
+# The response bound the published generation and gave the two-stage results.
+alone, joint = result(split, 'optical'), result(together, 'optical')
+assert alone['status'] == joint['status'] == 'completed', (alone['status'], joint['status'])
+assert alone['reference'] == {'stage': 'gs', 'state_id': gs_generation}, alone['reference']
+assert alone['reference_representation'] == joint['reference_representation']
+assert alone['reference_representation'] == {'L': 20.0, 'k': context['k']}
+assert alone['convergence_report']['reference']['state_id'] == gs_generation
+
+def energy_evidence(record):
+    """The reference's energy-change evidence, less what names the run."""
+    evidence = dict(record['convergence_report']['reference']['energy_change'])
+    evidence['sample'] = {k: v for k, v in evidence['sample'].items() if k != 'run_id'}
+    return evidence.pop('value'), evidence
+
+
+assert alone['convergence_report']['reference']['engine_converged'] is True
+assert joint['convergence_report']['reference']['engine_converged'] is True
+(value, evidence), (joint_value, joint_evidence) = energy_evidence(alone), energy_evidence(joint)
+assert evidence == joint_evidence, (evidence, joint_evidence)
+assert abs(value - joint_value) < 1e-12, (value, joint_value)  # gs ran twice: roundoff
+for x, y in zip(alone['properties']['polarizability']['values'],
+                joint['properties']['polarizability']['values'], strict=True):
+    assert x['frequency'] == y['frequency'] and x['converged'] and y['converged']
+    assert close(x['components']['zz'], y['components']['zz']), (x, y)
+
+
+def iterations(record):
+    return [(c['channel'], c['frequency'], c['protocol']['thresh'], c['iterations_at_save'])
+            for c in record['convergence_report']['channels']]
+
+
+assert iterations(alone) == iterations(joint), (iterations(alone), iterations(joint))
+
+# A reference outside the deck is read only from a published generation.
+log = run('optical-fresh', work / 'NoReference', response, success=False)
+assert 'reference gs has no published generation' in log, log[-3000:]
+# Tightening is checked against the published generation, too.
+tight = response.replace('protocol [1e-4, 1e-6]', 'protocol [1e-4, 1e-8]')
+log = run('optical-tight', split, tight, resume=True, success=False)
+assert 'response protocol is tighter than reference gs' in log, log[-3000:]
+print('disk-only handoff: response from the published generation equals the two-stage run')

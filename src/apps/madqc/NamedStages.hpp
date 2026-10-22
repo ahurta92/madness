@@ -227,6 +227,12 @@ inline std::vector<Stage> parse(madness::World &world,
          {"accuracy.energy_change",
           "not applicable: a driven response has no local energy (see the "
           "reference stage's energy change)"}};
+  // DESIGN A1: a reference names an earlier moldft stage of this deck, or a
+  // stage outside it whose published generation is read at run time. A name
+  // used later in the deck would be a forward reference.
+  std::map<std::string, std::string> deck_kinds;
+  for (const auto& b : blocks(text))
+    deck_kinds.emplace(b.name, b.kind);
   for (const auto &b : blocks(text)) {
     std::set<std::string> seen;
 
@@ -351,20 +357,19 @@ inline std::vector<Stage> parse(madness::World &world,
       cp.set_user_defined_value("save", true);
     } else {
       stage.reference = controls.get<std::string>("reference");
-      if (!indices.count(stage.reference) ||
-          stages.at(indices.at(stage.reference)).kind != "moldft")
+      const bool in_deck = deck_kinds.contains(stage.reference);
+      if (stage.reference.empty()
+          || (in_deck
+              && (!indices.contains(stage.reference)
+                  || stages.at(indices.at(stage.reference)).kind != "moldft")))
         throw std::runtime_error("unresolved earlier moldft reference " +
                                  stage.reference + " for " + b.name);
       if (seen.count("molecule"))
         throw std::runtime_error("molresponse takes reference, not molecule");
-      const auto &source = stages.at(indices.at(stage.reference));
-      // Copy reference physics, but retain the response stage's protocol.
-      // rp remains independent; it is not copied from the source stage.
+      // DESIGN A1: nothing is copied from the reference stage. Its molecule,
+      // charge, L and final thresh/k come from its published generation
+      // when this stage runs; cp keeps only this stage's protocol.
       const auto own_protocol = cp.protocol();
-      cp = source.params.get<CalculationParameters>();
-      cp.set_user_defined_value("protocol", own_protocol);
-      stage.params.get<madness::Molecule>() =
-          source.params.get<madness::Molecule>();
       // Current named-path capability limit: only alpha is mapped through
       // input, execution and results. Other response properties are rejected.
       if (stage.properties != std::vector<std::string>{"polarizability"})
@@ -414,14 +419,19 @@ inline std::vector<Stage> parse(madness::World &world,
           throw std::runtime_error("response protocol rungs collide at engine "
                                    "protocol-key precision");
       // Reject downstream tightening instead of silently refining the source.
-      const auto &reference_cp = source.params.get<CalculationParameters>();
-      const int source_k = reference_cp.k() == -1
-                               ? protocol_k(reference_cp.protocol().back())
-                               : reference_cp.k();
-      if (own_protocol.back() < reference_cp.protocol().back() ||
-          protocol_k(own_protocol.back()) > source_k)
-        throw std::runtime_error(
-            "response protocol is tighter than reference " + stage.reference);
+      // An in-deck reference is checked here, before anything runs; every
+      // reference is checked again against its published generation.
+      if (in_deck) {
+        const auto& reference_cp = stages.at(indices.at(stage.reference))
+                                       .params.get<CalculationParameters>();
+        const int source_k = reference_cp.k() == -1
+                                 ? protocol_k(reference_cp.protocol().back())
+                                 : reference_cp.k();
+        if (own_protocol.back() < reference_cp.protocol().back()
+            || protocol_k(own_protocol.back()) > source_k)
+          throw std::runtime_error(
+              "response protocol is tighter than reference " + stage.reference);
+      }
     }
 
     if (b.kind == "moldft") {
@@ -457,7 +467,11 @@ inline std::vector<Stage> parse(madness::World &world,
       throw std::runtime_error(
           "positive finite dconv and positive maxiter required");
     stage.params.set_derived_values();
-    if (!cp.spin_restricted() || cp.nalpha() <= 0 || cp.nalpha() != cp.nbeta())
+    // A response stage has no molecule of its own; its reference's shell is
+    // checked against the published generation when it runs.
+    if (b.kind == "moldft"
+        && (!cp.spin_restricted() || cp.nalpha() <= 0
+            || cp.nalpha() != cp.nbeta()))
       throw std::runtime_error(
           "named stages currently require a closed-shell reference");
     if (!std::isfinite(cp.econv()) || cp.econv() <= 0 ||
