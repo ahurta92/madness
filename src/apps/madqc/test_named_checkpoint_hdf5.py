@@ -15,8 +15,9 @@ a = p.parse_args()
 binary = str(Path(a.binary).resolve())
 work = Path(tempfile.mkdtemp(prefix='checkpoint-hdf5-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
-env = dict(os.environ, MAD_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
+env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            MADRESPONSE_IO_HDF5='1')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 text = (Path(a.source) / 'named_h2.in').read_text()
 text = text.replace('[1e-4, 1e-6]', '[1e-4]').replace('dconv 1e-5', 'dconv 1e-3')
 text = text.replace('dconv 1e-4', 'dconv 1e-3').replace('[0.0, 0.02]', '[0.0]')

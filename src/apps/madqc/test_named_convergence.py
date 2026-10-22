@@ -19,8 +19,9 @@ work = Path(tempfile.mkdtemp(prefix='named-convergence-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 binary = str(Path(a.binary).resolve())
 deck = (Path(a.source) / 'named_h2.in').read_text()
-env = dict(os.environ, MAD_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
+env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
 
 def run(label, root, text=deck, resume=False, success=True):

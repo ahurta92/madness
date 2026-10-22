@@ -17,20 +17,29 @@ args = parser.parse_args()
 work = Path(tempfile.mkdtemp(prefix='response-explicit-accuracy-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 binary = str(Path(args.binary).resolve())
-deck = (Path(args.source) / 'named_h2.in').read_text()
-deck = deck.replace('polarizability.frequencies [0.0, 0.02]', 'polarizability.frequencies [0.0]')
-# Loose values are acceptance fixtures, never suggested scientific tolerances.
-# The written targets decide (DESIGN B8); the response dconv is the
-# induced-density target.
-assert deck.count('  dconv 1e-4\n') == 1  # the response stage's dconv
-deck = deck.replace('  dconv 1e-4\n', '  dconv 1000\n')
 controls = '  convergence.use_default_criteria false\n' + ''.join(
     '  accuracy.' + metric + ' 1000\n' for metric in ('bsh_residual', 'kinetic_trace_change'))
-assert deck.count('molresponse optical\n') == 1
-deck = deck.replace('molresponse optical\n', 'molresponse optical\n' + controls)
-assert 'polarizability.frequencies [0.0]' in deck and controls in deck
-env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
+
+
+def criteria_deck(name):
+    """The deck `name` at one frequency, with loose written targets deciding."""
+    text = (Path(args.source) / name).read_text()
+    text = text.replace('polarizability.frequencies [0.0, 0.02]', 'polarizability.frequencies [0.0]')
+    # Loose values are acceptance fixtures, never suggested scientific tolerances.
+    # The written targets decide (DESIGN B8); the response dconv is the
+    # induced-density target.
+    assert text.count('  dconv 1e-4\n') == 1  # the response stage's dconv
+    text = text.replace('  dconv 1e-4\n', '  dconv 1000\n')
+    assert text.count('molresponse optical\n') == 1
+    text = text.replace('molresponse optical\n', 'molresponse optical\n' + controls)
+    assert 'polarizability.frequencies [0.0]' in text and controls in text
+    return text
+
+
+deck = criteria_deck('named_h2.in')
+env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if args.ranks == 1 else [args.mpiexec, '-n', str(args.ranks)]
 
 def run(label, root, text, resume=False, success=True):
@@ -145,7 +154,9 @@ assert 'accuracy.energy_change is not applicable' in (work / 'unsupported-energy
 assert latest(fresh)[1] == pointer
 # A driven Full response must retain both X and Y in its raw criteria.
 full = work / 'Full'
-full_deck = deck.replace('polarizability.frequencies [0.0]', 'polarizability.frequencies [0.02]')
+# One rung is enough: the case needs a nonzero frequency, not the ladder.
+full_deck = criteria_deck('named_h2_plumbing.in').replace(
+    'polarizability.frequencies [0.0]', 'polarizability.frequencies [0.02]')
 full_result = run('full', full, full_deck)
 assert full_result[-1]['status'] == 'completed'
 _, _, _, full_manifest = latest(full)

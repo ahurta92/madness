@@ -26,8 +26,9 @@ deck = deck.replace('dconv 1e-5', 'dconv 1000').replace('econv 1e-6', 'econv 100
 controls = '  convergence.use_default_criteria false\n' + ''.join(
     '  accuracy.' + name + ' 1000\n' for name in ('bsh_residual', 'kinetic_trace_change'))
 deck = deck.replace('moldft gs\n', 'moldft gs\n' + controls)
-env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
+env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if args.ranks == 1 else [args.mpiexec, '-n', str(args.ranks)]
 
 def run(label, root, text=deck, resume=False, success=True):

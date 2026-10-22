@@ -28,8 +28,9 @@ deck = deck.replace('molresponse optical\n', 'molresponse optical\n'
                     '  convergence.use_default_criteria false\n'
                     '  accuracy.kinetic_trace_change 0\n  progress.window 1\n'
                     '  progress.minimum_relative_improvement 0.99999999\n')
-env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
+env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if args.ranks == 1 else [args.mpiexec, '-n', str(args.ranks)]
 
 def run(label, root, text, resume=False):

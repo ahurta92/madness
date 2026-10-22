@@ -20,7 +20,7 @@ work = Path(tempfile.mkdtemp(prefix='named-econv-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
-env.setdefault('MAD_NUM_THREADS', '2')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '--bind-to', 'none', '-n', str(a.ranks)]
 with_econv = (Path(a.source) / 'named_h2.in').read_text().split('molresponse optical')[0]
 assert 'econv 1e-6' in with_econv

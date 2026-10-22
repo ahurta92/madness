@@ -22,8 +22,9 @@ deck = deck.replace('molresponse optical\n', 'molresponse optical\n  diagnostic.
 input_file = work / 'forced.in'
 input_file.write_text(deck)
 root = work / 'run'
-env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
+env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
 with (work / 'run.log').open('w') as out:
     result = subprocess.run(launch + [binary, str(input_file), '--prefix=' + str(root)],

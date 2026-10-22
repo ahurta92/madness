@@ -19,7 +19,7 @@ source = Path(args.source)
 work = Path(tempfile.mkdtemp(prefix='named-stages-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 env = dict(os.environ)
-env.setdefault('MAD_NUM_THREADS', '2')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 env.setdefault('OPENBLAS_NUM_THREADS', '1')
 env.setdefault('OMP_NUM_THREADS', '1')
 launch = [] if args.ranks == 1 else [args.mpiexec, '-n', str(args.ranks)]

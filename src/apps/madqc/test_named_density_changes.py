@@ -21,8 +21,9 @@ print('artifacts:', work, flush=True)
 # This verified deck explicitly sets protocol, dconv, econv and maxiter.
 # The new measurements have no stopping targets; no defaults are being tested.
 deck = (Path(a.source) / 'named_h2.in').read_text().split('molresponse optical')[0]
-env = dict(os.environ, MAD_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1',
+env = dict(os.environ, OPENBLAS_NUM_THREADS='1',
            OMP_NUM_THREADS='1', OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
 
 def run(label, root, text=deck, resume=False, success=True):

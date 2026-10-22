@@ -23,10 +23,10 @@ work = Path(tempfile.mkdtemp(prefix='response-modes-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
 env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
-env.setdefault('MAD_NUM_THREADS', '2')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '--bind-to', 'none', '-n', str(a.ranks)]
-base = (Path(a.source) / 'named_h2.in').read_text().replace(
-    'polarizability.frequencies [0.0, 0.02]', 'polarizability.frequencies [0.0]')
+# One rung and one frequency: these cases test who decides, not the ladder.
+base = (Path(a.source) / 'named_h2_plumbing.in').read_text()
 assert base.count('  dconv 1e-4\n') == 1  # the response stage's dconv
 
 

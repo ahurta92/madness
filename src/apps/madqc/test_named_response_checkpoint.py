@@ -19,8 +19,9 @@ a = p.parse_args()
 binary = str(Path(a.binary).resolve())
 work = Path(tempfile.mkdtemp(prefix='response-checkpoint-', dir=Path.cwd()))
 print('artifacts:', work, flush=True)
-env = dict(os.environ, MAD_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
+env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
+env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
 deck = (Path(a.source) / 'named_h2.in').read_text()
 one = deck.replace('[0.0, 0.02]', '[0.0]')
