@@ -1,4 +1,5 @@
 #pragma once
+#include <madness/chem/ConvergenceSettings.h>
 #include <madness/mra/QCCalculationParametersBase.h>
 
 using namespace madness;
@@ -6,8 +7,8 @@ using namespace madness;
 struct ResponseParameters : public QCCalculationParametersBase {
     static constexpr char const* tag = "response";
     [[nodiscard]] std::set<std::string> full_precision_keys() const override {
-        return {"accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change",
-                "accuracy.kinetic_trace_change", "progress.minimum_relative_improvement"};
+        return {"accuracy.bsh_residual", "accuracy.kinetic_trace_change",
+                "progress.minimum_relative_improvement"};
     }
     ResponseParameters(const ResponseParameters& other) = default;
     ResponseParameters(World& world, const commandlineparser& parser) : ResponseParameters() {
@@ -34,9 +35,16 @@ struct ResponseParameters : public QCCalculationParametersBase {
                            "extrapolation). 0 disables.");
         initialize<int>("diagnostic.iterations_per_rung", 0,
                         "Explicit diagnostic iteration count per supplied rung; 0 disables. Invalid states still stop.");
-        for (const auto* metric : {"density_change", "bsh_residual", "energy_change", "kinetic_trace_change"})
+        // Written targets of a named stage (DESIGN B8): dconv is the
+        // induced-density-change target; a driven response has no energy one.
+        for (const auto* metric : {"bsh_residual", "kinetic_trace_change"})
             initialize<double>(std::string("accuracy.") + metric, -1.0,
-                "Explicit named response accuracy target; omitted means inactive. Driven-response energy is unsupported.");
+                               "Explicit named response accuracy target; "
+                               "omitted means inactive.");
+        initialize<bool>(
+            madness::convergence::use_default_criteria_key, true,
+            "Named stages: true, the engine check decides convergence; false, "
+            "the written targets decide (DESIGN B8)");
         initialize<int>("progress.window", 0,
                         "Explicit named FD progress lookback; 0 disables.");
         initialize<double>("progress.minimum_relative_improvement", -1.0,

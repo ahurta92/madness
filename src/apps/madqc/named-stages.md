@@ -405,28 +405,42 @@ Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify
 unmet explicit accuracy.
 
-### Explicit driven-response accuracy requests
+### Driven-response targets and who decides
 
-Named `molresponse` FD stages support `accuracy.density_change`,
-`accuracy.bsh_residual`, and `accuracy.kinetic_trace_change`. Limits are finite,
-nonnegative, absolute and explicitly supplied. Density is the L2 change in the
-kernel's induced charge density (`kernel_induced_density_L2_atomic_units`).
-BSH is the maximum raw residual over all stored orbital functions and X/Y
-blocks (`response_amplitude_L2_atomic_units`). Kinetics is the absolute change
-in the unweighted positive trace over those blocks
-(`hartree_times_response_amplitude_scale_squared`). Per-function values remain
-diagnostics. These response quantities include the perturbation amplitude
-scale and must not be interpreted as a ground-state energy or density.
-`accuracy.energy_change` is rejected because a local driven-response energy
-has not been established.
+A named `molresponse` FD stage follows the same rule as `moldft` (DESIGN B8):
+written values are targets on their own metrics, and
+`convergence.use_default_criteria` (default `true`) says who stops each solve.
 
-Both the last genuine input and independently reassessed saved output must
-satisfy requested criteria, in addition to existing engine eligibility. The
-legacy quadrature gate remains separate from the requested maximum. Explicit
-requests disable best-effort acceptance and the inherited plateau shortcut;
-no universal stall threshold is introduced. A tighter request reuses compatible
-amplitudes, reevaluates evidence, and invalidates dependent properties until
-satisfied. Forced diagnostics exhaust the specified iterations per supplied
+| Keyword | Metric | Quantity compared |
+|---|---|---|
+| `dconv` | `charge_density_change` | L2 change of the kernel's induced charge density (`kernel_induced_density_L2_atomic_units`), absolute |
+| `accuracy.bsh_residual` | `bsh_residual` | largest raw residual over all stored functions and X/Y blocks (`response_amplitude_L2_atomic_units`) |
+| `accuracy.kinetic_trace_change` | `delta_kinetic_energy` | absolute change of the unweighted positive trace over those blocks (`hartree_times_response_amplitude_scale_squared`) |
+
+These response quantities include the perturbation amplitude scale and must not
+be read as a ground-state energy or density. A driven response has no local
+energy, so there is no energy target; `accuracy.energy_change` is rejected
+with that message, and `accuracy.density_change` is replaced by `dconv`.
+
+- **Engine check decides** (default): each leg converges when `||dx|| <= 5
+  max(dconv, thresh) (1 + ||x||)` and `||drho|| <= 5 max(dconv, thresh) (1 +
+  ||rho||)` from the second iteration (`ConvergencePolicy::effective_for_thresh`),
+  with the engine's plateau detector and best-effort acceptance as before. The
+  written targets are evaluated on the solver's input and on the saved state
+  and reported (`affects_stopping: false`), with a start-of-stage warning.
+- **Written targets decide** (`false`): a solve converges when every written
+  target is met on the last genuine input and on the independently reassessed
+  saved output; the engine check is not applied, the plateau detector and
+  best-effort acceptance are off, and only `progress.*` can declare a stall.
+  A request without a target is rejected; one without a density or BSH
+  target is warned about. An unmet target withholds the stage's properties.
+
+Each saved entry records `checkpoint_decided_by`. On `--continue` a converged
+entry is re-solved for an unmet written target only when the targets decide.
+The settings table at stage start shows both groups (the engine's per-leg
+limits as formulas, since they are relative); the outcome table at stage end
+shows each written target's largest saved value over the channels of the
+final rung. Forced diagnostics exhaust the specified iterations per supplied
 rung without certifying unmet accuracy. Checkpoints preserve raw histories,
 comparison identities and reconstructed decisions; missing or incompatible
 historical evidence cannot certify a newly requested criterion.

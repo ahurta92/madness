@@ -98,10 +98,14 @@ struct MetricOutcome {
              : metric.group == Group::requested_criteria;
 }
 
-/// The limit a row is compared against: its effective limit, else its target.
+/// The single number a row is compared against: its effective limit, else
+/// its target when no formula derives the limit from it. None when the limit
+/// is only a formula (e.g. a relative, per-leg response gate).
 [[nodiscard]] inline std::optional<double>
 comparison_limit(const MetricSetting& metric) {
-  return metric.effective_limit ? metric.effective_limit : metric.target;
+  if (metric.effective_limit)
+    return metric.effective_limit;
+  return metric.limit_formula.empty() ? metric.target : std::nullopt;
 }
 
 /// B8: the selected group alone decides; there is no AND mode.
@@ -339,9 +343,10 @@ to_json(const ConvergenceSettings& settings) {
   if (!comparison_limit(metric) && metric.limit_formula.empty()) {
     limit = "reported only";
   } else {
-    limit = detail::scientific(comparison_limit(metric));
+    if (comparison_limit(metric))
+      limit = detail::scientific(comparison_limit(metric));
     if (!metric.limit_formula.empty())
-      limit += " = " + metric.limit_formula;
+      limit += (limit.empty() ? "" : " = ") + metric.limit_formula;
     if (!enforced(settings, metric))
       limit += ", reported only";
   }

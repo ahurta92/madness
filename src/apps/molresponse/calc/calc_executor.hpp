@@ -647,7 +647,10 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // like exhausting max_iters: same acceptance rule, fewer wasted iterations.
   auto accepted_now = [&](const typename Solver::State &st, const Solver &sv) {
     const int diagnostic = ctx.policy.diagnostic_iterations_per_rung;
-    if (!ctx.policy.explicit_accuracy_targets.empty()) return false;
+    // Best-effort acceptance belongs to the engine check; when the written
+    // targets decide, an unmet target is never accepted (B5, B8).
+    if (ctx.policy.decider == madness::convergence::Decider::requested_criteria)
+      return false;
     return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged &&
            (st.iter >= (diagnostic > 0 ? diagnostic : ctx.max_iters) || st.stalled) && !converged_now(st, sv);
   };
@@ -665,20 +668,24 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     }
     const bool strict = converged_now(st, solv);
     const bool accepted = accepted_now(st, solv);
-    save_fd_state<Type, Shell>(world, st, ctx.calc_dir, pert, freq,
-                               /*converged=*/strict || accepted,
-                               /*seed=*/seed_kind, /*accepted=*/accepted,
-                               /*wall_s=*/wall_s,
-                               /*metadata_shard=*/ctx.metadata_shard,
-                               /*log_prefix=*/ctx.log_prefix,
-                               /*log_group=*/ctx.log_group,
-                               /*checkpoint_native=*/bool(ctx.checkpoint_observer),
-                               /*checkpoint_dconv=*/ctx.policy.dconv_user,
-                               /*checkpoint_targets=*/&solv.targets(),
-                               /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation : nullptr,
-                               /*checkpoint_accuracy_targets=*/&ctx.policy.explicit_accuracy_targets,
-                               /*checkpoint_diagnostic_iterations=*/ctx.policy.diagnostic_iterations_per_rung,
-                               /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration);
+    save_fd_state<Type, Shell>(
+        world, st, ctx.calc_dir, pert, freq,
+        /*converged=*/strict || accepted,
+        /*seed=*/seed_kind, /*accepted=*/accepted,
+        /*wall_s=*/wall_s,
+        /*metadata_shard=*/ctx.metadata_shard,
+        /*log_prefix=*/ctx.log_prefix,
+        /*log_group=*/ctx.log_group,
+        /*checkpoint_native=*/bool(ctx.checkpoint_observer),
+        /*checkpoint_dconv=*/ctx.policy.dconv_user,
+        /*checkpoint_targets=*/&solv.targets(),
+        /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation
+                                                          : nullptr,
+        /*checkpoint_accuracy_targets=*/&ctx.policy.explicit_accuracy_targets,
+        /*checkpoint_diagnostic_iterations=*/
+        ctx.policy.diagnostic_iterations_per_rung,
+        /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration,
+        /*checkpoint_decider=*/ctx.policy.decider);
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
           {"frequency", freq}, {"protocol", protocol_key()},

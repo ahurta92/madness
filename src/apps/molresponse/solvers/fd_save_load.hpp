@@ -132,25 +132,24 @@ inline std::string response_filename(const std::string &pert,
 /// driver) solve one perturbation/freq per State; multi-channel save is a
 /// later concern.
 template <typename Type, typename Shell>
-void save_fd_state(madness::World &world,
-                   const typename FDSolver<Type, Shell>::State &state,
-                   const std::string &dir,
-                   const Perturbation &pert,
-                   double freq,
-                   bool converged,
-                   const std::string &seed = std::string(),
-                   bool accepted = false,
-                   double wall_s = 0.0,     // R1b: point-solve wall time
-                   const std::string &metadata_shard = std::string(),
-                   const std::string &log_prefix = std::string(),  // F2d
-                   int log_group = -1,
-                   bool checkpoint_native = false,
-                   double checkpoint_dconv = 0.0,
-                   const ConvergencePolicy::Targets* checkpoint_targets = nullptr,
-                   const typename FDSolver<Type, Shell>::State* checkpoint_validation = nullptr,
-                   const nlohmann::json* checkpoint_accuracy_targets = nullptr,
-                   int checkpoint_diagnostic_iterations = 0,
-                   const nlohmann::json* checkpoint_progress = nullptr) {                            // F2d
+void save_fd_state(
+    madness::World& world, const typename FDSolver<Type, Shell>::State& state,
+    const std::string& dir, const Perturbation& pert, double freq,
+    bool converged, const std::string& seed = std::string(),
+    bool accepted = false,
+    double wall_s = 0.0, // R1b: point-solve wall time
+    const std::string& metadata_shard = std::string(),
+    const std::string& log_prefix = std::string(), // F2d
+    int log_group = -1, bool checkpoint_native = false,
+    double checkpoint_dconv = 0.0,
+    const ConvergencePolicy::Targets* checkpoint_targets = nullptr,
+    const typename FDSolver<Type, Shell>::State* checkpoint_validation
+    = nullptr,
+    const nlohmann::json* checkpoint_accuracy_targets = nullptr,
+    int checkpoint_diagnostic_iterations = 0,
+    const nlohmann::json* checkpoint_progress = nullptr,
+    madness::convergence::Decider checkpoint_decider
+    = madness::convergence::Decider::engine_check) { // F2d
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
   // subworlds never race the canonical file; rank 0 merges them after the fence.
@@ -371,6 +370,9 @@ void save_fd_state(madness::World &world,
       if (checkpoint_accuracy_targets && !checkpoint_accuracy_targets->empty()) {
         MADNESS_CHECK_THROW(checkpoint_validation, "explicit FD accuracy requires saved-state validation");
         entry["checkpoint_accuracy_targets"] = *checkpoint_accuracy_targets;
+        // Who decided this solve (B8): reuse and validation read it.
+        entry["checkpoint_decided_by"]
+            = madness::convergence::to_string(checkpoint_decider);
         entry["checkpoint_iteration_count"] = state.iter;
         entry["rung_exhausted"] = state.rung_exhausted;
         entry["checkpoint_diagnostic_iterations"] = checkpoint_diagnostic_iterations;
@@ -388,7 +390,9 @@ void save_fd_state(madness::World &world,
         MADNESS_CHECK_THROW(state.saved_explicit_accuracy.size() == 1 &&
             entry.at("saved_state_validation").at("explicit_accuracy") == state.saved_explicit_accuracy.at(0),
             "FD saved accuracy/report mismatch");
-        entry["saved_state_validation"]["affects_stopping"] = true;
+        entry["saved_state_validation"]["affects_stopping"]
+            = checkpoint_decider
+              == madness::convergence::Decider::requested_criteria;
         entry["explicit_accuracy_history"] = nlohmann::json::array();
         for (std::size_t i = 0; i < entry.at("function_bsh_history").size(); ++i) {
           const auto& bsh_sample = entry.at("function_bsh_history").at(i);

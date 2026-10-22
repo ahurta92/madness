@@ -31,20 +31,24 @@
 // appropriate values.
 // =========================================================================
 
-#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <madness/chem/ConvergenceSettings.h>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 namespace molresponse_v3 {
 
 struct ConvergencePolicy {
-  // Named FD only. These supplement legacy engine eligibility; no target is
-  // supplied implicitly and no driven-response energy is manufactured.
+  // Named FD only (DESIGN B8): the written targets. Which check stops a solve
+  // is `decider`: the engine check (default) or these targets; both are
+  // always evaluated and recorded. No driven-response energy is manufactured.
   nlohmann::json explicit_accuracy_targets = nlohmann::json::object();
   nlohmann::json explicit_progress_configuration = nlohmann::json::object();
   int diagnostic_iterations_per_rung = 0; // explicit diagnostic, disabled by default
+  madness::convergence::Decider decider
+      = madness::convergence::Decider::engine_check;
   // User-facing density-convergence target. The effective target at each
   // protocol is a multiple of max(thresh, dconv_user) — see
   // effective_for_thresh.

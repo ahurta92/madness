@@ -143,6 +143,9 @@ struct Stage {
   Params params;
   std::vector<std::string> properties, components;
   std::vector<double> frequencies;
+  // The keywords this stage's deck wrote, so "who set it" (B9) does not
+  // depend on values the parser fills in for the engine.
+  std::set<std::string> written;
   Stage(madness::World &world, const Block &b)
       : kind(b.kind), name(b.name), params(world) {}
 };
@@ -206,10 +209,24 @@ inline std::vector<Stage> parse(madness::World &world,
   const std::map<std::string, std::string> replaced_scf_keys
       = {{"accuracy.density_change", "dconv (the density-change target)"},
          {"accuracy.energy_change", "econv (the energy-change target)"}};
-  const std::set<std::string> response_keys = {"dconv", "maxiter", "kain", "diagnostic.iterations_per_rung",
-      "progress.window", "progress.minimum_relative_improvement",
-      "accuracy.density_change", "accuracy.bsh_residual", "accuracy.energy_change", "accuracy.kinetic_trace_change",
-                                               "print_level"};
+  const std::set<std::string> response_keys
+      = {"dconv",
+         "maxiter",
+         "kain",
+         "diagnostic.iterations_per_rung",
+         "progress.window",
+         "progress.minimum_relative_improvement",
+         "accuracy.bsh_residual",
+         "accuracy.kinetic_trace_change",
+         madness::convergence::use_default_criteria_key,
+         "print_level"};
+  // B8: dconv is the induced-density-change target of a molresponse stage; a
+  // driven response has no local energy, so no energy target.
+  const std::map<std::string, std::string> replaced_response_keys
+      = {{"accuracy.density_change", "dconv (the density-change target)"},
+         {"accuracy.energy_change",
+          "not applicable: a driven response has no local energy (see the "
+          "reference stage's energy change)"}};
   for (const auto &b : blocks(text)) {
     std::set<std::string> seen;
 
@@ -259,11 +276,9 @@ inline std::vector<Stage> parse(madness::World &world,
         fail(line, "duplicate parameter " + k);
       if (b.kind == "moldft" && replaced_scf_keys.contains(k))
         fail(line, k + " is now " + replaced_scf_keys.at(k));
-      if (b.kind == "molresponse"
-          && k == madness::convergence::use_default_criteria_key)
-        fail(line, k
-                       + " is supported for moldft stages in this version; "
-                         "molresponse follows in the next change");
+      if (b.kind == "molresponse" && replaced_response_keys.contains(k))
+        fail(line, k + " is " + (k == "accuracy.density_change" ? "now " : "")
+                       + replaced_response_keys.at(k));
       if (k == "maxiter" && line.text.find('[') != std::string::npos) {
         // B5: "maxiter [30, 10]" gives each rung its own cap (moldft only).
         if (b.kind != "moldft")
@@ -287,7 +302,21 @@ inline std::vector<Stage> parse(madness::World &world,
 
     if (b.kind == "molresponse") {
       // Validate both controls before executing any stage, including reuse.
-      molresponse_v3::fd_requested_accuracy_targets(rp);
+      // B8 (Q3, Q5): as for moldft, letting the written targets decide needs
+      // at least one, and progress.* needs the targets to decide.
+      const bool targets_decide
+          = !rp.get<bool>(madness::convergence::use_default_criteria_key);
+      if (targets_decide
+          && molresponse_v3::fd_requested_accuracy_targets(rp).empty())
+        throw std::runtime_error(
+            b.name + ": " + madness::convergence::use_default_criteria_key
+            + " false needs at least one written target (dconv, "
+              "accuracy.bsh_residual, accuracy.kinetic_trace_change)");
+      if (!targets_decide && rp.is_user_defined("progress.window"))
+        throw std::runtime_error(
+            b.name
+            + ": progress.* stall rules act on your written targets; set "
+            + madness::convergence::use_default_criteria_key + " false");
       molresponse_v3::fd_requested_progress(rp);
     }
 
@@ -438,6 +467,7 @@ inline std::vector<Stage> parse(madness::World &world,
       throw std::runtime_error(
           "positive finite response dconv and positive maxiter required");
     // Only a fully validated stage becomes available to later references.
+    stage.written = seen;
     indices.emplace(b.name, stages.size());
     stages.push_back(std::move(stage));
   }

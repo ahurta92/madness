@@ -401,12 +401,30 @@ struct molresponse_v3_lib {
               "sidesteps the question entirely on multi-node runs.");
     }
     in.settings.policy.dconv_user = rp.dconv();
-    in.settings.policy.explicit_accuracy_targets = fd_requested_accuracy_targets(rp);
-    in.settings.policy.explicit_progress_configuration = fd_requested_progress(rp);
-    if (!in.settings.policy.explicit_progress_configuration.empty())
-      in.settings.policy.explicit_progress_configuration["protocol"] = protocol;
-    MADNESS_CHECK_THROW(in.settings.policy.explicit_accuracy_targets.empty() || bool(checkpoint_observer),
-                        "explicit response accuracy currently requires a named molresponse stage");
+    // Written targets and who decides belong to named stages (DESIGN B8); the
+    // unnamed path keeps its engine-only behavior.
+    const bool named_controls
+        = rp.is_user_defined("accuracy.bsh_residual")
+          || rp.is_user_defined("accuracy.kinetic_trace_change")
+          || rp.is_user_defined("progress.window")
+          || !rp.get<bool>(madness::convergence::use_default_criteria_key);
+    MADNESS_CHECK_THROW(!named_controls || bool(checkpoint_observer),
+                        "response accuracy, progress and convergence controls "
+                        "currently require "
+                        "a named molresponse stage");
+    if (checkpoint_observer) {
+      in.settings.policy.explicit_accuracy_targets
+          = fd_requested_accuracy_targets(rp);
+      in.settings.policy.explicit_progress_configuration
+          = fd_requested_progress(rp);
+      if (!in.settings.policy.explicit_progress_configuration.empty())
+        in.settings.policy.explicit_progress_configuration["protocol"]
+            = protocol;
+      in.settings.policy.decider
+          = rp.get<bool>(madness::convergence::use_default_criteria_key)
+                ? madness::convergence::Decider::engine_check
+                : madness::convergence::Decider::requested_criteria;
+    }
     const int diagnostic_iterations = rp.get<int>("diagnostic.iterations_per_rung");
     MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
     in.settings.policy.diagnostic_iterations_per_rung = diagnostic_iterations;

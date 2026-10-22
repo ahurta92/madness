@@ -35,6 +35,16 @@ def run(label, root, text=deck, resume=False, success=True):
     print(label, 'exit', r.returncode, flush=True)
     return json.loads((root / 'results.json').read_text())['stages']
 
+def strip_written_targets(entry):
+    """Make a response entry look as one from before step 2c: the response
+    dconv was not yet a written target (DESIGN B8), so such entries carry no
+    written-target evidence."""
+    for key in ('checkpoint_accuracy_targets', 'checkpoint_decided_by', 'explicit_accuracy',
+                'explicit_accuracy_history', 'checkpoint_iteration_count',
+                'checkpoint_diagnostic_iterations', 'rung_exhausted'):
+        entry.pop(key, None)
+    entry.get('saved_state_validation', {}).pop('explicit_accuracy', None)
+
 def manifests(root, stage):
     return [json.loads(f.read_text()) for f in (root / stage / 'checkpoints').glob('*/manifest.json')]
 
@@ -417,8 +427,11 @@ for corrupt in ('maximum', 'kinetic_change', 'kinetic_sample', 'historical_kinet
         entry['function_bsh_history'][0]['effective_limit'] = 99.0
     mfile.write_text(json.dumps(manifest))
     run('invalid-comparison-' + corrupt, root, resume=True, success=False)
-    expected_error = ('per-function kinetic measurement' if corrupt == 'historical_kinetic'
-                      else 'metric comparison')
+    # The response dconv is a written target (DESIGN B8), so the written-target
+    # validator checks every named response entry; it runs before the
+    # metric-comparison check and is the one that rejects a changed sample k.
+    expected_error = {'historical_kinetic': 'per-function kinetic measurement',
+                      'kinetic_sample': 'explicit accuracy evidence'}.get(corrupt, 'metric comparison')
     assert 'invalid response state: ' + expected_error in (work / ('invalid-comparison-' + corrupt + '.log')).read_text()
     assert (store / 'latest').read_text() == latest
 
@@ -484,6 +497,7 @@ for stage in ('gs', 'optical'):
         for channel in manifest['numerical']['engine_metadata']['fd_states'].values():
             for rung in channel.values():
                 for entry in rung.values():
+                    strip_written_targets(entry)
                     entry['convergence_measurements']['bsh_residual'].pop('per_function')
                     entry['convergence_measurements']['bsh_residual'].pop('maximum_comparison', None)
                     entry['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
@@ -512,6 +526,7 @@ manifest = json.loads(mfile.read_text())
 for channel in manifest['numerical']['engine_metadata']['fd_states'].values():
     for rung in channel.values():
         for entry in rung.values():
+            strip_written_targets(entry)
             for measurements in (entry['convergence_measurements'], entry['saved_state_validation']['measurements']):
                 measurements['bsh_residual'].pop('maximum_comparison')
                 measurements['delta_kinetic_energy'] = dict(value=None, availability='not_applicable', active_gate=False,
@@ -543,6 +558,7 @@ for stage in ('gs', 'optical'):
         for channel in m['numerical']['engine_metadata']['fd_states'].values():
             for rung in channel.values():
                 for e in rung.values():
+                    strip_written_targets(e)
                     e.pop('convergence_measurements')
                     e.pop('saved_state_validation', None)
                     e.pop('function_kinetic_history', None)

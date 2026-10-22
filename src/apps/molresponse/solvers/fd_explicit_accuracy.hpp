@@ -9,13 +9,13 @@ namespace molresponse_v3 {
 // existing engine gate; the inherited quadrature gate is not relabeled a max.
 template<class Parameters>
 nlohmann::json fd_requested_accuracy_targets(const Parameters& parameters) {
-  if (parameters.is_user_defined("accuracy.energy_change"))
-    throw std::invalid_argument("response accuracy.energy_change is not applicable: no local driven-response energy");
+  // Written targets (DESIGN B8): dconv targets the change of the
+  // kernel-induced density, compared absolutely; a driven response has no
+  // local energy, so there is no energy target.
   auto targets = madness::requested_accuracy_targets(
       parameters, "kernel_induced_density_L2_atomic_units",
       "response_amplitude_L2_atomic_units",
-      "hartree_times_response_amplitude_scale_squared",
-      "accuracy.density_change", "");
+      "hartree_times_response_amplitude_scale_squared", "dconv", "");
   if (targets.contains("bsh_residual"))
     targets["bsh_residual"]["quantity"] = "maximum_raw_fixed_point_function_L2";
   if (targets.contains("charge_density_change"))
@@ -195,10 +195,14 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
     const auto input = madness::evaluate_explicit_criteria(fd_accuracy_measurements(measurements), targets);
     const auto& saved = entry.at("saved_state_validation");
     const auto output = madness::evaluate_explicit_criteria(fd_accuracy_measurements(saved.at("measurements")), targets);
-    if (input.at("status") == "invalid" || output.at("status") == "invalid" ||
-        entry.at("explicit_accuracy") != input || criteria.back().at("criteria") != input ||
-        saved.at("explicit_accuracy") != output || saved.at("affects_stopping") != true ||
-        saved.at("comparison") != kinetic.at(iterations - 1).at("sample")) return false;
+    if (input.at("status") == "invalid" || output.at("status") == "invalid"
+        || entry.at("explicit_accuracy") != input
+        || criteria.back().at("criteria") != input
+        || saved.at("explicit_accuracy") != output
+        || saved.at("affects_stopping")
+               != (entry.value("checkpoint_decided_by", "") != "engine_check")
+        || saved.at("comparison") != kinetic.at(iterations - 1).at("sample"))
+      return false;
     for (const char* name : {"bsh_residual", "density_change", "kinetic_energy"}) {
       const auto& measured = saved.at("measurements").at(name);
       if (!sample_valid(measured.at("sample"), iterations) ||
@@ -225,7 +229,14 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
       return false;
     }
     if (entry.value("accepted", false)) return false;
-    if (entry.value("converged", false) && (input.at("status") != "satisfied" || output.at("status") != "satisfied")) return false;
+    // When the written targets decided (or, before the switch, both checks
+    // did), a converged entry must meet them on input and saved state. When
+    // the engine check decided, they are only reported (B8).
+    if (entry.value("checkpoint_decided_by", "") != "engine_check"
+        && entry.value("converged", false)
+        && (input.at("status") != "satisfied"
+            || output.at("status") != "satisfied"))
+      return false;
     return true;
   } catch (const std::exception&) {
     return false;

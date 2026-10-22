@@ -20,7 +20,12 @@ binary = str(Path(args.binary).resolve())
 deck = (Path(args.source) / 'named_h2.in').read_text().replace(
     'polarizability.frequencies [0.0, 0.02]', 'polarizability.frequencies [0.0]')
 # Deliberate stall fixture; these values are not calibrated scientific defaults.
+# progress.* acts on written targets, so the targets decide (DESIGN B8); the
+# kinetic target is the only one, as the response dconv is not written.
+assert deck.count('  dconv 1e-4\n') == 1  # the response stage's dconv
+deck = deck.replace('  dconv 1e-4\n', '')
 deck = deck.replace('molresponse optical\n', 'molresponse optical\n'
+                    '  convergence.use_default_criteria false\n'
                     '  accuracy.kinetic_trace_change 0\n  progress.window 1\n'
                     '  progress.minimum_relative_improvement 0.99999999\n')
 env = dict(os.environ, MAD_NUM_THREADS='2', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
@@ -116,5 +121,7 @@ for label, text in [('zero-fraction', deck.replace('0.99999999', '0')),
                     ('no-target', deck.replace('  accuracy.kinetic_trace_change 0\n', ''))]:
     run(label, root, text, resume=True)
     assert (store / 'latest').read_text() == pointer
-    assert 'progress' in (work / (label + '.log')).read_text()
+    # Without a target the targets cannot decide (B8): rejected at parse.
+    expected = 'needs at least one written target' if label == 'no-target' else 'progress'
+    assert expected in (work / (label + '.log')).read_text()
 print('response configured progress acceptance passed', flush=True)

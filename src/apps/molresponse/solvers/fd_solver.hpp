@@ -475,9 +475,11 @@ private:
     out.gate_history[0].push_back(g_bsh);
     out.gate_history[1].push_back(out.iter > 1 ? g_rho
                                    : std::numeric_limits<double>::infinity());
-    // Explicit criteria have no inherited plateau policy. Configured progress
-    // is separate; the legacy default cannot stop a still-improving criterion.
-    out.stalled = policy_.explicit_accuracy_targets.empty() && !out.diverged && policy_.plateau(out.gate_history);
+    // The engine's plateau detector belongs to the engine check (B8): it
+    // applies when the engine decides. When the written targets decide, only
+    // the configured progress rule (progress.*) can declare a stall.
+    out.stalled = policy_.decider == madness::convergence::Decider::engine_check
+                  && !out.diverged && policy_.plateau(out.gate_history);
     if (out.stalled && print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
       const std::size_t n = out.gate_history[0].size();
       const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
@@ -704,7 +706,10 @@ public:
       }
       const bool input_satisfied = std::all_of(out.explicit_accuracy.begin(), out.explicit_accuracy.end(),
           [](const auto& criterion) { return criterion.at("status") == "satisfied"; });
-      if (!out.diverged && !out.stalled && input_satisfied && legacy_converged(out)) {
+      // The saved-state check is part of the targets' decision (criteria mode);
+      // the engine check doesn't need it.
+      if (policy_.decider == madness::convergence::Decider::requested_criteria
+          && !out.diverged && !out.stalled && input_satisfied) {
         const auto saved = evaluate_saved_state(out);
         out.saved_explicit_accuracy = evaluate_requested_accuracy(out, &saved);
         for (const auto& criterion : out.saved_explicit_accuracy)
@@ -816,10 +821,18 @@ public:
 
   bool converged(const State& state) const {
     if (state.diverged || state.stalled) return true; // loop exit, never eligibility
-    if (!legacy_converged(state)) return false;
-    if (policy_.explicit_accuracy_targets.empty()) return true;
-    if (state.explicit_accuracy.size() != state.responses.size() ||
-        state.saved_explicit_accuracy.size() != state.responses.size()) return false;
+    return madness::convergence::converged(policy_.decider,
+                                           legacy_converged(state),
+                                           requested_criteria_met(state));
+  }
+
+  /// Every written target met on the solver's input and on the saved state
+  /// (B8; the latter is evaluated in criteria mode only).
+  [[nodiscard]] bool requested_criteria_met(const State& state) const {
+    if (policy_.explicit_accuracy_targets.empty()
+        || state.explicit_accuracy.size() != state.responses.size()
+        || state.saved_explicit_accuracy.size() != state.responses.size())
+      return false;
     for (const auto* evidence : {&state.explicit_accuracy, &state.saved_explicit_accuracy})
       for (const auto& criterion : *evidence)
         if (criterion.at("status") != "satisfied") return false;

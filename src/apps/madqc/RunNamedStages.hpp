@@ -295,6 +295,16 @@ inline bool run_if_named(madness::World &world,
       cp.set_user_defined_value("l", source->param.L());
       result["reference_representation"] = {{"L", source->param.L()},
                                             {"k", source->amo.at(0).k()}};
+      // B9: the stage's convergence settings, shown before the solve and
+      // recorded; the solver stops on the same targets.
+      const auto settings
+          = response_convergence_settings(stage, cp.protocol().back());
+      if (world.rank() == 0)
+        std::cout << '\n'
+                  << madness::convergence::render_settings_table(settings)
+                  << '\n'
+                  << std::flush;
+      result["convergence_settings"] = madness::convergence::to_json(settings);
       ResponseCheckpoint checkpoint(world, stage, stage_directory, directory, run_id,
           {{"stage", stage.reference}, {"generation", state_ids.at(stage.reference)}});
       molresponse_v3_lib::Results response;
@@ -338,6 +348,21 @@ inline bool run_if_named(madness::World &world,
       result["work_items"] = checkpoint.work_items;
       result["convergence_report"] = response_convergence_report(checkpoint.metadata(), state_id,
           reference_evidence.at(stage.reference));
+      result["convergence_report"]["decided_by"]
+          = madness::convergence::to_string(settings.decider);
+      {
+        const auto final_protocol = molresponse_v3::protocol_key(
+            cp.protocol().back(), protocol_k(cp.protocol().back()));
+        const auto outcomes
+            = response_saved_outcomes(checkpoint.metadata(), final_protocol);
+        result["convergence_report"]["convergence_outcome"]
+            = madness::convergence::outcome_to_json(settings, outcomes);
+        if (world.rank() == 0)
+          std::cout << madness::convergence::render_outcome_table(
+              settings, outcomes, converged ? "converged" : "unconverged")
+                    << '\n'
+                    << std::flush;
+      }
       result["reference_changed"] = checkpoint.reference_changed;
       result["acceleration_history"] = continuing ? "reset" : "fresh";
       result["properties"]["polarizability"]["source_state_id"] = state_id;

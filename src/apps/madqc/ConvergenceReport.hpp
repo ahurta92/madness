@@ -33,8 +33,13 @@ inline nlohmann::json response_convergence_report(const nlohmann::json& metadata
                                                   const std::string& state_id,
                                                   const nlohmann::json& reference) {
   using json = nlohmann::json;
-  json report = {{"schema", "madqc.convergence.v1"}, {"gate_policy", "existing_engine"},
-                 {"state_id", state_id}, {"reference", reference}, {"channels", json::array()}};
+  // The runner overwrites decided_by from the stage's settings; generations
+  // from before the switch were decided by the engine check.
+  json report = {{"schema", "madqc.convergence.v1"},
+                 {"decided_by", "engine_check"},
+                 {"state_id", state_id},
+                 {"reference", reference},
+                 {"channels", json::array()}};
   for (const auto& channel : metadata.at("fd_states").items()) {
     for (const auto& rung : channel.value().items()) {
       for (const auto& point : rung.value().items()) {

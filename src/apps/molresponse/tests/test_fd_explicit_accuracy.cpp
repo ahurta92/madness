@@ -34,15 +34,15 @@ int main() {
     json target = {{"bsh_residual", {{"value", 4.5}, {"units", "response_amplitude_L2_atomic_units"},
         {"quantity", "maximum_raw_fixed_point_function_L2"}}}};
     require(madness::evaluate_explicit_criteria(mapped, target).at("status") == "satisfied", "maximum criterion");
-    Controls controls{{{"accuracy.bsh_residual", 4.5}, {"accuracy.density_change", 0.1}}};
+    Controls controls{{{"accuracy.bsh_residual", 4.5}, {"dconv", 0.1}}};
     const auto configured = molresponse_v3::fd_requested_accuracy_targets(controls);
     require(configured.at("bsh_residual") == target.at("bsh_residual"), "target mapping");
     require(configured.at("charge_density_change").at("quantity") == "kernel_induced_charge_density_change_L2", "density target mapping");
-    controls.values["accuracy.energy_change"] = 1.0;
-    bool rejected = false;
-    try { molresponse_v3::fd_requested_accuracy_targets(controls); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    require(rejected, "driven response energy accepted");
+    // A driven response has no energy target: econv is never read (B8).
+    controls.values["econv"] = 1.0;
+    require(!molresponse_v3::fd_requested_accuracy_targets(controls).contains(
+                "energy_change"),
+            "driven response energy target created");
     measurements["bsh_residual"]["availability"] = "invalid";
     require(madness::evaluate_explicit_criteria(molresponse_v3::fd_accuracy_measurements(measurements), target).at("status") == "invalid", "parent invalidity hidden");
     measurements["bsh_residual"]["availability"] = "measured";

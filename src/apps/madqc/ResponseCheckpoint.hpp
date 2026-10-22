@@ -13,6 +13,137 @@
 
 namespace named_stages {
 
+// B9: one response stage's convergence settings, built once. The engine rows
+// come from the engine's own targets (ConvergencePolicy::effective_for_thresh);
+// its gates are per leg and relative, so they are shown as formulas, with the
+// per-channel verdicts in the channel records. The written targets come from
+// fd_requested_accuracy_targets, the same source the solver stops on.
+[[nodiscard]] inline madness::convergence::ConvergenceSettings
+response_convergence_settings(const Stage& stage, double final_thresh) {
+  namespace cv = madness::convergence;
+  using cv::Group;
+  using cv::Relation;
+  using cv::SetBy;
+  const auto& rp = stage.params.get<ResponseParameters>();
+  const auto text = [](double value) { return cv::detail::scientific(value); };
+  cv::ConvergenceSettings settings;
+  settings.stage = stage.name;
+  settings.application = "molresponse";
+  settings.decider = rp.get<bool>(cv::use_default_criteria_key)
+                         ? cv::Decider::engine_check
+                         : cv::Decider::requested_criteria;
+  settings.decider_set_by_user
+      = stage.written.contains(cv::use_default_criteria_key);
+  molresponse_v3::ConvergencePolicy policy;
+  policy.dconv_user = rp.dconv();
+  const auto limits = policy.effective_for_thresh(final_thresh);
+  const auto dconv_by
+      = stage.written.contains("dconv") ? SetBy::user : SetBy::engine_default;
+  const std::string effective = "max(dconv " + text(rp.dconv()) + ", thresh "
+                                + text(final_thresh) + ")";
+  settings.metrics.push_back(
+      {Group::engine_check, "BSH residual per leg", "dconv",
+       "engine_bsh_residual", "", "response_amplitude_L2_atomic_units",
+       rp.dconv(), dconv_by, Relation::less_than_or_equal, std::nullopt,
+       text(limits.bsh_residual) + " + " + text(limits.rtol)
+           + " x ||x|| (relative), from 5 x " + effective,
+       "per channel; verdicts in the channel records", ""});
+  settings.metrics.push_back(
+      {Group::engine_check, "density change per leg", "dconv",
+       "engine_density_change", "", "kernel_induced_density_L2_atomic_units",
+       rp.dconv(), dconv_by, Relation::less_than_or_equal, std::nullopt,
+       text(limits.density_residual) + " + " + text(limits.rtol)
+           + " x ||rho|| (relative), from 5 x " + effective,
+       "per channel; verdicts in the channel records", ""});
+
+  struct Requested {
+    const char *name, *keyword, *measurement, *quantity, *units;
+    std::string engine_instead;
+  };
+  const std::vector<Requested> requested = {
+      {"induced density change", "dconv", "charge_density_change",
+       "kernel_induced_charge_density_change_L2",
+       "kernel_induced_density_L2_atomic_units",
+       "compares each leg's density change against "
+           + text(limits.density_residual) + " + " + text(limits.rtol)
+           + " x ||rho||"},
+      {"BSH residual (max over functions)", "accuracy.bsh_residual",
+       "bsh_residual", "maximum_raw_fixed_point_function_L2",
+       "response_amplitude_L2_atomic_units",
+       "compares each leg's BSH residual against " + text(limits.bsh_residual)
+           + " + " + text(limits.rtol) + " x ||x||"},
+      {"kinetic trace change", "accuracy.kinetic_trace_change",
+       "delta_kinetic_energy", "absolute_kinetic_trace_change",
+       "hartree_times_response_amplitude_scale_squared",
+       "has no kinetic term"}};
+  const auto targets = molresponse_v3::fd_requested_accuracy_targets(rp);
+  for (const auto& row : requested) {
+    const bool written = targets.contains(row.measurement);
+    settings.metrics.push_back(
+        {Group::requested_criteria, row.name, row.keyword, row.measurement,
+         row.quantity, row.units,
+         written ? std::optional<double>(
+                       targets.at(row.measurement).at("value").get<double>())
+                 : std::nullopt,
+         written ? SetBy::user : SetBy::not_set, Relation::less_than_or_equal,
+         std::nullopt, "", "", row.engine_instead});
+  }
+  settings.metrics.push_back({Group::requested_criteria, "energy change", "",
+                              "energy_change", "", "hartree", std::nullopt,
+                              SetBy::not_set, Relation::less_than_or_equal,
+                              std::nullopt, "",
+                              "not applicable: a driven response has no local "
+                              "energy; see the reference stage",
+                              ""});
+  settings.iteration_caps = {
+      {static_cast<int>(rp.maxiter())},
+      stage.written.contains("maxiter") ? SetBy::user : SetBy::engine_default};
+  settings.warnings = cv::unenforced_target_warnings(settings);
+  for (auto& warning : cv::incomplete_request_warnings(
+           settings, {"charge_density_change", "bsh_residual"}))
+    settings.warnings.push_back(std::move(warning));
+  return settings;
+}
+
+// The end-of-stage outcome of a response stage (B9): for each written-target
+// measurement, the largest saved-state value over the channels and
+// frequencies of the final rung, so the limiting channel decides the row.
+[[nodiscard]] inline std::vector<madness::convergence::MetricOutcome>
+response_saved_outcomes(const json& metadata,
+                        const std::string& final_protocol) {
+  std::map<std::string, madness::convergence::MetricOutcome> largest;
+  // Held in a local: iterating items() of the temporary value() returns
+  // would dangle.
+  const auto states = metadata.value("fd_states", json::object());
+  for (const auto& channel : states.items()) {
+    if (!channel.value().contains(final_protocol))
+      continue;
+    for (const auto& point : channel.value().at(final_protocol).items()) {
+      const auto measurements = molresponse_v3::fd_accuracy_measurements(
+          point.value()
+              .value("saved_state_validation", json::object())
+              .value("measurements", json::object()));
+      for (const auto& item : measurements.items()) {
+        const auto& record = item.value();
+        auto& outcome = largest[item.key()];
+        outcome.measurement = item.key();
+        if (record.value("availability", "") != "measured"
+            || !record.at("value").is_number())
+          continue;
+        const double value = record.at("value").get<double>();
+        if (!outcome.value || value > *outcome.value)
+          outcome.value = value;
+        outcome.availability = "measured";
+      }
+    }
+  }
+  std::vector<madness::convergence::MetricOutcome> outcomes;
+  outcomes.reserve(largest.size());
+  for (auto& item : largest)
+    outcomes.push_back(std::move(item.second));
+  return outcomes;
+}
+
 // Scientific policy for the named HF/polarizability frontend. The engine still
 // owns state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -150,7 +281,9 @@ class ResponseCheckpoint {
         if (!states.contains(channel) || !states.at(channel).contains(key) ||
             !states.at(channel).at(key).contains(fkey)) return false;
         const auto& e = states.at(channel).at(key).at(fkey);
-        if (request.contains("accuracy_targets")) {
+        // Written targets block completion only when they decide (B8).
+        if (request.value("decided_by", "") == "requested_criteria"
+            && request.contains("accuracy_targets")) {
           const auto measurements = e.value("saved_state_validation", json::object())
               .value("measurements", json::object());
           if (madness::evaluate_explicit_criteria(molresponse_v3::fd_accuracy_measurements(measurements),
@@ -211,10 +344,19 @@ public:
                 {"dconv", stage.params.get<ResponseParameters>().dconv()}};
     const auto targets = molresponse_v3::fd_requested_accuracy_targets(stage.params.get<ResponseParameters>());
     if (!targets.empty()) request_["accuracy_targets"] = targets;
+    // Who decides convergence (B8); reuse and property eligibility follow it.
+    request_["decided_by"] = stage.params.get<ResponseParameters>().get<bool>(
+                                 madness::convergence::use_default_criteria_key)
+                                 ? "engine_check"
+                                 : "requested_criteria";
     const auto progress = molresponse_v3::fd_requested_progress(stage.params.get<ResponseParameters>());
     if (!progress.empty()) request_["progress"] = progress;
     const int diagnostic = stage.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung");
     if (diagnostic > 0) request_["diagnostic_iterations_per_rung"] = diagnostic;
+  }
+
+  [[nodiscard]] bool targets_decide() const {
+    return request_.value("decided_by", "") == "requested_criteria";
   }
 
   // Return true only when the requested analysis itself is already complete.
@@ -310,9 +452,16 @@ private:
           // A tighter subset must not erase independent convergence evidence.
           const auto accuracy = request_.value("accuracy_targets", json::object());
           const auto saved = e.value("saved_state_validation", json::object()).value("measurements", json::object());
-          const bool explicit_unmet = !accuracy.empty() &&
-              (e.value("accepted", false) || madness::evaluate_explicit_criteria(
-                  molresponse_v3::fd_accuracy_measurements(saved), accuracy).at("status") != "satisfied");
+          // An unmet written target forces a re-solve only when the targets
+          // decide; with the engine deciding it is reported, not enforced (B8).
+          const bool explicit_unmet
+              = !accuracy.empty() && targets_decide()
+                && (e.value("accepted", false)
+                    || madness::evaluate_explicit_criteria(
+                           molresponse_v3::fd_accuracy_measurements(saved),
+                           accuracy)
+                               .at("status")
+                           != "satisfied");
           if (requested && (explicit_unmet || e.at("checkpoint_dconv").get<double>() > target ||
               stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") > 0))
             e["converged"] = false;
@@ -370,7 +519,7 @@ private:
     m.stop_reason = converged ? "converged" : analyzed ? "unfinished" : "in_progress";
     // Keep analyzed values as diagnostics in engine_metadata, but an unmet
     // explicit request cannot publish them as eligible stage properties.
-    if (analyzed && (converged || !request_.contains("accuracy_targets")))
+    if (analyzed && (converged || !targets_decide()))
       m.properties.push_back({{"name", "polarizability"}, {"generation", m.generation},
                               {"converged", converged}, {"value", metadata.at("properties")}});
     const auto directory = store_ / m.generation;
