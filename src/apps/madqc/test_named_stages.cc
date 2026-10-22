@@ -1,3 +1,4 @@
+#include "MoldftCheckpoint.hpp"
 #include "NamedStages.hpp"
 #include <iostream>
 #include <stdexcept>
@@ -51,6 +52,55 @@ int main(int argc, char** argv) {
     collisions = response;
     collisions.replace(collisions.find("[1e-4]"), std::string("[1e-4]").size(), "[1.1e-4,1e-4]");
     rejects(geometry + gs + collisions, "protocol-key precision");
+    // D8: only a user-written econv is a request; it is judged on saved
+    // evidence and, in engine mode, reported but not enforced.
+    {
+      using nlohmann::json;
+      const auto saved = [](json value, const char* availability) {
+        return json{{"energy_change",
+                     {{"value", value},
+                      {"availability", availability},
+                      {"units", "hartree"}}}};
+      };
+      const auto status = [](const json& report) {
+        return report.at("status").get<std::string>();
+      };
+      CalculationParameters defaults;
+      check(!named_stages::requested_econv(defaults),
+            "engine default econv is not a request");
+      check(named_stages::energy_change_target(defaults).empty(),
+            "no econv, no energy target");
+      check(status(named_stages::energy_change_request_report(json::object(),
+                                                              defaults))
+                == "not_requested",
+            "no request needs no evidence");
+      CalculationParameters requested;
+      requested.set_user_defined_value("econv", 1e-6);
+      check(named_stages::requested_econv(requested) == 1e-6,
+            "user econv is the request");
+      const auto met = named_stages::energy_change_request_report(
+          saved(5e-7, "measured"), requested);
+      check(status(met) == "satisfied" && !met.contains("outcome"),
+            "met by evidence");
+      check(status(named_stages::energy_change_request_report(
+                saved(1e-6, "measured"), requested))
+                == "satisfied",
+            "met at equality (<=)");
+      const auto unmet = named_stages::energy_change_request_report(
+          saved(2e-6, "measured"), requested);
+      check(status(unmet) == "unmet" && unmet.at("enforced") == false
+                && unmet.at("outcome")
+                       == "unmet, not enforceable in engine mode",
+            "unmet evidence is reported, not enforced");
+      check(status(named_stages::energy_change_request_report(
+                saved(nullptr, "unavailable"), requested))
+                == "unavailable",
+            "unavailable evidence does not meet a request");
+      check(status(named_stages::energy_change_request_report(json::object(),
+                                                              requested))
+                == "unavailable",
+            "missing evidence does not meet a request");
+    }
     world.gop.sum(failures);
     if (world.rank() == 0) std::cout << "named-stage failures: " << failures << '\n';
     madness::finalize();

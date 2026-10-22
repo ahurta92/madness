@@ -66,11 +66,13 @@ assert result(fresh)['work'] == 'loaded'
 assert result(fresh)['iterations_this_run'] == 0
 assert published(fresh)[0] == generation and hashes(generation) == original
 
-# Changing a target forces iteration; old convergence cannot certify an update
-# that never reached the solver's convergence test (which starts at iteration 1).
+# Changing a target the deciding check enforces forces iteration; old
+# convergence cannot certify an update that never reached the solver's
+# convergence test (which starts at iteration 1). In engine mode that is
+# dconv: a written econv is reported only (D8, B8), so it no longer serves here.
 stale = work / 'StaleEvidence'
 shutil.copytree(fresh, stale)
-run('stale-evidence', stale, deck.replace('econv 1e-6', 'econv 1e-7').replace('maxiter 30', 'maxiter 1'),
+run('stale-evidence', stale, deck.replace('dconv 1e-5', 'dconv 1e-7').replace('maxiter 30', 'maxiter 1'),
     resume=True, success=False)
 assert result(stale)['status'] == 'unconverged'
 assert published(stale)[1]['stop_reason'] != 'converged'

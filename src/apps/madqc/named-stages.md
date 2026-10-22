@@ -97,9 +97,14 @@ a ground state is acceptable for response. An unfinished state remains saved
 and causes a nonzero exit before any response stage runs.
 
 The existing SCF gate uses `max(dconv, protocol threshold)`; both requested and
-effective targets are recorded. `econv` is recorded, and tightening it forces
-iteration, but this slice does not introduce an energy-change stopping gate or
-claim the full milestone-2d convergence contract.
+effective targets are recorded. `econv` is the target of the energy-change
+metric, but only when the deck writes it; the engine's default `econv` is not a
+request and is recorded as `set_by: engine_default_not_a_target`. A written
+`econv` is reported against (`relation: less_than_or_equal`), not enforced: the
+SCF engine check alone stops the run. On `--continue` a written `econv` counts
+as met only when the energy change measured on the saved orbitals
+(`saved_state_validation.measurements.energy_change`) is at or below it;
+otherwise the stage resumes. The recorded `econv` number is never evidence.
 
 On `--continue`, each response stage validates its own published generation.
 A completed identical request reuses its saved properties with zero response
@@ -168,8 +173,10 @@ Ground stages report density change (maximum spin-density L2 change), raw BSH
 residual (maximum orbital/spin norm), total-energy change, and the absolute
 change of the occupation-weighted electronic kinetic energy summed over spins.
 Energy and kinetic changes are diagnostic; no new stopping gate is enabled.
-The energy record includes the requested `econv` and its comparison, explicitly
-marked `active_gate: false`. A missing first comparison at each protocol rung
+The energy record carries a user-written `econv` as its target and verdict,
+explicitly marked `active_gate: false`; without one it has no target and no
+verdict. `results.json` adds `convergence_report.energy_change_request`, the
+current request judged on the saved state. A missing first comparison at each protocol rung
 or restarted solve has `value: null`, never an invented zero.
 
 Response reports contain separate channel/frequency/protocol records. Density

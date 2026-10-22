@@ -14,6 +14,42 @@ namespace named_stages {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// D8: econv is the target of the energy-change metric, but only when the user
+// wrote it. The engine's default econv is not a request (B3).
+[[nodiscard]] inline std::optional<double>
+requested_econv(const CalculationParameters& parameters) {
+  if (!parameters.is_user_defined("econv"))
+    return std::nullopt;
+  return parameters.econv();
+}
+
+// The econv request in the form evaluate_explicit_criteria() takes; empty when
+// the deck has no econv.
+[[nodiscard]] inline json
+energy_change_target(const CalculationParameters& parameters) {
+  json targets = json::object();
+  if (const auto econv = requested_econv(parameters))
+    targets["energy_change"] = {{"value", *econv}, {"units", "hartree"}};
+  return targets;
+}
+
+// D8 with B8 engine mode: a written econv is judged on the energy change
+// measured on the saved orbitals (never on the econv a generation recorded),
+// and reported. The engine check decides, so an unmet econv is not enforceable
+// and does not make --continue resume: resuming would stop on the engine check
+// again at once (Adrian, 2026-10-21).
+[[nodiscard]] inline json
+energy_change_request_report(const json& saved_measurements,
+                             const CalculationParameters& parameters) {
+  auto report = madness::evaluate_explicit_criteria(
+      saved_measurements, energy_change_target(parameters));
+  report["enforced"] = false;
+  const auto status = report.at("status").get<std::string>();
+  if (status != "not_requested" && status != "satisfied")
+    report["outcome"] = status + ", not enforceable in engine mode";
+  return report;
+}
+
 // Application policy lives here; StageCheckpoint only checks physical storage.
 class MoldftCheckpoint {
   madness::World &world_;
@@ -255,17 +291,17 @@ public:
     const auto saved_measurements = latest_.metrics.value("convergence_report", json::object())
         .value("saved_state_validation", json::object()).value("measurements", json::object());
     const auto requested_accuracy = madness::evaluate_explicit_criteria(saved_measurements, accuracy_targets);
-    const bool satisfied =
-        (accuracy_targets.empty() || requested_accuracy.at("status") == "satisfied") &&
-        cp.get<int>("diagnostic.iterations_per_rung") == 0 &&
-        latest_.stop_reason == "converged" &&
-        latest_.numerical.at("threshold").get<double>() <=
-            cp.protocol().back() &&
-        latest_.numerical.at("k").get<int>() ==
-            (cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k()) &&
-        latest_.targets.at("effective_dconv").get<double>() <=
-            std::max(cp.dconv(), cp.protocol().back()) &&
-        latest_.targets.at("econv").get<double>() <= cp.econv();
+    const bool satisfied
+        = (accuracy_targets.empty()
+           || requested_accuracy.at("status") == "satisfied")
+          && cp.get<int>("diagnostic.iterations_per_rung") == 0
+          && latest_.stop_reason == "converged"
+          && latest_.numerical.at("threshold").get<double>()
+                 <= cp.protocol().back()
+          && latest_.numerical.at("k").get<int>()
+                 == (cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k())
+          && latest_.targets.at("effective_dconv").get<double>()
+                 <= std::max(cp.dconv(), cp.protocol().back());
     work = satisfied ? "loaded" : "resumed";
     madness::checkpoint::detail::on_root(world_, [&] {
       validate_measurements(latest_.metrics, latest_.stage, latest_.numerical);
@@ -353,8 +389,26 @@ public:
     evidence["bsh_residual"]["reduction"] = "maximum_over_orbital_and_spin_L2_norms";
     if (step.has_previous && !step.previous_function_residuals.empty())
       evidence["bsh_residual"]["per_function"] = madness::function_residual_record(step.previous_function_residuals);
-    evidence["energy_change"] = measured(step.energy_change, "hartree",
-        "successive_iteration_energy_evaluations", false, scf.param.econv(), scf.param.econv(), step.iteration);
+    // D8: reported against a user-written econv only, never enforced here; the
+    // engine check alone still stops the run.
+    const auto econv = requested_econv(scf.param);
+    const json econv_target = econv ? json(*econv) : json(nullptr);
+    evidence["energy_change"]
+        = measured(step.energy_change, "hartree",
+                   "successive_iteration_energy_evaluations", false,
+                   econv_target, econv_target, step.iteration);
+    auto& energy_change = evidence["energy_change"];
+    energy_change["set_by"] = econv ? "user" : "engine_default_not_a_target";
+    if (!econv)
+      energy_change["engine_default"] = scf.param.econv();
+    if (econv) {
+      // Requested criteria compare with <= (evaluate_explicit_criteria).
+      energy_change["relation"] = "less_than_or_equal";
+      energy_change["satisfied"]
+          = energy_change.at("value").is_number()
+                ? json(energy_change.at("value").get<double>() <= *econv)
+                : json(nullptr);
+    }
     evidence["delta_kinetic_energy"] = measured(step.kinetic_change, "hartree",
         "successive_iteration_kinetic_evaluations", false, nullptr, nullptr, step.iteration);
     const auto current_blocks = kinetic_blocks(step.input_kinetic_diagonal);
@@ -409,15 +463,30 @@ public:
         ? madness::density_change_norms(world_, evaluation.alpha_density, evaluation.alpha_density,
               comparison_->comparison_alpha, comparison_->comparison_beta)
         : madness::DensityChanges{};
-    const std::map<std::string, double> values = {
-        {"bsh_residual", evaluation.bsh_residual}, {"density_change", density},
-        {"charge_density_change", density_changes.charge}, {"spin_density_change", density_changes.spin},
-        {"energy_change", comparable ? std::abs(energy - comparison_->comparison_energy) : 0.0},
-        {"delta_kinetic_energy", comparable ? std::abs(evaluation.kinetic - comparison_->comparison_kinetic) : 0.0}};
+    // Without a same-rung comparison sample a change has no value at all (B2),
+    // so it is absent rather than zero.
+    const auto change = [&](double value) {
+      return comparable ? std::optional<double>(value) : std::nullopt;
+    };
+    const std::map<std::string, std::optional<double>> values = {
+        {"bsh_residual", evaluation.bsh_residual},
+        {"density_change", change(density)},
+        {"charge_density_change", change(density_changes.charge)},
+        {"spin_density_change", change(density_changes.spin)},
+        {"energy_change",
+         comparable ? std::optional<double>(
+                          std::abs(energy - comparison_->comparison_energy))
+                    : std::nullopt},
+        {"delta_kinetic_energy",
+         comparable ? std::optional<double>(std::abs(
+                          evaluation.kinetic - comparison_->comparison_kinetic))
+                    : std::nullopt}};
     for (auto& item : evidence.items()) {
       auto& m = item.value();
-      const double value = values.at(item.key());
-      const bool available = item.key() == "bsh_residual" || comparable;
+      const auto measured_value = values.at(item.key());
+      const bool available = measured_value.has_value();
+      const double value
+          = measured_value.value_or(0.0); // read only when available
       const bool finite = std::isfinite(value);
       m["value"] = available && finite ? json(value) : json(nullptr);
       m["availability"] = !available ? "unavailable" : finite ? "measured" : "invalid";
@@ -425,8 +494,13 @@ public:
       m["valid_for_saved_state"] = available && finite;
       m["phase"] = "saved_orbitals_before_archive";
       m["active_gate"] = false; // diagnostic; the engine verdict is unchanged
-      m["satisfied"] = available && finite && !m.at("effective_limit").is_null()
-          ? json(value < m.at("effective_limit").get<double>()) : json(nullptr);
+      const bool inclusive
+          = m.value("relation", json()) == "less_than_or_equal";
+      const auto& limit = m.at("effective_limit");
+      m["satisfied"] = available && finite && !limit.is_null()
+                           ? json(inclusive ? value <= limit.get<double>()
+                                            : value < limit.get<double>())
+                           : json(nullptr);
       m.erase("sample");
       m.erase("components");
     }
@@ -482,10 +556,11 @@ private:
       m.position["previous_generation"] = latest_.generation;
     m.metrics = metrics;
     m.targets = {{"dconv", scf.param.dconv()},
-                 {"econv", scf.param.econv()},
                  {"effective_dconv",
                   std::max(scf.param.dconv(),
                            madness::FunctionDefaults<3>::get_thresh())}};
+    if (const auto econv = requested_econv(scf.param)) // D8: user-written only
+      m.targets["econv"] = *econv;
     m.targets["explicit_accuracy"] = madness::requested_accuracy_targets(scf.param, "a0^(-3/2)", "dimensionless", "hartree");
     m.stop_reason = converged   ? "converged"
                     : evaluated ? "iteration_limit"
