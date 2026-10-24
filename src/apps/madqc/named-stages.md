@@ -88,6 +88,21 @@ completed request loads without SCF iterations. Iteration limits and requested
 energy/dipole properties can change. Results report `work` (`solved`, `loaded`,
 `resumed`), `iterations_this_run`, and acceleration-history reset.
 
+Where a moldft stage continues is decided from the saved generation's rung,
+matched by value (`thresh`, `k`), not by position in the `protocol` list. A
+finished rung is never redone: the stage continues at the next tighter
+requested rung. An unfinished rung resumes where it stopped. A finished final
+rung is loaded if it meets the current request and resumed otherwise.
+`maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
+number of iterations a rung may take in this run; a `--continue` run starts
+the count again, so a resumed rung gets `maxiter` more iterations. Each
+generation records the rung (`position.rung`): its index, `thresh`, `k`, the
+iterations in this run (`iterations_this_run`), the total across runs
+(`iterations_at_rung`, recorded, never compared with `maxiter`), and how it
+ended (`converged`, `stalled`, `iteration_limit`, or `in_progress`). The
+stage's `results.json` `continuation` block says what happened and why, e.g.
+"resumed at rung 2 (thresh 1e-06, k 8), iteration 3 of that rung".
+
 The store is `<prefix>/<stage>/checkpoints/`. Each generation contains its own
 `state.restartdata.*` physical shards and `manifest.json`; the `latest` pointer
 selects exactly one generation. Occupations, orbital energies/order, molecular

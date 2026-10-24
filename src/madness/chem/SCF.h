@@ -690,9 +690,9 @@ public:
     void orthonormalize(World& world, vecfuncT& amo_new, int nocc) const;
 
     // For given protocol, solve the DFT/HF/response equations
-    /// Solve at the current protocol rung. `iteration_cap`, when given, is the
-    /// number of iterations left at this rung (named stages, DESIGN B5);
-    /// otherwise maxiter applies.
+    /// Solve at the current protocol rung. `iteration_cap`, when given, is this
+    /// rung's maxiter from a per-rung list (named stages, DESIGN B5);
+    /// otherwise maxiter applies. Either way it counts this run only.
     void solve(World& world, std::optional<int> iteration_cap = std::nullopt);
 
     void output_calc_info_schema() const;
@@ -720,19 +720,14 @@ public:
 
     bool provides_gradient() const { return true; }
 
-    /// Named stages (DESIGN B5): iterations left at rung `proto`, from
-    /// maxiter (one number or one per rung) minus what earlier --continue runs
-    /// already spent at the starting rung. Nothing for the unnamed path, which
-    /// keeps maxiter per rung exactly as before.
-    std::optional<int> named_rung_cap(std::size_t proto, int start_rung) const {
+    /// Named stages (DESIGN B5): maxiter at rung `proto` when the deck gave one
+    /// per rung. maxiter is per run (D-007), so a resumed rung gets all of it.
+    /// Nothing otherwise: maxiter applies at every rung, as before.
+    std::optional<int> named_rung_cap(std::size_t proto) const {
         const auto per_rung = calc.param.get<std::vector<int>>("maxiter_per_rung");
-        if (per_rung.empty() and start_rung < 0) return std::nullopt;
-        const int cap = per_rung.empty() ? calc.param.maxiter()
-                        : per_rung.size() == 1 ? per_rung.front()
-                                               : per_rung.at(proto);
-        const int done = int(proto) == start_rung
-                         ? calc.param.get<int>("restart.iterations_done") : 0;
-        return cap - done;
+        if (per_rung.empty())
+            return std::nullopt;
+        return per_rung.size() == 1 ? per_rung.front() : per_rung.at(proto);
     }
 
     double value(const Tensor<double>& x) {
@@ -919,8 +914,7 @@ public:
                     // archive's rung), so take the header value the plan kept.
                     calc.current_energy = plan.stale_energy;
                     calc.solve_virtuals(world);
-                }
-                else if (const auto cap = named_rung_cap(proto, adapter_start_rung))
+                } else if (const auto cap = named_rung_cap(proto))
                     calc.solve(world, cap);
                 else calc.solve(world);
 

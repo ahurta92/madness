@@ -73,10 +73,8 @@ assert published(fresh)[0] == generation and hashes(generation) == original
 # dconv: a written econv is reported only (D8, B8), so it no longer serves here.
 stale = work / 'StaleEvidence'
 shutil.copytree(fresh, stale)
-# maxiter counts every iteration at a rung across runs (B5), so allow exactly
-# one more than the saved state already spent at its rung.
-spent = published(fresh)[1]['position']['rung']['iterations_at_rung']
-run('stale-evidence', stale, deck.replace('dconv 1e-5', 'dconv 1e-7').replace('maxiter 30', 'maxiter %d' % (spent + 1)),
+# maxiter is per run (B5, D-007): exactly one more iteration.
+run('stale-evidence', stale, deck.replace('dconv 1e-5', 'dconv 1e-7').replace('maxiter 30', 'maxiter 1'),
     resume=True, success=False)
 assert result(stale)['status'] == 'unconverged'
 assert published(stale)[1]['stop_reason'] != 'converged'

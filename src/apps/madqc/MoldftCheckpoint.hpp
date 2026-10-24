@@ -157,21 +157,13 @@ saved_outcomes(const json& saved_measurements) {
 
 namespace continuation = madness::scf_continuation;
 
-// B5/B6: the requested protocol ladder, each rung identified by value and
-// given its iteration cap (maxiter, or one maxiter per rung).
-[[nodiscard]] inline std::vector<continuation::RequestedRung>
+// B6: the requested protocol ladder, each rung identified by value.
+[[nodiscard]] inline std::vector<continuation::Rung>
 requested_ladder(const CalculationParameters& parameters) {
-  const auto protocol = parameters.protocol();
-  const auto per_rung = parameters.get<std::vector<int>>("maxiter_per_rung");
-  std::vector<continuation::RequestedRung> ladder;
-  for (std::size_t i = 0; i < protocol.size(); ++i) {
-    const int k
-        = parameters.k() == -1 ? protocol_k(protocol[i]) : parameters.k();
-    const int cap = per_rung.empty()       ? parameters.maxiter()
-                    : per_rung.size() == 1 ? per_rung.front()
-                                           : per_rung.at(i);
-    ladder.push_back({{protocol[i], k}, cap});
-  }
+  std::vector<continuation::Rung> ladder;
+  for (const double thresh : parameters.protocol())
+    ladder.push_back(
+        {thresh, parameters.k() == -1 ? protocol_k(thresh) : parameters.k()});
   return ladder;
 }
 
@@ -401,9 +393,10 @@ class MoldftCheckpoint {
       validate(report.at("saved_state_validation").at("measurements"));
   }
 
-  // B5/B6: the rung a sample belongs to, identified by value, with every
-  // iteration spent there, including earlier --continue runs, and how it
-  // ended (on the final-rotation sample).
+  // B5/B6: the rung a sample belongs to, identified by value, with the
+  // iterations spent there in this run (what maxiter caps) and in total,
+  // earlier --continue runs included (recorded only), and how it ended (on
+  // the final-rotation sample).
   [[nodiscard]] json
   rung_record(const madness::SCF& scf,
               const madness::SCF::IterationCheckpoint& step) const {
@@ -411,7 +404,7 @@ class MoldftCheckpoint {
     const auto ladder = requested_ladder(scf.param);
     std::size_t index = ladder.size();
     for (std::size_t i = 0; i < ladder.size() && index == ladder.size(); ++i)
-      if (continuation::same_rung(ladder[i].rung, rung))
+      if (continuation::same_rung(ladder[i], rung))
         index = i;
     require(index < ladder.size(), "sample rung is not in the protocol");
     const int earlier = resumed_by_plan_ && index == continuation_.start_rung
@@ -421,6 +414,7 @@ class MoldftCheckpoint {
             {"thresh", rung.thresh},
             {"k", rung.k},
             {"iterations_at_rung", earlier + step.iteration + 1},
+            {"iterations_this_run", step.iteration + 1},
             {"stop", continuation::to_string(step.rung_stop)}};
   }
 
@@ -527,8 +521,8 @@ public:
         = reuse_.action == convergence::ReuseAction::load
           && cp.get<int>("diagnostic.iterations_per_rung") == 0;
     // B6: the adapter, not the engine's restart planner, decides where to
-    // continue: load, or resume at a rung matched by value with the
-    // iterations it already used (Q6).
+    // continue: load, or resume at a rung matched by value (Q6). The rung
+    // gets a fresh maxiter (B5, D-007).
     const auto ladder = requested_ladder(cp);
     continuation_ = continuation::plan_scf_continuation(saved_rung(latest_),
                                                         ladder, satisfied);
@@ -551,8 +545,6 @@ public:
     if (!load) {
       scf.param.set_user_defined_value(
           "restart.start_rung", static_cast<int>(continuation_.start_rung));
-      scf.param.set_user_defined_value("restart.iterations_done",
-                                       continuation_.iterations_done);
       resumed_by_plan_ = true;
     }
     has_latest_ = true;
@@ -560,18 +552,11 @@ public:
 
   const madness::checkpoint::Manifest &latest() const { return latest_; }
 
-  /// Loaded on --continue although the request is unmet (B5: the final
-  /// rung used its iteration cap).
-  [[nodiscard]] bool loaded_unmet() const {
-    return continuation_.action == continuation::Action::load
-           && !continuation_.unmet.empty();
-  }
-
   /// What --continue did and why (B6), for results.json and the manifest.
   [[nodiscard]] json
   continuation_record(const CalculationParameters& parameters) const {
     const auto ladder = requested_ladder(parameters);
-    const auto& start = ladder.at(continuation_.start_rung).rung;
+    const auto& start = ladder.at(continuation_.start_rung);
     return {{"action", continuation_.action == continuation::Action::load
                            ? "loaded"
                            : "resumed"},
@@ -583,8 +568,6 @@ public:
             {"why", continuation_.why},
             {"reuse_why", reuse_.why},
             {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
-            {"unmet", continuation_.unmet.empty() ? json(nullptr)
-                                                  : json(continuation_.unmet)},
             {"summary", continuation::describe(continuation_, ladder)}};
   }
   fs::path prefix() const { return store_ / latest_.generation / "state"; }

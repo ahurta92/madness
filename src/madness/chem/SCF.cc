@@ -2843,10 +2843,11 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
     json progress_history = json::array();
     const int diagnostic_iterations = param.get<int>("diagnostic.iterations_per_rung");
     MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
-    // Named stages pass the iterations left at this rung (B5: the cap counts
-    // every iteration at a rung, across --continue runs); otherwise maxiter.
-    MADNESS_CHECK_THROW(!iteration_cap || *iteration_cap > 0,
-                        "SCF::solve: the iteration cap for this rung is used up");
+    // Named stages pass this rung's maxiter from a per-rung list (B5: per
+    // run, D-007); otherwise maxiter.
+    MADNESS_CHECK_THROW(
+        !iteration_cap || *iteration_cap > 0,
+        "SCF::solve: the iteration cap for this rung must be positive");
     const int iteration_limit = diagnostic_iterations ? diagnostic_iterations
                                 : iteration_cap       ? *iteration_cap
                                                       : param.maxiter();

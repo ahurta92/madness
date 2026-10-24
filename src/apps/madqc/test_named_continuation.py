@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""--continue resumes at the right rung and the iteration cap counts across runs
-(DESIGN B5, B6): a finished rung is never redone, an interrupted rung resumes
-with its iterations counted, and a final rung that used its cap is loaded and
-reported unmet until the cap is raised."""
+"""--continue resumes at the right rung (DESIGN B5, B6): a finished rung is
+never redone and an interrupted rung resumes. maxiter is per run (D-007): a
+resumed rung gets maxiter iterations again, and the total at the rung is
+recorded, not compared with the cap."""
 import argparse
 import json
 import os
@@ -36,7 +36,8 @@ def run(label, root, text=deck, resume=False, success=True):
         r = subprocess.run(launch + [binary, str(inp), '--prefix=' + str(root)] +
                            (['--continue'] if resume else []), cwd=work, env=env,
                            stdout=out, stderr=subprocess.STDOUT, timeout=600)
-    assert (r.returncode == 0) == success, log.read_text()[-6000:]
+    if success is not None:  # None: either outcome is valid; the caller checks
+        assert (r.returncode == 0) == success, log.read_text()[-6000:]
     print(label, 'exit', r.returncode, flush=True)
     return log.read_text()
 
@@ -127,16 +128,23 @@ assert rung(last)['index'] == 2 and rung(last)['iterations_at_rung'] == 2, rung(
 assert rung(last)['stop'] == 'iteration_limit' and last['stop_reason'] != 'converged'
 assert result(capped)['status'] == 'unconverged'
 
-# Same cap on --continue: the cap is used up, so the state is loaded and
-# reported unmet instead of iterating again.
+# Same cap on --continue: maxiter is per run (D-007), so rung 2 resumes with
+# two more iterations; the total at the rung counts both runs.
 same_cap = work / 'SameCap'
 shutil.copytree(capped, same_cap)
-run('same-cap', same_cap, deck.replace('maxiter 30', 'maxiter [30, 2]'), resume=True, success=False)
+run('same-cap', same_cap, deck.replace('maxiter 30', 'maxiter [30, 2]'), resume=True, success=None)
 record = result(same_cap)['continuation']
-assert record['action'] == 'loaded' and result(same_cap)['iterations_this_run'] == 0, record
-assert record['unmet'] == 'unmet: iteration limit reached at rung 2', record
+assert record['action'] == 'resumed' and record['rung']['index'] == 2, record
+assert record['iterations_done_at_rung'] == 2, record
+assert result(same_cap)['iterations_this_run'] == 2, result(same_cap)['iterations_this_run']
+last = generations(same_cap)[-1]
+assert rung(last)['iterations_this_run'] == 2 and rung(last)['iterations_at_rung'] == 4, rung(last)
+# Two more iterations may or may not finish rung 2 (it needs three from a
+# fresh start, and the accelerator restarts cold); the status follows the stop.
+assert rung(last)['stop'] in ('converged', 'iteration_limit'), rung(last)
+assert (result(same_cap)['status'] == 'completed') == (rung(last)['stop'] == 'converged')
 
-# A raised cap gives rung 2 more iterations; the count includes the first run.
+# A larger maxiter lets rung 2 finish; the recorded total includes the first run.
 raised = work / 'RaisedCap'
 shutil.copytree(capped, raised)
 run('raised-cap', raised, deck.replace('maxiter 30', 'maxiter [30, 30]'), resume=True)

@@ -230,11 +230,9 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
                      <= std::max(cp.dconv(), cp.protocol().back());
   checkpoint.finish(*scf, converged);
   const auto& saved = checkpoint.latest();
-  // A loaded state was judged against this request by prepare(); one
-  // loaded with its cap used up and the request unmet is not converged
-  // (B5). A solved state is converged when its stop reason says so.
-  converged = checkpoint.work == "loaded" ? !checkpoint.loaded_unmet()
-                                          : saved.stop_reason == "converged";
+  // A loaded state was judged against this request by prepare() and met it
+  // (B6); a solved state is converged when its stop reason says so.
+  converged = checkpoint.work == "loaded" || saved.stop_reason == "converged";
   state_id = saved.generation;
   result["state_id"] = state_id;
   result["identity_kind"] = "checkpoint_generation";

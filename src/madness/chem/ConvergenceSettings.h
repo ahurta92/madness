@@ -65,7 +65,7 @@ struct MetricSetting {
 };
 
 /// The iteration cap per protocol rung (B5): maxiter, one number or one per
-/// rung, counted across --continue runs.
+/// rung, per run: a restart starts the count again (D-007).
 struct IterationCaps {
   std::vector<int> per_rung; ///< one entry: the same cap at every rung
   SetBy set_by = SetBy::engine_default;
@@ -465,7 +465,7 @@ render_settings_table(const ConvergenceSettings& settings) {
     table += "  Iteration cap (maxiter): "
              + detail::caps_text(settings.iteration_caps) + " ("
              + detail::words(to_string(settings.iteration_caps.set_by))
-             + "), counted across --continue runs\n";
+             + "), per run; a restart starts the count again\n";
   for (const auto& warning : settings.warnings)
     table += "  WARNING: " + warning + "\n";
   return table;
