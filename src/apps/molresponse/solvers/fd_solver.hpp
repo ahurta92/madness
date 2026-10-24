@@ -114,6 +114,9 @@ public:
     /// (ConvergencePolicy::stall_*). converged() returns true on it so the
     /// loop exits; the executor records it and applies best-effort acceptance.
     bool                                    stalled = false;
+    /// How the last solve's rung ended (B5, rung_exit), set by iterate<>.
+    madness::convergence::StopReason stop
+        = madness::convergence::StopReason::in_progress;
     bool                                    rung_exhausted = false;
     nlohmann::json explicit_accuracy = nlohmann::json::array();
     nlohmann::json saved_explicit_accuracy = nlohmann::json::array();
@@ -808,6 +811,13 @@ public:
   bool legacy_converged(const State &s) const {
     if (s.diverged) return true;
     if (s.stalled)  return true;   // exit; executor reads State::stalled
+    return engine_check_passed(s);
+  }
+
+  /// The engine check alone (B8): every leg converged by fd_leg_converged.
+  /// Divergence and stalls are not verdicts on convergence; they are the
+  /// caller's validity check and rung_exit's stall exit.
+  [[nodiscard]] bool engine_check_passed(const State& s) const {
     if (s.iter < policy_.min_iters_before_conv) return false;
     if (s.last_bsh_residual.empty()) return false;
     for (std::size_t c = 0; c < s.last_bsh_residual.size(); ++c) {
@@ -824,6 +834,18 @@ public:
     return madness::convergence::converged(policy_.decider,
                                            legacy_converged(state),
                                            requested_criteria_met(state));
+  }
+
+  /// B5: how this solve's rung ends after `iterations` iterations of this
+  /// attempt, by the shared rung_exit; this solver only supplies its
+  /// verdicts. iterate<> checks divergence before asking.
+  [[nodiscard]] madness::convergence::StopReason
+  stop_reason(const State& state, int iterations, int cap,
+              int forced_iterations) const {
+    return madness::convergence::rung_exit(
+        {policy_.decider, engine_check_passed(state),
+         requested_criteria_met(state), state.stalled, iterations, cap,
+         forced_iterations});
   }
 
   /// Every written target met on the solver's input and on the saved state

@@ -50,10 +50,25 @@ auto iterate(Solver &solver, typename Solver::State state,
   const int count = policy.forced_iterations ? policy.forced_iterations : policy.max_iters;
   for (int k = 0; k < count; ++k) {
     state = solver.step(state);
-    if (policy.forced_iterations) {
+    // DESIGN B5: a solver with stop_reason() (the FD solver) leaves the order
+    // of the exits to the shared rung_exit; divergence, its validity check,
+    // comes first. The others keep the loop below until their named ports.
+    if constexpr (requires { solver.stop_reason(state, 0, 0, 0); }) {
+      if (iteration_diverged(state, 0))
+        break;
+      state.stop = solver.stop_reason(state, k + 1, policy.max_iters,
+                                      policy.forced_iterations);
+      if (state.stop == decltype(state.stop)::in_progress)
+        continue;
+      converged = state.stop == decltype(state.stop)::converged;
+      break;
+    } else if (policy.forced_iterations) {
       if (iteration_diverged(state, 0)) { converged = false; break; }
       converged = !iteration_stalled(state, 0) && solver.converged(state);
-    } else if (solver.converged(state)) { converged = true; break; }
+    } else if (solver.converged(state)) {
+      converged = true;
+      break;
+    }
   }
   solver.print_final(state, converged);
   return state;

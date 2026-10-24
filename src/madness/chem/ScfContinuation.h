@@ -19,6 +19,8 @@
 //     final rung that used its cap is loaded and reported unmet; a raised cap
 //     gives it more iterations.
 
+#include <madness/chem/ConvergenceSettings.h>
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -53,36 +55,12 @@ inline constexpr double same_thresh_tolerance = 1e-9;
          && !same_rung(candidate, reference);
 }
 
-/// How a rung ended (B5): the three exits, or not yet.
-enum class RungStop : std::uint8_t {
-  in_progress,
-  converged,
-  stalled,
-  iteration_limit
-};
-
-[[nodiscard]] inline const char* to_string(RungStop stop) {
-  switch (stop) {
-  case RungStop::converged:
-    return "converged";
-  case RungStop::stalled:
-    return "stalled";
-  case RungStop::iteration_limit:
-    return "iteration_limit";
-  case RungStop::in_progress:
-    break;
-  }
-  return "in_progress";
-}
+/// How a rung ended (B5); defined beside rung_exit, which decides it.
+using RungStop = convergence::StopReason;
+using convergence::to_string;
 
 [[nodiscard]] inline RungStop rung_stop_from_string(const std::string& text) {
-  if (text == "converged")
-    return RungStop::converged;
-  if (text == "stalled")
-    return RungStop::stalled;
-  if (text == "iteration_limit")
-    return RungStop::iteration_limit;
-  return RungStop::in_progress;
+  return convergence::stop_reason_from_string(text);
 }
 
 /// What the saved generation says about the rung it was produced at.

@@ -115,6 +115,74 @@ comparison_limit(const MetricSetting& metric) {
                                           : requested_criteria_met;
 }
 
+/// How a protocol rung ended (B5): one of the three exits, or not yet
+/// (`in_progress`, DESIGN's "none"). The strings are those saved in manifests.
+enum class StopReason : std::uint8_t {
+  in_progress,
+  converged,
+  stalled,
+  iteration_limit
+};
+
+[[nodiscard]] inline const char* to_string(StopReason stop) {
+  switch (stop) {
+  case StopReason::converged:
+    return "converged";
+  case StopReason::stalled:
+    return "stalled";
+  case StopReason::iteration_limit:
+    return "iteration_limit";
+  case StopReason::in_progress:
+    break;
+  }
+  return "in_progress";
+}
+
+[[nodiscard]] inline StopReason
+stop_reason_from_string(const std::string& text) {
+  if (text == "converged")
+    return StopReason::converged;
+  if (text == "stalled")
+    return StopReason::stalled;
+  if (text == "iteration_limit")
+    return StopReason::iteration_limit;
+  return StopReason::in_progress;
+}
+
+/// One sample at an engine's save boundary, as verdicts and counts (B5:
+/// engines compare live state; everything outside takes verdicts).
+struct RungSample {
+  Decider decider = Decider::engine_check;
+  bool engine_check_passed = false;
+  bool criteria_met = false;
+  bool stall_detected = false;
+  int iterations_at_rung = 0; ///< in this run, this sample included
+  int cap = 0;                ///< maxiter at this rung, per run
+  int forced_iterations = 0;  ///< diagnostic.iterations_per_rung; 0: off
+};
+
+/// B5: the one place the exits of a rung are ordered. Converged (by the B8
+/// decider), else the iteration cap, else a stall, else the rung goes on.
+/// Forced iterations (the trajectory-study control) run exactly that many:
+/// no exit before, and at the last one converged or iteration limit; the
+/// stall is ignored. Divergence is the engine's validity check, made before.
+[[nodiscard]] inline StopReason rung_exit(const RungSample& sample) {
+  const bool decided = converged(sample.decider, sample.engine_check_passed,
+                                 sample.criteria_met);
+  if (sample.forced_iterations > 0) {
+    if (sample.iterations_at_rung < sample.forced_iterations)
+      return StopReason::in_progress;
+    return decided ? StopReason::converged : StopReason::iteration_limit;
+  }
+  if (decided)
+    return StopReason::converged;
+  if (sample.iterations_at_rung >= sample.cap)
+    return StopReason::iteration_limit;
+  if (sample.stall_detected)
+    return StopReason::stalled;
+  return StopReason::in_progress;
+}
+
 [[nodiscard]] inline bool
 has_requested_criteria(const ConvergenceSettings& settings) {
   return std::any_of(settings.metrics.begin(), settings.metrics.end(),

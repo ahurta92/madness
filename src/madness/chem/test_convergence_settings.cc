@@ -176,6 +176,86 @@ int main() {
             != std::string::npos,
         "the outcome table names the limiting metric");
 
+  // B5: rung_exit orders the exits once. Each row: decider, engine check,
+  // criteria met, stall, iterations this run, cap, forced, expected exit.
+  constexpr auto E = Decider::engine_check;
+  constexpr auto C = Decider::requested_criteria;
+  constexpr auto none = StopReason::in_progress;
+  constexpr auto conv = StopReason::converged;
+  constexpr auto stall = StopReason::stalled;
+  constexpr auto cap = StopReason::iteration_limit;
+  struct ExitCase {
+    const char* name;
+    RungSample sample;
+    StopReason expected;
+  };
+  const std::vector<ExitCase> exits = {
+      {"nothing yet", {E, false, false, false, 3, 30, 0}, none},
+      {"engine check passes", {E, true, false, false, 3, 30, 0}, conv},
+      {"engine mode ignores met criteria",
+       {E, false, true, false, 3, 30, 0},
+       none},
+      {"criteria met", {C, false, true, false, 3, 30, 0}, conv},
+      {"criteria mode ignores the engine check",
+       {C, true, false, false, 3, 30, 0},
+       none},
+      {"cap reached", {E, false, false, false, 30, 30, 0}, cap},
+      {"beyond the cap", {E, false, false, false, 31, 30, 0}, cap},
+      {"stall", {C, false, false, true, 5, 30, 0}, stall},
+      {"converged and cap: converged",
+       {E, true, false, false, 30, 30, 0},
+       conv},
+      {"converged and stall: converged",
+       {E, true, false, true, 5, 30, 0},
+       conv},
+      {"cap and stall: iteration limit",
+       {C, false, false, true, 30, 30, 0},
+       cap},
+      {"all three: converged", {C, false, true, true, 30, 30, 0}, conv},
+      {"forced: no exit before N even if converged",
+       {E, true, false, false, 2, 30, 5},
+       none},
+      {"forced: no exit before N on a stall",
+       {C, false, false, true, 2, 30, 5},
+       none},
+      {"forced: the cap does not end it early",
+       {E, false, false, false, 3, 3, 5},
+       none},
+      {"forced: converged at N", {E, true, false, false, 5, 30, 5}, conv},
+      {"forced: unmet at N is the iteration limit",
+       {E, false, false, false, 5, 30, 5},
+       cap},
+      {"forced: stall ignored at N", {C, false, true, true, 5, 30, 5}, conv},
+      {"forced: unmet and stalled at N",
+       {C, false, false, true, 5, 30, 5},
+       cap},
+  };
+  for (const auto& row : exits)
+    check(rung_exit(row.sample) == row.expected,
+          std::string("rung_exit: ") + row.name);
+  // Over every verdict combination: never converged unless the decider's
+  // verdict holds, and a stall never wins over the cap or convergence.
+  for (const auto decider : {E, C})
+    for (int bits = 0; bits < 16; ++bits) {
+      const bool engine = (bits & 1) != 0;
+      const bool criteria = (bits & 2) != 0;
+      const bool stalled = (bits & 4) != 0;
+      const bool at_cap = (bits & 8) != 0;
+      const RungSample sample{decider,         engine, criteria, stalled,
+                              at_cap ? 30 : 3, 30,     0};
+      const auto exit = rung_exit(sample);
+      const bool decided = converged(decider, engine, criteria);
+      check((exit == conv) == decided,
+            "rung_exit: converged exactly when the decider's verdict holds");
+      check(exit != stall || (!decided && !at_cap && stalled),
+            "rung_exit: stalled only below the cap and unconverged");
+    }
+  check(std::string(to_string(stall)) == "stalled"
+            && stop_reason_from_string("iteration_limit") == cap
+            && stop_reason_from_string("in_progress") == none
+            && stop_reason_from_string("") == none,
+        "stop reasons keep their saved spelling");
+
   std::cout << "convergence settings failures: " << failures << '\n';
   return failures ? 1 : 0;
 }

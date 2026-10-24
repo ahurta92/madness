@@ -3173,15 +3173,19 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
             const bool criteria_met
                 = !explicit_targets.empty()
                   && explicit_accuracy.at("status") == "satisfied";
-            converged = convergence::converged(decider, engine_check_passed,
-                                               criteria_met);
-            if (diagnostic_iterations && iter + 1 < diagnostic_iterations) converged = false;
+            // B5: the shared rule orders the exits (converged, cap, stall)
+            // and applies forced iterations; this engine only supplies the
+            // verdicts it computed above. The cap is what this run may take.
+            const auto rung_stop = convergence::rung_exit(
+                {decider, engine_check_passed, criteria_met, stalled, iter + 1,
+                 iteration_limit, diagnostic_iterations});
+            converged = rung_stop == convergence::StopReason::converged;
             // previous conv was too tight for small systems
             // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
             //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
 
             // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
-            if (converged || stalled || iter == iteration_limit - 1) {
+            if (rung_stop != convergence::StopReason::in_progress) {
                 // record what we converged *to*, on every rank and independent
                 // of the print level: the restart logic keys off these two
                 // fields. The values are the thresholds of this protocol level,
@@ -3293,39 +3297,34 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
                 }
 
                 if (checkpoint_observer)
-                    checkpoint_observer(
-                        world, *this,
-                        {iter,
-                         FunctionDefaults<3>::get_thresh(),
-                         etot,
-                         da,
-                         db,
-                         bsh_residual,
-                         iter > 0,
-                         true,
-                         ekinetic,
-                         energy_change,
-                         kinetic_change,
-                         comparison_alpha,
-                         comparison_beta,
-                         comparison_energy,
-                         comparison_kinetic,
-                         iter - 1,
-                         function_residuals,
-                         density_changes.charge,
-                         density_changes.spin,
-                         input_kinetic_diagonal,
-                         comparison_kinetic_diagonal,
-                         explicit_accuracy,
-                         configured_progress,
-                         converged ? scf_continuation::RungStop::converged
-                         : stalled
-                             ? scf_continuation::RungStop::stalled
-                             : scf_continuation::RungStop::iteration_limit,
-                         engine_check_passed});
+                    checkpoint_observer(world, *this,
+                                        {iter,
+                                         FunctionDefaults<3>::get_thresh(),
+                                         etot,
+                                         da,
+                                         db,
+                                         bsh_residual,
+                                         iter > 0,
+                                         true,
+                                         ekinetic,
+                                         energy_change,
+                                         kinetic_change,
+                                         comparison_alpha,
+                                         comparison_beta,
+                                         comparison_energy,
+                                         comparison_kinetic,
+                                         iter - 1,
+                                         function_residuals,
+                                         density_changes.charge,
+                                         density_changes.spin,
+                                         input_kinetic_diagonal,
+                                         comparison_kinetic_diagonal,
+                                         explicit_accuracy,
+                                         configured_progress,
+                                         rung_stop,
+                                         engine_check_passed});
                 break;
             }
-
         }
 
         const double previous_bsh_residual = bsh_residual;

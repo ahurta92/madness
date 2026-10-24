@@ -631,12 +631,11 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
                                  FunctionDefaults<3>::get_thresh());
   };
 
-  // Use the solver's minimum-iteration rule as well as its residual gates:
-  // the first update has no preceding density sample. converged() also tells
-  // the iteration loop to stop on stall/divergence, so exclude those exits
-  // from the strict verdict saved for restart and property prerequisites.
-  auto converged_now = [](const typename Solver::State &st, const Solver &sv) {
-    return !st.diverged && !st.stalled && sv.converged(st);
+  // The strict verdict saved for restart and property prerequisites is the
+  // exit rung_exit chose (B5); a diverged solve never reaches it.
+  using madness::convergence::StopReason;
+  auto converged_now = [](const typename Solver::State& st, const Solver&) {
+    return !st.diverged && st.stop == StopReason::converged;
   };
 
   // Best-effort acceptance (--accept-at-maxiter): a non-diverged solve that
@@ -645,14 +644,16 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // flag + recorded residual keep the verdict honest.
   // A plateau (State::stalled, ConvergencePolicy::stall_*) is treated exactly
   // like exhausting max_iters: same acceptance rule, fewer wasted iterations.
-  auto accepted_now = [&](const typename Solver::State &st, const Solver &sv) {
+  auto accepted_now = [&](const typename Solver::State& st, const Solver&) {
     const int diagnostic = ctx.policy.diagnostic_iterations_per_rung;
     // Best-effort acceptance belongs to the engine check; when the written
     // targets decide, an unmet target is never accepted (B5, B8).
     if (ctx.policy.decider == madness::convergence::Decider::requested_criteria)
       return false;
-    return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged &&
-           (st.iter >= (diagnostic > 0 ? diagnostic : ctx.max_iters) || st.stalled) && !converged_now(st, sv);
+    // Accepted only on the cap or stall exit rung_exit chose (B5).
+    return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged
+           && (st.stop == StopReason::iteration_limit
+               || st.stop == StopReason::stalled);
   };
 
   auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
