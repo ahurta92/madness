@@ -10,6 +10,9 @@
 #include <madness/chem/StageCheckpoint.h>
 #include <madness/chem/FunctionResidualReport.h>
 
+#include <madness/chem/CheckpointRetention.h>
+#include <set>
+
 namespace named_stages {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -193,6 +196,31 @@ saved_rung(const madness::checkpoint::Manifest& manifest) {
           stop};
 }
 
+// A3: a generation saved inside a rung, not at a rung end or stop. Older
+// generations without a rung record are mid-rung when saved after an orbital
+// update.
+[[nodiscard]] inline bool
+mid_rung(const madness::checkpoint::Manifest& manifest) {
+  const auto phase = manifest.position.value("phase", "");
+  if (!manifest.position.contains("rung"))
+    return phase == "after_orbital_update";
+  return manifest.position.at("rung").value("stop", "") == "in_progress"
+         && phase != "final_properties_on_saved_orbitals";
+}
+
+// B5: maxiter at rung `index` (0-based) in this run: the forced count when
+// diagnostic.iterations_per_rung is set, else the per-rung list, else maxiter.
+[[nodiscard]] inline int rung_maxiter(const CalculationParameters& parameters,
+                                      std::size_t index) {
+  const int forced = parameters.get<int>("diagnostic.iterations_per_rung");
+  if (forced > 0)
+    return forced;
+  const auto per_rung = parameters.get<std::vector<int>>("maxiter_per_rung");
+  if (per_rung.empty())
+    return parameters.maxiter();
+  return per_rung.size() == 1 ? per_rung.front() : per_rung.at(index);
+}
+
 // Application policy lives here; StageCheckpoint only checks physical storage.
 class MoldftCheckpoint {
   madness::World &world_;
@@ -206,6 +234,14 @@ class MoldftCheckpoint {
   std::optional<madness::SCF::IterationCheckpoint> comparison_;
   json previous_kinetic_blocks_ = json::object();
   json iteration_history_ = json::array();
+  // A3: the per-iteration history of earlier --continue runs, carried into
+  // every manifest of this run so it survives retention. Record only: it is
+  // not re-validated against this run's settings.
+  json earlier_history_ = json::array();
+  // The metrics of the last observed sample, published or not (A3: within a
+  // rung only some samples are published); finish() starts from them.
+  json last_metrics_ = nullptr;
+  std::vector<std::string> retention_warnings_;
   // The stage's convergence settings (B9), built once by the runner and kept
   // as an immutable copy: observe() is an engine callback and needs them at
   // every iteration (A7: owned, explicit, never changed).
@@ -546,6 +582,12 @@ public:
       scf.param.set_user_defined_value(
           "restart.start_rung", static_cast<int>(continuation_.start_rung));
       resumed_by_plan_ = true;
+      // A3: the resumed-from generation may be deleted by retention, so its
+      // history (and what it carried from earlier runs) moves forward.
+      earlier_history_
+          = report.value("earlier_runs_iteration_history", json::array());
+      for (const auto& entry : report.value("iteration_history", json::array()))
+        earlier_history_.push_back(entry);
     }
     has_latest_ = true;
   }
@@ -685,13 +727,32 @@ public:
             scf.param.get<int>("diagnostic.iterations_per_rung")},
            {"measurements", evidence},
            {"iteration_history", iteration_history_}};
-    publish(scf, false, json::array(), metrics,
-            {{"iteration", step.iteration},
-             {"iterations_this_run", iterations},
-             {"phase", step.final_rotation ? "after_final_rotation"
-                                           : "after_orbital_update"},
-             {"rung", current_rung_}},
-            false);
+    if (!earlier_history_.empty())
+      metrics["convergence_report"]["earlier_runs_iteration_history"]
+          = earlier_history_;
+    last_metrics_ = metrics;
+    // A3: the observer alone decides whether this save boundary publishes.
+    const bool decision_point
+        = step.rung_stop != convergence::StopReason::in_progress;
+    const auto& cadence = settings_.checkpoints;
+    if (madness::checkpoint::publish_now(
+            decision_point, current_rung_.at("iterations_at_rung").get<int>(),
+            current_rung_.at("iterations_this_run").get<int>(),
+            rung_maxiter(scf.param,
+                         current_rung_.at("index").get<std::size_t>() - 1),
+            cadence.every_iterations))
+      publish(scf, false, json::array(), metrics,
+              {{"iteration", step.iteration},
+               {"iterations_this_run", iterations},
+               {"phase", step.final_rotation ? "after_final_rotation"
+                                             : "after_orbital_update"},
+               {"rung", current_rung_}},
+              false);
+  }
+
+  /// Deletions retention could not make (A3), the same on every rank.
+  [[nodiscard]] const std::vector<std::string>& retention_warnings() const {
+    return retention_warnings_;
   }
 
   // Only these final properties have actually been evaluated on the saved
@@ -712,7 +773,12 @@ public:
     json properties = {
         {{"name", "energy"}, {"value", energy}, {"units", "hartree"}},
         {{"name", "dipole"}, {"value", dip}, {"units", "e*a0"}}};
-    auto metrics = has_latest_ ? latest_.metrics : json::object();
+    // The last observed sample, whether or not the cadence published it (A3).
+    auto metrics = json::object();
+    if (!last_metrics_.is_null())
+      metrics = last_metrics_;
+    else if (has_latest_)
+      metrics = latest_.metrics;
     // History remains intact. These additional checks evaluate the saved
     // orbitals and use a same-rung iteration input as the comparison sample.
     json evidence = metrics.at("convergence_report").at("measurements");
@@ -900,6 +966,74 @@ private:
     // inventory.
     latest_ = checkpoint::read_published(world_, store_);
     has_latest_ = true;
+    if (!settings_.checkpoints.keep_all)
+      apply_retention();
+  }
+
+  // A3, save and replace: after a successful publish, delete this stage's
+  // older mid-rung generations, keeping latest, every rung end and stop, and
+  // any generation another stage's manifest references (A1). Other stages are
+  // read only when there is something to delete.
+  void apply_retention() {
+    namespace checkpoint = madness::checkpoint;
+    std::vector<checkpoint::GenerationSummary> summaries;
+    for (const auto& manifest :
+         checkpoint::read_generation_manifests(world_, store_))
+      if (manifest.stage == stage_.name)
+        summaries.push_back({manifest.generation, mid_rung(manifest)});
+    if (checkpoint::generations_to_delete(summaries, latest_.generation)
+            .empty())
+      return;
+    const auto warning = checkpoint::remove_generations(
+        world_, store_,
+        checkpoint::generations_to_delete(summaries, latest_.generation,
+                                          referenced_generations()));
+    if (warning.empty())
+      return;
+    retention_warnings_.push_back(warning);
+    if (world_.rank() == 0)
+      std::cout << "stage " << stage_.name
+                << ": retention could not delete every older generation "
+                   "(extra files only): "
+                << warning << '\n'
+                << std::flush;
+  }
+
+  // A1: this stage's generations that another stage of the run names as its
+  // reference. Rank 0 reads the other stages' manifests; every rank gets the
+  // same set.
+  [[nodiscard]] std::set<std::string> referenced_generations() const {
+    namespace checkpoint = madness::checkpoint;
+    const auto text = checkpoint::detail::on_root(world_, [&] {
+      json names = json::array();
+      const auto stage_directory = store_.parent_path();
+      for (const auto& stage :
+           fs::directory_iterator(stage_directory.parent_path())) {
+        const auto other = stage.path() / "checkpoints";
+        if (stage.path() == stage_directory || !fs::is_directory(other))
+          continue;
+        for (const auto& entry : fs::directory_iterator(other)) {
+          if (!checkpoint::detail::generation_name(
+                  entry.path().filename().string()))
+            continue;
+          try {
+            const auto reference
+                = checkpoint::read_manifest(entry.path()).reference;
+            if (reference.is_object()
+                && reference.value("stage", "") == stage_.name)
+              names.push_back(reference.value("generation", ""));
+          } catch (const std::exception&) {
+            // No readable manifest: not a published generation; it
+            // references nothing.
+          }
+        }
+      }
+      return names.dump();
+    });
+    std::set<std::string> referenced;
+    for (const auto& name : json::parse(text))
+      referenced.insert(name.get<std::string>());
+    return referenced;
   }
 };
 } // namespace named_stages

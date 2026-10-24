@@ -71,6 +71,20 @@ struct IterationCaps {
   SetBy set_by = SetBy::engine_default;
 };
 
+/// When a stage publishes checkpoints and what it keeps (A3). By default only
+/// at decision points (every rung end and every stop), with older mid-rung
+/// generations deleted after each publish.
+struct CheckpointCadence {
+  int every_iterations
+      = 0; ///< K within a rung (opt-in); 0: decision points only
+  SetBy every_iterations_set_by = SetBy::engine_default;
+  bool keep_all = false; ///< true: retention off (debugging)
+  SetBy keep_all_set_by = SetBy::engine_default;
+  /// Non-empty when the application cannot change its cadence yet: what it
+  /// does instead (e.g. molresponse publishes at solve ends only).
+  std::string fixed;
+};
+
 struct ConvergenceSettings {
   std::string stage;
   std::string application;
@@ -78,6 +92,7 @@ struct ConvergenceSettings {
   bool decider_set_by_user = false;
   std::vector<MetricSetting> metrics;
   IterationCaps iteration_caps;
+  CheckpointCadence checkpoints;
   std::vector<std::string> warnings;
 };
 
@@ -366,6 +381,47 @@ inline std::string padded(std::string text, std::size_t width) {
 } // namespace detail
 
 [[nodiscard]] inline nlohmann::json
+checkpoints_to_json(const CheckpointCadence& checkpoints) {
+  if (!checkpoints.fixed.empty())
+    return {{"fixed", checkpoints.fixed}};
+  return {
+      {"every_iterations", checkpoints.every_iterations > 0
+                               ? nlohmann::json(checkpoints.every_iterations)
+                               : nlohmann::json(nullptr)},
+      {"every_iterations_set_by",
+       to_string(checkpoints.every_iterations_set_by)},
+      {"at_decision_points", true},
+      {"keep_all", checkpoints.keep_all},
+      {"keep_all_set_by", to_string(checkpoints.keep_all_set_by)}};
+}
+
+/// The "Checkpoints" line of the settings table (A3, B9).
+[[nodiscard]] inline std::string
+checkpoints_text(const CheckpointCadence& checkpoints) {
+  if (!checkpoints.fixed.empty())
+    return checkpoints.fixed;
+  const std::string when
+      = checkpoints.every_iterations > 0
+            ? "every " + std::to_string(checkpoints.every_iterations)
+                  + " iterations within a rung ("
+                  + detail::words(
+                      to_string(checkpoints.every_iterations_set_by))
+                  + "), plus every rung end and stop"
+            : "at every rung end and stop ("
+                  + detail::words(
+                      to_string(checkpoints.every_iterations_set_by))
+                  + "; checkpoint.every_iterations K adds one every K "
+                    "iterations)";
+  const std::string kept
+      = checkpoints.keep_all
+            ? "every generation kept (checkpoint.keep_all, "
+                  + detail::words(to_string(checkpoints.keep_all_set_by)) + ")"
+            : "older mid-rung generations deleted after each publish ("
+                  + detail::words(to_string(checkpoints.keep_all_set_by)) + ")";
+  return when + "; " + kept;
+}
+
+[[nodiscard]] inline nlohmann::json
 to_json(const ConvergenceSettings& settings) {
   nlohmann::json metrics = nlohmann::json::array();
   for (const auto& metric : settings.metrics) {
@@ -399,7 +455,8 @@ to_json(const ConvergenceSettings& settings) {
           {"maxiter",
            {{"per_rung", settings.iteration_caps.per_rung},
             {"set_by", to_string(settings.iteration_caps.set_by)},
-            {"counts", "every iteration at a rung, across --continue runs"}}},
+            {"counts", "iterations at a rung in this run (D-007)"}}},
+          {"checkpoints", checkpoints_to_json(settings.checkpoints)},
           {"warnings", settings.warnings}};
 }
 
@@ -466,6 +523,7 @@ render_settings_table(const ConvergenceSettings& settings) {
              + detail::caps_text(settings.iteration_caps) + " ("
              + detail::words(to_string(settings.iteration_caps.set_by))
              + "), per run; a restart starts the count again\n";
+  table += "  Checkpoints: " + checkpoints_text(settings.checkpoints) + "\n";
   for (const auto& warning : settings.warnings)
     table += "  WARNING: " + warning + "\n";
   return table;

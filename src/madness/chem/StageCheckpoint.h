@@ -401,5 +401,71 @@ inline Manifest read_published(World& world, const fs::path& stage_dir) {
     });
     return from_json_record(json::parse(record));
 }
+
+/// Collective: the manifests of every generation directory in `stage_dir`
+/// that has a readable manifest, in no particular order. Names that are not
+/// generations (`latest`, `.publish-lock`, `.deleting-*`, pointer
+/// temporaries) and directories without a readable manifest (unpublished or
+/// partly deleted) are skipped, never reported. Shards are not validated:
+/// this lists, it does not load. A missing `stage_dir` gives an empty list.
+inline std::vector<Manifest>
+read_generation_manifests(World& world, const fs::path& stage_dir) {
+    const auto records = detail::on_root(world, [&] {
+        json list = json::array();
+        std::error_code error;
+        if (!fs::is_directory(fs::symlink_status(stage_dir, error)))
+            return list.dump();
+        for (const auto& entry : fs::directory_iterator(stage_dir)) {
+            const auto name = entry.path().filename().string();
+            if (!detail::generation_name(name)
+                || !fs::is_directory(entry.symlink_status()))
+                continue;
+            try {
+                list.push_back(to_json_record(read_manifest(entry.path())));
+            } catch (const std::exception&) {
+                // No readable manifest: unpublished or partly deleted, so
+                // not a generation; listing never reports or touches it.
+            }
+        }
+        return list.dump();
+    });
+    std::vector<Manifest> manifests;
+    for (const auto& record : json::parse(records))
+        manifests.push_back(from_json_record(record));
+    return manifests;
+}
+
+/// Collective retention step (DESIGN A3): rank zero deletes the named
+/// generations of `stage_dir`. Each is first renamed to `.deleting-<name>`,
+/// so a crash never leaves a partial directory under a generation name, then
+/// removed. The generation `latest` names is never touched. A deletion that
+/// fails leaves extra files only, so it is returned as a warning (empty on
+/// success), the same text on every rank, instead of thrown.
+inline std::string remove_generations(World& world, const fs::path& stage_dir,
+                                      const std::vector<std::string>& names) {
+    return detail::on_root(world, [&] {
+        const auto latest
+            = detail::read_json(detail::member_path(stage_dir, "latest"))
+                  .at("generation")
+                  .get<std::string>();
+        std::string warning;
+        for (const auto& name : names) {
+            try {
+                detail::require(detail::generation_name(name),
+                                "not a generation name: " + name);
+                detail::require(name != latest,
+                                "refusing to delete the latest generation "
+                                    + name);
+                const auto doomed = stage_dir / (".deleting-" + name);
+                fs::rename(detail::member_path(stage_dir, name), doomed);
+                fs::remove_all(doomed);
+            } catch (const std::exception& e) {
+                warning
+                    += (warning.empty() ? "" : "; ") + std::string(e.what());
+            }
+        }
+        return warning;
+    });
+}
 } // namespace madness::checkpoint
 #endif

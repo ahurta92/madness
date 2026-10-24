@@ -98,6 +98,10 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
   settings.iteration_caps = {
       {static_cast<int>(rp.maxiter())},
       stage.written.contains("maxiter") ? SetBy::user : SetBy::engine_default};
+  // A3: no save boundary inside a solve yet (DESIGN §1.4).
+  settings.checkpoints.fixed
+      = "at every solve end (molresponse has no save boundary inside a "
+        "solve); every generation kept";
   settings.warnings = cv::unenforced_target_warnings(settings);
   for (auto& warning : cv::incomplete_request_warnings(
            settings, {"charge_density_change", "bsh_residual"}))

@@ -162,6 +162,35 @@ int main(int argc, char** argv) {
     rejects(geometry + gs + response_list, "moldft only");
     rejects(geometry + "moldft bad\n molecule H2\n restart.start_rung 1\nend\n",
             "restart.start_rung");
+    // A3: checkpoint cadence and retention are stage keys (moldft only).
+    try {
+        auto cadence = gs;
+        cadence.replace(
+            cadence.find(" dconv 1e-5\n"), 0,
+            " checkpoint.every_iterations 3\n checkpoint.keep_all true\n");
+        const auto stages = named_stages::parse(world, geometry + cadence);
+        check(stages[0].checkpoint_every_iterations == 3
+                  && stages[0].checkpoint_keep_all,
+              "checkpoint keys are kept on the moldft stage");
+        const auto defaults = named_stages::parse(world, geometry + gs);
+        check(defaults[0].checkpoint_every_iterations == 0
+                  && !defaults[0].checkpoint_keep_all,
+              "default: decision points only, retention on");
+    } catch (const std::exception& e) {
+        check(false, e.what());
+    }
+    auto zero_cadence = gs;
+    zero_cadence.replace(zero_cadence.find(" dconv 1e-5\n"), 0,
+                         " checkpoint.every_iterations 0\n");
+    rejects(geometry + zero_cadence, "must be at least 1");
+    for (const auto* key :
+         {" checkpoint.every_iterations 2\n", " checkpoint.keep_all true\n"}) {
+        auto response_cadence = response;
+        response_cadence.replace(response_cadence.find(" dconv 2e-4\n"), 0,
+                                 key);
+        rejects(geometry + gs + response_cadence,
+                "publishes at solve ends only");
+    }
     world.gop.sum(failures);
     if (world.rank() == 0) std::cout << "named-stage failures: " << failures << '\n';
     madness::finalize();

@@ -38,7 +38,7 @@ The first implementation supports these controls:
 | Block | Controls |
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
-| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
+| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
 | `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties [polarizability]`, `polarizability.frequencies`, `polarizability.frequency_units au`, `polarizability.components` |
 
 Ground states must be closed shell. Response frequencies and components must
@@ -112,8 +112,27 @@ precede publication and loading. A private attempt copy supplies the existing
 SCF restart planner, keeping saved generations immutable. Never select archives
 by modification time or combine shards from different generations.
 
-An intermediate generation is published after each orbital update (and at the
-final rotation boundary). It is resumable but carries no convergence claim.
+A moldft stage publishes a generation at its decision points: every rung end
+(the final rotation boundary) and every stop (converged, stalled, iteration
+limit), plus the final properties. Saving the orbitals is not cheap for large
+systems, so it does not publish after every update by default.
+`checkpoint.every_iterations K` (K >= 1) also publishes every K-th iteration
+at a rung, counted across `--continue` runs, so an interrupted run can resume
+from inside the rung. After each publish, older mid-rung generations of the
+stage are deleted (save and replace); `latest`, every rung end and stop, and
+any generation another stage's manifest references are kept. A deletion first
+renames the directory to `.deleting-<generation>`; one that fails leaves extra
+files only and is reported in the stage's `checkpoint_warnings`.
+`checkpoint.keep_all true` keeps every generation, for debugging. The settings
+table shows both settings and who set them. molresponse rejects both keys: it
+publishes at solve ends only, having no save boundary inside a solve yet.
+A rung-end or stop generation carries the whole per-iteration history of this
+run (`convergence_report.iteration_history`) and, after `--continue`, the
+history of earlier runs (`earlier_runs_iteration_history`, a record only), so
+the history never depends on which generations were kept.
+
+An intermediate generation (with `checkpoint.every_iterations`) is resumable
+but carries no convergence claim.
 Its energy/density/residual measurements identify their input/previous-update
 sampling phase; they are not presented as final properties of the saved output.
 After the solver returns, energy and dipole are evaluated on the actual final

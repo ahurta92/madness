@@ -207,6 +207,15 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   // solve; the same struct feeds the record and the stopping decision.
   auto settings
       = moldft_convergence_settings(stage.name, cp, scf->molecule.natom());
+  // A3: the observer's cadence and retention, shown with who set them.
+  const auto set_by = [&](const char* key) {
+    return stage.written.contains(key)
+               ? madness::convergence::SetBy::user
+               : madness::convergence::SetBy::engine_default;
+  };
+  settings.checkpoints = {
+      stage.checkpoint_every_iterations, set_by("checkpoint.every_iterations"),
+      stage.checkpoint_keep_all, set_by("checkpoint.keep_all"), ""};
   if (world.rank() == 0)
     std::cout << '\n'
               << madness::convergence::render_settings_table(settings) << '\n'
@@ -239,6 +248,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   result["checkpoint_generation"] = saved.generation;
   result["work"] = checkpoint.work;
   result["iterations_this_run"] = checkpoint.iterations;
+  result["checkpoint_warnings"] = checkpoint.retention_warnings();
   result["acceleration_history"] = continuing ? "reset" : "fresh";
   if (continuing) {
     // B6: what --continue did and why.

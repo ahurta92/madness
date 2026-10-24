@@ -130,6 +130,13 @@ struct Controls : madness::QCCalculationParametersBase {
                             "frequency units", {"", "au"});
     initialize<std::vector<std::string>>("polarizability.components", {},
                                          "Cartesian pairs");
+    // DESIGN A3: when the stage's observer publishes, and what it keeps.
+    initialize<int>("checkpoint.every_iterations", 0,
+                    "also publish every K iterations within a rung (K >= 1); "
+                    "default: only at rung ends and stops");
+    initialize<bool>("checkpoint.keep_all", false,
+                     "keep every generation (debugging); default: delete "
+                     "older mid-rung generations");
   }
   [[nodiscard]] std::string get_tag() const override { return "stage"; }
   [[nodiscard]] std::set<std::string> case_sensitive_keys() const override {
@@ -143,6 +150,9 @@ struct Stage {
   Params params;
   std::vector<std::string> properties, components;
   std::vector<double> frequencies;
+  // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
+  int checkpoint_every_iterations = 0;
+  bool checkpoint_keep_all = false;
   // The keywords this stage's deck wrote, so "who set it" (B9) does not
   // depend on values the parser fills in for the engine.
   std::set<std::string> written;
@@ -325,6 +335,23 @@ inline std::vector<Stage> parse(madness::World &world,
             + madness::convergence::use_default_criteria_key + " false");
       molresponse_v3::fd_requested_progress(rp);
     }
+
+    // A3: a stage publishes inside a solve only where it has a save boundary
+    // there; molresponse publishes at solve ends only (DESIGN §1.4).
+    for (const auto* k : {"checkpoint.every_iterations", "checkpoint.keep_all"})
+      if (seen.contains(k) && b.kind != "moldft")
+        throw std::runtime_error(
+            b.name + ": " + k
+            + " is not available for molresponse, which publishes at solve "
+              "ends only");
+    stage.checkpoint_every_iterations
+        = controls.get<int>("checkpoint.every_iterations");
+    stage.checkpoint_keep_all = controls.get<bool>("checkpoint.keep_all");
+    if (seen.contains("checkpoint.every_iterations")
+        && stage.checkpoint_every_iterations < 1)
+      throw std::runtime_error(b.name
+                               + ": checkpoint.every_iterations must be at "
+                                 "least 1");
 
     // Bind the molecule/reference and translate property requests.
     stage.properties =
