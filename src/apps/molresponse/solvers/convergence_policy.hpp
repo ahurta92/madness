@@ -342,6 +342,17 @@ inline bool fd_leg_converged(int iter, double bsh, double x_norm, double drho,
   return fd_leg_within(bsh, x_norm, drho, rho_norm, t);
 }
 
+/// The ES gate for one root (the engine check, DESIGN B8): the density change
+/// and the eigenvalue change both strictly below their targets. The BSH
+/// residual is not gated (it jitters for near-degenerate roots after omega and
+/// the density have settled). A root with no eigenvalue step yet carries the
+/// 1e9 sentinel in omega_residual and so never passes.
+inline bool es_root_within(double density_residual, double omega_residual,
+                           const ConvergencePolicy::Targets& t) {
+  return density_residual < t.density_residual
+         && omega_residual < t.omega_residual;
+}
+
 /// The FD explosion guard, relative to the leg: ||dx|| > guard * max(1, ||x||).
 /// For a leg of norm <= 1 it is the absolute guard as before.
 inline bool fd_exploded(double bsh, double x_norm, double guard) {

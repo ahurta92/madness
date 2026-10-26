@@ -14,11 +14,14 @@
 //   typename Solver::State
 //
 //   State Solver::step(State in);
-//   bool  Solver::converged(const State&) const;
+//   StopReason Solver::stop_reason(const State&, int iterations, int cap,
+//                                  int forced_iterations) const;   // DESIGN B5
+//   (a solver not yet on rung_exit supplies bool converged(const State&) const
+//    instead; none is left in the tree)
 //
 // Solvers that need optional acceleration (KAIN) or step restriction
 // fold those into ::step. The driver itself stays minimal — one loop,
-// one convergence check, no policy.
+// one exit decision (the shared rung_exit), no policy.
 //
 // See solvers/convergence_policy.hpp.
 // =========================================================================
@@ -50,9 +53,10 @@ auto iterate(Solver &solver, typename Solver::State state,
   const int count = policy.forced_iterations ? policy.forced_iterations : policy.max_iters;
   for (int k = 0; k < count; ++k) {
     state = solver.step(state);
-    // DESIGN B5: a solver with stop_reason() (the FD solver) leaves the order
-    // of the exits to the shared rung_exit; divergence, its validity check,
-    // comes first. The others keep the loop below until their named ports.
+    // DESIGN B5: a solver with stop_reason() (the FD and ES solvers) leaves
+    // the order of the exits to the shared rung_exit; divergence, its
+    // validity check, comes first. The branch below serves a solver without
+    // stop_reason(); none is left in the tree.
     if constexpr (requires { solver.stop_reason(state, 0, 0, 0); }) {
       if (iteration_diverged(state, 0))
         break;

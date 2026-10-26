@@ -516,6 +516,34 @@ int main() {
            "partial ES bundle with budget left -> Resume");
     EXPECT(reconcile_protocol(*es, ms, 1e-4, /*max_iters=*/0) == NodeAction::Resume,
            "max_iters == 0 keeps the legacy Resume");
+    // B1 (DESIGN B5, B2): the saved bundle now carries stop_reason and
+    // per-root verdicts; reconcile still reads converged, diverged, iter and
+    // stalled only, so the new keys change no action.
+    json mr = empty_meta();
+    put_es_bundle(mr, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false,
+                  /*iter=*/5);
+    {
+      json& e = mr["excited_states"][protocol_key_at(1e-4)];
+      e["stop_reason"] = "in_progress";
+      e["roots"] = json::array({{{"slot", 0},
+                                 {"root_id", "es_root_0000"},
+                                 {"converged", false},
+                                 {"locked", false},
+                                 {"stalled", false},
+                                 {"omega_residual", 2.0e-3},
+                                 {"density_target", 5.0e-4},
+                                 {"omega_target", 5.0e-4}}});
+    }
+    EXPECT(reconcile_protocol(*es, mr, 1e-4, /*max_iters=*/30)
+               == NodeAction::Resume,
+           "stop_reason and per-root verdict keys are ignored by reconcile");
+    json mc = empty_meta();
+    put_es_bundle(mc, 1e-4, /*converged=*/true, "tda", 1, /*stalled=*/false,
+                  /*iter=*/8);
+    mc["excited_states"][protocol_key_at(1e-4)]["stop_reason"] = "converged";
+    EXPECT(reconcile_protocol(*es, mc, 1e-4, /*max_iters=*/30)
+               == NodeAction::Skip,
+           "a converged bundle with stop_reason recorded -> Skip as before");
   }
 
   // ====== reconcile: excited.maxiter is the ES budget ========================

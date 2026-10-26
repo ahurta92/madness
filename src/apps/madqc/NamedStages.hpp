@@ -124,12 +124,32 @@ struct Controls : madness::QCCalculationParametersBase {
     initialize<std::string>("reference", "", "earlier moldft stage");
     initialize<std::vector<std::string>>("requested_properties", {},
                                          "requested properties");
+    // D-017: one block per property; frequencies are always written (B3),
+    // components mean every Cartesian tuple when omitted.
     initialize<std::vector<double>>("polarizability.frequencies", {},
                                     "explicit frequencies");
     initialize<std::string>("polarizability.frequency_units", "",
                             "frequency units", {"", "au"});
     initialize<std::vector<std::string>>("polarizability.components", {},
-                                         "Cartesian pairs");
+                                         "Cartesian pairs; omitted: all 9");
+    initialize<std::vector<double>>("hyperpolarizability.frequencies", {},
+                                    "explicit driver frequencies (SHG: "
+                                    "output at 2w; static at 0)");
+    initialize<std::string>("hyperpolarizability.frequency_units", "",
+                            "frequency units", {"", "au"});
+    initialize<std::vector<std::string>>("hyperpolarizability.components", {},
+                                         "Cartesian triples; omitted: all 27");
+    initialize<std::vector<double>>("raman.frequencies", {},
+                                    "explicit optical frequencies");
+    initialize<std::string>("raman.frequency_units", "", "frequency units",
+                            {"", "au"});
+    initialize<std::vector<std::string>>("raman.components", {},
+                                         "Cartesian pairs; omitted: all 9");
+    initialize<std::vector<int>>("raman.atoms", {},
+                                 "displaced atoms, numbered from 0; omitted: "
+                                 "every atom");
+    initialize<std::vector<std::string>>("raman.directions", {},
+                                         "displacement axes; omitted: x, y, z");
     // DESIGN A3: when the stage's observer publishes, and what it keeps.
     initialize<int>("checkpoint.every_iterations", 0,
                     "also publish every K iterations within a rung (K >= 1); "
@@ -143,13 +163,30 @@ struct Controls : madness::QCCalculationParametersBase {
     return {"molecule", "reference"};
   }
 };
+// One optical property request of a molresponse stage: explicit frequencies
+// and the Cartesian components (every tuple when the deck wrote none).
+struct PropertyRequest {
+  std::vector<double> frequencies;
+  std::vector<std::string> components;
+};
 // One application instance. Its Params is independent of every other stage,
 // including stages of the same application type.
 struct Stage {
   std::string kind, name, reference;
   Params params;
-  std::vector<std::string> properties, components;
+  std::vector<std::string> properties;
+  // The polarizability request (ResponseCheckpoint.hpp reads these two).
+  std::vector<std::string> components;
   std::vector<double> frequencies;
+  // D-017: the hyperpolarizability and Raman requests. Raman coordinates are
+  // atoms x directions; empty atoms means every atom of the reference
+  // (numbered from 0), empty directions means x, y and z. Both omitted is the
+  // engine's full set with the normal-mode analysis (raman_full_set); a
+  // written subset gives derivative rows only.
+  PropertyRequest hyperpolarizability, raman;
+  std::vector<int> raman_atoms;
+  std::string raman_directions;
+  bool raman_full_set = false;
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
   int checkpoint_every_iterations = 0;
   bool checkpoint_keep_all = false;
@@ -184,6 +221,190 @@ inline void valid_protocol(const std::vector<double> &protocol) {
 }
 inline int protocol_k(double t) {
   return molresponse_v3::default_k_for_thresh(t);
+}
+
+// The named property language of a molresponse stage (D-017). Each property
+// in requested_properties has its own block: <property>.frequencies and
+// <property>.frequency_units are required (B3: a number is never defaulted),
+// <property>.components is optional and means every Cartesian tuple when
+// omitted. Raman adds raman.atoms and raman.directions (see Stage).
+inline const std::vector<std::string>& named_response_properties() {
+  static const std::vector<std::string> names
+      = {"polarizability", "hyperpolarizability", "raman"};
+  return names;
+}
+// The tensor rank of a property's Cartesian components: beta_ABC is a
+// triple, alpha_AB and d(alpha_AB)/dQ are pairs.
+inline std::size_t component_rank(const std::string& property) {
+  return property == "hyperpolarizability" ? 3 : 2;
+}
+// Every Cartesian tuple of the given rank, x before y before z in each place
+// (xx, xy, xz, yx, ... for pairs).
+inline std::vector<std::string> every_component(std::size_t rank) {
+  std::vector<std::string> tuples = {""};
+  for (std::size_t place = 0; place < rank; ++place) {
+    std::vector<std::string> longer;
+    for (const auto& prefix : tuples)
+      for (char axis : std::string("xyz"))
+        longer.push_back(prefix + axis);
+    tuples = std::move(longer);
+  }
+  return tuples;
+}
+// Frequencies must be finite, nonnegative and distinct at the engine's
+// frequency-key precision: the engine rounds frequencies in state filenames,
+// and two that round alike would share a stored state.
+inline std::vector<double>
+checked_frequencies(const std::string& property,
+                    const std::vector<double>& frequencies,
+                    const std::string& units) {
+  if (frequencies.empty() || units != "au")
+    throw std::runtime_error(property
+                             + " needs explicit frequencies and "
+                               "frequency_units au");
+  std::set<std::string> keys;
+  for (double f : frequencies)
+    if (!std::isfinite(f) || f < 0
+        || !keys.insert(molresponse_v3::ResponseMetadata::freq_key(f)).second)
+      throw std::runtime_error(
+          property
+          + " frequencies must be finite, nonnegative and distinct "
+            "at engine frequency-key precision");
+  return frequencies;
+}
+// Components are distinct Cartesian tuples of the property's rank; none
+// written means every one.
+inline std::vector<std::string>
+checked_components(const std::string& property,
+                   const std::vector<std::string>& components) {
+  const auto rank = component_rank(property);
+  if (components.empty())
+    return every_component(rank);
+  std::set<std::string> distinct;
+  for (const auto& c : components)
+    if (c.size() != rank || c.find_first_not_of("xyz") != std::string::npos
+        || !distinct.insert(c).second)
+      throw std::runtime_error(property
+                               + " components must be distinct "
+                                 "Cartesian "
+                               + (rank == 3 ? "triples" : "pairs"));
+  return components;
+}
+// Read the property blocks of a molresponse stage into its requests and map
+// them onto the engine's knobs. The engine takes axes and one frequency grid,
+// not components: it gets the union of every axis and frequency named (it may
+// compute extra tensor elements), and the runner selects the requested
+// components from its rows (ResponseProperties.hpp). The raw engine spellings
+// (dipole.*, quadratic, beta.*, raman.nuc_*, nuclear.*) are not stage
+// controls, so parse rejects them: one spelling per thing.
+inline void translate_response_properties(const std::string& stage_name,
+                                          const Controls& controls,
+                                          Stage& stage,
+                                          ResponseParameters& rp) {
+  const auto& known = named_response_properties();
+  if (stage.properties.empty())
+    throw std::runtime_error(
+        stage_name
+        + ": molresponse requested_properties must name at least "
+          "one of polarizability, hyperpolarizability, raman");
+  std::set<std::string> requested;
+  for (const auto& p : stage.properties)
+    if (std::find(known.begin(), known.end(), p) == known.end()
+        || !requested.insert(p).second)
+      throw std::runtime_error(
+          stage_name + ": unsupported or repeated molresponse property " + p
+          + " (polarizability, hyperpolarizability, raman)");
+  // A property's block without the property is a mistake, not a default.
+  for (const auto& p : known) {
+    if (requested.contains(p))
+      continue;
+    for (const auto* suffix : {".frequencies", ".frequency_units",
+                               ".components", ".atoms", ".directions"})
+      if (controls.parameter_exists(p + suffix)
+          && controls.is_user_defined(p + suffix))
+        throw std::runtime_error(stage_name + ": " + p + suffix + " needs " + p
+                                 + " in requested_properties");
+  }
+  auto request = [&](const std::string& p) {
+    PropertyRequest r;
+    r.frequencies = checked_frequencies(
+        p, controls.get<std::vector<double>>(p + ".frequencies"),
+        controls.get<std::string>(p + ".frequency_units"));
+    r.components = checked_components(
+        p, controls.get<std::vector<std::string>>(p + ".components"));
+    return r;
+  };
+  // The engine's grid and axes: the union over the properties requested, the
+  // polarizability's first so an alpha-only deck maps as it always did.
+  std::vector<double> grid;
+  std::set<std::string> grid_keys;
+  std::set<char> axes;
+  auto gather = [&](const PropertyRequest& r) {
+    for (double f : r.frequencies)
+      if (grid_keys.insert(molresponse_v3::ResponseMetadata::freq_key(f))
+              .second)
+        grid.push_back(f);
+    for (const auto& c : r.components)
+      axes.insert(c.begin(), c.end());
+  };
+  if (requested.contains("polarizability")) {
+    const auto r = request("polarizability");
+    stage.frequencies = r.frequencies;
+    stage.components = r.components;
+    gather(r);
+  }
+  if (requested.contains("hyperpolarizability")) {
+    stage.hyperpolarizability = request("hyperpolarizability");
+    gather(stage.hyperpolarizability);
+  }
+  if (requested.contains("raman")) {
+    stage.raman = request("raman");
+    gather(stage.raman);
+    stage.raman_atoms = controls.get<std::vector<int>>("raman.atoms");
+    std::set<int> distinct_atoms;
+    for (int atom : stage.raman_atoms)
+      if (atom < 0 || !distinct_atoms.insert(atom).second)
+        throw std::runtime_error(
+            stage_name
+            + ": raman.atoms must be distinct atom indices, numbered from 0");
+    // The written atoms are checked against the reference's atom count when
+    // the stage runs (the engine knows the molecule; the parser does not).
+    std::set<char> distinct_axes;
+    for (const auto& d :
+         controls.get<std::vector<std::string>>("raman.directions")) {
+      if (d.size() != 1 || std::string("xyz").find(d[0]) == std::string::npos
+          || !distinct_axes.insert(d[0]).second)
+        throw std::runtime_error(
+            stage_name
+            + ": raman.directions must be distinct axes out of "
+              "x, y, z");
+      stage.raman_directions += d[0];
+    }
+    stage.raman_full_set
+        = stage.raman_atoms.empty() && stage.raman_directions.empty();
+  }
+  rp.set_user_defined_value("requested_properties", stage.properties);
+  rp.set_user_defined_value("dipole.frequencies", grid);
+  rp.set_user_defined_value("dipole.directions",
+                            std::string(axes.begin(), axes.end()));
+  if (requested.contains("hyperpolarizability"))
+    // SHG legs at w and 2w for these driver frequencies only (static at 0).
+    rp.set_user_defined_value("beta.frequencies",
+                              stage.hyperpolarizability.frequencies);
+  if (requested.contains("raman")) {
+    // The engine's raman.atoms and raman.directions take the stage's lists as
+    // written (D-020): the engine plans their product, every atom or x, y, z
+    // for an empty one, derivative rows only. The full set (both omitted)
+    // is the engine's raman.nuc_atom -1, its only full-set switch until the
+    // unnamed path is ported; the lists stay unwritten then.
+    rp.set_user_defined_value("raman.frequencies", stage.raman.frequencies);
+    if (stage.raman_full_set)
+      rp.set_user_defined_value("raman.nuc_atom", -1);
+    if (!stage.raman_atoms.empty())
+      rp.set_user_defined_value("raman.atoms", stage.raman_atoms);
+    if (!stage.raman_directions.empty())
+      rp.set_user_defined_value("raman.directions", stage.raman_directions);
+  }
 }
 
 // Build and validate the whole sequence before any calculation starts.
@@ -364,8 +585,9 @@ inline std::vector<Stage> parse(madness::World &world,
       if (seen.count("reference"))
         throw std::runtime_error("moldft takes molecule, not reference");
       for (const auto &k : seen)
-        if (k.find("polarizability.") == 0)
-          throw std::runtime_error("polarizability belongs to molresponse");
+        for (const auto& p : named_response_properties())
+          if (k.find(p + ".") == 0)
+            throw std::runtime_error(p + " belongs to molresponse");
       stage.params.get<madness::Molecule>() = molecules.at(name);
       // Current named-path capability limit: HF energy/dipole only.
       // This is not a limitation of moldft's underlying XC implementation.
@@ -397,44 +619,18 @@ inline std::vector<Stage> parse(madness::World &world,
       // charge, L and final thresh/k come from its published generation
       // when this stage runs; cp keeps only this stage's protocol.
       const auto own_protocol = cp.protocol();
-      // Current named-path capability limit: only alpha is mapped through
-      // input, execution and results. Other response properties are rejected.
+      // D-017: the property blocks, validated and mapped onto the engine.
+      translate_response_properties(b.name, controls, stage, rp);
+      // D-017.2: until the response checkpoint carries quadratic sources
+      // (builder A, after planner step 4.3), a named stage runs alpha only.
+      // Builder A deletes this check with that change; everything above it
+      // already accepts the other two properties.
       if (stage.properties != std::vector<std::string>{"polarizability"})
         throw std::runtime_error(
-            "molresponse requested_properties must be [polarizability]");
-      stage.frequencies =
-          controls.get<std::vector<double>>("polarizability.frequencies");
-      stage.components =
-          controls.get<std::vector<std::string>>("polarizability.components");
-      if (stage.frequencies.empty() || stage.components.empty() ||
-          controls.get<std::string>("polarizability.frequency_units") != "au")
-        throw std::runtime_error("polarizability needs explicit frequencies, "
-                                 "frequency_units au and components");
-      // The engine rounds frequencies in state filenames. Reject requests
-      // that would accidentally share a stored state under that naming scheme.
-      std::set<std::string> frequencies;
-      for (double f : stage.frequencies)
-        if (!std::isfinite(f) || f < 0 ||
-            !frequencies.insert(molresponse_v3::ResponseMetadata::freq_key(f))
-                 .second)
-          throw std::runtime_error(
-              "polarizability frequencies must be finite, nonnegative and "
-              "distinct at engine frequency-key precision");
-      // The existing engine takes axes, not component pairs. Request the
-      // union of axes (e.g. xy -> x,y); the runner selects the requested pairs.
-      std::set<char> axes;
-      std::set<std::string> components;
-      for (const auto &c : stage.components) {
-        if (c.size() != 2 || c.find_first_not_of("xyz") != std::string::npos ||
-            !components.insert(c).second)
-          throw std::runtime_error(
-              "polarizability components must be distinct Cartesian pairs");
-        axes.insert(c.begin(), c.end());
-      }
-      rp.set_user_defined_value("requested_properties", stage.properties);
-      rp.set_user_defined_value("dipole.frequencies", stage.frequencies);
-      rp.set_user_defined_value("dipole.directions",
-                                std::string(axes.begin(), axes.end()));
+            b.name
+            + ": hyperpolarizability and raman wait for the response "
+              "checkpoint to carry quadratic sources; a named stage "
+              "computes polarizability only for now");
       // Defaults must come from this stage, not the upstream SCF maxiter.
       rp.set_user_defined_value("maxiter", rp.get<std::size_t>("maxiter"));
       valid_protocol(own_protocol);
