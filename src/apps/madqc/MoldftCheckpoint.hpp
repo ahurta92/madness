@@ -726,8 +726,11 @@ public:
     evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(current_blocks, previous_kinetic_blocks_));
     evidence["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
     previous_kinetic_blocks_ = current_blocks;
+    // B2: each row keeps the raw total energy of its sample, so every change
+    // in the history can be re-derived from the record alone.
     iteration_history_.push_back(
         {{"measurements", evidence},
+         {"energy", metrics.at("energy")},
          {"kinetic_trace", metrics.at("kinetic_trace")},
          {"occupation_weighted_physical_kinetic_energy",
           metrics.at("occupation_weighted_physical_kinetic_energy")},

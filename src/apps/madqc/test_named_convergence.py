@@ -221,6 +221,8 @@ for samples in by_rung.values():
         values = after['measurements']
         check_function_bsh(values['bsh_residual'], 'max')
         assert values['bsh_residual']['sample']['iteration'] == before['kinetic_trace']['sample']['iteration']
+        delta = abs(after['energy']['value'] - before['energy']['value'])
+        assert abs(values['energy_change']['value'] - delta) < 1e-14
         delta_t = abs(after['kinetic_trace']['value'] - before['kinetic_trace']['value'])
         assert abs(values['delta_kinetic_energy']['value'] - delta_t) < 1e-14
 # Final energy and kinetic differences must use the recorded prior iteration,
@@ -231,6 +233,7 @@ previous = next(row for row in gs_history(fresh)
                 if row['kinetic_trace']['sample']['threshold'] == comparison['threshold']
                 and row['kinetic_trace']['sample']['iteration'] == comparison['iteration'])
 assert comparison['kinetic_trace']['blocks'] == previous['kinetic_trace']['blocks']
+assert comparison['energy'] == previous['energy']['value']
 assert comparison['kinetic_energy'] == previous['occupation_weighted_physical_kinetic_energy']['value']
 for metric, key in [('energy_change', 'energy')]:
     assert abs(v['measurements'][metric]['value'] - abs(v[key] - comparison[key])) < 1e-14

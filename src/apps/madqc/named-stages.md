@@ -99,7 +99,9 @@ current request and resumed otherwise, except that a final rung that stalled
 with the request unmet is loaded and reported unmet (resuming would stall
 again; tighten the protocol or loosen a target). A changed problem (geometry,
 model, charge, cell) starts fresh in the same stage directory, leaving the
-old generations untouched. A generation with no recorded measurements (from
+old generations untouched: the old problem's rung-end and stop generations
+stay on disk (retention deletes only mid-rung generations), and `latest` then
+names the new problem's. A generation with no recorded measurements (from
 before the convergence report) cannot be re-judged and is resumed.
 `maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
 number of iterations a rung may take in this run; a `--continue` run starts

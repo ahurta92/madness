@@ -104,7 +104,7 @@ assert sum(lengths.values()) == iterations, (lengths, iterations)
 history = latest(fresh)['metrics']['convergence_report']['iteration_history']
 assert len(history) == iterations, (len(history), iterations)
 for row in history:
-    assert {'measurements', 'kinetic_trace', 'explicit_accuracy', 'configured_progress',
+    assert {'measurements', 'energy', 'kinetic_trace', 'explicit_accuracy', 'configured_progress',
             'engine_check_passed'} <= set(row), sorted(row)
     for name in ('density_change', 'bsh_residual', 'energy_change', 'charge_density_change',
                  'spin_density_change', 'delta_kinetic_energy'):
