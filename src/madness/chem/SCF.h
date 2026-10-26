@@ -65,6 +65,7 @@
 #include<madness/chem/QCPropertyInterface.h>
 
 #include <madness/chem/ExplicitCriteria.h>
+#include <madness/chem/LadderPlanner.h>
 #include <madness/chem/ScfContinuation.h>
 #include <madness/tensor/tensor_json.hpp>
 #include <memory>
@@ -727,7 +728,8 @@ public:
         const auto per_rung = calc.param.get<std::vector<int>>("maxiter_per_rung");
         if (per_rung.empty())
             return std::nullopt;
-        return per_rung.size() == 1 ? per_rung.front() : per_rung.at(proto);
+        return planning::maxiter_at_rung(per_rung, calc.param.maxiter(), 0,
+                                         proto);
     }
 
     double value(const Tensor<double>& x) {

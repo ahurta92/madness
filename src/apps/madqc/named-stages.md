@@ -88,11 +88,19 @@ completed request loads without SCF iterations. Iteration limits and requested
 energy/dipole properties can change. Results report `work` (`solved`, `loaded`,
 `resumed`), `iterations_this_run`, and acceleration-history reset.
 
-Where a moldft stage continues is decided from the saved generation's rung,
-matched by value (`thresh`, `k`), not by position in the `protocol` list. A
-finished rung is never redone: the stage continues at the next tighter
-requested rung. An unfinished rung resumes where it stopped. A finished final
-rung is loaded if it meets the current request and resumed otherwise.
+What a moldft stage does on `--continue` is decided by one planner
+(`plan_ladder`, `src/madness/chem/LadderPlanner.h`) from the saved generation
+and the current request. Saved values are re-judged against today's limits and
+targets; a saved verdict is never trusted. Rungs are matched by value (`thresh`,
+`k`), not by position in the `protocol` list. A finished rung is never redone:
+the stage continues at the next tighter requested rung. An unfinished rung
+resumes where it stopped. A finished final rung is loaded if it meets the
+current request and resumed otherwise, except that a final rung that stalled
+with the request unmet is loaded and reported unmet (resuming would stall
+again; tighten the protocol or loosen a target). A changed problem (geometry,
+model, charge, cell) starts fresh in the same stage directory, leaving the
+old generations untouched. A generation with no recorded measurements (from
+before the convergence report) cannot be re-judged and is resumed.
 `maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
 number of iterations a rung may take in this run; a `--continue` run starts
 the count again, so a resumed rung gets `maxiter` more iterations. Each
@@ -100,8 +108,11 @@ generation records the rung (`position.rung`): its index, `thresh`, `k`, the
 iterations in this run (`iterations_this_run`), the total across runs
 (`iterations_at_rung`, recorded, never compared with `maxiter`), and how it
 ended (`converged`, `stalled`, `iteration_limit`, or `in_progress`). The
-stage's `results.json` `continuation` block says what happened and why, e.g.
-"resumed at rung 2 (thresh 1e-06, k 8), iteration 3 of that rung".
+stage's `results.json` `continuation` block says what happened and why:
+`action` (`loaded`, `resumed`, `fresh`), the start `rung`,
+`iterations_done_at_rung`, `why`, `unmet` (e.g. a stalled final rung),
+`unmet_not_enforceable` (engine mode) and a `summary`, e.g. "resumed at rung 2
+(thresh 1e-06, k 8), iteration 3 of that rung".
 
 A loaded state is one that meets the current request, judged on its saved
 measurements. If its generation had stopped as something other than

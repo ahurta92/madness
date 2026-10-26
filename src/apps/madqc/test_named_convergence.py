@@ -594,11 +594,26 @@ for control in ('accuracy', 'progress', 'progress-only'):
     assert (store / 'latest').read_text() == pointer
     assert 'missing configured accuracy/progress report' in (work / ('required-evidence-' + control + '.log')).read_text()
 
-old_results = run('old', old, resume=True)
+# A response generation from before these reports: still reused, and no
+# measurement is invented for it (its reference ground state is current).
+old_response = work / 'OldResponse'
+shutil.copytree(fresh, old_response)
+shutil.rmtree(old_response / 'optical')
+shutil.copytree(old / 'optical', old_response / 'optical')
+old_results = run('old-response', old_response, resume=True)
 assert all(s['iterations_this_run'] == 0 for s in old_results)
-assert old_results[0]['convergence_report']['measurements']['energy_change']['value'] is None
 assert old_results[1]['convergence_report']['channels'][0]['measurements']['bsh_residual']['value'] is None
-assert 'saved_state_validation' not in old_results[0]['convergence_report']
 assert all('saved_state_validation' not in c and 'function_kinetic_history' not in c and 'function_bsh_history' not in c
            for c in old_results[1]['convergence_report']['channels'])
+# A ground state from before the report has no measured values to re-judge
+# against today's request, so --continue resumes it rather than trusting its
+# old verdict (DESIGN B6: never a saved verdict; the moldft counterpart of
+# D-005.4). Its new generations carry the measurements.
+old_ground = work / 'OldGround'
+shutil.copytree(old, old_ground)
+shutil.rmtree(old_ground / 'optical')
+ground = run('old-ground', old_ground, deck.split('molresponse optical')[0], resume=True)[0]
+assert ground['work'] == 'resumed' and ground['iterations_this_run'] > 0, ground['work']
+assert 'cannot be re-judged' in ground['continuation']['why'], ground['continuation']
+assert ground['convergence_report']['measurements']['energy_change']['availability'] == 'measured'
 print('named convergence reporting, saved-state validation and continuation passed', flush=True)

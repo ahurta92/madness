@@ -11,6 +11,8 @@
 #include <madness/chem/FunctionResidualReport.h>
 
 #include <madness/chem/CheckpointRetention.h>
+#include <madness/chem/LadderPlanner.h>
+#include <map>
 #include <set>
 
 namespace named_stages {
@@ -196,6 +198,30 @@ saved_rung(const madness::checkpoint::Manifest& manifest) {
           stop};
 }
 
+namespace planning = madness::planning;
+
+// B6: what the planner needs from a published moldft generation: its problem
+// (the physical block), its rung and how it ended, and its raw measurements:
+// the engine check's deciding sample and the values on the saved orbitals.
+// Generations without a convergence report have no values to re-judge, so
+// they resume (B6: never a saved verdict).
+[[nodiscard]] inline planning::SavedState
+saved_state(const madness::checkpoint::Manifest& manifest) {
+  const auto rung = saved_rung(manifest);
+  const auto report
+      = manifest.metrics.value("convergence_report", json::object());
+  planning::SavedState state;
+  state.identity = manifest.physical.dump();
+  state.rung = rung.rung;
+  state.iterations_at_rung = rung.iterations_at_rung;
+  state.stop = rung.stop;
+  state.engine_measurements = report.value("measurements", json::object());
+  state.saved_measurements
+      = report.value("saved_state_validation", json::object())
+            .value("measurements", json::object());
+  return state;
+}
+
 // A3: a generation saved inside a rung, not at a rung end or stop. Older
 // generations without a rung record are mid-rung when saved after an orbital
 // update.
@@ -206,19 +232,6 @@ mid_rung(const madness::checkpoint::Manifest& manifest) {
     return phase == "after_orbital_update";
   return manifest.position.at("rung").value("stop", "") == "in_progress"
          && phase != "final_properties_on_saved_orbitals";
-}
-
-// B5: maxiter at rung `index` (0-based) in this run: the forced count when
-// diagnostic.iterations_per_rung is set, else the per-rung list, else maxiter.
-[[nodiscard]] inline int rung_maxiter(const CalculationParameters& parameters,
-                                      std::size_t index) {
-  const int forced = parameters.get<int>("diagnostic.iterations_per_rung");
-  if (forced > 0)
-    return forced;
-  const auto per_rung = parameters.get<std::vector<int>>("maxiter_per_rung");
-  if (per_rung.empty())
-    return parameters.maxiter();
-  return per_rung.size() == 1 ? per_rung.front() : per_rung.at(index);
 }
 
 // Application policy lives here; StageCheckpoint only checks physical storage.
@@ -247,9 +260,10 @@ class MoldftCheckpoint {
   // every iteration (A7: owned, explicit, never changed).
   const convergence::ConvergenceSettings settings_;
   // The reuse decision on --continue (B6, B8).
-  convergence::ReuseDecision reuse_;
+
   // Where this run started (B6) and the rung of the latest sample (B5).
-  continuation::Continuation continuation_;
+  // The planner's decision on --continue (B6, D7).
+  planning::LadderPlan plan_;
   bool resumed_by_plan_ = false;
   json current_rung_ = nullptr;
   static json kinetic_blocks(const madness::FunctionResidualBlocks& values) {
@@ -443,8 +457,8 @@ class MoldftCheckpoint {
       if (continuation::same_rung(ladder[i], rung))
         index = i;
     require(index < ladder.size(), "sample rung is not in the protocol");
-    const int earlier = resumed_by_plan_ && index == continuation_.start_rung
-                            ? continuation_.iterations_done
+    const int earlier = resumed_by_plan_ && index == plan_.start_rung
+                            ? plan_.iterations_done
                             : 0;
     return {{"index", index + 1},
             {"thresh", rung.thresh},
@@ -510,6 +524,28 @@ public:
       : world_(world), stage_(stage), store_(directory / "checkpoints"),
         run_id_(std::move(run_id)), settings_(std::move(settings)) {}
 
+  // B6: today's request for the stage's one state: the problem, the ladder,
+  // the settings (mode and written targets) and the engine check's limits at
+  // the final rung, from the engine's own limit function.
+  [[nodiscard]] planning::LadderRequest
+  ladder_request(const madness::SCF& scf) const {
+    const auto& cp = scf.param;
+    planning::LadderRequest request;
+    request.identity = physical_.dump();
+    request.ladder = requested_ladder(cp);
+    request.settings = settings_;
+    const auto limits = madness::SCF::engine_check_limits(
+        cp.dconv(), cp.protocol().back(), scf.molecule.natom(),
+        cp.get<bool>("conv_only_dens"));
+    request.engine_limits.push_back(
+        {"density_change", limits.density, 0.0, false});
+    if (limits.bsh_checked)
+      request.engine_limits.push_back({"bsh_residual", limits.bsh, 0.0, false});
+    request.forced_iterations
+        = cp.get<int>("diagnostic.iterations_per_rung") > 0;
+    return request;
+  }
+
   // Validate the complete selected generation before the engine opens an
   // archive. A private copy lets the existing restart planner use its ordinary
   // prefix without ever changing an immutable generation or using an AO
@@ -522,8 +558,6 @@ public:
     latest_ = madness::checkpoint::read_published(world_, store_);
     require(latest_.stage == stage_.name && latest_.method == "HF",
             "stage/method mismatch");
-    require(latest_.physical == physical_,
-            "geometry, model or cell changed; use a new run");
     require(latest_.archives.size() == 1 &&
                 latest_.archives[0].role == "orbitals" &&
                 latest_.archives[0].basename == "state.restartdata",
@@ -533,36 +567,16 @@ public:
     const auto &cp = scf.param;
     const auto report
         = latest_.metrics.value("convergence_report", json::object());
-    const auto saved_measurements
-        = report.value("saved_state_validation", json::object())
-              .value("measurements", json::object());
-    const auto requested = madness::evaluate_explicit_criteria(
-        saved_measurements, convergence::requested_targets(settings_));
-    // The saved engine verdict (recorded since the switch; before it, a
-    // converged stop meant the engine check passed), for the current request.
-    const bool saved_engine_passed = report.value(
-        "engine_check_passed", latest_.stop_reason == "converged");
-    const bool engine_passes_now
-        = saved_engine_passed
-          && latest_.numerical.at("threshold").get<double>()
-                 <= cp.protocol().back()
-          && latest_.numerical.at("k").get<int>()
-                 == (cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k())
-          && latest_.targets.at("effective_dconv").get<double>()
-                 <= std::max(cp.dconv(), cp.protocol().back());
-    // B6/B8: the deciding check, judged from saved evidence. Forced
-    // diagnostic iterations always iterate.
-    reuse_ = convergence::decide_reuse(settings_, engine_passes_now, requested);
-    const bool satisfied
-        = reuse_.action == convergence::ReuseAction::load
-          && cp.get<int>("diagnostic.iterations_per_rung") == 0;
-    // B6: the adapter, not the engine's restart planner, decides where to
-    // continue: load, or resume at a rung matched by value (Q6). The rung
-    // gets a fresh maxiter (B5, D-007).
-    const auto ladder = requested_ladder(cp);
-    continuation_ = continuation::plan_scf_continuation(saved_rung(latest_),
-                                                        ladder, satisfied);
-    const bool load = continuation_.action == continuation::Action::load;
+    // B6, D7: one planner decides, from the saved record and today's request.
+    plan_ = planning::plan_ladder(saved_state(latest_), std::nullopt,
+                                  ladder_request(scf));
+    if (plan_.action == planning::Action::fresh) {
+      // R1: a different problem starts fresh; the old generations stay.
+      work = "solved";
+      has_latest_ = false;
+      return;
+    }
+    const bool load = plan_.action == planning::Action::load;
     work = load ? "loaded" : "resumed";
     madness::checkpoint::detail::on_root(world_, [&] {
       validate_measurements(latest_.metrics, latest_.stage, latest_.numerical);
@@ -579,8 +593,8 @@ public:
     scf.param.set_user_defined_value("restart", load ? std::string("read_only")
                                                      : std::string("iterate"));
     if (!load) {
-      scf.param.set_user_defined_value(
-          "restart.start_rung", static_cast<int>(continuation_.start_rung));
+      scf.param.set_user_defined_value("restart.start_rung",
+                                       static_cast<int>(plan_.start_rung));
       resumed_by_plan_ = true;
       // A3: the resumed-from generation may be deleted by retention, so its
       // history (and what it carried from earlier runs) moves forward.
@@ -598,19 +612,23 @@ public:
   [[nodiscard]] json
   continuation_record(const CalculationParameters& parameters) const {
     const auto ladder = requested_ladder(parameters);
-    const auto& start = ladder.at(continuation_.start_rung);
-    return {{"action", continuation_.action == continuation::Action::load
-                           ? "loaded"
-                           : "resumed"},
+    const auto& start = ladder.at(plan_.start_rung);
+    const std::map<planning::Action, const char*> words
+        = {{planning::Action::load, "loaded"},
+           {planning::Action::resume, "resumed"},
+           {planning::Action::seed, "seeded"},
+           {planning::Action::fresh, "fresh"}};
+    return {{"action", words.at(plan_.action)},
             {"rung",
-             {{"index", continuation_.start_rung + 1},
+             {{"index", plan_.start_rung + 1},
               {"thresh", start.thresh},
               {"k", start.k}}},
-            {"iterations_done_at_rung", continuation_.iterations_done},
-            {"why", continuation_.why},
-            {"reuse_why", reuse_.why},
-            {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
-            {"summary", continuation::describe(continuation_, ladder)}};
+            {"iterations_done_at_rung", plan_.iterations_done},
+            {"why", plan_.why},
+            {"unmet", plan_.unmet},
+            {"unmet_not_enforceable", plan_.unmet_not_enforceable},
+            {"planner", "plan_ladder"},
+            {"summary", planning::describe(plan_, ladder)}};
   }
 
   void observe(const madness::SCF &scf,
@@ -737,8 +755,11 @@ public:
     if (madness::checkpoint::publish_now(
             decision_point, current_rung_.at("iterations_at_rung").get<int>(),
             current_rung_.at("iterations_this_run").get<int>(),
-            rung_maxiter(scf.param,
-                         current_rung_.at("index").get<std::size_t>() - 1),
+            planning::maxiter_at_rung(
+                scf.param.get<std::vector<int>>("maxiter_per_rung"),
+                scf.param.maxiter(),
+                scf.param.get<int>("diagnostic.iterations_per_rung"),
+                current_rung_.at("index").get<std::size_t>() - 1),
             cadence.every_iterations))
       publish(scf, false, json::array(), metrics,
               {{"iteration", step.iteration},
@@ -1005,8 +1026,8 @@ private:
            {"from_generation", source},
            {"stop_reason_before", latest_.stop_reason},
            {"decided_by", convergence::to_string(settings_.decider)},
-           {"why", reuse_.why},
-           {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
+           {"why", plan_.why},
+           {"unmet_not_enforceable", plan_.unmet_not_enforceable},
            {"convergence_settings", convergence::to_json(settings_)}};
     for (auto& property : m.properties)
       property["generation"] = m.generation;

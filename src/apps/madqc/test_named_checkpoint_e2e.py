@@ -119,7 +119,7 @@ assert abs(result(coarse)['properties']['energy']['value'] - energy) < 2e-7
 assert hashes(coarse_dir) == coarse_hash
 
 # Full-inventory validation must fail before any replacement generation.
-for defect in ('missing', 'corrupt', 'inventory', 'geometry'):
+for defect in ('missing', 'corrupt', 'inventory'):
     broken = work / defect
     shutil.copytree(fresh, broken)
     directory, m = published(broken)
@@ -136,10 +136,23 @@ for defect in ('missing', 'corrupt', 'inventory', 'geometry'):
         m['archives'] = []
         (directory / 'manifest.json').write_text(json.dumps(m))
     before = hashes(broken / 'gs/checkpoints')
-    text = deck.replace('H 0 0 0.7', 'H 0 0 0.8') if defect == 'geometry' else deck
-    log = run(defect, broken, text, resume=True, success=False)
+    log = run(defect, broken, deck, resume=True, success=False)
     assert 'checkpoint' in log.lower(), log[-3000:]
     assert hashes(broken / 'gs/checkpoints') == before
+
+# A changed geometry is a different problem: --continue starts it fresh
+# (DESIGN B6 R1) and leaves the old generations exactly as they were.
+moved = work / 'geometry'
+shutil.copytree(fresh, moved)
+before = hashes(moved / 'gs/checkpoints')
+run('geometry', moved, deck.replace('H 0 0 0.7', 'H 0 0 0.8'), resume=True)
+assert result(moved)['continuation']['action'] == 'fresh', result(moved)['continuation']
+assert 'problem changed (R1)' in result(moved)['continuation']['why']
+assert result(moved)['iterations_this_run'] > 0
+after = hashes(moved / 'gs/checkpoints')
+assert all(after.get(path) == digest for path, digest in before.items()
+           if not path.startswith('latest')), 'an old generation changed'
+assert published(moved)[1]['generation'] != generation
 
 print(json.dumps({'mpi_ranks': a.ranks, 'energy': energy,
                   'fresh_iterations': fresh_iterations,

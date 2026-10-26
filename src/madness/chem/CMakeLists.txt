@@ -63,6 +63,7 @@ set(MADCHEM_HEADERS
     StageCheckpoint.h
     CheckpointRetention.h
     ConvergenceSettings.h
+    LadderPlanner.h
     ScfContinuation.h
     RestartPlan.h
     PathManager.hpp
@@ -226,8 +227,8 @@ if(BUILD_TESTING)
     add_mpi_tests(chem test_stage_checkpoint "2" "MADworld" "unittests;short")
     set_tests_properties(madness/test/chem/test_stage_checkpoint_mpi2/run PROPERTIES TIMEOUT 60)
   endif()
-  # Pure continuation planning for named moldft stages (DESIGN B5, B6): no MPI, no files.
-  add_unittests(chem "test_scf_continuation.cc" "MADworld" "unittests;short")
+  # The planner, plan_ladder (DESIGN B6, D7): pure, a table of cases.
+  add_unittests(chem "test_plan_ladder.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Who decides convergence and the settings table (DESIGN B8, B9): pure.
   add_unittests(chem "test_convergence_settings.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Checkpoint cadence and retention decisions (DESIGN A3): pure.
