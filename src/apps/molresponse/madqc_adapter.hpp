@@ -324,6 +324,10 @@ struct molresponse_v3_lib {
       // normal-mode Raman analysis (Hessian from the same nuclear response
       // states, frequencies, activities, depolarization ratios) under
       // properties.vibrational_analysis / properties.raman_spectra.
+      // A written nuclear.directions (D-017, the named path's raman.directions)
+      // turns the request into a list: that atom, or every atom when
+      // raman.nuc_atom is -1, times the written axes; derivative rows only,
+      // no normal-mode analysis.
       ResponsePropertyRequest r;
       r.kind = ResponsePropertyKind::PolarizabilityGradient;
       r.gradient_mode = GradientMode::Nuclear;
@@ -331,18 +335,54 @@ struct molresponse_v3_lib {
       r.raman_nuc_atom = rp.raman_nuc_atom();
       r.raman_nuc_axis = rp.raman_nuc_axis();
       const int natom = static_cast<int>(reference_molecule.natom());
-      if (r.raman_nuc_atom >= 0) {
+      // Upper bound (review finding C13): an out-of-range atom otherwise
+      // fails later, inside the nuclear-derivative functor, as an unnamed
+      // exception.
+      if (r.raman_nuc_atom >= natom)
+        throw std::runtime_error(
+            "response: raman.nuc_atom " + std::to_string(r.raman_nuc_atom)
+            + " is out of range for a molecule of " + std::to_string(natom)
+            + " atom(s) (atoms are numbered from 0)");
+      if (rp.is_user_defined("nuclear.directions")) {
+        if (rp.is_user_defined("raman.nuc_axis"))
+          throw std::runtime_error(
+              "response: give the displacement axes once, as "
+              "nuclear.directions "
+              "(a list) or raman.nuc_axis (one axis), not both");
+        std::vector<int> axes_written;
+        for (char c : rp.nuclear_directions()) {
+          const auto axis = std::string("xyz").find(
+              static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+          if (axis == std::string::npos
+              || std::find(axes_written.begin(), axes_written.end(),
+                           static_cast<int>(axis))
+                     != axes_written.end())
+            throw std::runtime_error("response: nuclear.directions must be "
+                                     "distinct axes out of xyz");
+          axes_written.push_back(static_cast<int>(axis));
+        }
+        if (axes_written.empty())
+          throw std::runtime_error("response: nuclear.directions is empty");
+        std::vector<int> atoms;
+        if (r.raman_nuc_atom >= 0)
+          atoms.push_back(r.raman_nuc_atom);
+        else
+          for (int atom = 0; atom < natom; ++atom)
+            atoms.push_back(atom);
+        for (int atom : atoms)
+          for (int axis : axes_written)
+            r.raman_coordinates.push_back({atom, axis});
+        r.raman_nuc_atom = -1; // the list carries the request
+        r.raman_nuc_axis = -1;
+        if (world.rank() == 0)
+          print("response: polarizability gradient over",
+                r.raman_coordinates.size(),
+                "written nuclear coordinate(s); derivative rows only, no "
+                "normal-mode analysis");
+      } else if (r.raman_nuc_atom >= 0) {
         if (r.raman_nuc_axis < 0 || r.raman_nuc_axis > 2)
           throw std::runtime_error(
               "response: raman.nuc_axis must be 0 (x), 1 (y) or 2 (z)");
-        // Upper bound (review finding C13): an out-of-range atom otherwise
-        // fails later, inside the nuclear-derivative functor, as an unnamed
-        // exception.
-        if (r.raman_nuc_atom >= natom)
-          throw std::runtime_error(
-              "response: raman.nuc_atom " + std::to_string(r.raman_nuc_atom) +
-              " is out of range for a molecule of " + std::to_string(natom) +
-              " atom(s) (atoms are numbered from 0)");
       } else {
         r.raman_nuc_atom = -1;   // full set; the axis is ignored
         r.raman_nuc_axis = -1;

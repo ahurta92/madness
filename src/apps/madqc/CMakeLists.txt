@@ -96,6 +96,17 @@ if(BUILD_TESTING)
     set_tests_properties(madness/test/madqc/test_named_stages/mpi2
       PROPERTIES LABELS "unittests;short" TIMEOUT 60)
   endif()
+  add_mad_executable(test_response_properties "test_response_properties.cc" "MADchem")
+  add_test(NAME madness/test/madqc/test_response_properties/run COMMAND test_response_properties)
+  set_tests_properties(madness/test/madqc/test_response_properties/run
+    PROPERTIES LABELS "unittests;short" TIMEOUT 60)
+  if(ENABLE_MPI)
+    add_test(NAME madness/test/madqc/test_response_properties/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_response_properties> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(madness/test/madqc/test_response_properties/mpi2
+      PROPERTIES LABELS "unittests;short" TIMEOUT 60)
+  endif()
 endif()
 
 if(BUILD_TESTING AND Python3_EXECUTABLE)

@@ -142,6 +142,53 @@ int main() {
     EXPECT(none_sentinel, "no sentinel in the single-coordinate plan");
   }
 
+  // ----- A written list of coordinates (D-017): concrete legs, no sentinel --
+  std::printf("=== PolarizabilityGradient Nuclear list (0z, 1z) ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::PolarizabilityGradient;
+    r.gradient_mode = GradientMode::Nuclear;
+    r.frequencies = {0.0};
+    r.raman_coordinates = {{0, 2}, {1, 2}};
+    r.protocol_thresholds = P;
+    auto plan = plan_one(r);
+    EXPECT(plan.nuclear_fd.size() == 2
+               && has_fd(plan.nuclear_fd, "nuc_0_z", 0.0)
+               && has_fd(plan.nuclear_fd, "nuc_1_z", 0.0),
+           "2 concrete nuclear legs");
+    EXPECT(plan.vbc.size() == 6, "6 VBC (3 optical axes x 2 coordinates)");
+    bool none_sentinel = true;
+    for (const auto& v : plan.vbc)
+      none_sentinel = none_sentinel && !v.pert_c.is_all_atoms();
+    EXPECT(none_sentinel, "no sentinel in the list plan");
+    // A one-entry list plans exactly what the single coordinate plans (B4).
+    auto legs = [](const ResponsePlan& p) {
+      std::vector<std::string> out;
+      for (const auto& f : p.fd)
+        out.push_back("fd " + f.pert.description() + "@"
+                      + std::to_string(f.freq));
+      for (const auto& f : p.nuclear_fd)
+        out.push_back("nfd " + f.pert.description() + "@"
+                      + std::to_string(f.freq));
+      for (const auto& v : p.vbc)
+        out.push_back("vbc " + v.pert_b.description() + "__"
+                      + v.pert_c.description() + "@" + std::to_string(v.freq_b)
+                      + "_" + std::to_string(v.freq_c));
+      return out;
+    };
+    ResponsePropertyRequest single = r;
+    single.raman_coordinates.clear();
+    single.raman_nuc_atom = 1;
+    single.raman_nuc_axis = 2;
+    ResponsePropertyRequest one = r;
+    one.raman_coordinates = {{1, 2}};
+    EXPECT(legs(plan_one(single)) == legs(plan_one(one)),
+           "list {1z} plans the same legs in the same order as nuc_atom 1, "
+           "nuc_axis 2");
+    EXPECT(legs(plan_one(single)).size() == 3 + 1 + 3,
+           "that plan: 3 dipole FD (axes xyz), 1 nuclear leg, 3 VBC");
+  }
+
   // ----- Nuclear axes are full 3N even if optical axes subset --------------
   std::printf("=== Nuclear gradient: full 3N displacement even w/ axes={z} ===\n");
   {

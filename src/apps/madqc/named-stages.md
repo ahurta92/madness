@@ -39,13 +39,18 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties [polarizability]`, `polarizability.frequencies`, `polarizability.frequency_units au`, `polarizability.components` |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
 
-Ground states must be closed shell. Response frequencies and components must
-be explicit; components are Cartesian pairs such as `[zz]` or `[xx, xy]`.
-The engine may calculate extra tensor elements needed to assemble the request;
-`properties.polarizability.values` selects the requested components. The raw
-engine evidence is retained alongside them. Response protocols finer than the
+Ground states must be closed shell. Every requested property names its own
+frequencies and `frequency_units au` (numbers are never defaulted); its
+components are Cartesian tuples such as `[zz]` or `[xx, xy]` and mean every
+tuple when omitted (9 pairs for the polarizability and Raman, 27 triples for
+the hyperpolarizability). The engine takes axes and one frequency grid, not
+components, so it may calculate extra tensor elements needed to assemble the
+request; `properties.<property>.values` selects the requested ones. The raw
+engine evidence is retained alongside them. The engine's own spellings
+(`dipole.*`, `quadratic`, `beta.*`, `raman.nuc_*`, `nuclear.*`) are not stage
+controls and are rejected. Response protocols finer than the
 reference threshold/order are rejected (before any stage runs for a reference
 in the deck, and against the published generation for every reference). A
 generation published before the consumer context existed cannot be a reference;
@@ -66,7 +71,9 @@ method, units, effective reference cell, requested targets, and the existing
 engine's convergence evidence. An unconverged stage is recorded and causes a
 nonzero exit before descendants run.
 
-Energy is in hartree, dipole in `e*a0`, and polarizability in `a0^3`; response
+Energy is in hartree, dipole in `e*a0`, polarizability in `a0^3`, the
+hyperpolarizability in `e^3 a0^3 Eh^-2` and the polarizability gradient in
+`a0^2` per bohr of displacement, all atomic units; response
 frequency is in atomic angular-frequency units. Property records identify their
 state and, for response, the source ground state. A moldft state is identified
 by its immutable checkpoint generation. Response states also identify immutable checkpoint generations and their exact
@@ -183,7 +190,66 @@ use checked native archives even in HDF5-enabled builds; the optional ground-sta
 HDF5 mirror stays in the attempt directory. Standalone/legacy response backend
 selection remains unchanged.
 
-Beta, Raman, 2PA, excited states, Nemo, MP2, CC2, and optimization are not exposed
+## Hyperpolarizability and Raman
+
+A `molresponse` stage may request the first hyperpolarizability and the
+vibrational Raman polarizability gradient beside the polarizability:
+
+```
+molresponse quadratic
+  reference gs
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 60
+  kain true
+  requested_properties [polarizability, hyperpolarizability, raman]
+  polarizability.frequencies [0.0]
+  polarizability.frequency_units au
+  hyperpolarizability.frequencies [0.0, 0.05]
+  hyperpolarizability.frequency_units au
+  hyperpolarizability.components [zzz, xzz]
+  raman.frequencies [0.0]
+  raman.frequency_units au
+  raman.components [zz]
+  raman.atoms [1]
+  raman.directions [z]
+end
+```
+
+**Hyperpolarizability.** A component `abc` is `beta_abc(-2w; w, w)` for each
+driver frequency `w` in `hyperpolarizability.frequencies`: second-harmonic
+generation, which at `w = 0` is the static hyperpolarizability. `a` is the
+output dipole axis at `2w`, `b` and `c` the input axes at `w`. The engine
+solves the dipole legs at `w` and `2w` and one quadratic source per `(b, c)`
+pair; `properties.hyperpolarizability.values` holds one record per
+frequency: `frequency`, `process` (`static` or `shg`), `output_frequency`,
+`components`, `converged` (every leg of every requested element met its
+target), and the engine rows as `engine_evidence`. Other processes (optical
+rectification, the electro-optic Pockels effect) have no quadratic source in
+the engine yet and no deck spelling here.
+
+**Raman.** A component `ab` is `d(alpha_ab)/dQ` at each optical frequency in
+`raman.frequencies`, for each nuclear coordinate `Q`. The coordinates are
+`raman.atoms` (atoms as the reference's molecule numbers them, from 0;
+omitted: every atom; one atom at most until the engine takes a list) times
+`raman.directions` (`x`, `y`, `z`; omitted: all three). With both omitted the
+engine computes the full `3N` set, builds the Hessian from the same nuclear
+response states, and passes its normal-mode analysis through as
+`properties.raman.vibrational_analysis` and `properties.raman.raman_spectra`
+(`coordinates: all`, `spectrum_complete`); the stage is converged only when
+every derivative row was. A written subset gives derivative rows only
+(`coordinates: written`, `normal_mode_analysis: false` with the reason).
+Each record in `properties.raman.values` names its `coordinate`
+(`nuc_<atom>_<axis>`), `atom`, `axis`, `frequency`, `components`,
+`converged` and the engine rows.
+
+The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
+the benchmark geometry. Until the response checkpoint carries the quadratic
+sources, the parser accepts these requests but refuses to run them
+("hyperpolarizability and raman wait for the response checkpoint"); the
+unnamed `--wf=response` path computes both today.
+
+2PA, excited states, Nemo, MP2, CC2, and optimization are not exposed
 through this named frontend yet. The broader convergence contract is milestone 2d.
 
 Checkpointing assumes a shared filesystem and supported archive reader counts

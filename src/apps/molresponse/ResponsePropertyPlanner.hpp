@@ -68,6 +68,13 @@ enum class GradientMode {
   Resonant,   // transition polarizability via excited states — resonance Raman
 };
 
+/// One nuclear displacement coordinate: the atom as the molecule numbers it
+/// (from 0) and the Cartesian axis (0=x, 1=y, 2=z).
+struct NuclearCoordinate {
+  int atom;
+  int axis;
+};
+
 /// User-facing request — one response property at one set of frequencies.
 struct ResponsePropertyRequest {
   ResponsePropertyKind kind;
@@ -84,6 +91,11 @@ struct ResponsePropertyRequest {
   /// build_dag; enables the normal-mode Raman analysis.
   int                  raman_nuc_atom = -1;
   int                  raman_nuc_axis = -1;
+  /// Raman, a written list of nuclear coordinates (D-017): one concrete
+  /// nuclear leg and the dipole x nuclear sources per entry, derivative rows
+  /// only (no all-atoms sentinel, so no normal-mode analysis). Empty: the
+  /// single coordinate above, or the full set when that is -1 too.
+  std::vector<NuclearCoordinate> raman_coordinates;
   BetaProcess          beta_process = BetaProcess::SHG;       // Hyperpolarizability
   GradientMode         gradient_mode = GradientMode::Nuclear;  // PolarizabilityGradient
   int                  n_roots      = 0;                       // Resonant gradient
@@ -350,19 +362,29 @@ inline ResponsePlan plan_one(const ResponsePropertyRequest &req) {
         // ...plus nuclear-displacement states at ω=0 for ALL atoms. Normal-
         // mode analysis needs the full 3N Cartesian set, so emit all three
         // displacement axes regardless of the optical `axes` subset.
-        if (req.raman_nuc_atom >= 0 && req.raman_nuc_axis >= 0) {
-          // SINGLE component (cheap test): concrete nuclear pert (no sentinel)
-          // + its FD + the dipole x nuclear VBC pairs that feed the contraction.
-          const Perturbation nuc =
-              Perturbation::nuclear(req.raman_nuc_atom, req.raman_nuc_axis);
-          plan.nuclear_fd.push_back({nuc, 0.0, req.protocol_thresholds});
-          for (double w : req.frequencies)
-            for (char ax_b : req.axes) {
-              int ib = axis_index(ax_b);
-              if (ib < 0) continue;
-              plan.vbc.push_back({Perturbation::dipole(ib), nuc, w, 0.0,
-                                  req.protocol_thresholds});
-            }
+        // The written coordinates, or the single one, as a list; empty means
+        // the full set below. A one-entry list plans exactly what the single
+        // coordinate planned before the list existed (B4).
+        std::vector<NuclearCoordinate> coordinates = req.raman_coordinates;
+        if (coordinates.empty() && req.raman_nuc_atom >= 0
+            && req.raman_nuc_axis >= 0)
+          coordinates.push_back({req.raman_nuc_atom, req.raman_nuc_axis});
+        if (!coordinates.empty()) {
+          // Concrete nuclear perts (no sentinel): each one's FD leg + the
+          // dipole x nuclear VBC pairs that feed the contraction.
+          for (const auto& coordinate : coordinates) {
+            const Perturbation nuc
+                = Perturbation::nuclear(coordinate.atom, coordinate.axis);
+            plan.nuclear_fd.push_back({nuc, 0.0, req.protocol_thresholds});
+            for (double w : req.frequencies)
+              for (char ax_b : req.axes) {
+                int ib = axis_index(ax_b);
+                if (ib < 0)
+                  continue;
+                plan.vbc.push_back({Perturbation::dipole(ib), nuc, w, 0.0,
+                                    req.protocol_thresholds});
+              }
+          }
         } else {
           // FULL set: all atoms x xyz nuclear FD, plus the dipole x nuclear VBC
           // for every (optical axis, displacement axis) pair. Both carry the

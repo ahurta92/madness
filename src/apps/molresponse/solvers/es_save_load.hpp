@@ -220,16 +220,25 @@ void save_es_roots(madness::World &world,
       entry["locked"] = us < state.locked.size()
                             ? static_cast<bool>(state.locked[us])
                             : false;
-      entry["omega_residual"] = (us < state.last_omega_residual.size()
-                                 && state.last_omega_residual[us] < 1.0e8)
+      // A missing value is written as null with the reason beside it (R-006).
+      const bool omega_residual_known
+          = us < state.last_omega_residual.size()
+            && state.last_omega_residual[us] < 1.0e8;
+      entry["omega_residual"] = omega_residual_known
                                     ? state.last_omega_residual[us]
                                     : std::numeric_limits<double>::quiet_NaN();
-      entry["density_target"] = state.density_target >= 0.0
+      if (!omega_residual_known)
+        entry["omega_residual_unavailable"] = "no eigenvalue step yet";
+      const bool targets_known
+          = state.density_target >= 0.0 && state.omega_target >= 0.0;
+      entry["density_target"] = targets_known
                                     ? state.density_target
                                     : std::numeric_limits<double>::quiet_NaN();
-      entry["omega_target"] = state.omega_target >= 0.0
+      entry["omega_target"] = targets_known
                                   ? state.omega_target
                                   : std::numeric_limits<double>::quiet_NaN();
+      if (!targets_known)
+        entry["targets_unavailable"] = "no convergence check yet";
       entry["file"] = detail_save_load::root_file(s);
       entry["coeffs"] = root_coeffs[static_cast<size_t>(s)];
       entry["bytes"]  = root_coeffs[static_cast<size_t>(s)] * sizeof(double);
