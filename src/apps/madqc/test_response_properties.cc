@@ -139,7 +139,9 @@ int main(int argc, char** argv) {
                                           "hyperpolarizability"},
           "requested_properties as written");
     check(!rp.is_user_defined("raman.nuc_atom")
-              && !rp.is_user_defined("nuclear.directions"),
+              && !rp.is_user_defined("raman.atoms")
+              && !rp.is_user_defined("raman.directions")
+              && !rp.is_user_defined("raman.frequencies"),
           "no Raman knobs without raman");
 
     const auto all = translated(world, {"requested_properties [polarizability]",
@@ -156,39 +158,65 @@ int main(int argc, char** argv) {
     check(full.raman_full_set && full.raman.components.size() == 9
               && full.params.get<ResponseParameters>().raman_nuc_atom() == -1
               && !full.params.get<ResponseParameters>().is_user_defined(
-                  "nuclear.directions"),
-          "raman with atoms and directions omitted: the engine's full set");
+                  "raman.atoms")
+              && !full.params.get<ResponseParameters>().is_user_defined(
+                  "raman.directions")
+              && full.params.get<ResponseParameters>().raman_frequencies()
+                     == std::vector<double>{0.0},
+          "raman with atoms and directions omitted: the engine's full set "
+          "(raman.nuc_atom -1, no lists) at raman.frequencies");
     const auto one = translated(
         world, {"requested_properties [raman]", "raman.frequencies [0.0]",
                 "raman.frequency_units au", "raman.components [zz]",
                 "raman.atoms [1]", "raman.directions [z]"});
-    check(
-        !one.raman_full_set && one.raman_atoms == std::vector<int>{1}
-            && one.raman_directions == "z"
-            && one.params.get<ResponseParameters>().raman_nuc_atom() == 1
-            && one.params.get<ResponseParameters>().nuclear_directions() == "z"
-            && one.params.get<ResponseParameters>().dipole_directions() == "z",
-        "one coordinate: raman.nuc_atom and nuclear.directions");
+    check(!one.raman_full_set && one.raman_atoms == std::vector<int>{1}
+              && one.raman_directions == "z"
+              && one.params.get<ResponseParameters>().raman_atoms()
+                     == std::vector<int>{1}
+              && one.params.get<ResponseParameters>().raman_directions() == "z"
+              && !one.params.get<ResponseParameters>().is_user_defined(
+                  "raman.nuc_atom")
+              && !one.params.get<ResponseParameters>().is_user_defined(
+                  "nuclear.directions")
+              && one.params.get<ResponseParameters>().dipole_directions()
+                     == "z",
+          "one coordinate: raman.atoms and raman.directions as written, "
+          "neither raman.nuc_atom nor nuclear.directions");
     const auto every_atom_z = translated(
         world, {"requested_properties [raman]", "raman.frequencies [0.0]",
                 "raman.frequency_units au", "raman.directions [x, z]"});
-    check(every_atom_z.raman_atoms.empty()
-              && every_atom_z.raman_directions == "xz"
-              && every_atom_z.params.get<ResponseParameters>().raman_nuc_atom()
-                     == -1
-              && every_atom_z.params.get<ResponseParameters>()
-                         .nuclear_directions()
-                     == "xz",
-          "every atom times written directions: -1 with nuclear.directions");
+    check(
+        every_atom_z.raman_atoms.empty()
+            && every_atom_z.raman_directions == "xz"
+            && !every_atom_z.params.get<ResponseParameters>().is_user_defined(
+                "raman.atoms")
+            && !every_atom_z.params.get<ResponseParameters>().is_user_defined(
+                "raman.nuc_atom")
+            && every_atom_z.params.get<ResponseParameters>().raman_directions()
+                   == "xz",
+        "every atom times written directions: raman.directions alone");
     const auto atom_xyz = translated(
         world, {"requested_properties [raman]", "raman.frequencies [0.0]",
                 "raman.frequency_units au", "raman.atoms [0]"});
     check(!atom_xyz.raman_full_set
-              && atom_xyz.params.get<ResponseParameters>().raman_nuc_atom() == 0
-              && atom_xyz.params.get<ResponseParameters>().nuclear_directions()
-                     == "xyz",
-          "one atom, directions omitted: that atom times x, y, z, as a written "
-          "list");
+              && atom_xyz.params.get<ResponseParameters>().raman_atoms()
+                     == std::vector<int>{0}
+              && !atom_xyz.params.get<ResponseParameters>().is_user_defined(
+                  "raman.directions"),
+          "one atom, directions omitted: raman.atoms alone");
+    const auto two_atoms = translated(
+        world, {"requested_properties [raman]", "raman.frequencies [0.0, 0.05]",
+                "raman.frequency_units au", "raman.atoms [1, 0]",
+                "raman.directions [z, x]"});
+    check(two_atoms.raman_atoms == std::vector<int>{1, 0}
+              && two_atoms.raman_directions == "zx"
+              && two_atoms.params.get<ResponseParameters>().raman_atoms()
+                     == std::vector<int>{1, 0}
+              && two_atoms.params.get<ResponseParameters>().raman_directions()
+                     == "zx"
+              && two_atoms.params.get<ResponseParameters>().raman_frequencies()
+                     == std::vector<double>{0.0, 0.05},
+          "a list of atoms and directions passes through in deck order");
   } catch (const std::exception& e) {
     check(false, e.what());
   }
@@ -229,9 +257,9 @@ int main(int argc, char** argv) {
       [&] {
         translated(world,
                    {"requested_properties [raman]", "raman.frequencies [0.0]",
-                    "raman.frequency_units au", "raman.atoms [0, 1]"});
+                    "raman.frequency_units au", "raman.atoms [0, 0]"});
       },
-      "more than one atom");
+      "distinct atom indices");
   throws(
       [&] {
         translated(world,
@@ -292,7 +320,8 @@ int main(int argc, char** argv) {
   }
   for (const auto* engine_key :
        {" quadratic true\n", " beta.frequencies [0.0]\n", " raman.nuc_atom 1\n",
-        " nuclear.directions z\n", " dipole.directions z\n"}) {
+        " raman.nuc_axis 2\n", " nuclear.directions z\n",
+        " dipole.directions z\n"}) {
     auto deck = beta_deck;
     deck.replace(deck.find(" protocol"), 0, engine_key);
     rejects(geometry + gs + deck, "unsupported parameter");

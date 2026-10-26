@@ -367,16 +367,8 @@ inline void translate_response_properties(const std::string& stage_name,
         throw std::runtime_error(
             stage_name
             + ": raman.atoms must be distinct atom indices, numbered from 0");
-    // The engine's raman.nuc_atom carries one atom or every atom; a list of
-    // atoms needs an engine knob that does not exist yet (progress.md, a
-    // decision for Adrian). The written one atom is checked against the
-    // reference's atom count when the stage runs.
-    if (stage.raman_atoms.size() > 1)
-      throw std::runtime_error(
-          stage_name
-          + ": raman.atoms names more than one atom; give one "
-            "atom or omit it (every atom) until the engine takes "
-            "a list");
+    // The written atoms are checked against the reference's atom count when
+    // the stage runs (the engine knows the molecule; the parser does not).
     std::set<char> distinct_axes;
     for (const auto& d :
          controls.get<std::vector<std::string>>("raman.directions")) {
@@ -400,17 +392,18 @@ inline void translate_response_properties(const std::string& stage_name,
     rp.set_user_defined_value("beta.frequencies",
                               stage.hyperpolarizability.frequencies);
   if (requested.contains("raman")) {
-    // raman.nuc_atom: the one written atom, or -1 for every atom. A written
-    // nuclear.directions makes the engine plan a list of coordinates
-    // (derivative rows only); unwritten with -1, it plans the full set.
-    rp.set_user_defined_value(
-        "raman.nuc_atom",
-        stage.raman_atoms.empty() ? -1 : stage.raman_atoms.front());
-    if (!stage.raman_full_set)
-      rp.set_user_defined_value("nuclear.directions",
-                                stage.raman_directions.empty()
-                                    ? std::string("xyz")
-                                    : stage.raman_directions);
+    // The engine's raman.atoms and raman.directions take the stage's lists as
+    // written (D-020): the engine plans their product, every atom or x, y, z
+    // for an empty one, derivative rows only. The full set (both omitted)
+    // is the engine's raman.nuc_atom -1, its only full-set switch until the
+    // unnamed path is ported; the lists stay unwritten then.
+    rp.set_user_defined_value("raman.frequencies", stage.raman.frequencies);
+    if (stage.raman_full_set)
+      rp.set_user_defined_value("raman.nuc_atom", -1);
+    if (!stage.raman_atoms.empty())
+      rp.set_user_defined_value("raman.atoms", stage.raman_atoms);
+    if (!stage.raman_directions.empty())
+      rp.set_user_defined_value("raman.directions", stage.raman_directions);
   }
 }
 

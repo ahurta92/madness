@@ -149,14 +149,34 @@ struct ResponseParameters : public QCCalculationParametersBase {
         initialize<bool>("nuclear", false, "Compute nuclear response");
         initialize<std::string>("nuclear.directions", "xyz", "directions for nuclear response");
         initialize<std::vector<double>>("nuclear.frequencies", {0.0}, "frequencies for nuclear response");
-        initialize<int>("raman.nuc_atom", 0,
-                        "vibrational Raman: index of the displaced atom (0-based) for a "
-                        "single polarizability-gradient component, or -1 for the full set: "
-                        "all 3N nuclear coordinates, the Hessian from the same nuclear "
-                        "response states, and the normal-mode Raman spectrum "
-                        "(properties.vibrational_analysis / raman_spectra).");
+        initialize<int>(
+            "raman.nuc_atom", 0,
+            "vibrational Raman: index of the displaced atom (0-based) for a "
+            "single polarizability-gradient component, or -1 for the full set: "
+            "all 3N nuclear coordinates, the Hessian from the same nuclear "
+            "response states, and the normal-mode Raman spectrum "
+            "(properties.vibrational_analysis / raman_spectra). The unnamed "
+            "path's spelling of one coordinate; raman.atoms and "
+            "raman.directions (lists) are the other, and writing both is an "
+            "error.");
         initialize<int>("raman.nuc_axis", 2,
                         "vibrational Raman: Cartesian axis of the displacement, 0=x 1=y 2=z.");
+        initialize<std::vector<int>>(
+            "raman.atoms", {},
+            "vibrational Raman: the displaced atoms (0-based) of the "
+            "polarizability gradient, as a list; empty = every atom. With "
+            "raman.directions it spans the nuclear coordinates (atoms x "
+            "directions): derivative rows for exactly those, no normal-mode "
+            "analysis. Both empty: raman.nuc_atom decides (D-020).");
+        initialize<std::string>(
+            "raman.directions", "",
+            "vibrational Raman: the displacement axes of the polarizability "
+            "gradient, out of xyz; empty = x, y and z. See raman.atoms.");
+        initialize<std::vector<double>>(
+            "raman.frequencies", {},
+            "optical frequencies of the polarizability gradient (the dipole "
+            "legs at w, the nuclear legs at 0). Empty (default) = every "
+            "dipole.frequencies entry, like beta.frequencies.");
         initialize<bool>("quadratic", false, "Compute quadratic response properties from defined perturbations");
         initialize<std::string>("dalton.dir", "",
                                 "seed-from-directory import (showcase W3): path to a DALTON "
@@ -380,6 +400,15 @@ public:
     }
     [[nodiscard]] int raman_nuc_atom() const { return get<int>("raman.nuc_atom"); }
     [[nodiscard]] int raman_nuc_axis() const { return get<int>("raman.nuc_axis"); }
+    [[nodiscard]] std::vector<int> raman_atoms() const {
+        return get<std::vector<int>>("raman.atoms");
+    }
+    [[nodiscard]] std::string raman_directions() const {
+        return get<std::string>("raman.directions");
+    }
+    [[nodiscard]] std::vector<double> raman_frequencies() const {
+        return get<std::vector<double>>("raman.frequencies");
+    }
 
 private:
     void validate_user_specified_properties() {

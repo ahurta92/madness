@@ -231,8 +231,8 @@ the engine yet and no deck spelling here.
 **Raman.** A component `ab` is `d(alpha_ab)/dQ` at each optical frequency in
 `raman.frequencies`, for each nuclear coordinate `Q`. The coordinates are
 `raman.atoms` (atoms as the reference's molecule numbers them, from 0;
-omitted: every atom; one atom at most until the engine takes a list) times
-`raman.directions` (`x`, `y`, `z`; omitted: all three). With both omitted the
+omitted: every atom) times `raman.directions` (`x`, `y`, `z`; omitted: all
+three). With both omitted the
 engine computes the full `3N` set, builds the Hessian from the same nuclear
 response states, and passes its normal-mode analysis through as
 `properties.raman.vibrational_analysis` and `properties.raman.raman_spectra`
