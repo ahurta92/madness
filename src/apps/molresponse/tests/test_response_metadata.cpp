@@ -367,6 +367,22 @@ int main() {
            "index intact after kill-simulated save cycle");
   }
 
+  // ---- drop_fd_rung: a redefined protocol key drops its FD entries ----------
+  std::printf("=== drop_fd_rung ===\n");
+  {
+    auto m = ResponseMetadata::load_or_create((tmp / "drop.json").string());
+    for (const char *pert : {"dipole_x", "dipole_y"})
+      for (const char *key : {"1e-04_k6", "1e-06_k8"})
+        m.set_fd_state(pert, key, ResponseMetadata::freq_key(0.0),
+                       {{"freq", 0.0}, {"converged", true}});
+    m.drop_fd_rung("1e-06_k8");
+    const auto &fd = m.json()["fd_states"];
+    EXPECT(!fd["dipole_x"].contains("1e-06_k8") && !fd["dipole_y"].contains("1e-06_k8"),
+           "every channel's entries at the redefined key are gone");
+    EXPECT(fd["dipole_x"].contains("1e-04_k6") && fd["dipole_y"].contains("1e-04_k6"),
+           "other keys are kept");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);

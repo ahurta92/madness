@@ -159,6 +159,7 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   mgr_policy.es_max_iters_per_step = in.settings.es_max_iters;
   mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   mgr_policy.fd_subworld_ranks  = in.settings.fd_subworld_ranks;
+  mgr_policy.state_plans        = in.settings.state_plans;     // named, D-016
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
   mgr.build(gs.molecule().natom());
   timing["plan_build"] = t_build.lap();

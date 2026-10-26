@@ -365,7 +365,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
         world, stage.params, molecule, directory, reference.saved_prefix,
         [&](madness::World& w, const json& event) {
           checkpoint.observe(w, event);
-        });
+        },
+        checkpoint.state_plans());
   }
   result["method"] = "TDHF";
   result["reference"]
@@ -414,6 +415,15 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   }
   result["reference_changed"] = checkpoint.reference_changed;
   result["acceleration_history"] = continuing ? "reset" : "fresh";
+  if (!checkpoint.state_plans().empty()) {
+    // B6: what --continue did per state and why.
+    result["continuation"] = checkpoint.continuation();
+    if (world.rank() == 0)
+      for (const auto& state : result["continuation"]["states"])
+        madness::print("stage", stage.name,
+                       "continuation:", state.at("state").get<std::string>(),
+                       "-", state.at("summary").get<std::string>());
+  }
   result["properties"]["polarizability"]["source_state_id"] = state_id;
   outcome.state_id = state_id;
   outcome.converged = converged;

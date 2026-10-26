@@ -98,6 +98,16 @@ public:
         {"thresh", thresh}, {"k", k}, {"index", index}};
   }
 
+  /// A protocol key redefined (keys round the threshold): the FD entries saved
+  /// under its old definition cannot be told apart from the new rung's, so
+  /// they are dropped. Their archives are replaced when those states are
+  /// solved again at the new definition.
+  void drop_fd_rung(const std::string &protocol_key) {
+    if (!j_.contains("fd_states")) return;
+    for (const auto &channel : j_["fd_states"].items())
+      channel.value().erase(protocol_key);
+  }
+
   /// Upsert one FD point: fd_states/<pert>/<protocol_key>/<freq_key> = entry.
   void set_fd_state(const std::string &pert,
                     const std::string &protocol_key,

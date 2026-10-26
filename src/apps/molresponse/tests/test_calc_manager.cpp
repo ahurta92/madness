@@ -644,6 +644,104 @@ int main() {
            "the leg is identified by input and freq");
   }
 
+  // ====== StatePlan (named --continue, D-016): the planner's decision ======
+  // planned_action forces each planned rung once; after that, reconcile.
+  std::printf("=== planned_action / schedule with plans ===\n");
+  {
+    ResponsePropertyRequest r;
+    r.kind = ResponsePropertyKind::Polarizability;
+    r.frequencies = {0.1};
+    r.axes = {'z'};
+    r.protocol_thresholds = P;
+    auto dag = build_dag(plan_one(r), /*n_atoms=*/1);
+    const CalcNode *fd = find_id(dag, "fd:dipole_z@f0.10000");
+    const std::string k4 = protocol_key_at(1e-4), k6 = protocol_key_at(1e-6);
+    // Both rungs saved: rung 1 converged, rung 2 at its iteration limit.
+    json m = empty_meta();
+    put_fd(m, "dipole_z", 1e-4, 0.1, /*converged=*/true, false, 5);
+    put_fd(m, "dipole_z", 1e-6, 0.1, /*converged=*/false, false, 8);
+
+    StatePlan load{StatePlan::Kind::load, 1e-6, k6, /*met=*/true};
+    EXPECT(fd && planned_action(*fd, m, 1e-4, load, {}) == NodeAction::Skip &&
+               planned_action(*fd, m, 1e-6, load, {}) == NodeAction::Skip,
+           "load: Skip at every rung");
+
+    StatePlan resume{StatePlan::Kind::resume, 1e-6, ""};
+    EXPECT(fd && planned_action(*fd, m, 1e-4, resume, {}) == NodeAction::Skip,
+           "resume: a rung looser than the start is never redone");
+    EXPECT(fd && planned_action(*fd, m, 1e-6, resume, {}) == NodeAction::Resume,
+           "resume: the start rung's own entry resumes, past reconcile's honest climb");
+    EXPECT(fd && reconcile_protocol(*fd, m, 1e-6, /*max_iters=*/8) == NodeAction::Skip,
+           "(reconcile alone would Skip that rung at max_iters 8)");
+    EXPECT(fd && !planned_action(*fd, m, 1e-6, resume, {fd->id + "|" + k6}),
+           "resume: once this run solved the rung, reconcile decides");
+
+    json coarse = empty_meta();
+    put_fd(coarse, "dipole_z", 1e-4, 0.1, /*converged=*/true, false, 5);
+    EXPECT(fd && planned_action(*fd, coarse, 1e-6, resume, {}) == NodeAction::Restart,
+           "resume with no entry at the start rung: Restart from the coarser one");
+
+    StatePlan fresh{StatePlan::Kind::fresh, 1e-4, ""};
+    EXPECT(fd && planned_action(*fd, m, 1e-4, fresh, {}) == NodeAction::Fresh,
+           "fresh: the start rung ignores its saved entry");
+    EXPECT(fd && planned_action(*fd, m, 1e-6, fresh, {fd->id + "|" + k4}) ==
+                     NodeAction::Resume,
+           "fresh: a finer rung is solved once in this run even if an entry exists");
+
+    // schedule: the planned state takes the plan; an unplanned one reconciles.
+    const StatePlans plans{{fd ? fd->id : "", resume}};
+    auto waves = schedule(dag, P, m, /*max_iters=*/8, 0, plans);
+    EXPECT(waves.size() == 1 && waves[0].size() == 1 &&
+               waves[0][0].thresh == 1e-6 && waves[0][0].action == NodeAction::Resume,
+           "schedule: one wave, the planned Resume at rung 2");
+    EXPECT(schedule(dag, P, m, /*max_iters=*/8).empty(),
+           "schedule without plans: unchanged (honest climb Skips both rungs)");
+    EXPECT(schedule(dag, P, m, 8, 0, plans, {fd ? fd->id + "|" + k6 : ""}).empty(),
+           "schedule: after the planned rung ran, reconcile Skips it");
+    EXPECT(schedule(dag, P, m, 8, 0, {{fd ? fd->id : "", load}}).empty(),
+           "schedule: a loaded state schedules nothing");
+  }
+
+  // prerequisites_converged and fd_leg_accuracy take the planner's load (D-016).
+  std::printf("=== planner loads: prerequisites and leg accuracy ===\n");
+  {
+    const std::string k4 = protocol_key_at(1e-4);
+    std::vector<CalcNode> dag(3);
+    dag[0].kind = CalcKind::FD; dag[0].pert = Perturbation::dipole(0);
+    dag[0].freq = 0.1; dag[0].id = fd_node_id(dag[0].pert, 0.1);
+    dag[1].kind = CalcKind::FD; dag[1].pert = Perturbation::dipole(1);
+    dag[1].freq = 0.1; dag[1].id = fd_node_id(dag[1].pert, 0.1);
+    dag[2].kind = CalcKind::VBC; dag[2].id = "vbc:test";
+    dag[2].prerequisites = {dag[0].id, dag[1].id};
+    json m = empty_meta();
+    put_fd(m, "dipole_x", 1e-4, 0.1, /*converged=*/false, false, 30);
+    put_fd(m, "dipole_y", 1e-4, 0.1, /*converged=*/true);
+    EXPECT(!prerequisites_converged(dag[2], dag, m, 1e-4),
+           "an unconverged dep gates the node without plans");
+    const StatePlans plans{{dag[0].id, {StatePlan::Kind::load, 1e-4, k4, true}}};
+    EXPECT(prerequisites_converged(dag[2], dag, m, 1e-4, plans),
+           "a dep the planner loaded counts as converged");
+
+    auto a = fd_leg_accuracy(m, Perturbation::dipole(0), 0.1, 1e-4, 6, k4, plans);
+    EXPECT(!a.value("converged", true) && a.value("met", false) &&
+               a.value("decided_by", "") == "planner",
+           "loaded leg: met, decided_by planner, engine flag kept");
+    auto b = fd_leg_accuracy(m, Perturbation::dipole(1), 0.1, 1e-4, 6, k4, plans);
+    EXPECT(b.value("converged", false) && !b.contains("met") && !b.contains("decided_by"),
+           "an unplanned leg: the record is unchanged");
+    const StatePlans tighter{{dag[0].id, {StatePlan::Kind::load, 1e-6,
+                                          protocol_key_at(1e-6), true}}};
+    auto c = fd_leg_accuracy(m, Perturbation::dipole(0), 0.1, 1e-4, 6, k4, tighter);
+    EXPECT(!c.contains("met"),
+           "a loaded state read through another source key is not marked met");
+    // R2: a stalled final rung loaded with the request unmet.
+    const StatePlans unmet{{dag[0].id, {StatePlan::Kind::load, 1e-4, k4, false}}};
+    EXPECT(!fd_leg_accuracy(m, Perturbation::dipole(0), 0.1, 1e-4, 6, k4, unmet)
+                .contains("met") &&
+               !prerequisites_converged(dag[2], dag, m, 1e-4, unmet),
+           "an unmet load (R2) is neither met nor a converged prerequisite");
+  }
+
   std::printf("\n%s  (%d failures)\n", failed ? "FAILED" : "PASSED", failed);
   return failed ? 1 : 0;
 }

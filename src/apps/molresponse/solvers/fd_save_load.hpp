@@ -193,7 +193,14 @@ void save_fd_state(
     // Register the protocol if this is the first artifact at this key.
     // `index` is unknown to this writer (it's a property of the caller's
     // ramp); a later orchestrator can overwrite it with the real ordering.
-    if (!meta.json()["protocols"].contains(key)) {
+    // Keys round the threshold (1e-6 and 1.01e-6 share one): a save at a
+    // different threshold redefines the key and drops the FD entries saved
+    // under the old definition, which no reader could tell apart from it.
+    const auto &protocols = meta.json().at("protocols");
+    if (!protocols.contains(key)) {
+      meta.set_protocol(key, thresh, k_now, /*index=*/-1);
+    } else if (protocols.at(key).value("thresh", 0.0) != thresh) {
+      meta.drop_fd_rung(key);
       meta.set_protocol(key, thresh, k_now, /*index=*/-1);
     }
 

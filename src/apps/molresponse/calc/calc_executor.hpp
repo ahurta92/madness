@@ -107,6 +107,8 @@ struct ExecutorSettings {
   // Named stages publish a consistent snapshot after a complete FD protocol step.
   // Empty for legacy callers; this does not change solver steps or stopping tests.
   std::function<void(madness::World&, const nlohmann::json&)> checkpoint_observer;
+  // Named stages: the planner's decision per FD state (D-016); empty otherwise.
+  StatePlans        state_plans;
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
   std::string       calc_dir;      // holds response_metadata.json + archives
@@ -1247,6 +1249,9 @@ struct CalcManagerPolicy {
   int          es_max_iters_per_step = 0;   // ES budget; 0 = max_iters_per_step
   int          fd_subworlds = 0;   // F2f: subworlds PER NODE (0=off, 1=node-aligned)
   int          fd_subworld_ranks = 0;   // ranks per subworld; >0 = universe split (may span nodes)
+  // Named stages: the planner's decision per FD state (D-016). Empty on the
+  // unnamed path, where reconcile_protocol alone schedules.
+  StatePlans   state_plans;
 };
 
 // ===========================================================================
@@ -1339,7 +1344,8 @@ public:
       // max_iters flows into reconcile so a budget-exhausted rung climbs the
       // ladder (honest-climb) instead of Resume-looping into the no-progress halt.
       auto waves = schedule(dag_, ramp, meta_json, policy_.max_iters_per_step,
-                            policy_.es_max_iters_per_step);
+                            policy_.es_max_iters_per_step,
+                            policy_.state_plans, solved_);
       // Review fix (confirmed HIGH — front-wave starvation): quarantine nodes
       // that stopped making progress instead of halting the WHOLE run. Only
       // the front wave ever executes, so a deterministically-stuck node (e.g.
@@ -1470,6 +1476,9 @@ public:
                                  {"thresh", it.thresh},
                                  {"action", node_action_name(it.action)}});
       diag["schedule"].push_back(std::move(wrec));
+      // A planned rung is forced once; from here reconcile_protocol decides.
+      for (const auto &it : wave)
+        solved_.insert(it.node->id + "|" + protocol_key_at(it.thresh));
 
       if (world.rank() == 0) {
         madness::print("[CALC] run: wave of", (int)wave.size(),
@@ -1776,6 +1785,7 @@ private:
   std::string           calc_dir_;
   Policy                policy_;
   std::vector<CalcNode> dag_;
+  SolvedRungs           solved_;   // rungs this run solved (planned states)
 };
 
 // ---------------------------------------------------------------------------
@@ -2407,6 +2417,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
     std::vector<int>         row_conv(ax.size(), 0);   // converged AND not accepted@maxiter
     std::vector<int>         row_acc (ax.size(), 0);   // accepted@maxiter (converged forced true)
     std::vector<double>      row_res (ax.size(), 0.0); // bsh residual at the source
+    std::vector<int>         row_met (ax.size(), 0);   // loaded by the planner (D-016)
     bool present = true;   // does every channel have SOME usable (non-diverged) state?
 
     for (size_t i = 0; i < ax.size() && present; ++i) {
@@ -2416,20 +2427,22 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       // read its honest accuracy, so the reported accuracy matches the state that
       // actually builds the row. Rank 0 decides; broadcasts keep the collective
       // load + reproject below in lockstep across ranks.
-      std::string sk; int cv = 0, ac = 0; double rs = 0.0;
+      std::string sk; int cv = 0, ac = 0, mt = 0; double rs = 0.0;
       if (world.rank() == 0) {
         auto meta = ResponseMetadata::load_or_create(
             ctx.calc_dir + "/response_metadata.json");
         const auto a = fd_leg_accuracy(meta.json(), Perturbation::dipole(ax[i]), w,
-                                       thresh, k_now, key);
+                                       thresh, k_now, key, ctx.state_plans);
         sk = a.value("source_protocol_key", std::string{});
         cv = a.value("converged", false) ? 1 : 0;
         ac = a.value("accepted", false) ? 1 : 0;
+        mt = a.value("met", false) ? 1 : 0;
         rs = a.value("bsh_residual", 0.0);
       }
       world.gop.broadcast_serializable(sk, 0);
       world.gop.broadcast(cv, 0);
       world.gop.broadcast(ac, 0);
+      world.gop.broadcast(mt, 0);
       world.gop.broadcast(rs, 0);
 
       if (sk.empty()) {   // no usable state at all -> cannot form this row
@@ -2440,6 +2453,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         break;
       }
       src_key[i] = sk; row_conv[i] = cv; row_acc[i] = ac; row_res[i] = rs;
+      row_met[i] = mt;
 
       auto Xi = detail_exec::load_fd_as_xy<ClosedShell>(
           world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
@@ -2458,7 +2472,8 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
 
     bool all_conv = true; double max_res = 0.0;
     for (size_t i = 0; i < ax.size(); ++i) {
-      all_conv = all_conv && (row_conv[i] != 0);
+      // A row the planner loaded is met (D-016); its engine flag stays as saved.
+      all_conv = all_conv && (row_conv[i] != 0 || row_met[i] != 0);
       if (row_res[i] > max_res) max_res = row_res[i];
     }
 
@@ -2471,6 +2486,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
                        " source_protocol=", src_key[i],
                        " converged=", (row_conv[i] != 0),
                        (row_acc[i] ? " (ACCEPTED best-effort: maxiter or stall; see the fd_states entry)" : ""),
+                       (row_met[i] != 0 ? " (met: loaded by the planner)" : ""),
                        " bsh_res=", row_res[i]);
         for (size_t j = 0; j < ax.size(); ++j)
           madness::print("[ALPHA]  alpha_", beta_axis_name(ax[i]),
@@ -2502,9 +2518,18 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
                         {"converged", row_conv[i] != 0},
                         {"accepted",  row_acc[i]  != 0},
                         {"bsh_residual", row_res[i]}});
+        if (row_met[i] != 0) {
+          racc.back()["met"] = true;
+          racc.back()["decided_by"] = "planner";
+        }
       }
       row["row_accuracy"]     = racc;
       row["converged"]        = all_conv;    // tensor-level: every row met dconv
+                                             // (or was loaded by the planner)
+      // D-016: a tensor built from a planner load says so.
+      if (std::any_of(row_met.begin(), row_met.end(),
+                      [](int met) { return met != 0; }))
+        row["decided_by"] = "planner";
       row["max_bsh_residual"] = max_res;
       meta.add_property("alpha", key, row);
       meta.save();

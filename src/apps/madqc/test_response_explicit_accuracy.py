@@ -134,18 +134,28 @@ assert any(e['saved_state_validation']['explicit_accuracy']['status'] == 'unmet'
            for e in entries(manifest))
 
 # Explicit diagnostic exhaustion advances rungs without accepted convergence.
+# On --continue the planner forces the final rung only: the first rung finished
+# and a finished rung is never redone (DESIGN B6).
 forced = work / 'Forced'
 shutil.copytree(fresh, forced)
 forced_deck = deck.replace('accuracy.kinetic_trace_change 1000', 'accuracy.kinetic_trace_change 0').replace('molresponse optical\n', 'molresponse optical\n  diagnostic.iterations_per_rung 3\n')
 forced_result = run('forced', forced, forced_deck, resume=True, success=False)
-assert forced_result[-1]['iterations_this_run'] == 6
+assert forced_result[-1]['iterations_this_run'] == 3
+assert [s['action'] for s in forced_result[-1]['continuation']['states']] == ['resumed']
 _, _, _, manifest = latest(forced)
 assert not manifest['properties']
-for entry in entries(manifest):
-    assert entry['rung_exhausted'] and entry['iter'] == 3
-    assert not entry['converged'] and not entry['accepted']
+metadata = manifest['numerical']['engine_metadata']
+final = min(metadata['protocols'], key=lambda key: metadata['protocols'][key]['thresh'])
+for channel in metadata['fd_states'].values():
+    for key, rung in channel.items():
+        for entry in rung.values():
+            if key == final:
+                assert entry['rung_exhausted'] and entry['iter'] == 3
+                assert not entry['converged'] and not entry['accepted']
+            else:
+                assert entry['converged'] and not entry['rung_exhausted']
 forced_again = run('forced-again', forced, forced_deck, resume=True, success=False)
-assert forced_again[-1]['iterations_this_run'] == 6
+assert forced_again[-1]['iterations_this_run'] == 3
 
 # No local driven-response energy is fabricated from the source overlap.
 unsupported = deck.replace('molresponse optical\n', 'molresponse optical\n  accuracy.energy_change 1\n')

@@ -116,6 +116,44 @@ for path, digest in original.items():
         assert hashes(added)[path] == digest
 assert hashes(generation) == original
 
+# The planner decides each state on its own (DESIGN B6, D-016). Selecting the
+# generation saved after omega 0.02 finished rung 1 leaves omega 0 complete at
+# the final rung: it loads, and omega 0.02 resumes at rung 2 only.
+per_state = work / 'PerState'
+shutil.copytree(fresh, per_state)
+store = per_state / 'optical/checkpoints'
+selected = [m for m in (json.loads(f.read_text()) for f in store.glob('g-*/manifest.json'))
+            if m['stop_reason'] == 'in_progress' and m['position']['frequency'] == 0.02]
+selected = min(selected, key=lambda m: int(m['generation'].rsplit('-', 1)[1]))
+first_rung = selected['position']['protocol']
+(store / 'latest').write_text(json.dumps({'generation': selected['generation']}))
+run('per-state', per_state, deck, resume=True)
+states = {s['frequency']: s for s in result(per_state)['continuation']['states']}
+assert states[0.0]['action'] == 'loaded' and states[0.0]['rung']['index'] == 2
+assert states[0.02]['action'] == 'resumed' and states[0.02]['rung']['index'] == 2
+items = result(per_state)['work_items']
+assert [(i['frequency'], i['protocol'] != first_rung) for i in items] == [(0.02, True)]
+assert abs(alpha(per_state) - alpha(fresh)) < 1e-12
+assert abs(alpha(per_state, 1) - alpha(fresh, 1)) < 1e-8
+# D-016: the loaded leg is met by the planner's verdict, and its row says so;
+# the engine's own flag on it is unchanged.
+values = result(per_state)['properties']['polarizability']['values']
+loaded_row = values[0]['engine_evidence']
+assert values[0]['converged'] and loaded_row['decided_by'] == 'planner'
+assert all(leg['met'] and leg['decided_by'] == 'planner' and leg['converged']
+           for leg in loaded_row['row_accuracy'])
+assert 'decided_by' not in values[1]['engine_evidence']
+# The adapter no longer edits the engine's file (D7): every state this run did
+# not solve is in the attempt exactly as the selected generation saved it.
+attempt = Path(published(per_state)[1]['numerical']['attempt_directory'])
+after = json.loads((attempt / 'response_metadata.json').read_text())['fd_states']
+saved = selected['numerical']['engine_metadata']['fd_states']
+for channel, rungs in saved.items():
+    for key, points in rungs.items():
+        for fkey, entry in points.items():
+            if not (fkey == 'f0.02000' and key != first_rung):
+                assert after[channel][key][fkey] == entry, (channel, key, fkey)
+
 partial = work / 'Partial'
 short = one.rsplit('maxiter 30', 1)
 short = 'maxiter 1'.join(short)

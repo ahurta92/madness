@@ -177,13 +177,37 @@ enforceable in engine mode" instead of making the stage resume.
 
 On `--continue`, each response stage validates its own published generation.
 A completed identical request reuses its saved properties with zero response
-iterations (`work: loaded`). Saved functions without the requested completed
-analysis are restored into a private attempt: the engine either analyzes those
-prerequisites (`analyzed`), continues unfinished/tighter states (`resumed`), or
-solves new frequencies/channels. Adding frequencies preserves compatible saved
+iterations (`work: loaded`). Otherwise the moldft planner (`plan_ladder`)
+decides each requested state (perturbation and exact frequency) on its own,
+from that state's records in the generation (`numerical.states`), by the same
+rules: saved values are re-judged against today's engine limits and written
+targets; a finished rung is never redone; a state that meets the request is
+loaded; a final rung that stalled with the request unmet is loaded and
+reported unmet; a state with no record (a new frequency or channel, or a
+changed exact frequency) is solved fresh. The saved functions and the engine's
+state entries are copied into a private attempt unchanged (only the derived
+property rows are left out), and the plans are passed to the engine as input.
+From each state's start rung on, every rung is solved once in this run; after
+that the engine's own scheduling continues. A loaded state that meets the
+request counts as met in the analysis: its `row_accuracy` entry carries
+`met: true` and `decided_by: "planner"`, and so does the tensor row built from
+it (`decided_by: "planner"`), while each leg's `converged` keeps the flag the
+engine recorded, so the two verdicts stay distinguishable. Two kinds of saved
+rung are not planned from, and the state is solved again: a rung whose engine
+key equals a requested rung's but whose threshold differs (keys round it, e.g.
+1e-6 and 1.01e-6; the next save redefines the key), and a rung tighter than
+every requested rung (the analysis reads only states at or coarser than the
+final rung). The stage's `results.json` `continuation` block has one record
+per state: `state`, `perturbation`, `frequency`, `action` (`loaded`,
+`resumed`, `fresh`), the start `rung`, `iterations_done_at_rung`, `why`,
+`unmet`, `unmet_not_enforceable` and a `summary`; the generation records the
+same list as `numerical.plans`. The stage's `work` is `analyzed` when only the
+analysis ran, else `resumed`. Adding frequencies preserves compatible saved
 states. `iterations_this_run` counts response iterations across channels and
 protocol steps; `work_items` records the individual solves and restart seeds.
-A previous invocation's exhausted iteration budget does not exhaust the new one.
+A previous invocation's exhausted iteration budget does not exhaust the new one,
+and forced diagnostic iterations (`diagnostic.iterations_per_rung`) on
+`--continue` apply to the final rung only, since finished rungs are not redone.
 Acceleration history is rebuilt on continuation.
 
 Response generations contain the complete saved FD inventory and engine metadata.

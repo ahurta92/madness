@@ -201,7 +201,8 @@ struct molresponse_v3_lib {
 
   /// DESIGN A1: the response on a saved reference alone: its orbital archive
   /// (`reference_prefix` + ".restartdata") and its molecule. Named stages call
-  /// this with both read from the reference's published generation.
+  /// this with both read from the reference's published generation, and on
+  /// --continue with the planner's decision per FD state (`state_plans`).
   inline static Results run_response_on_reference(
       madness::World& world, const Params& params,
       const madness::Molecule& reference_molecule,
@@ -209,7 +210,8 @@ struct molresponse_v3_lib {
       const std::filesystem::path& reference_prefix,
       const std::function<void(madness::World&, const nlohmann::json&)>&
           checkpoint_observer
-      = {}) {
+      = {},
+      const molresponse_v3::StatePlans& state_plans = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
@@ -388,6 +390,8 @@ struct molresponse_v3_lib {
     in.settings.calc_dir = reference_prefix.empty() ? "." : outdir.string();
     in.settings.max_iters = static_cast<int>(rp.maxiter());
     in.settings.checkpoint_observer = checkpoint_observer;
+    // Named --continue: the planner's decision per FD state (D-016).
+    in.settings.state_plans = state_plans;
     // excited.maxiter / guess_max_iter / maxsub (review C2), when the deck sets them.
     apply_deck_es_knobs(rp, in.settings);
     // Deck `subworlds N` -> the F2 state-parallel fan-out (same path as the

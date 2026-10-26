@@ -92,13 +92,16 @@ for corruption in ('decision', 'fractional-window', 'missing-rung', 'inserted-ru
     assert (store / 'latest').read_text() == pointer
     assert 'invalid response state' in (work / ('bad-' + corruption + '.log')).read_text()
 
-# A genuine continuation retains the originating request for old pending
-# entries while each newly completed solve receives the current attempt.
+# The final rung stalled with the request unmet, so --continue loads it and
+# reports it unmet instead of stalling again (DESIGN B6 R2, D-005.1). The new
+# generation keeps the originating request beside the current attempt's.
 continued = work / 'Continued'
 shutil.copytree(root, continued)
 run('continued', continued, deck, resume=True)
 result = json.loads((continued / 'results.json').read_text())['stages'][-1]
-assert result['status'] == 'unconverged' and result['iterations_this_run'] == 6
+assert result['status'] == 'unconverged' and result['iterations_this_run'] == 0
+states = result['continuation']['states']
+assert [s['action'] for s in states] == ['loaded'] and states[0]['unmet']
 _, _, _, manifest = latest(continued)
 assert len(manifest['numerical']['engine_metadata']['checkpoint_requests']) >= 2
 assert not manifest['properties']

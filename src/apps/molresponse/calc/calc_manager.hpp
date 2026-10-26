@@ -49,8 +49,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -152,6 +154,31 @@ struct WorkItem {
   double          thresh = 0.0;   // this protocol step's truncation threshold
   NodeAction      action = NodeAction::Fresh;
 };
+
+/// DESIGN B6, D-016: what the madqc planner (madness::planning::plan_ladder)
+/// decided on `--continue` for one FD state. Named stages pass one per
+/// requested state; the unnamed path passes none, and scheduling is
+/// reconcile_protocol's alone, as before.
+///   load    the saved state is used as it is: Skip at every rung. When it
+///           meets today's request (`met`), the analysis counts the leg as
+///           met, decided by the planner; a stalled final rung loaded with
+///           the request unmet (R2) is not met.
+///   resume  Skip every rung looser than start_thresh (a finished rung is never
+///           redone). Each rung from start_thresh on is solved once in this run
+///           (Resume an entry at that rung, else Restart from the nearest
+///           coarser one, else Fresh); after that, reconcile_protocol decides.
+///   fresh   as resume, but the start rung solves from a zero guess.
+struct StatePlan {
+  enum class Kind : std::uint8_t { load, resume, fresh };
+  Kind        kind = Kind::fresh;
+  double      start_thresh = 0.0;
+  std::string loaded_key;   ///< load: protocol key of the saved state loaded
+  bool        met = false;  ///< load: the saved state meets today's request
+};
+/// The plans of one run, by fd_node_id.
+using StatePlans = std::map<std::string, StatePlan>;
+/// Rungs this run has solved, as "<node id>|<protocol key>".
+using SolvedRungs = std::set<std::string>;
 
 // ---------------------------------------------------------------------------
 // Identity helpers (free functions — also used by the executor later).
@@ -520,6 +547,33 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
 }
 
 // ---------------------------------------------------------------------------
+// planned_action — what a planner decision (StatePlan) forces at one rung. Pure.
+// ---------------------------------------------------------------------------
+
+/// The action `plan` forces on FD-family `node` at `thresh`, or nullopt when
+/// reconcile_protocol decides (a rung this run has already solved). The
+/// forced source is the one the loader will pick (best_usable_fd_source_key),
+/// so the trace names what is actually loaded.
+inline std::optional<NodeAction>
+planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
+               const StatePlan &plan, const SolvedRungs &solved) {
+  if (plan.kind == StatePlan::Kind::load) return NodeAction::Skip;
+  const double start = plan.start_thresh;
+  const bool   at_start =
+      std::abs(thresh - start) <= 1e-12 * std::max(thresh, start);
+  if (!at_start && thresh > start) return NodeAction::Skip;
+  const int         k   = default_k_for_thresh(thresh);
+  const std::string key = protocol_key(thresh, k);
+  if (solved.contains(node.id + "|" + key)) return std::nullopt;
+  if (at_start && plan.kind == StatePlan::Kind::fresh) return NodeAction::Fresh;
+  const std::string source = best_usable_fd_source_key(
+      meta, node.pert.description(), ResponseMetadata::freq_key(node.freq),
+      thresh, k, key);
+  if (source.empty()) return NodeAction::Fresh;
+  return source == key ? NodeAction::Resume : NodeAction::Restart;
+}
+
+// ---------------------------------------------------------------------------
 // prerequisites_converged — readiness gate (implicit-by-identity). Pure.
 // ---------------------------------------------------------------------------
 
@@ -527,9 +581,11 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
 /// are resolved against `dag`; each dep's convergence is checked at the SAME
 /// protocol step key (the doc-15 "reconstruct prerequisites' identity at the same
 /// protocol_key" contract). A dep id that resolves to no node, or to a node
-/// with no converged entry, gates the node out.
+/// with no converged entry, gates the node out. A dep the planner loaded
+/// (`plans`, named path) counts as converged: the planner decided (D-016).
 bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &dag,
-                const nlohmann::json &meta, double thresh) {
+                const nlohmann::json &meta, double thresh,
+                const StatePlans &plans = {}) {
   if (node.prerequisites.empty()) return true;
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
@@ -543,6 +599,10 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
   for (const auto &dep_id : node.prerequisites) {
     const CalcNode *dep = find_node(dep_id);
     if (!dep) return false;
+    const auto plan = plans.find(dep_id);
+    if (plan != plans.end() && plan->second.kind == StatePlan::Kind::load &&
+        plan->second.met)
+      continue;
     bool ok = false;
     if (dep->kind == CalcKind::ES) {
       const auto *e = detail_calc::es_entry(meta, key, *dep);
@@ -586,11 +646,16 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 /// becomes the front. Do not consume non-front waves' actions directly. (The
 /// full list is returned anyway: it is cheap and makes the schedule legible /
 /// unit-testable.)
+///
+/// `plans` (named path, D-016): a node with a plan takes planned_action's
+/// verdict; `solved` lists the rungs this run has solved, after which
+/// reconcile_protocol decides again. Empty plans: reconcile_protocol alone.
 std::vector<std::vector<WorkItem>>
 schedule(const std::vector<CalcNode> &dag,
          const std::vector<double> &global_ramp,
          const nlohmann::json &meta, int max_iters = 0,
-         int es_max_iters = 0) {
+         int es_max_iters = 0, const StatePlans &plans = {},
+         const SolvedRungs &solved = {}) {
   using detail_calc::ramp_contains;
   std::vector<std::vector<WorkItem>> waves;
 
@@ -606,8 +671,13 @@ schedule(const std::vector<CalcNode> &dag,
   auto make_item = [&](const CalcNode *n, double thresh,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
-    if (!prerequisites_converged(*n, dag, meta, thresh))   return false;
-    const NodeAction a = reconcile_protocol(*n, meta, thresh, max_iters, es_max_iters);
+    if (!prerequisites_converged(*n, dag, meta, thresh, plans)) return false;
+    const auto plan = plans.find(n->id);
+    const auto forced = plan == plans.end()
+        ? std::nullopt
+        : planned_action(*n, meta, thresh, plan->second, solved);
+    const NodeAction a = forced ? *forced
+        : reconcile_protocol(*n, meta, thresh, max_iters, es_max_iters);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};
     return true;
@@ -669,10 +739,13 @@ schedule(const std::vector<CalcNode> &dag,
 /// and accepted=true. Shared by the alpha, beta/Raman and 2PA assemblers
 /// (review findings C9, D4). Returns {input, freq, source_protocol_key,
 /// converged, accepted, bsh_residual}; source_protocol_key is "" when no usable
-/// state exists.
+/// state exists. A leg the planner loaded (`plans`, named path, D-016) adds
+/// met = true and decided_by = "planner"; `converged` stays the engine's
+/// recorded verdict, so a reader can tell the two apart (B8).
 inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturbation &p,
                                       double freq, double thresh, int k,
-                                      const std::string &key) {
+                                      const std::string &key,
+                                      const StatePlans &plans = {}) {
   const std::string chan = p.description();
   const std::string fk   = ResponseMetadata::freq_key(freq);
   const std::string sk   = best_usable_fd_source_key(meta, chan, fk, thresh, k, key);
@@ -684,6 +757,14 @@ inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturba
     a["converged"]    = e.value("converged", false) && !acc;
     a["accepted"]     = acc;
     a["bsh_residual"] = e.value("bsh_residual", 0.0);
+    // Only the state the planner judged: a loaded tighter rung read through
+    // a coarser source here is not it.
+    const auto plan = plans.find(fd_node_id(p, freq));
+    if (plan != plans.end() && plan->second.kind == StatePlan::Kind::load &&
+        plan->second.met && plan->second.loaded_key == sk) {
+      a["met"]        = true;
+      a["decided_by"] = "planner";
+    }
   }
   return a;
 }
