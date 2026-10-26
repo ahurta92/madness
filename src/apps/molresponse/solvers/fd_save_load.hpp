@@ -407,6 +407,8 @@ void save_fd_state(
       entry["measurement_convention"] = {{"perturbation", pdesc},
           {"model", detail_fd_save_load::type_tag<Type>()},
           {"shell", detail_fd_save_load::shell_tag<Shell>()}, {"normalization", "native_kernel_no_size_scaling"}};
+      // How the rung ended, as rung_exit decided it (B5); the planner reads it.
+      entry["stop"] = madness::convergence::to_string(state.stop);
     }
     meta.set_fd_state(pdesc, key, fkey, entry);
     meta.save();

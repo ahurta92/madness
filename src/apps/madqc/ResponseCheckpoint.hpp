@@ -11,6 +11,9 @@
 #include <map>
 #include <set>
 
+#include <iomanip>
+#include <sstream>
+
 namespace named_stages {
 
 // B9: one response stage's convergence settings, built once. The engine rows
@@ -148,6 +151,22 @@ response_saved_outcomes(const json& metadata,
   return outcomes;
 }
 
+// B5, B6: how an FD state's rung ended. Entries written since 4f74ffe0c carry
+// rung_exit's reason as `stop`; older ones are read through a documented
+// mapping: best-effort acceptance and an exhausted rung are an iteration
+// limit (or a stall), never convergence.
+[[nodiscard]] inline std::string response_stop(const json& entry) {
+  if (entry.contains("stop"))
+    return entry.at("stop").get<std::string>();
+  if (entry.value("converged", false) && !entry.value("accepted", false))
+    return "converged";
+  if (entry.value("stalled", false))
+    return "stalled";
+  if (entry.value("accepted", false) || entry.value("rung_exhausted", false))
+    return "iteration_limit";
+  return "in_progress";
+}
+
 // Scientific policy for the named HF/polarizability frontend. The engine still
 // owns state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -160,6 +179,72 @@ class ResponseCheckpoint {
   Manifest latest_;
   bool restored_ = false, loaded_ = false;
   std::size_t sequence_ = 0;
+  // B6: iterations recorded per state and rung before this attempt (keyed by
+  // the engine's channel|protocol|frequency keys), and which states this
+  // attempt restored as unfinished, so the total across runs is kept.
+  std::map<std::string, int> previous_totals_;
+  std::set<std::string> restored_unfinished_;
+
+  static std::string state_key(const std::string& channel,
+                               const std::string& protocol,
+                               const std::string& frequency) {
+    return channel + "|" + protocol + "|" + frequency;
+  }
+
+  // B6, the planner's record of every response state in `metadata`, one per
+  // (perturbation, frequency, rung): identity, reference generation, rung,
+  // iterations at the rung across runs (recorded, never compared, D-007), how
+  // it ended, whether it diverged, the deciding mode, and the raw
+  // measurements (the deciding sample and the saved state, each with the norm
+  // its relative limit uses).
+  [[nodiscard]] json state_records(const json& metadata) const {
+    json records = json::array();
+    // Held in a local: iterating items() of the temporary value() returns
+    // would dangle.
+    const auto states = metadata.value("fd_states", json::object());
+    for (const auto& channel : states.items())
+      for (const auto& rung : channel.value().items()) {
+        const auto& protocol = metadata.at("protocols").at(rung.key());
+        for (const auto& point : rung.value().items()) {
+          const auto& e = point.value();
+          const auto key = state_key(channel.key(), rung.key(), point.key());
+          // This attempt's count: prepare_states resets `iter` of a restored
+          // state (checkpoint_iteration_count keeps the old attempt's).
+          const int iter = e.value("iter", 0);
+          // A restored state adds this attempt to what it had; an untouched
+          // one keeps its recorded total; a new one has only this attempt.
+          const auto previous = previous_totals_.find(key);
+          const int before
+              = previous != previous_totals_.end() ? previous->second : 0;
+          int total = iter;
+          if (restored_unfinished_.contains(key))
+            total = before + iter;
+          else if (previous != previous_totals_.end())
+            total = std::max(before, iter);
+          std::ostringstream frequency;
+          frequency << std::setprecision(17) << e.at("freq").get<double>();
+          records.push_back(
+              {{"schema", "madqc.response.state.v1"},
+               {"key", key},
+               {"identity", channel.key() + "|" + frequency.str()},
+               {"perturbation", channel.key()},
+               {"frequency", e.at("freq")},
+               {"reference_generation", reference_.value("generation", "")},
+               {"rung",
+                {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
+               {"iterations_at_rung", total},
+               {"stop", response_stop(e)},
+               {"diverged", e.value("diverged", false)},
+               {"decided_by", e.value("checkpoint_decided_by", "engine_check")},
+               {"engine_measurements",
+                e.value("convergence_measurements", json::object())},
+               {"saved_measurements",
+                e.value("saved_state_validation", json::object())
+                    .value("measurements", json::object())}});
+        }
+      }
+    return records;
+  }
 
   static void require(bool ok, const std::string& why) {
     if (!ok) throw std::runtime_error("response checkpoint: " + why);
@@ -386,6 +471,15 @@ public:
     if (loaded_) { work = "loaded"; return true; }
 
     auto metadata = latest_.numerical.at("engine_metadata");
+    // B6: totals so far, from the generation's state records (or, for one
+    // written before them, from the entries themselves).
+    for (const auto& record : state_records(metadata))
+      previous_totals_[record.at("key").get<std::string>()]
+          = record.at("iterations_at_rung").get<int>();
+    const auto saved_records = latest_.numerical.value("states", json::array());
+    for (const auto& record : saved_records)
+      previous_totals_[record.at("key").get<std::string>()]
+          = record.at("iterations_at_rung").get<int>();
     // Analysis is derived: never let old property rows certify this request.
     metadata["properties"] = json::object();
     prepare_states(metadata);
@@ -425,7 +519,7 @@ public:
 private:
   // Engine filenames are rounded keys. Compare exact definitions before giving
   // any entry to its restart planner, including sources at coarser rungs.
-  void prepare_states(json& metadata) const {
+  void prepare_states(json& metadata) {
     std::map<std::string, double> frequencies, protocols;
     std::set<std::string> channels;
     for (double f : stage_.frequencies)
@@ -470,6 +564,8 @@ private:
               stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") > 0))
             e["converged"] = false;
           if (!e.at("converged").get<bool>()) {
+            restored_unfinished_.insert(
+                state_key(channel.key(), rung.key(), point.key()));
             e["iteration_at_checkpoint"] = e.value("checkpoint_iteration_count", e.at("iter"));
             e["iter"] = 0;
             e["stalled"] = false;
@@ -515,7 +611,10 @@ private:
     m.generation = "g-" + stage_.name + "-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
     m.reference = reference_;
-    m.numerical = {{"request", request_}, {"attempt_directory", attempt_.string()}, {"engine_metadata", metadata}};
+    m.numerical = {{"request", request_},
+                   {"attempt_directory", attempt_.string()},
+                   {"engine_metadata", metadata},
+                   {"states", state_records(metadata)}};
     m.targets = {{"dconv", request_.at("dconv")}};
     m.position = position;
     m.position["iterations_this_run"] = iterations;
