@@ -612,7 +612,6 @@ public:
             {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
             {"summary", continuation::describe(continuation_, ladder)}};
   }
-  fs::path prefix() const { return store_ / latest_.generation / "state"; }
 
   void observe(const madness::SCF &scf,
                const madness::SCF::IterationCheckpoint &step) {
@@ -758,8 +757,14 @@ public:
   // Only these final properties have actually been evaluated on the saved
   // state.
   void finish(madness::SCF &scf, bool converged) {
-    if (work == "loaded" && iterations == 0)
+    if (work == "loaded" && iterations == 0) {
+      // A loaded state met today's request (B6). If its generation stopped
+      // as anything but converged, record the new verdict on disk, so a
+      // consumer reading the generation agrees with this run (A1).
+      if (latest_.stop_reason != "converged")
+        publish_reuse_verdict(scf);
       return;
+    }
     const auto evaluation = scf.evaluate_restricted_hf(world_);
     const double energy = evaluation.energy;
     require(std::isfinite(energy), "nonfinite final energy");
@@ -966,6 +971,65 @@ private:
     // inventory.
     latest_ = checkpoint::read_published(world_, store_);
     has_latest_ = true;
+    if (!settings_.checkpoints.keep_all)
+      apply_retention();
+  }
+
+  // A1, B6: a loaded generation re-judged as meeting today's request is
+  // published again as a new generation with that verdict: the same orbital
+  // shards, byte for byte, the same measurements, stop reason converged, and
+  // a record of the request it met and the generation it came from.
+  // Generations are immutable (A3), so the verdict cannot be written into the
+  // old one.
+  void publish_reuse_verdict(const madness::SCF& scf) {
+    namespace checkpoint = madness::checkpoint;
+    auto m = latest_;
+    const auto source = latest_.generation;
+    m.generation = "g-" + run_id_ + "-" + std::to_string(++sequence_);
+    m.stop_reason = "converged";
+    m.position["previous_generation"] = source;
+    m.position["iterations_this_run"] = 0;
+    m.position["reused_from"] = source;
+    m.working_orbitals
+        = {{"state_id", m.generation}, {"ordering", "archive_order"}};
+    m.targets = {{"dconv", scf.param.dconv()},
+                 {"effective_dconv",
+                  std::max(scf.param.dconv(),
+                           m.numerical.at("threshold").get<double>())}};
+    if (const auto econv = requested_econv(scf.param)) // D8: user-written only
+      m.targets["econv"] = *econv;
+    m.targets["explicit_accuracy"] = convergence::requested_targets(settings_);
+    m.targets["decided_by"] = convergence::to_string(settings_.decider);
+    m.metrics["convergence_report"]["reuse_verdict"]
+        = {{"work", "loaded"},
+           {"from_generation", source},
+           {"stop_reason_before", latest_.stop_reason},
+           {"decided_by", convergence::to_string(settings_.decider)},
+           {"why", reuse_.why},
+           {"unmet_not_enforceable", reuse_.unmet_not_enforceable},
+           {"convergence_settings", convergence::to_json(settings_)}};
+    for (auto& property : m.properties)
+      property["generation"] = m.generation;
+    // The copy is byte for byte, so the inventory is the source's; rank 0
+    // checks that before publishing, and publish() validates the files again.
+    m.archives = latest_.archives;
+    const auto directory = store_ / m.generation;
+    checkpoint::detail::on_root(world_, [&] {
+      const auto& orbitals = latest_.archives.at(0);
+      require(fs::create_directory(directory), "generation already exists");
+      for (const auto& shard : orbitals.shards)
+        fs::copy_file(store_ / source / shard.path, directory / shard.path,
+                      fs::copy_options::none);
+      const auto copied = checkpoint::inspect_archive(
+          directory, orbitals.role, orbitals.basename, orbitals.indices,
+          orbitals.writers);
+      for (std::size_t i = 0; i < orbitals.shards.size(); ++i)
+        require(copied.shards.at(i).checksum == orbitals.shards.at(i).checksum,
+                "copied orbital shard differs from its source");
+      return std::string{};
+    });
+    checkpoint::publish(world_, store_, m);
+    latest_ = checkpoint::read_published(world_, store_);
     if (!settings_.checkpoints.keep_all)
       apply_retention();
   }

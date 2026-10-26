@@ -43,7 +43,8 @@ def run(label, root, text, resume=False, success=True):
         r = subprocess.run(launch + [binary, str(inp), '--prefix=' + str(root)] +
                            (['--continue'] if resume else []), cwd=work, env=env,
                            stdout=out, stderr=subprocess.STDOUT, timeout=900)
-    assert (r.returncode == 0) == success, log.read_text()[-6000:]
+    if success is not None:  # None: either outcome is valid; the caller checks
+        assert (r.returncode == 0) == success, log.read_text()[-6000:]
     print(label, 'exit', r.returncode, flush=True)
     return log.read_text()
 
@@ -126,4 +127,35 @@ assert 'reference gs has no published generation' in log, log[-3000:]
 tight = response.replace('protocol [1e-4, 1e-6]', 'protocol [1e-4, 1e-8]')
 log = run('optical-tight', split, tight, resume=True, success=False)
 assert 'response protocol is tighter than reference gs' in log, log[-3000:]
+
+# A reused ground state is the same reference in and out of the deck (A1, B6).
+# Run 1: the written targets decide and cannot be met in 3 iterations per
+# rung, so the final rung stops at its iteration limit.
+assert '  econv 1e-6\n' in ground and '  dconv 1e-5\n' in ground and '  maxiter 30\n' in ground
+capped = ground.replace('moldft gs\n', 'moldft gs\n  convergence.use_default_criteria false\n') \
+               .replace('  econv 1e-6\n', '  econv 1e-14\n').replace('  maxiter 30\n', '  maxiter 3\n')
+reused = work / 'Reused'
+run('gs-capped', reused, capped, success=False)
+before = manifest(reused, 'gs')
+assert before['stop_reason'] == 'iteration_limit', before['stop_reason']
+# Run 2: looser targets that the saved orbitals meet. The state is loaded, and
+# because its generation did not stop converged, the verdict is published as a
+# new generation with the same orbital shards.
+loose = capped.replace('  econv 1e-14\n', '  econv 1e-2\n').replace('  dconv 1e-5\n', '  dconv 1e-1\n')
+run('gs-reused', reused, loose, resume=True)
+record = result(reused, 'gs')
+assert record['work'] == 'loaded' and record['iterations_this_run'] == 0, record['work']
+assert record['status'] == 'completed', record['status']
+after = manifest(reused, 'gs')
+assert after['generation'] != before['generation'] and record['state_id'] == after['generation']
+assert after['stop_reason'] == 'converged' and after['position']['reused_from'] == before['generation']
+verdict = after['metrics']['convergence_report']['reuse_verdict']
+assert verdict['stop_reason_before'] == 'iteration_limit' and verdict['decided_by'] == 'requested_criteria', verdict
+assert [s['checksum'] for s in after['archives'][0]['shards']] == \
+       [s['checksum'] for s in before['archives'][0]['shards']]
+assert after['position']['rung'] == before['position']['rung']  # how the rung ended stays recorded
+# Run 3: a response stage outside gs's deck now accepts that generation, as an
+# in-deck reference does.
+run('optical-on-reused', reused, response, resume=True, success=None)
+assert result(reused, 'optical')['reference']['state_id'] == after['generation']
 print('disk-only handoff: response from the published generation equals the two-stage run')

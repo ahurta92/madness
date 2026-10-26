@@ -103,6 +103,16 @@ ended (`converged`, `stalled`, `iteration_limit`, or `in_progress`). The
 stage's `results.json` `continuation` block says what happened and why, e.g.
 "resumed at rung 2 (thresh 1e-06, k 8), iteration 3 of that rung".
 
+A loaded state is one that meets the current request, judged on its saved
+measurements. If its generation had stopped as something other than
+`converged` (e.g. `iteration_limit` under tighter targets, now loosened), the
+stage publishes a new generation recording the new verdict: the same orbital
+shards, byte for byte, with `stop_reason: converged`, `position.reused_from`
+naming the source generation, and `convergence_report.reuse_verdict` (the
+stop reason before, who decided, why, and the settings it met). A later stage
+then reads the same verdict whether it is in this deck or a later one. The
+rung record keeps how the rung actually ended.
+
 The store is `<prefix>/<stage>/checkpoints/`. Each generation contains its own
 `state.restartdata.*` physical shards and `manifest.json`; the `latest` pointer
 selects exactly one generation. Occupations, orbital energies/order, molecular
