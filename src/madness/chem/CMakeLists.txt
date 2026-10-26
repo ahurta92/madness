@@ -61,6 +61,9 @@ set(MADCHEM_HEADERS
     ResponseParameters.hpp
     Restart.h
     StageCheckpoint.h
+    CheckpointRetention.h
+    ConvergenceSettings.h
+    ScfContinuation.h
     RestartPlan.h
     PathManager.hpp
     Applications.hpp
