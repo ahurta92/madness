@@ -108,6 +108,26 @@ int main() {
   expect(!es_roots_stalled({1, 1}, {1, 0}, {1, 0}),
          "a converged root flagged plateaued does not count as stuck");
 
+  std::printf("=== es_root_within: the per-root engine check (B1) ===\n");
+  {
+    ConvergencePolicy::Targets t{};
+    t.density_residual = 5.0e-4;
+    t.omega_residual = 5.0e-4;
+    expect(es_root_within(1.0e-4, 1.0e-4, t), "both below target -> within");
+    expect(!es_root_within(5.0e-4, 1.0e-4, t),
+           "density exactly at target -> not within (strict <)");
+    expect(!es_root_within(1.0e-4, 5.0e-4, t),
+           "omega change exactly at target -> not within (strict <)");
+    expect(!es_root_within(1.0e-3, 1.0e-4, t),
+           "density above target -> not within");
+    expect(!es_root_within(1.0e-4, 1.0e-3, t),
+           "omega change above target -> not within");
+    expect(!es_root_within(1.0e-4, 1.0e9, t),
+           "no eigenvalue step measured yet (sentinel) -> not within");
+    expect(!es_root_within(1.0e-4, inf, t),
+           "non-finite omega change -> not within");
+  }
+
   std::printf("\n%s: %d failure(s)\n", failed == 0 ? "ALL PASS" : "FAILED",
               failed);
   return failed == 0 ? 0 : 1;

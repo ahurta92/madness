@@ -125,9 +125,21 @@ public:
     bool                                    diverged = false;
     /// Set by step() when the gated residuals (density, |dw|) of the active
     /// roots have plateaued above the targets (ConvergencePolicy::stall_*).
-    /// converged() returns true on it so the loop exits; the executor reports
-    /// the bundle as NOT converged and records `stalled`.
+    /// rung_exit turns it into the stall exit (DESIGN B5); the executor
+    /// reports the bundle as NOT converged and records `stalled`.
     bool                                    stalled = false;
+    /// How this rung ended (DESIGN B5, rung_exit), set by iterate<>.
+    madness::convergence::StopReason stop
+        = madness::convergence::StopReason::in_progress;
+    /// Per-slot engine-check verdict at the last iteration
+    /// (es_root_converged), recorded so the saved bundle can say which roots
+    /// met the gate (DESIGN B2). Follows its root through
+    /// sort_state_by_omega. Empty before the first iteration.
+    std::vector<char> root_converged;
+    /// The gate targets those verdicts were compared with (B2), set with
+    /// them in update_stall; negative before the first iteration.
+    double density_target = -1.0;
+    double omega_target = -1.0;
   };
 
   /// Preferred ctor — caller supplies a problem and a policy.
@@ -328,9 +340,8 @@ public:
   void print_final(const State &s, bool converged) const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
     print("");
-    // iterate<> sets `converged=true` whenever solver.converged()
-    // returns true. converged() also returns true on diverged so the
-    // loop exits — so distinguish here by checking s.diverged first.
+    // iterate<> passes converged = (stop == converged), after checking
+    // divergence itself; report diverged and stalled first all the same.
     if (s.diverged)       print("Stopped at iter", s.iter,
                                 "(diverged — residual exceeded "
                                 "explosion guard).");
@@ -1147,6 +1158,11 @@ public:
       if (active[s2] && !conv[s2] && plat[s2])
         out.stalled_roots.push_back(static_cast<int>(s2));
     }
+    // B2: the per-root verdicts and the targets they were judged against
+    // travel with the state, so the saved bundle can report them per root.
+    out.root_converged = conv;
+    out.density_target = targets_.density_residual;
+    out.omega_target = targets_.omega_residual;
     const bool solve_flat = policy_.plateau(out.gate_history);
     const bool roots_flat = es_roots_stalled(active, conv, plat);
     out.stalled = !out.diverged && (solve_flat || roots_flat);
@@ -1174,27 +1190,42 @@ public:
 
   /// Per-root ES convergence: energy + density (NOT the BSH amplitude, which
   /// jitters for near-degenerate roots after ω/ρ are settled). Needs ≥2 iters
-  /// (one to measure Δω). Drives both converged() and the lock trigger so they
-  /// share one definition. explosion_guard still catches runaway amplitudes.
+  /// (one to measure Δω). Drives both engine_check_passed() and the lock
+  /// trigger so they share one definition (es_root_within). explosion_guard
+  /// still catches runaway amplitudes.
   bool es_root_converged(const State &out, int s) const {
     if (out.iter <= std::max(1, policy_.min_iters_before_conv)) return false;
     if (s >= static_cast<int>(out.last_density_residual.size())) return false;
     if (s >= static_cast<int>(out.last_omega_residual.size()))   return false;
-    return out.last_density_residual[s] < targets_.density_residual &&
-           out.last_omega_residual[s]   < targets_.omega_residual;
+    return es_root_within(out.last_density_residual[s],
+                          out.last_omega_residual[s], targets_);
   }
 
-  /// Converged: diverged, OR every root passes es_root_converged (energy +
-  /// density). With locking on this is equivalent to "all roots locked".
-  bool converged(const State &s) const {
-    if (s.diverged) return true;  // exit; print_final reports diverged
-    if (s.stalled)  return true;  // exit; executor reads State::stalled
+  /// The engine check alone (DESIGN B8): every root passes es_root_converged
+  /// (energy + density). With locking on this is equivalent to "all roots
+  /// locked". Divergence and stalls are not verdicts on convergence; they
+  /// are the caller's validity check and rung_exit's stall exit.
+  [[nodiscard]] bool engine_check_passed(const State& s) const {
     if (s.iter < policy_.min_iters_before_conv) return false;
     const long M = s.omega.dim(0);
     if (M == 0) return false;
     for (long i = 0; i < M; ++i)
       if (!es_root_converged(s, static_cast<int>(i))) return false;
     return true;
+  }
+
+  /// DESIGN B5: how this rung ends after `iterations` iterations of this
+  /// attempt, by the shared rung_exit; this solver only supplies its
+  /// verdicts. Excited states have no written targets yet (they are not on
+  /// the named path), so the requested-criteria verdict is false and the
+  /// executor refuses that decider. iterate<> checks divergence before asking.
+  [[nodiscard]] madness::convergence::StopReason
+  stop_reason(const State& state, int iterations, int cap,
+              int forced_iterations) const {
+    return madness::convergence::rung_exit(
+        {policy_.decider, engine_check_passed(state),
+         /*criteria_met=*/false, state.stalled, iterations, cap,
+         forced_iterations});
   }
 
   void save(const State &s, const std::string &path_prefix) const {
@@ -1230,6 +1261,10 @@ public:
     std::vector<double>  bsh_new(M, 0.0), drho_new(M, 0.0);
     std::vector<madness::real_function_3d> rho_prev_new(s.rho_alpha_prev.size());
     std::vector<char>    locked_new(s.locked.empty() ? 0 : M, 0);
+    // The per-root verdict fields follow their root too (B2: no relabelling).
+    std::vector<double> domega_new(s.last_omega_residual.empty() ? 0 : M,
+                                   1.0e9);
+    std::vector<char> conv_new(s.root_converged.empty() ? 0 : M, 0);
     for (long i = 0; i < M; ++i) {
       const long src = perm[i];
       omega_new(i)  = s.omega(src);
@@ -1242,6 +1277,11 @@ public:
         rho_prev_new[i] = s.rho_alpha_prev[src];
       if (!s.locked.empty() && src < static_cast<long>(s.locked.size()))
         locked_new[i] = s.locked[src];
+      if (!domega_new.empty()
+          && src < static_cast<long>(s.last_omega_residual.size()))
+        domega_new[i] = s.last_omega_residual[src];
+      if (!conv_new.empty() && src < static_cast<long>(s.root_converged.size()))
+        conv_new[i] = s.root_converged[src];
     }
     s.omega                 = omega_new;
     s.roots                 = std::move(roots_new);
@@ -1249,6 +1289,19 @@ public:
     s.last_density_residual = std::move(drho_new);
     s.rho_alpha_prev        = std::move(rho_prev_new);
     if (!s.locked.empty()) s.locked = std::move(locked_new);
+    if (!domega_new.empty())
+      s.last_omega_residual = std::move(domega_new);
+    if (!conv_new.empty())
+      s.root_converged = std::move(conv_new);
+    // stalled_roots holds slot numbers: send each old slot to its new one.
+    {
+      std::vector<int> new_slot_of(static_cast<size_t>(M), -1);
+      for (long i = 0; i < M; ++i)
+        new_slot_of[static_cast<size_t>(perm[i])] = static_cast<int>(i);
+      for (int& slot : s.stalled_roots)
+        if (slot >= 0 && slot < M)
+          slot = new_slot_of[static_cast<size_t>(slot)];
+    }
     // Keep each root's stable identity attached to its data as slots move.
     permute_stable_index(s.stable_index, perm);
 

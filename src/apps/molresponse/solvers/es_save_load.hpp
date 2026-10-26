@@ -178,6 +178,9 @@ void save_es_roots(madness::World &world,
     j["converged"]    = converged;
     j["diverged"]     = state.diverged;
     j["stalled"]      = state.stalled;   // plateau detector (ConvergencePolicy::stall_*)
+    // DESIGN B5: which exit ended this rung (converged, stalled,
+    // iteration_limit; in_progress for a bundle saved without a verdict).
+    j["stop_reason"] = madness::convergence::to_string(state.stop);
 
     // slot_permutation[slot] = stable_index — the cross-protocol root map.
     j["slot_permutation"] = stable_index;
@@ -206,6 +209,27 @@ void save_es_roots(madness::World &world,
       entry["stalled"] = std::find(state.stalled_roots.begin(),
                                    state.stalled_roots.end(), s) !=
                          state.stalled_roots.end();
+      // DESIGN B2: this root's engine-check verdict, the eigenvalue change it
+      // was judged on (null until a step has measured one), the two targets
+      // it was compared with, and the freeze flag, kept apart from target
+      // satisfaction (a locked root is frozen, not thereby converged).
+      const auto us = static_cast<size_t>(s);
+      entry["converged"] = us < state.root_converged.size()
+                               ? static_cast<bool>(state.root_converged[us])
+                               : false;
+      entry["locked"] = us < state.locked.size()
+                            ? static_cast<bool>(state.locked[us])
+                            : false;
+      entry["omega_residual"] = (us < state.last_omega_residual.size()
+                                 && state.last_omega_residual[us] < 1.0e8)
+                                    ? state.last_omega_residual[us]
+                                    : std::numeric_limits<double>::quiet_NaN();
+      entry["density_target"] = state.density_target >= 0.0
+                                    ? state.density_target
+                                    : std::numeric_limits<double>::quiet_NaN();
+      entry["omega_target"] = state.omega_target >= 0.0
+                                  ? state.omega_target
+                                  : std::numeric_limits<double>::quiet_NaN();
       entry["file"] = detail_save_load::root_file(s);
       entry["coeffs"] = root_coeffs[static_cast<size_t>(s)];
       entry["bytes"]  = root_coeffs[static_cast<size_t>(s)] * sizeof(double);
@@ -243,20 +267,21 @@ void save_es_roots(madness::World &world,
       }
 
       nlohmann::json bundle_entry = {
-          {"type",             detail_save_load::type_tag<Type>()},
-          {"shell",            detail_save_load::shell_tag<Shell>()},
-          {"n_roots",          n_roots},
-          {"backend",          io_backend_tag(backend)},
-          {"bundle_dir",       bundle_path.filename().string()},
-          {"converged",        converged},
-          {"diverged",         state.diverged},
-          {"stalled",          state.stalled},
+          {"type", detail_save_load::type_tag<Type>()},
+          {"shell", detail_save_load::shell_tag<Shell>()},
+          {"n_roots", n_roots},
+          {"backend", io_backend_tag(backend)},
+          {"bundle_dir", bundle_path.filename().string()},
+          {"converged", converged},
+          {"diverged", state.diverged},
+          {"stalled", state.stalled},
+          {"stop_reason", madness::convergence::to_string(state.stop)},
           {"slot_permutation", stable_index},
           {"kinetic_history", kinetic_history},
-          {"roots",            roots_arr},
-          {"iter",             state.iter},
-          {"rss_gb",           bundle_rss_gb},
-          {"metrics",          bundle_metrics.to_json()},  // R1b: uniform block
+          {"roots", roots_arr},
+          {"iter", state.iter},
+          {"rss_gb", bundle_rss_gb},
+          {"metrics", bundle_metrics.to_json()}, // R1b: uniform block
       };
       meta.set_es_bundle(key, bundle_entry);
       meta.save();
@@ -457,6 +482,8 @@ load_es_roots(madness::World &world, const std::string &dir) {
   s.stable_index          = std::move(stable_index_recorded);
   s.iter                  = 0;       // fresh count for the resumed solver
   s.diverged              = false;
+  s.stalled = false; // the resumed attempt earns its own exit
+  s.stop = madness::convergence::StopReason::in_progress;
   // rho_alpha_prev left empty — first-iter density-residual check in
   // ESSolver::step() is already gated by iter <= 1.
 
