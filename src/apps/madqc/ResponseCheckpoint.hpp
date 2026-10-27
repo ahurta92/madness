@@ -542,6 +542,9 @@ class ResponseCheckpoint {
     return records;
   }
 
+public:
+  // The generation checks below are functions of their arguments: the
+  // response AppSpec binds members and validate_generation (S3a, D-036).
   static void require(bool ok, const std::string& why) {
     if (!ok) throw std::runtime_error("response checkpoint: " + why);
   }
@@ -793,9 +796,14 @@ class ResponseCheckpoint {
     return true;
   }
 
-  void validate(const Manifest& m) const {
-    require(m.stage == stage_.name && m.method == "TDHF" &&
-            m.physical == json{{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}},
+  // A2: the science checks on a complete generation of stage `stage`, whose
+  // reference has `natom` atoms.
+  static void validate_generation(const std::string& stage, int natom,
+                                  const Manifest& m) {
+    require(m.stage == stage && m.method == "TDHF"
+                && m.physical
+                       == json{{"schema", "madqc.response.v1"},
+                               {"shell", "closed_shell"}},
             "stage or response model mismatch");
     if (m.numerical.at("request").contains("progress")) {
       const auto origins = m.numerical.at("engine_metadata").value("checkpoint_requests", json::object());
@@ -854,7 +862,7 @@ class ResponseCheckpoint {
       require(recorded.size() == requested.size()
                   && request_complete(
                       m.numerical.at("engine_metadata"),
-                      m.numerical.at("request"), natom_,
+                      m.numerical.at("request"), natom,
                       loaded_states(m.numerical.value("plans", json::array()))),
               "completed property lacks converged prerequisites");
   }
@@ -868,6 +876,7 @@ class ResponseCheckpoint {
     return loaded;
   }
 
+private:
   // B6: one plan per state the requested values need (response_needs), from
   // the generation's state records. `own` is the state's finest saved rung
   // the engine can use. Left out: a rung whose engine key equals a requested
@@ -1155,7 +1164,7 @@ public:
     world_.gop.broadcast(exists, 0);
     if (!exists) return false; // a newly added stage, or no completed first save
     latest_ = checkpoint::read_published(world_, store_);
-    validate(latest_);
+    validate_generation(stage_.name, natom_, latest_);
     reference_changed = latest_.reference != reference_;
     if (reference_changed) return false; // no old descendants enter this attempt
     restored_ = true;

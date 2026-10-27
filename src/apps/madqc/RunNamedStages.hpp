@@ -175,6 +175,47 @@ struct LadderSteps {
   std::function<void(json&)> properties;
 };
 
+// DESIGN C4, skeleton spec 3.2 (S3a, D-036): an application's row, the
+// functions the skeleton needs from it. Each is a function of its arguments
+// (no engine object, no files) and table-tested in test_named_stages
+// through <app>_fields(); <app>_spec() adds the run binding.
+// `natom` is the engine fact both applications need: the atom count of the
+// stage's molecule (moldft) or of its reference (response). S3b adds the
+// state records and the plan, S3c the observer's sample record (D-045).
+struct AppSpec {
+  std::string name; // the deck's block kind
+  // The deck check (B3, B7); empty until S6 (D-047): parse() checks every
+  // kind today.
+  std::function<void(const Stage&)> validate;
+  // B9: the stage's convergence settings.
+  std::function<madness::convergence::ConvergenceSettings(const Stage&,
+                                                          int natom)>
+      settings;
+  // A2: the files a generation must hold, from its engine metadata.
+  std::function<std::vector<std::string>(const json& engine_metadata)> members;
+  // A2: the science checks on a complete generation; throws why not.
+  std::function<void(const Stage&, int natom,
+                     const madness::checkpoint::Manifest&)>
+      validate_generation;
+  // The requested property records from the engine's output (D-024:
+  // unavailable values are records, not errors).
+  std::function<json(const Stage&, int natom, const json& engine_output)>
+      properties;
+  // B5: may a dependent stage bind to this outcome.
+  std::function<bool(const StageOutcome&)> release;
+  // A8: the run binding, which runs the stage through run_ladder_stage.
+  RunStage run = nullptr;
+};
+
+// B5, the shared release: only a converged outcome is a reference.
+[[nodiscard]] inline bool released(const StageOutcome& outcome) {
+  return outcome.converged;
+}
+
+// The two rows, defined below the run functions they name.
+inline const AppSpec& moldft_spec();
+inline const AppSpec& response_spec();
+
 // The sequence every ladder stage runs (skeleton spec 2.4 and 3.3; moldft
 // and response, D-043: one order). The shared part of each step is here; the
 // application's part is a LadderSteps closure. finish() decides the verdict
@@ -260,19 +301,9 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   std::optional<decltype(library.run(world, stage.params, NextAction::Redo))>
       values;
   LadderSteps steps;
+  const auto natom = static_cast<int>(scf->molecule.natom());
   steps.settings = [&] {
-    settings
-        = moldft_convergence_settings(stage.name, cp, scf->molecule.natom());
-    // A3: the observer's cadence and retention, shown with who set them.
-    const auto set_by = [&](const char* key) {
-      return stage.written.contains(key)
-                 ? madness::convergence::SetBy::user
-                 : madness::convergence::SetBy::engine_default;
-    };
-    settings->checkpoints
-        = {stage.checkpoint_every_iterations,
-           set_by("checkpoint.every_iterations"), stage.checkpoint_keep_all,
-           set_by("checkpoint.keep_all"), ""};
+    settings = moldft_spec().settings(stage, natom);
     return *settings;
   };
   steps.prepare = [&] {
@@ -347,15 +378,11 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
                                 {"k", scf->amo.at(0).k()},
                                 {"threshold", saved.numerical.at("threshold")}};
     // These properties were evaluated on the exact archived orbital state.
-    for (const auto& property : saved.properties) {
-      const auto name = property.at("name").get<std::string>();
-      if (std::find(stage.properties.begin(), stage.properties.end(), name)
-          != stage.properties.end()) {
-        auto value = property;
-        value.erase("name");
-        value["source_state_id"] = saved.generation;
-        result["properties"][name] = value;
-      }
+    auto selected = moldft_spec().properties(
+        stage, natom, {{"properties", saved.properties}});
+    for (auto& [name, record] : selected.items()) {
+      record["source_state_id"] = saved.generation;
+      result["properties"][name] = std::move(record);
     }
   };
   return run_ladder_stage(ctx, steps);
@@ -400,8 +427,9 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   json selected = json::object();
   LadderSteps steps;
   // B9: the solver stops on the same targets.
+  const auto natom = static_cast<int>(molecule.natom());
   steps.settings = [&] {
-    settings = response_convergence_settings(stage, cp.protocol().back());
+    settings = response_spec().settings(stage, natom);
     return *settings;
   };
   steps.prepare = [&] {
@@ -441,10 +469,13 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
           = directory / ("es_analysis__" + final_protocol_key(stage) + ".json");
       if (!loaded && fs::exists(analysis))
         transition = madness::checkpoint::detail::read_json(analysis);
-      selected = select_response_properties(
-          stage, response.properties, response.metadata,
-          response.vibrational_analysis, response.raman_spectra,
-          static_cast<int>(molecule.natom()), transition);
+      selected = response_spec().properties(
+          stage, natom,
+          {{"properties", response.properties},
+           {"metadata", response.metadata},
+           {"vibrational_analysis", response.vibrational_analysis},
+           {"raman_spectra", response.raman_spectra},
+           {"transition", transition}});
       converged = all_requested_converged(selected);
     });
     world.gop.broadcast(converged, 0);
@@ -502,6 +533,65 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     });
   };
   return run_ladder_stage(ctx, steps);
+}
+
+// moldft's row (D-040): the SCF stage. The fields alone, without the run
+// binding, are what test_named_stages tables: it links no engine.
+inline AppSpec moldft_fields() {
+  return {.name = "moldft",
+          .validate = {},
+          .settings = moldft_stage_settings,
+          .members = moldft_members,
+          .validate_generation =
+              [](const Stage&, int, const madness::checkpoint::Manifest& m) {
+                MoldftCheckpoint::validate_measurements(m.metrics, m.stage,
+                                                        m.numerical);
+              },
+          .properties = moldft_properties,
+          .release = released};
+}
+inline const AppSpec& moldft_spec() {
+  static const AppSpec spec = [] {
+    auto row = moldft_fields();
+    row.run = run_moldft_stage;
+    return row;
+  }();
+  return spec;
+}
+
+// molresponse's row (D-040): response properties against a reference.
+inline AppSpec response_fields() {
+  return {
+      .name = "molresponse",
+      .validate = {},
+      .settings =
+          [](const Stage& stage, int) {
+            return response_convergence_settings(
+                stage,
+                stage.params.get<CalculationParameters>().protocol().back());
+          },
+      .members = ResponseCheckpoint::members,
+      .validate_generation =
+          [](const Stage& stage, int natom,
+             const madness::checkpoint::Manifest& m) {
+            ResponseCheckpoint::validate_generation(stage.name, natom, m);
+          },
+      .properties =
+          [](const Stage& stage, int natom, const json& output) {
+            return select_response_properties(
+                stage, output.at("properties"), output.at("metadata"),
+                output.at("vibrational_analysis"), output.at("raman_spectra"),
+                natom, output.at("transition"));
+          },
+      .release = released};
+}
+inline const AppSpec& response_spec() {
+  static const AppSpec spec = [] {
+    auto row = response_fields();
+    row.run = run_response_stage;
+    return row;
+  }();
+  return spec;
 }
 
 /// Returns false for the existing unnamed input surface. Missing default input
@@ -568,10 +658,10 @@ inline bool run_if_named(madness::World& world,
   world.gop.broadcast_serializable(run_id, 0);
   root = root_string;
 
-  // A8: one run function per application, looked up by its name; each
+  // A8, D-036: one AppSpec per application, looked up by its name; each
   // stage's outcome is kept by its label for the stages that consume it.
-  const std::map<std::string, RunStage> run_functions
-      = {{"moldft", run_moldft_stage}, {"molresponse", run_response_stage}};
+  const std::map<std::string, AppSpec> applications
+      = {{"moldft", moldft_spec()}, {"molresponse", response_spec()}};
   std::map<std::string, StageOutcome> outcomes;
   json index = {{"schema", "madqc.named-stages.v1"},
                 {"run_id", run_id},
@@ -596,7 +686,8 @@ inline bool run_if_named(madness::World& world,
     if (!stage.reference.empty())
       ctx.inputs.emplace("reference",
                          read_input(world, root, stage.reference, outcomes));
-    auto outcome = run_functions.at(stage.kind)(ctx);
+    const auto& application = applications.at(stage.kind);
+    auto outcome = application.run(ctx);
 
     // 5. Record the outcome before stopping an unconverged sequence. Later
     // stages must not run against a reference that failed its completion check.
@@ -605,7 +696,7 @@ inline bool run_if_named(madness::World& world,
     write_result(world, stage_directory / "results.json", result);
     index["stages"].push_back(result);
     write_result(world, root / "results.json", index);
-    if (!outcome.converged)
+    if (!application.release(outcome))
       throw std::runtime_error("stage " + stage.name
                                + " did not satisfy its requested convergence "
                                  "criteria; see results.json");

@@ -1,6 +1,7 @@
 #include "MoldftCheckpoint.hpp"
 #include "NamedStages.hpp"
 #include "ResponseCheckpoint.hpp"
+#include "RunNamedStages.hpp"
 #include <iostream>
 #include <stdexcept>
 
@@ -30,6 +31,17 @@ int main(int argc, char** argv) {
         named_stages::read_value(world, paths, {1, "prefix /tmp/CaseRun/GS/state"});
         check(paths.prefix() == "/tmp/CaseRun/GS/state", "text prefix preserves case");
     } catch (const std::exception& e) { check(false, e.what()); }
+    auto rejects_with
+        = [&](const std::function<void()>& call, const std::string& message,
+              const std::string& why) {
+            try {
+              call();
+              check(false, "accepted: " + why);
+            } catch (const std::exception& e) {
+              check(std::string(e.what()).find(message) != std::string::npos,
+                    why + ": " + e.what());
+            }
+          };
     auto rejects = [&](const std::string& text, const std::string& message) {
         try { named_stages::parse(world, text); check(false, "accepted: " + message); }
         catch (const std::exception& e) { check(std::string(e.what()).find(message) != std::string::npos, e.what()); }
@@ -216,6 +228,190 @@ int main(int argc, char** argv) {
         check(named_stages::response_needs(legacy, 2).legs.size() == 2 &&
                   named_stages::response_needs(legacy, 2).sources.empty(),
               "response_needs: a request saved before it named properties is polarizability");
+    }
+    // S3a (D-036): the AppSpec rows, one table per field.
+    try {
+      namespace cv = madness::convergence;
+      using madness::checkpoint::Manifest;
+      // The rows without their run binding: this test links no engine.
+      const auto moldft = named_stages::moldft_fields();
+      const auto molresponse = named_stages::response_fields();
+      auto cadence = gs;
+      cadence.replace(cadence.find(" dconv 1e-5\n"), 0,
+                      " checkpoint.every_iterations 3\n");
+      const auto stages = named_stages::parse(
+          world, geometry + cadence + response
+                     + "moldft other\n molecule H2\n xc hf\n "
+                       "requested_properties [energy]\nend\n");
+      const auto& ground = stages[0];
+      const auto& optical = stages[1];
+      const auto& other = stages[2];
+      // name, validate (empty until S6, D-047); run is bound by <app>_spec().
+      check(moldft.name == "moldft" && molresponse.name == "molresponse",
+            "spec: names are the deck's block kinds");
+      check(!moldft.validate && !molresponse.validate,
+            "spec: validate is left empty until S6");
+      check(!moldft.run && !molresponse.run,
+            "spec: the fields leave the run binding to <app>_spec()");
+      // settings: the stage's table plus moldft's cadence, who set each.
+      const auto settings = moldft.settings(ground, 2);
+      const auto plain = named_stages::moldft_convergence_settings(
+          "GS", ground.params.get<CalculationParameters>(), 2);
+      check(
+          cv::to_json(settings).at("metrics")
+                  == cv::to_json(plain).at("metrics")
+              && settings.decider == plain.decider,
+          "spec settings (moldft): the metrics of moldft_convergence_settings");
+      check(settings.checkpoints.every_iterations == 3
+                && settings.checkpoints.every_iterations_set_by
+                       == cv::SetBy::user
+                && !settings.checkpoints.keep_all
+                && settings.checkpoints.keep_all_set_by
+                       == cv::SetBy::engine_default,
+            "spec settings (moldft): written cadence by the user, retention by "
+            "default");
+      check(cv::to_json(molresponse.settings(optical, 2))
+                == cv::to_json(
+                    named_stages::response_convergence_settings(optical, 1e-4)),
+            "spec settings (response): response_convergence_settings at the "
+            "final rung");
+      // members: the files a generation must hold.
+      check(moldft.members(json::object())
+                == std::vector<std::string>{"state.restartdata"},
+            "spec members (moldft): one orbital archive");
+      const auto key
+          = molresponse_v3::protocol_key(1e-4, named_stages::protocol_k(1e-4));
+      const json bundle = {{"type", "tda"},
+                           {"shell", "closed_shell"},
+                           {"backend", "native"},
+                           {"bundle_dir", "es__" + key},
+                           {"n_roots", 1},
+                           {"converged", false},
+                           {"roots",
+                            {{{"slot", 0},
+                              {"omega", 0.5},
+                              {"density_residual", nullptr},
+                              {"omega_residual", nullptr}}}}};
+      const json metadata = {
+          {"fd_states", json::object()},
+          {"vbc_states", json::object()},
+          {"protocols",
+           {{key, {{"thresh", 1e-4}, {"k", named_stages::protocol_k(1e-4)}}}}},
+          {"excited_states", {{key, bundle}}}};
+      const std::string root
+          = "es__" + key + "/" + molresponse_v3::detail_save_load::root_file(0);
+      check(molresponse.members(metadata) == std::vector<std::string>{root},
+            "spec members (response): one archive per root of a bundle");
+      auto diverged = metadata;
+      diverged["excited_states"][key]["diverged"] = true;
+      rejects_with([&] { (void)molresponse.members(diverged); }, "diverged",
+                   "spec members (response): a diverged bundle is refused");
+      // validate_generation: the science checks on a complete generation.
+      Manifest scf;
+      scf.stage = "GS";
+      moldft.validate_generation(ground, 2, scf);
+      check(true, "spec validate_generation (moldft): no report, no controls");
+      scf.metrics = {{"convergence_report",
+                      {{"measurements",
+                        {{"energy_change", {{"availability", "invalid"}}}}}}}};
+      rejects_with([&] { moldft.validate_generation(ground, 2, scf); },
+                   "energy_change",
+                   "spec validate_generation (moldft): an invalid measurement "
+                   "is refused");
+      Manifest es;
+      es.stage = "optical";
+      es.method = "TDHF";
+      es.physical
+          = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
+      es.numerical = {
+          {"request", {{"protocol", {1e-4}}, {"properties", json::object()}}},
+          {"engine_metadata", metadata},
+          {"bundle_indices",
+           {{key,
+             {{"roots",
+               {{{"file", molresponse_v3::detail_save_load::root_file(0)}}}},
+              {"type", "tda"},
+              {"shell", "closed_shell"},
+              {"n_roots", 1},
+              {"backend", "native"},
+              {"writer_nproc", 1}}}}}};
+      es.archives.push_back({"response", root, {}, 1, {}});
+      es.stop_reason = "in_progress";
+      molresponse.validate_generation(optical, 2, es);
+      check(
+          true,
+          "spec validate_generation (response): a complete bundle generation");
+      auto renamed = es;
+      renamed.stage = "elsewhere";
+      rejects_with(
+          [&] { molresponse.validate_generation(optical, 2, renamed); },
+          "stage or response model mismatch",
+          "spec validate_generation (response): another stage's generation");
+      auto missing = es;
+      missing.archives.clear();
+      rejects_with(
+          [&] { molresponse.validate_generation(optical, 2, missing); },
+          "inventory",
+          "spec validate_generation (response): a missing archive");
+      // properties: the requested records from the engine's output.
+      const json evaluated
+          = {{"properties",
+              {{{"name", "energy"}, {"value", -1.1}, {"units", "hartree"}},
+               {{"name", "dipole"},
+                {"value", {0.0, 0.0, 0.1}},
+                {"units", "e*a0"}}}}};
+      check(moldft.properties(other, 2, evaluated)
+                == json{{"energy", {{"value", -1.1}, {"units", "hartree"}}}},
+            "spec properties (moldft): only the requested ones, without their "
+            "names");
+      const json alpha_rows = {{{"omega", 0.0},
+                                {"directions", "z"},
+                                {"alpha", {{6.45}}},
+                                {"converged", true}},
+                               {{"omega", 0.02},
+                                {"directions", "z"},
+                                {"alpha", {{6.46}}},
+                                {"converged", true}}};
+      const json output = {{"properties", {{"alpha", {{key, alpha_rows}}}}},
+                           {"metadata", metadata},
+                           {"vibrational_analysis", nullptr},
+                           {"raman_spectra", nullptr},
+                           {"transition", nullptr}};
+      const auto direct = [&]() -> json {
+        try {
+          return named_stages::select_response_properties(
+              optical, output.at("properties"), output.at("metadata"), nullptr,
+              nullptr, 2, nullptr);
+        } catch (const std::exception& e) {
+          return e.what();
+        }
+      }();
+      const auto field = [&]() -> json {
+        try {
+          return molresponse.properties(optical, 2, output);
+        } catch (const std::exception& e) {
+          return e.what();
+        }
+      }();
+      check(field == direct
+                && field.at("polarizability")
+                           .at("values")
+                           .at(1)
+                           .at("components")
+                           .at("zz")
+                       == 6.46,
+            "spec properties (response): select_response_properties on the "
+            "output");
+      // release (B5): only a converged outcome is a reference.
+      named_stages::StageOutcome outcome;
+      outcome.converged = true;
+      check(moldft.release(outcome) && molresponse.release(outcome),
+            "spec release: a converged outcome binds");
+      outcome.converged = false;
+      check(!moldft.release(outcome) && !molresponse.release(outcome),
+            "spec release: an unconverged outcome does not");
+    } catch (const std::exception& e) {
+      check(false, std::string("spec tables: ") + e.what());
     }
     world.gop.sum(failures);
     if (world.rank() == 0) std::cout << "named-stage failures: " << failures << '\n';

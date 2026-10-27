@@ -160,6 +160,46 @@ saved_outcomes(const json& saved_measurements) {
   return outcomes;
 }
 
+// B9, A3: the stage's convergence settings with the observer's cadence and
+// retention, each shown with who set it. The moldft AppSpec's settings.
+[[nodiscard]] inline convergence::ConvergenceSettings
+moldft_stage_settings(const Stage& stage, int natom) {
+  auto settings = moldft_convergence_settings(
+      stage.name, stage.params.get<CalculationParameters>(), natom);
+  const auto set_by = [&](const char* key) {
+    return stage.written.contains(key) ? convergence::SetBy::user
+                                       : convergence::SetBy::engine_default;
+  };
+  settings.checkpoints = {
+      stage.checkpoint_every_iterations, set_by("checkpoint.every_iterations"),
+      stage.checkpoint_keep_all, set_by("checkpoint.keep_all"), ""};
+  return settings;
+}
+
+// A2: the files a moldft generation holds: one orbital archive (with its
+// shards). The moldft AppSpec's members.
+[[nodiscard]] inline std::vector<std::string> moldft_members(const json&) {
+  return {"state.restartdata"};
+}
+
+// The requested properties among those evaluated on the archived orbitals
+// (`engine_output`: {"properties": the generation's property list}), keyed by
+// name. The moldft AppSpec's properties.
+[[nodiscard]] inline json moldft_properties(const Stage& stage, int,
+                                            const json& engine_output) {
+  json selected = json::object();
+  for (const auto& property : engine_output.at("properties")) {
+    const auto name = property.at("name").get<std::string>();
+    if (std::find(stage.properties.begin(), stage.properties.end(), name)
+        != stage.properties.end()) {
+      auto value = property;
+      value.erase("name");
+      selected[name] = value;
+    }
+  }
+  return selected;
+}
+
 namespace continuation = madness::scf_continuation;
 
 // B6: the requested protocol ladder, each rung identified by value.
@@ -279,11 +319,14 @@ class MoldftCheckpoint {
     return result;
   }
 
+public:
   static void require(bool condition, const std::string &message) {
     if (!condition)
       throw std::runtime_error("moldft checkpoint: " + message);
   }
 
+  // A2: the science checks on a generation's measurements; the moldft
+  // AppSpec's validate_generation (S3a, D-036).
   static void validate_measurements(const json& metrics, const std::string& stage, const json& numerical) {
     const auto configured = numerical.value("parameters", json::object()).value("parameters", json::object());
     const bool has_progress_controls = configured.value("progress.window", 0) > 0;
@@ -443,6 +486,7 @@ class MoldftCheckpoint {
       validate(report.at("saved_state_validation").at("measurements"));
   }
 
+private:
   // B5/B6: the rung a sample belongs to, identified by value, with the
   // iterations spent there in this run (what maxiter caps) and in total,
   // earlier --continue runs included (recorded only), and how it ended (on
