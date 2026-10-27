@@ -8,7 +8,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <madness/chem/Applications.hpp>
+#include <optional>
 #include <unistd.h>
 
 // Execute the validated stages from NamedStages.hpp using the existing engines.
@@ -144,125 +146,208 @@ using RunStage = StageOutcome (*)(const StageContext&);
           {"properties", json::object()}};
 }
 
-// A named moldft stage: the SCF engine with explicit paths, published through
-// MoldftCheckpoint.
-inline StageOutcome run_moldft_stage(const StageContext& ctx) {
-  // The names below are those of the former loop body in run_if_named, so
-  // the code reads as it did there (A8: one run function per application).
+// The application's part of each step of run_ladder_stage (S1, D-041):
+// closures over its engine and checkpoint adapter. The working form of the
+// application's AppSpec (S3, D-036).
+struct LadderSteps {
+  // 2. The stage's convergence settings (B9), cadence and retention (A3).
+  std::function<madness::convergence::ConvergenceSettings()> settings;
+  // 3-4. Read the latest generation, validate it, plan (B6), load if met.
+  std::function<void()> prepare;
+  // 5. Run the engine with the checkpoint observer.
+  std::function<void()> run_engine;
+  // 6-7. Validate, publish, retention; returns the stage's verdict.
+  std::function<bool()> finish;
+  // The published generation, the work done, the iterations of this run.
+  std::function<const madness::checkpoint::Manifest&()> latest;
+  std::function<std::string()> work;
+  std::function<std::size_t()> iterations;
+  // The application's fields of the generation record.
+  std::function<void(json&)> generation_record;
+  // What --continue did and why (B6), when there is a record of it.
+  std::function<std::optional<json>()> continuation;
+  // 9. The convergence report, and the saved-state outcomes of the table.
+  std::function<void(json&)> report;
+  std::function<std::vector<madness::convergence::MetricOutcome>()> outcomes;
+  // 8. The properties and the stage's own fields.
+  std::function<void(json&)> properties;
+};
+
+// The sequence every ladder stage runs (skeleton spec 2.4 and 3.3; S1, the
+// moldft stage). The shared part of each step is here; the application's
+// part is a LadderSteps closure.
+inline StageOutcome run_ladder_stage(const StageContext& ctx,
+                                     const LadderSteps& steps) {
   auto& world = ctx.world;
   auto& stage = ctx.stage;
-  const auto& stage_directory = ctx.stage_directory;
-  const auto& directory = ctx.attempt_directory;
-  const auto& run_id = ctx.run_id;
-  const bool continuing = ctx.continuing;
-  auto& cp = stage.params.get<CalculationParameters>();
+  // 1. The record starts.
   json result = stage_record(ctx);
-  std::string state_id = result.at("state_id").get<std::string>();
-  bool converged = false;
-  StageOutcome outcome;
-  // Run the normal SCF engine with explicit paths; never change cwd.
-  moldft_lib library((directory / "resolved.in").string());
-  cp.set_user_defined_value("save",
-                            false); // immutable adapter owns persistence
-  auto scf = library.calc(world, stage.params);
-  // B9: the stage's convergence settings, built once and shown before the
-  // solve; the same struct feeds the record and the stopping decision.
-  auto settings
-      = moldft_convergence_settings(stage.name, cp, scf->molecule.natom());
-  // A3: the observer's cadence and retention, shown with who set them.
-  const auto set_by = [&](const char* key) {
-    return stage.written.contains(key)
-               ? madness::convergence::SetBy::user
-               : madness::convergence::SetBy::engine_default;
-  };
-  settings.checkpoints = {
-      stage.checkpoint_every_iterations, set_by("checkpoint.every_iterations"),
-      stage.checkpoint_keep_all, set_by("checkpoint.keep_all"), ""};
+  // 2. B9: the settings, built once and shown before the solve; the same
+  // struct feeds the record and the stopping decision.
+  const auto settings = steps.settings();
   if (world.rank() == 0)
     std::cout << '\n'
               << madness::convergence::render_settings_table(settings) << '\n'
               << std::flush;
   result["convergence_settings"] = madness::convergence::to_json(settings);
-  MoldftCheckpoint checkpoint(world, stage, stage_directory, run_id, settings);
-  checkpoint.prepare(*scf, continuing);
-  scf->checkpoint_observer
-      = [&](madness::World&, const madness::SCF& state,
-            const madness::SCF::IterationCheckpoint& step) {
-          checkpoint.observe(state, step);
-        };
-  auto values = library.run(world, stage.params, NextAction::Redo);
-  scf->checkpoint_observer = {};
-  const auto& evidence = std::get<2>(values);
-
-  // The engine's own verdict at the final rung (it records its claim only
-  // when its check passed, Q6); finish() lets the selected group decide.
-  converged = evidence.converged_for_thresh <= cp.protocol().back()
-              && evidence.converged_for_dconv
-                     <= std::max(cp.dconv(), cp.protocol().back());
-  checkpoint.finish(*scf, converged);
-  const auto& saved = checkpoint.latest();
-  // A loaded state was judged against this request by prepare() and met it
-  // (B6); a solved state is converged when its stop reason says so.
-  converged = checkpoint.work == "loaded" || saved.stop_reason == "converged";
-  state_id = saved.generation;
+  // 3-7. Plan, run, publish, judge.
+  steps.prepare();
+  steps.run_engine();
+  const bool converged = steps.finish();
+  // The published generation is the stage's identity (A1).
+  const auto& saved = steps.latest();
+  const std::string state_id = saved.generation;
   result["state_id"] = state_id;
   result["identity_kind"] = "checkpoint_generation";
   result["checkpoint_generation"] = saved.generation;
-  result["work"] = checkpoint.work;
-  result["iterations_this_run"] = checkpoint.iterations;
-  result["checkpoint_warnings"] = checkpoint.retention_warnings();
-  result["acceleration_history"] = continuing ? "reset" : "fresh";
-  if (continuing) {
+  result["work"] = steps.work();
+  result["iterations_this_run"] = steps.iterations();
+  steps.generation_record(result);
+  result["acceleration_history"] = ctx.continuing ? "reset" : "fresh";
+  if (const auto continuation = steps.continuation()) {
     // B6: what --continue did and why.
-    result["continuation"] = checkpoint.continuation_record(cp);
+    result["continuation"] = *continuation;
     if (world.rank() == 0)
       madness::print("stage", stage.name, "continuation:",
                      result["continuation"]["summary"].get<std::string>());
   }
-  result["checkpoint_metrics"] = saved.metrics;
-  result["convergence_report"]
-      = ground_convergence_report(saved.metrics, state_id, converged);
-  const auto saved_measurements
-      = saved.metrics.value("convergence_report", json::object())
-            .value("saved_state_validation", json::object())
-            .value("measurements", json::object());
-  // The current request, judged on the saved state (B6, B8), also when the
-  // generation was reused from an earlier request.
-  result["convergence_report"]["requested_accuracy"]
-      = requested_criteria_report(saved_measurements, settings);
+  // 9. The outcome table and the record.
+  steps.report(result);
+  const auto outcomes = steps.outcomes();
   result["convergence_report"]["convergence_outcome"]
-      = madness::convergence::outcome_to_json(
-          settings, saved_outcomes(saved_measurements));
+      = madness::convergence::outcome_to_json(settings, outcomes);
   if (world.rank() == 0)
-    std::cout << madness::convergence::render_outcome_table(
-        settings, saved_outcomes(saved_measurements), saved.stop_reason)
+    std::cout << madness::convergence::render_outcome_table(settings, outcomes,
+                                                            saved.stop_reason)
               << '\n'
               << std::flush;
-  result["method"] = "HF";
-  result["convergence"] = evidence.to_json();
-  result["targets"] = {{"dconv", cp.dconv()}};
-  if (const auto econv = requested_econv(cp)) // D8: user-written only
-    result["targets"]["econv"] = *econv;
-  result["parameters"] = cp.to_json_if_precedence("defined");
-  result["geometry"] = scf->molecule.to_json();
-  result["representation"] = {{"L", scf->param.L()},
-                              {"k", scf->amo.at(0).k()},
-                              {"threshold", saved.numerical.at("threshold")}};
-  // These properties were evaluated on the exact archived orbital state.
-  for (const auto& property : saved.properties) {
-    const auto name = property.at("name").get<std::string>();
-    if (std::find(stage.properties.begin(), stage.properties.end(), name)
-        != stage.properties.end()) {
-      auto value = property;
-      value.erase("name");
-      value["source_state_id"] = state_id;
-      result["properties"][name] = value;
-    }
-  }
+  // 8. The properties.
+  steps.properties(result);
+  // 10. What the stage hands on (A8).
+  StageOutcome outcome;
   outcome.state_id = state_id;
   outcome.converged = converged;
   outcome.result = std::move(result);
   return outcome;
+}
+
+// A named moldft stage: the SCF engine with explicit paths, published through
+// MoldftCheckpoint, run by run_ladder_stage.
+inline StageOutcome run_moldft_stage(const StageContext& ctx) {
+  auto& world = ctx.world;
+  auto& stage = ctx.stage;
+  const auto& directory = ctx.attempt_directory;
+  auto& cp = stage.params.get<CalculationParameters>();
+  // Run the normal SCF engine with explicit paths; never change cwd.
+  moldft_lib library((directory / "resolved.in").string());
+  cp.set_user_defined_value("save",
+                            false); // immutable adapter owns persistence
+  auto scf = library.calc(world, stage.params);
+  std::optional<madness::convergence::ConvergenceSettings> settings;
+  std::optional<MoldftCheckpoint> checkpoint;
+  std::optional<decltype(library.run(world, stage.params, NextAction::Redo))>
+      values;
+  LadderSteps steps;
+  steps.settings = [&] {
+    settings
+        = moldft_convergence_settings(stage.name, cp, scf->molecule.natom());
+    // A3: the observer's cadence and retention, shown with who set them.
+    const auto set_by = [&](const char* key) {
+      return stage.written.contains(key)
+                 ? madness::convergence::SetBy::user
+                 : madness::convergence::SetBy::engine_default;
+    };
+    settings->checkpoints
+        = {stage.checkpoint_every_iterations,
+           set_by("checkpoint.every_iterations"), stage.checkpoint_keep_all,
+           set_by("checkpoint.keep_all"), ""};
+    return *settings;
+  };
+  steps.prepare = [&] {
+    checkpoint.emplace(world, stage, ctx.stage_directory, ctx.run_id,
+                       *settings);
+    checkpoint->prepare(*scf, ctx.continuing);
+  };
+  steps.run_engine = [&] {
+    scf->checkpoint_observer
+        = [&](madness::World&, const madness::SCF& state,
+              const madness::SCF::IterationCheckpoint& step) {
+            checkpoint->observe(state, step);
+          };
+    values.emplace(library.run(world, stage.params, NextAction::Redo));
+    scf->checkpoint_observer = {};
+  };
+  steps.finish = [&] {
+    const auto& evidence = std::get<2>(*values);
+    // The engine's own verdict at the final rung (it records its claim only
+    // when its check passed, Q6); finish() lets the selected group decide.
+    const bool claimed = evidence.converged_for_thresh <= cp.protocol().back()
+                         && evidence.converged_for_dconv
+                                <= std::max(cp.dconv(), cp.protocol().back());
+    checkpoint->finish(*scf, claimed);
+    // A loaded state was judged against this request by prepare() and met
+    // it (B6); a solved state is converged when its stop reason says so.
+    return checkpoint->work == "loaded"
+           || checkpoint->latest().stop_reason == "converged";
+  };
+  steps.latest = [&]() -> const madness::checkpoint::Manifest& {
+    return checkpoint->latest();
+  };
+  steps.work = [&] { return checkpoint->work; };
+  steps.iterations = [&] { return checkpoint->iterations; };
+  steps.generation_record = [&](json& result) {
+    result["checkpoint_warnings"] = checkpoint->retention_warnings();
+  };
+  steps.continuation = [&]() -> std::optional<json> {
+    if (!ctx.continuing)
+      return std::nullopt;
+    return checkpoint->continuation_record(cp);
+  };
+  const auto saved_measurements = [&] {
+    return checkpoint->latest()
+        .metrics.value("convergence_report", json::object())
+        .value("saved_state_validation", json::object())
+        .value("measurements", json::object());
+  };
+  steps.report = [&](json& result) {
+    const auto& saved = checkpoint->latest();
+    const bool converged
+        = checkpoint->work == "loaded" || saved.stop_reason == "converged";
+    result["checkpoint_metrics"] = saved.metrics;
+    result["convergence_report"]
+        = ground_convergence_report(saved.metrics, saved.generation, converged);
+    // The current request, judged on the saved state (B6, B8), also when the
+    // generation was reused from an earlier request.
+    result["convergence_report"]["requested_accuracy"]
+        = requested_criteria_report(saved_measurements(), *settings);
+  };
+  steps.outcomes = [&] { return saved_outcomes(saved_measurements()); };
+  steps.properties = [&](json& result) {
+    const auto& saved = checkpoint->latest();
+    const auto& evidence = std::get<2>(*values);
+    result["method"] = "HF";
+    result["convergence"] = evidence.to_json();
+    result["targets"] = {{"dconv", cp.dconv()}};
+    if (const auto econv = requested_econv(cp)) // D8: user-written only
+      result["targets"]["econv"] = *econv;
+    result["parameters"] = cp.to_json_if_precedence("defined");
+    result["geometry"] = scf->molecule.to_json();
+    result["representation"] = {{"L", scf->param.L()},
+                                {"k", scf->amo.at(0).k()},
+                                {"threshold", saved.numerical.at("threshold")}};
+    // These properties were evaluated on the exact archived orbital state.
+    for (const auto& property : saved.properties) {
+      const auto name = property.at("name").get<std::string>();
+      if (std::find(stage.properties.begin(), stage.properties.end(), name)
+          != stage.properties.end()) {
+        auto value = property;
+        value.erase("name");
+        value["source_state_id"] = saved.generation;
+        result["properties"][name] = value;
+      }
+    }
+  };
+  return run_ladder_stage(ctx, steps);
 }
 
 // A named molresponse stage: the response engine against its declared
