@@ -306,15 +306,42 @@ int main(int argc, char** argv) {
       diverged["excited_states"][key]["diverged"] = true;
       rejects_with([&] { (void)molresponse.members(diverged); }, "diverged",
                    "spec members (response): a diverged bundle is refused");
-      // validate_generation: the science checks on a complete generation.
+      // validate_generation: the checks on the generation --continue reads.
       Manifest scf;
       scf.stage = "GS";
+      scf.method = "HF";
+      scf.numerical = {{"representation", "mo"}};
+      scf.archives.push_back({"orbitals", "state.restartdata", {}, 1, {}});
       moldft.validate_generation(ground, 2, scf);
       check(true, "spec validate_generation (moldft): no report, no controls");
-      scf.metrics = {{"convergence_report",
-                      {{"measurements",
-                        {{"energy_change", {{"availability", "invalid"}}}}}}}};
-      rejects_with([&] { moldft.validate_generation(ground, 2, scf); },
+      auto refused = scf;
+      refused.stage = "other";
+      rejects_with([&] { moldft.validate_generation(ground, 2, refused); },
+                   "stage/method mismatch",
+                   "spec validate_generation (moldft): another stage's "
+                   "generation");
+      refused = scf;
+      refused.method = "TDHF";
+      rejects_with([&] { moldft.validate_generation(ground, 2, refused); },
+                   "stage/method mismatch",
+                   "spec validate_generation (moldft): another method");
+      refused = scf;
+      refused.archives.clear();
+      rejects_with([&] { moldft.validate_generation(ground, 2, refused); },
+                   "inventory",
+                   "spec validate_generation (moldft): a missing orbital "
+                   "archive");
+      refused = scf;
+      refused.numerical["representation"] = "ao";
+      rejects_with([&] { moldft.validate_generation(ground, 2, refused); },
+                   "unsupported representation",
+                   "spec validate_generation (moldft): another representation");
+      refused = scf;
+      refused.metrics
+          = {{"convergence_report",
+              {{"measurements",
+                {{"energy_change", {{"availability", "invalid"}}}}}}}};
+      rejects_with([&] { moldft.validate_generation(ground, 2, refused); },
                    "energy_change",
                    "spec validate_generation (moldft): an invalid measurement "
                    "is refused");
@@ -402,6 +429,105 @@ int main(int argc, char** argv) {
                        == 6.46,
             "spec properties (response): select_response_properties on the "
             "output");
+      // S3b (D-048): the response stage's read side, as functions of their
+      // arguments. The request: what the stage's states are planned against.
+      const auto request = named_stages::response_request(optical);
+      check(request.at("protocol") == json{1e-4} && request.at("dconv") == 2e-4
+                && request.at("decided_by") == "engine_check"
+                && request.at("properties").at("polarizability")
+                       == json{{"frequencies", {0.0, 0.02}},
+                               {"components", {"zz"}}},
+            "response_request: the stage's protocol, dconv, decider and "
+            "properties");
+      const auto legs = named_stages::response_needs(request, 2).legs;
+      check(legs.size() == 2 && legs[0].second == 0.0 && legs[1].second == 0.02,
+            "response_request: zz at two frequencies needs two z legs");
+      // response_state_records: one record per state, with its iterations
+      // at the rung across runs (D-007).
+      const auto channel = legs[0].first.description();
+      const auto fkey = molresponse_v3::ResponseMetadata::freq_key(0.0);
+      const auto state = channel + "|" + key + "|" + fkey;
+      json fd = metadata;
+      fd.erase("excited_states");
+      fd["fd_states"]
+          = {{channel, {{key, {{fkey, {{"iter", 3}, {"freq", 0.0}}}}}}}};
+      const auto iterations = [&](const named_stages::IterationTotals& totals) {
+        return named_stages::response_state_records(fd, "g-ref", totals)
+            .at(0)
+            .at("iterations_at_rung")
+            .get<int>();
+      };
+      const auto records
+          = named_stages::response_state_records(fd, "g-ref", {});
+      check(records.size() == 1 && records[0].at("key") == state
+                && records[0].at("identity") == channel + "|0"
+                && records[0].at("reference_generation") == "g-ref"
+                && records[0].at("rung")
+                       == json{{"thresh", 1e-4},
+                               {"k", named_stages::protocol_k(1e-4)}}
+                && records[0].at("stop") == "in_progress"
+                && records[0].at("diverged") == false,
+            "response_state_records: one FD state, unfinished");
+      struct TotalsRow {
+        named_stages::IterationTotals totals;
+        int expected;
+        const char* why;
+      };
+      for (const auto& row : std::vector<TotalsRow>{
+               {{}, 3, "first run: this attempt's count"},
+               {{{{state, 7}}, {}, {}}, 7, "untouched: the recorded total"},
+               {{{{state, 7}}, {state}, {state}},
+                10,
+                "resumed and solved: the recorded total plus this attempt"},
+               {{{{state, 7}}, {}, {state}},
+                3,
+                "solved again from the start: this attempt alone"}})
+        check(iterations(row.totals) == row.expected,
+              std::string("response_state_records: ") + row.why);
+      const auto bundles
+          = named_stages::response_state_records(metadata, "g-ref", {});
+      check(bundles.size() == 1 && bundles[0].at("kind") == "excited_states"
+                && bundles[0].at("identity")
+                       == molresponse_v3::es_node_id(true, 1)
+                && bundles[0].at("key")
+                       == molresponse_v3::es_node_id(true, 1) + "|" + key
+                && bundles[0].at("roots").size() == 1,
+            "response_state_records: a bundle is one state per rung");
+      // plan_response_states: one plan per leg the request needs.
+      using Kind = molresponse_v3::StatePlan::Kind;
+      const auto node0 = molresponse_v3::fd_node_id(legs[0].first, 0.0);
+      const auto node1 = molresponse_v3::fd_node_id(legs[1].first, 0.02);
+      const auto fresh = named_stages::plan_response_states(
+          optical, request, 2, "g-ref", json::array());
+      check(fresh.engine.size() == 2
+                && fresh.engine.at(node0).kind == Kind::fresh
+                && fresh.engine.at(node1).kind == Kind::fresh
+                && fresh.records.size() == 2
+                && fresh.records[0].at("action") == "fresh"
+                && fresh.records[1].at("action") == "fresh"
+                && fresh.resumed.empty(),
+            "plan_response_states: no records, every leg fresh");
+      const auto resumed = named_stages::plan_response_states(
+          optical, request, 2, "g-ref", records);
+      check(resumed.engine.at(node0).kind == Kind::resume
+                && resumed.records[0].at("action") == "resumed"
+                && resumed.records[0].at("iterations_done_at_rung") == 3
+                && resumed.resumed == std::set<std::string>{state},
+            "plan_response_states: an unfinished rung resumes, and its key "
+            "is resumed");
+      check(resumed.engine.at(node1).kind == Kind::seed
+                && resumed.engine.at(node1).seed_frequency == 0.0
+                && resumed.records[1].at("action") == "seeded"
+                && resumed.records[1].at("seed_frequency") == 0.0,
+            "plan_response_states: a leg with no record starts from the "
+            "nearest saved frequency (R4)");
+      const auto changed = named_stages::plan_response_states(
+          optical, request, 2, "g-new", records);
+      check(changed.engine.at(node0).kind == Kind::fresh
+                && changed.engine.at(node1).kind == Kind::fresh
+                && changed.resumed.empty(),
+            "plan_response_states: records of another reference are not used "
+            "(R1)");
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;

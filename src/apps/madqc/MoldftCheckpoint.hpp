@@ -325,8 +325,7 @@ public:
       throw std::runtime_error("moldft checkpoint: " + message);
   }
 
-  // A2: the science checks on a generation's measurements; the moldft
-  // AppSpec's validate_generation (S3a, D-036).
+  // A2: the science checks on a generation's measurements.
   static void validate_measurements(const json& metrics, const std::string& stage, const json& numerical) {
     const auto configured = numerical.value("parameters", json::object()).value("parameters", json::object());
     const bool has_progress_controls = configured.value("progress.window", 0) > 0;
@@ -486,6 +485,20 @@ public:
       validate(report.at("saved_state_validation").at("measurements"));
   }
 
+  // A2: the checks on a generation --continue reads, before the plan: its
+  // stage and method, its orbital inventory and representation, and its
+  // measurements. The moldft AppSpec's validate_generation (S3b).
+  static void validate_generation(const std::string& stage,
+                                  const madness::checkpoint::Manifest& m) {
+    require(m.stage == stage && m.method == "HF", "stage/method mismatch");
+    require(m.archives.size() == 1 && m.archives[0].role == "orbitals"
+                && m.archives[0].basename == "state.restartdata",
+            "required orbital inventory is missing");
+    require(m.numerical.at("representation") == "mo",
+            "unsupported representation");
+    validate_measurements(m.metrics, m.stage, m.numerical);
+  }
+
 private:
   // B5/B6: the rung a sample belongs to, identified by value, with the
   // iterations spent there in this run (what maxiter caps) and in total,
@@ -590,24 +603,19 @@ public:
     return request;
   }
 
-  // Validate the complete selected generation before the engine opens an
-  // archive. A private copy lets the existing restart planner use its ordinary
-  // prefix without ever changing an immutable generation or using an AO
-  // sidecar.
-  void prepare(madness::SCF &scf, bool continuing) {
+  // The engine's progress controls and the problem, before any generation is
+  // read.
+  void prepare(madness::SCF& scf) {
     scf.validate_progress_controls();
     physical_ = physical(scf);
-    if (!continuing)
-      return;
-    latest_ = madness::checkpoint::read_published(world_, store_);
-    require(latest_.stage == stage_.name && latest_.method == "HF",
-            "stage/method mismatch");
-    require(latest_.archives.size() == 1 &&
-                latest_.archives[0].role == "orbitals" &&
-                latest_.archives[0].basename == "state.restartdata",
-            "required orbital inventory is missing");
-    require(latest_.numerical.at("representation") == "mo",
-            "unsupported representation");
+  }
+
+  // The generation --continue read, validated (validate_generation), before
+  // the engine opens an archive. A private copy lets the existing restart
+  // planner use its ordinary prefix without ever changing an immutable
+  // generation or using an AO sidecar.
+  void load(madness::SCF& scf, const madness::checkpoint::Manifest& latest) {
+    latest_ = latest;
     const auto &cp = scf.param;
     const auto report
         = latest_.metrics.value("convergence_report", json::object());
@@ -623,7 +631,6 @@ public:
     const bool load = plan_.action == planning::Action::load;
     work = load ? "loaded" : "resumed";
     madness::checkpoint::detail::on_root(world_, [&] {
-      validate_measurements(latest_.metrics, latest_.stage, latest_.numerical);
       const auto directory = store_ / latest_.generation;
       for (const auto &shard : latest_.archives[0].shards) {
         const auto suffix = shard.path.substr(std::string("state").size());

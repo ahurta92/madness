@@ -152,8 +152,18 @@ using RunStage = StageOutcome (*)(const StageContext&);
 struct LadderSteps {
   // 2. The stage's convergence settings (B9), cadence and retention (A3).
   std::function<madness::convergence::ConvergenceSettings()> settings;
-  // 3-4. Read the latest generation, validate it, plan (B6), load if met.
+  // 3. The application's set-up before any generation is read.
   std::function<void()> prepare;
+  // 3. D-049: whether --continue reads a generation (collective). moldft
+  // reads one always and refuses without it; response reads one only when
+  // the stage has one, else starts fresh.
+  std::function<bool()> has_generation;
+  // 3. A2: the checks on the generation read (the AppSpec's
+  // validate_generation); throws why not.
+  std::function<void(const madness::checkpoint::Manifest&)> validate_generation;
+  // 4. The state records and the plan (B6), from the generation read, and
+  // the load of what the plan uses.
+  std::function<void(const madness::checkpoint::Manifest&)> load;
   // 5. Run the engine with the checkpoint observer.
   std::function<void()> run_engine;
   // 6-7. Validate, publish, retention; returns the stage's verdict.
@@ -180,8 +190,10 @@ struct LadderSteps {
 // (no engine object, no files) and table-tested in test_named_stages
 // through <app>_fields(); <app>_spec() adds the run binding.
 // `natom` is the engine fact both applications need: the atom count of the
-// stage's molecule (moldft) or of its reference (response). S3b adds the
-// state records and the plan, S3c the observer's sample record (D-045).
+// stage's molecule (moldft) or of its reference (response). The state
+// records and the plan are functions of their arguments since S3b, called
+// by the run bindings; their fields come at S4 (D-048). S3c adds the
+// observer's sample record (D-045).
 struct AppSpec {
   std::string name; // the deck's block kind
   // The deck check (B3, B7); empty until S6 (D-047): parse() checks every
@@ -235,8 +247,15 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
               << madness::convergence::render_settings_table(settings) << '\n'
               << std::flush;
   result["convergence_settings"] = madness::convergence::to_json(settings);
-  // 3-7. Plan, run, publish, judge.
+  // 3-4. Read the latest generation, validate it, plan (B6), load if met.
   steps.prepare();
+  if (ctx.continuing && steps.has_generation()) {
+    const auto latest = madness::checkpoint::read_published(
+        world, ctx.stage_directory / "checkpoints");
+    steps.validate_generation(latest);
+    steps.load(latest);
+  }
+  // 5-7. Run, publish, judge.
   steps.run_engine();
   const bool converged = steps.finish();
   // The published generation is the stage's identity (A1).
@@ -309,7 +328,14 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   steps.prepare = [&] {
     checkpoint.emplace(world, stage, ctx.stage_directory, ctx.run_id,
                        *settings);
-    checkpoint->prepare(*scf, ctx.continuing);
+    checkpoint->prepare(*scf);
+  };
+  steps.has_generation = [] { return true; };
+  steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
+    moldft_spec().validate_generation(stage, natom, m);
+  };
+  steps.load = [&](const madness::checkpoint::Manifest& m) {
+    checkpoint->load(*scf, m);
   };
   steps.run_engine = [&] {
     scf->checkpoint_observer
@@ -437,7 +463,13 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
                        json{{"stage", stage.reference},
                             {"generation", reference.saved.generation}},
                        static_cast<int>(molecule.natom()));
-    loaded = checkpoint->prepare(ctx.continuing);
+  };
+  steps.has_generation = [&] { return checkpoint->has_generation(); };
+  steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
+    response_spec().validate_generation(stage, natom, m);
+  };
+  steps.load = [&](const madness::checkpoint::Manifest& m) {
+    loaded = checkpoint->load(m);
   };
   steps.run_engine = [&] {
     if (loaded) {
@@ -543,9 +575,9 @@ inline AppSpec moldft_fields() {
           .settings = moldft_stage_settings,
           .members = moldft_members,
           .validate_generation =
-              [](const Stage&, int, const madness::checkpoint::Manifest& m) {
-                MoldftCheckpoint::validate_measurements(m.metrics, m.stage,
-                                                        m.numerical);
+              [](const Stage& stage, int,
+                 const madness::checkpoint::Manifest& m) {
+                MoldftCheckpoint::validate_generation(stage.name, m);
               },
           .properties = moldft_properties,
           .release = released};

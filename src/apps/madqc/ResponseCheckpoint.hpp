@@ -395,6 +395,52 @@ bundle_engine_limits(const Stage& stage, double final_thresh) {
   return measurements;
 }
 
+// B6: iterations recorded per state and rung before this attempt (keyed by
+// the engine's channel|protocol|frequency keys), the rungs the planner
+// resumes, and the rungs this attempt solved, so the total across runs is
+// kept.
+struct IterationTotals {
+  std::map<std::string, int> previous;
+  std::set<std::string> resumed, solved;
+};
+
+// Iterations at one state's rung across runs, from `iter`, the count of
+// the attempt that last solved it: a rung solved in this attempt adds to
+// what it had when the planner resumed it, else counts this attempt alone;
+// an untouched one keeps its recorded total.
+[[nodiscard]] inline int iterations_across_runs(const IterationTotals& totals,
+                                                const std::string& key,
+                                                int iter) {
+  const auto previous = totals.previous.find(key);
+  const int before = previous != totals.previous.end() ? previous->second : 0;
+  if (totals.solved.contains(key))
+    return (totals.resumed.contains(key) ? before : 0) + iter;
+  if (previous != totals.previous.end())
+    return before;
+  return iter;
+}
+
+// B6, D-016: the planner's decision per requested state, for the engine (by
+// its node id), its record, for the manifest and results.json, and the state
+// keys it resumes at their own saved rung (IterationTotals::resumed).
+struct ResponsePlans {
+  molresponse_v3::StatePlans engine;
+  json records = json::array();
+  std::set<std::string> resumed;
+};
+
+// S3b (D-048): the read side of --continue, as functions of their arguments,
+// defined after ResponseCheckpoint (whose state keys they use).
+[[nodiscard]] inline json response_request(const Stage& stage);
+[[nodiscard]] inline json
+response_state_records(const json& metadata,
+                       const std::string& reference_generation,
+                       const IterationTotals& totals);
+[[nodiscard]] inline ResponsePlans
+plan_response_states(const Stage& stage, const json& stage_request, int natom,
+                     const std::string& reference_generation,
+                     const json& records);
+
 // Scientific policy for the named response frontend. The engine still owns
 // state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -408,16 +454,18 @@ class ResponseCheckpoint {
   Manifest latest_;
   bool restored_ = false, loaded_ = false;
   std::size_t sequence_ = 0;
-  // B6: iterations recorded per state and rung before this attempt (keyed by
-  // the engine's channel|protocol|frequency keys), the rungs the planner
-  // resumes, and the rungs this attempt solved, so the total across runs is
-  // kept.
-  std::map<std::string, int> previous_totals_;
-  std::set<std::string> resumed_, solved_;
-  // B6, D-016: the planner's decision per requested state, for the engine,
-  // and its record, for the manifest and results.json.
-  molresponse_v3::StatePlans plans_;
-  json plan_records_ = json::array();
+  // B6: this attempt's iteration totals and plans (S3b: the functions that
+  // read them take them as arguments).
+  IterationTotals totals_;
+  ResponsePlans plans_;
+
+  friend json response_state_records(const json& metadata,
+                                     const std::string& reference_generation,
+                                     const IterationTotals& totals);
+  friend ResponsePlans
+  plan_response_states(const Stage& stage, const json& stage_request, int natom,
+                       const std::string& reference_generation,
+                       const json& records);
 
   static std::string state_key(const std::string& channel,
                                const std::string& protocol,
@@ -442,104 +490,6 @@ class ResponseCheckpoint {
   // The engine's transition analysis of a converged bundle at rung `protocol`.
   static std::string analysis_file(const std::string& protocol) {
     return "es_analysis__" + protocol + ".json";
-  }
-
-  // Iterations at one state's rung across runs, from `iter`, the count of
-  // the attempt that last solved it: a rung solved in this attempt adds to
-  // what it had when the planner resumed it, else counts this attempt alone;
-  // an untouched one keeps its recorded total.
-  [[nodiscard]] int iterations_across_runs(const std::string& key,
-                                           int iter) const {
-    const auto previous = previous_totals_.find(key);
-    const int before
-        = previous != previous_totals_.end() ? previous->second : 0;
-    if (solved_.contains(key))
-      return (resumed_.contains(key) ? before : 0) + iter;
-    if (previous != previous_totals_.end())
-      return before;
-    return iter;
-  }
-
-  // B6, the planner's record of every response state in `metadata`, one per
-  // (perturbation, frequency, rung): identity, reference generation, rung,
-  // iterations at the rung across runs (recorded, never compared, D-007), how
-  // it ended, whether it diverged, the deciding mode, and the raw
-  // measurements (the deciding sample and the saved state, each with the norm
-  // its relative limit uses). An excited-state bundle is one state per rung
-  // (D-025), judged on its worst root, with the per-root rows inside.
-  [[nodiscard]] json state_records(const json& metadata) const {
-    json records = json::array();
-    // Held in a local: iterating items() of the temporary value() returns
-    // would dangle.
-    const auto states = metadata.value("fd_states", json::object());
-    for (const auto& channel : states.items())
-      for (const auto& rung : channel.value().items()) {
-        const auto& protocol = metadata.at("protocols").at(rung.key());
-        for (const auto& point : rung.value().items()) {
-          const auto& e = point.value();
-          const auto key = state_key(channel.key(), rung.key(), point.key());
-          const int total = iterations_across_runs(key, e.value("iter", 0));
-          std::ostringstream frequency;
-          frequency << std::setprecision(17) << e.at("freq").get<double>();
-          records.push_back(
-              {{"schema", "madqc.response.state.v1"},
-               {"key", key},
-               {"identity", channel.key() + "|" + frequency.str()},
-               {"perturbation", channel.key()},
-               {"frequency", e.at("freq")},
-               {"reference_generation", reference_.value("generation", "")},
-               {"rung",
-                {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
-               {"iterations_at_rung", total},
-               {"stop", response_stop(e)},
-               {"diverged", e.value("diverged", false)},
-               {"decided_by", e.value("checkpoint_decided_by", "engine_check")},
-               {"engine_measurements",
-                e.value("convergence_measurements", json::object())},
-               {"saved_measurements",
-                e.value("saved_state_validation", json::object())
-                    .value("measurements", json::object())}});
-        }
-      }
-    const auto bundles = metadata.value("excited_states", json::object());
-    for (const auto& rung : bundles.items()) {
-      const auto& e = rung.value();
-      const auto& protocol = metadata.at("protocols").at(rung.key());
-      const auto id = molresponse_v3::es_node_id(
-          e.at("type").get<std::string>() == "tda", e.at("n_roots").get<int>());
-      const auto key = bundle_key(id, rung.key());
-      json roots = json::array();
-      for (const auto& root : e.at("roots"))
-        roots.push_back(
-            {{"root_id", root.value("root_id", "")},
-             {"omega", root.value("omega", json())},
-             {"converged", root.value("converged", false)},
-             {"locked", root.value("locked", false)},
-             {"stalled", root.value("stalled", false)},
-             {"density_residual", root.value("density_residual", json())},
-             {"omega_residual", root.value("omega_residual", json())}});
-      records.push_back(
-          {{"schema", "madqc.response.state.v1"},
-           {"key", key},
-           {"kind", "excited_states"},
-           {"identity", id},
-           {"perturbation", id},
-           {"frequency", nullptr},
-           {"reference_generation", reference_.value("generation", "")},
-           {"rung",
-            {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
-           {"iterations_at_rung",
-            iterations_across_runs(key, e.value("iter", 0))},
-           {"stop", e.contains("stop_reason")
-                        ? e.at("stop_reason").get<std::string>()
-                        : response_stop(e)},
-           {"diverged", e.value("diverged", false)},
-           {"decided_by", e.value("decided_by", "engine_check")},
-           {"engine_measurements", bundle_measurements(e)},
-           {"saved_measurements", json::object()},
-           {"roots", std::move(roots)}});
-    }
-    return records;
   }
 
 public:
@@ -877,77 +827,6 @@ public:
   }
 
 private:
-  // B6: one plan per state the requested values need (response_needs), from
-  // the generation's state records. `own` is the state's finest saved rung
-  // the engine can use. Left out: a rung whose engine key equals a requested
-  // rung's but whose threshold differs (keys round it; the engine holds one
-  // definition per key), and a rung tighter than the final one (R3, deferred
-  // for response, D-018): the analysis reads only states at or coarser than
-  // the final rung, so such a state is solved again. A state with no usable
-  // record starts from the nearest saved frequency (R4/R7, frequency_seed).
-  // Quadratic sources are not planned: the engine builds them from their
-  // legs and rebuilds one whose leg is solved again. R6 needs nothing here:
-  // members() never publishes a diverged state, so the generation holds the
-  // state's converged coarser rung and the next rung restarts from it.
-  void plan_states(const json& records) {
-    std::map<std::string, double> requested_rungs;
-    auto request = ladder_request(requested_rungs);
-    for (const auto& [perturbation, frequency] :
-         response_needs(request_, natom_).legs) {
-      std::ostringstream identity;
-      identity << perturbation.description() << '|' << std::setprecision(17)
-               << frequency;
-      request.identity = identity.str();
-      const auto own = own_state(records, request.identity, requested_rungs,
-                                 request.ladder.back());
-      const auto seed
-          = own ? std::nullopt
-                : frequency_seed(records, perturbation.description(), frequency,
-                                 request.reference_generation, requested_rungs,
-                                 request.ladder.front());
-      const auto channel = perturbation.description();
-      const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
-      adopt(madness::planning::plan_ladder(own, seed, request), own, seed,
-            request, molresponse_v3::fd_node_id(perturbation, frequency),
-            {{"perturbation", channel}, {"frequency", frequency}},
-            [&](const std::string& protocol) {
-              return state_key(channel, protocol, fkey);
-            });
-    }
-    // The excited-state bundle (D-025): one state, judged on its worst root
-    // against the engine's own check; no seed (the engine cannot start a
-    // bundle from another root count or method, DESIGN §5).
-    if (const auto bundle = requested_bundle(request_)) {
-      request.identity = bundle->id;
-      request.engine_limits
-          = bundle_engine_limits(stage_, request.ladder.back().thresh);
-      // The written targets are the dipole legs' (B3: excited states have
-      // none yet; the engine check decides a bundle).
-      for (auto& metric : request.settings.metrics)
-        if (metric.group == madness::convergence::Group::requested_criteria)
-          metric.target.reset();
-      const auto own = own_state(records, bundle->id, requested_rungs,
-                                 request.ladder.back());
-      auto plan = madness::planning::plan_ladder(own, std::nullopt, request);
-      if (!own)
-        for (const auto& record : records)
-          if (record.value("kind", "") == "excited_states") {
-            plan.why += "; the saved bundle is "
-                        + record.at("identity").get<std::string>()
-                        + ", another method or root count, so this one "
-                          "starts fresh";
-            break;
-          }
-      adopt(plan, own, std::nullopt, request, bundle->id,
-            {{"kind", "excited_states"},
-             {"method", bundle->tda ? "tda" : "rpa"},
-             {"roots", bundle->roots}},
-            [&](const std::string& protocol) {
-              return bundle_key(bundle->id, protocol);
-            });
-    }
-  }
-
   // R4/R7: the same perturbation's saved state nearest in frequency (on a
   // tie the lower), at the finest rung the start rung can load (coarser or
   // equal, not aliased): the record of the state the engine's picker loads.
@@ -985,29 +864,29 @@ private:
   // The request every state of this stage is planned against, less its
   // identity; `requested_rungs` maps each requested rung's engine key to its
   // threshold.
-  [[nodiscard]] madness::planning::LadderRequest
-  ladder_request(std::map<std::string, double>& requested_rungs) const {
+  [[nodiscard]] static madness::planning::LadderRequest
+  ladder_request(const Stage& stage, const std::string& reference_generation,
+                 std::map<std::string, double>& requested_rungs) {
     madness::planning::LadderRequest request;
     for (double threshold :
-         stage_.params.get<CalculationParameters>().protocol()) {
+         stage.params.get<CalculationParameters>().protocol()) {
       request.ladder.push_back({threshold, protocol_k(threshold)});
       requested_rungs.emplace(
           molresponse_v3::protocol_key(threshold, protocol_k(threshold)),
           threshold);
     }
     const double final_thresh = request.ladder.back().thresh;
-    request.reference_generation = reference_.value("generation", "");
-    request.settings = response_convergence_settings(stage_, final_thresh);
-    request.engine_limits = response_engine_limits(stage_, final_thresh);
-    request.forced_iterations
-        = stage_.params.get<ResponseParameters>().get<int>(
-              "diagnostic.iterations_per_rung")
-          > 0;
+    request.reference_generation = reference_generation;
+    request.settings = response_convergence_settings(stage, final_thresh);
+    request.engine_limits = response_engine_limits(stage, final_thresh);
+    request.forced_iterations = stage.params.get<ResponseParameters>().get<int>(
+                                    "diagnostic.iterations_per_rung")
+                                > 0;
     return request;
   }
 
   // The record a state is planned from: its finest saved rung the engine can
-  // use (see plan_states).
+  // use (see plan_response_states).
   [[nodiscard]] static std::optional<madness::planning::SavedState>
   own_state(const json& records, const std::string& identity,
             const std::map<std::string, double>& requested_rungs,
@@ -1032,16 +911,17 @@ private:
     return own;
   }
 
-  // One state's plan: the engine's input (plans_, by the engine's node id),
-  // the iteration bookkeeping (resumed_) and the record for results.json and
-  // the manifest. `fields` name the state in the record; `key_at` gives its
-  // state key at a rung (by engine protocol key).
-  void adopt(const madness::planning::LadderPlan& plan,
-             const std::optional<madness::planning::SavedState>& own,
-             const std::optional<madness::planning::SavedState>& seed,
-             const madness::planning::LadderRequest& request,
-             const std::string& node_id, const json& fields,
-             const std::function<std::string(const std::string&)>& key_at) {
+  // One state's plan, added to `plans`: the engine's input (by the engine's
+  // node id), the iteration bookkeeping (resumed) and the record for
+  // results.json and the manifest. `fields` name the state in the record;
+  // `key_at` gives its state key at a rung (by engine protocol key).
+  static void
+  adopt(ResponsePlans& plans, const madness::planning::LadderPlan& plan,
+        const std::optional<madness::planning::SavedState>& own,
+        const std::optional<madness::planning::SavedState>& seed,
+        const madness::planning::LadderRequest& request,
+        const std::string& node_id, const json& fields,
+        const std::function<std::string(const std::string&)>& key_at) {
     namespace planning = madness::planning;
     using Kind = molresponse_v3::StatePlan::Kind;
     const std::map<planning::Action, const char*> words
@@ -1075,7 +955,7 @@ private:
     } else if (plan.action == planning::Action::resume) {
       engine_plan.kind = Kind::resume;
       if (madness::scf_continuation::same_rung(own->rung, start))
-        resumed_.insert(
+        plans.resumed.insert(
             key_at(molresponse_v3::protocol_key(start.thresh, start.k)));
     } else if (plan.action == planning::Action::seed) {
       engine_plan.kind = Kind::seed;
@@ -1085,8 +965,8 @@ private:
     } else {
       engine_plan.kind = Kind::fresh;
     }
-    plans_[node_id] = engine_plan;
-    plan_records_.push_back(std::move(record));
+    plans.engine[node_id] = engine_plan;
+    plans.records.push_back(std::move(record));
   }
 
 public:
@@ -1104,67 +984,32 @@ public:
       : world_(world), stage_(stage), store_(stage_directory / "checkpoints"),
         attempt_(attempt), run_id_(std::move(run_id)),
         reference_(std::move(reference)), natom_(natom) {
-    const auto& cp = stage.params.get<CalculationParameters>();
-    // The request is keyed on the properties the stage names (D-019): each
-    // with its frequencies and components, Raman with its atoms and
-    // directions as written (empty: every atom, x y z).
-    json properties = json::object();
-    for (const auto& name : stage.properties) {
-      if (name == "polarizability")
-        properties[name] = {{"frequencies", stage.frequencies},
-                            {"components", stage.components}};
-      else if (name == "hyperpolarizability")
-        properties[name]
-            = {{"frequencies", stage.hyperpolarizability.frequencies},
-               {"components", stage.hyperpolarizability.components}};
-      else if (name == "raman")
-        properties[name] = {{"frequencies", stage.raman.frequencies},
-                            {"components", stage.raman.components},
-                            {"atoms", stage.raman_atoms},
-                            {"directions", stage.raman_directions},
-                            {"full_set", stage.raman_full_set}};
-      else if (name == "excited_states")
-        properties[name] = {{"roots", stage.excited_states.roots},
-                            {"method", stage.excited_states.method},
-                            {"guess", stage.excited_states.guess},
-                            {"guess_basis", stage.excited_states.guess_basis}};
-      else
-        require(false, "unsupported property " + name);
-    }
-    request_ = {{"protocol", cp.protocol()},
-                {"properties", properties},
-                {"dconv", stage.params.get<ResponseParameters>().dconv()}};
-    const auto targets = molresponse_v3::fd_requested_accuracy_targets(stage.params.get<ResponseParameters>());
-    if (!targets.empty()) request_["accuracy_targets"] = targets;
-    // Who decides convergence (B8); reuse and property eligibility follow it.
-    request_["decided_by"] = stage.params.get<ResponseParameters>().get<bool>(
-                                 madness::convergence::use_default_criteria_key)
-                                 ? "engine_check"
-                                 : "requested_criteria";
-    const auto progress = molresponse_v3::fd_requested_progress(stage.params.get<ResponseParameters>());
-    if (!progress.empty()) request_["progress"] = progress;
-    const int diagnostic = stage.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung");
-    if (diagnostic > 0) request_["diagnostic_iterations_per_rung"] = diagnostic;
+    request_ = response_request(stage);
   }
 
   [[nodiscard]] bool targets_decide() const {
     return request_.value("decided_by", "") == "requested_criteria";
   }
 
-  // Return true only when the requested analysis itself is already complete.
-  // Otherwise restore prerequisites privately and let the engine schedule work.
-  bool prepare(bool continuing) {
-    namespace checkpoint = madness::checkpoint;
-    if (!continuing) return false;
+  // D-049: --continue reads a generation only when the stage has one; a
+  // stage with none (newly added, or no completed first save) starts fresh.
+  // Collective.
+  [[nodiscard]] bool has_generation() const {
     bool exists = false;
-    checkpoint::detail::on_root(world_, [&] {
+    madness::checkpoint::detail::on_root(world_, [&] {
       exists = std::filesystem::exists(store_ / "latest");
       return std::string{};
     });
     world_.gop.broadcast(exists, 0);
-    if (!exists) return false; // a newly added stage, or no completed first save
-    latest_ = checkpoint::read_published(world_, store_);
-    validate_generation(stage_.name, natom_, latest_);
+    return exists;
+  }
+
+  // The generation --continue read, validated (validate_generation): return
+  // true only when the requested analysis itself is already complete.
+  // Otherwise restore prerequisites privately and let the engine schedule work.
+  bool load(const Manifest& latest) {
+    namespace checkpoint = madness::checkpoint;
+    latest_ = latest;
     reference_changed = latest_.reference != reference_;
     if (reference_changed) return false; // no old descendants enter this attempt
     restored_ = true;
@@ -1189,13 +1034,16 @@ public:
     auto metadata = latest_.numerical.at("engine_metadata");
     // B6: the generation's state records (or, for one written before them,
     // records derived from its entries): totals so far, and the plans.
+    const auto reference_generation = reference_.value("generation", "");
     auto records = latest_.numerical.value("states", json::array());
     if (records.empty())
-      records = state_records(metadata);
+      records = response_state_records(metadata, reference_generation, totals_);
     for (const auto& record : records)
-      previous_totals_[record.at("key").get<std::string>()]
+      totals_.previous[record.at("key").get<std::string>()]
           = record.at("iterations_at_rung").get<int>();
-    plan_states(records);
+    plans_ = plan_response_states(stage_, request_, natom_,
+                                  reference_generation, records);
+    totals_.resumed = plans_.resumed;
     // The engine's state entries are copied as saved (D7, D-016); the plans
     // above steer it. Analysis is derived: old property rows and the Raman
     // normal-mode analysis are left out so they cannot certify this request.
@@ -1206,8 +1054,8 @@ public:
         = latest_.numerical.value("transition_analysis", json::object());
     std::vector<std::string> keep;
     if (const auto bundle = requested_bundle(request_)) {
-      const auto plan = plans_.find(bundle->id);
-      if (plan != plans_.end()
+      const auto plan = plans_.engine.find(bundle->id);
+      if (plan != plans_.engine.end()
           && plan->second.kind == molresponse_v3::StatePlan::Kind::load
           && analyses.contains(plan->second.loaded_key))
         keep.push_back(plan->second.loaded_key);
@@ -1235,11 +1083,11 @@ public:
 
   const Manifest& latest() const { return latest_; }
   [[nodiscard]] const molresponse_v3::StatePlans& state_plans() const {
-    return plans_;
+    return plans_.engine;
   }
   /// What --continue did per state and why (B6), for results.json.
   [[nodiscard]] json continuation() const {
-    return {{"planner", "plan_ladder"}, {"states", plan_records_}};
+    return {{"planner", "plan_ladder"}, {"states", plans_.records}};
   }
   json metadata() const { return latest_.numerical.at("engine_metadata"); }
   json properties() const { return metadata().at("properties"); }
@@ -1265,8 +1113,8 @@ public:
     const auto bundle = requested_bundle(request_);
     if (!bundle)
       return;
-    const auto plan = plans_.find(bundle->id);
-    if (plan != plans_.end()
+    const auto plan = plans_.engine.find(bundle->id);
+    if (plan != plans_.engine.end()
         && plan->second.kind == molresponse_v3::StatePlan::Kind::load
         && plan->second.met
         && metadata.at("excited_states").contains(plan->second.loaded_key))
@@ -1282,11 +1130,12 @@ public:
         = event.at("perturbation").get_ref<const std::string&>();
     const auto& protocol = event.at("protocol").get_ref<const std::string&>();
     if (event.value("kind", "") == "excited_states")
-      solved_.insert(bundle_key(perturbation, protocol));
+      totals_.solved.insert(bundle_key(perturbation, protocol));
     else
-      solved_.insert(state_key(perturbation, protocol,
-                               molresponse_v3::ResponseMetadata::freq_key(
-                                   event.at("frequency").get<double>())));
+      totals_.solved.insert(
+          state_key(perturbation, protocol,
+                    molresponse_v3::ResponseMetadata::freq_key(
+                        event.at("frequency").get<double>())));
     // A bundle restarted from its own saved rungs is resumed, as an FD state
     // restarted from its own is.
     const auto& seed = event.at("seed");
@@ -1343,11 +1192,13 @@ private:
     m.generation = "g-" + stage_.name + "-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
     m.reference = reference_;
-    m.numerical = {{"request", request_},
-                   {"attempt_directory", attempt_.string()},
-                   {"engine_metadata", metadata},
-                   {"states", state_records(metadata)},
-                   {"plans", plan_records_}};
+    m.numerical = {
+        {"request", request_},
+        {"attempt_directory", attempt_.string()},
+        {"engine_metadata", metadata},
+        {"states", response_state_records(
+                       metadata, reference_.value("generation", ""), totals_)},
+        {"plans", plans_.records}};
     m.targets = {{"dconv", request_.at("dconv")}};
     m.position = position;
     m.position["iterations_this_run"] = iterations;
@@ -1367,7 +1218,7 @@ private:
     const auto names = members(metadata);
     if (converged)
       require(request_complete(metadata, request_, natom_,
-                               loaded_states(plan_records_)),
+                               loaded_states(plans_.records)),
               "analysis lacks converged prerequisites");
     // Writers have already closed collectively. Copy the complete prerequisite
     // set; immutable generations never share writable files with an attempt.
@@ -1404,4 +1255,221 @@ private:
     latest_ = checkpoint::read_published(world_, store_);
   }
 };
+
+// The stage's request (D-019): what its states are planned against and what
+// a generation's request must equal to be loaded whole.
+inline json response_request(const Stage& stage) {
+  const auto& cp = stage.params.get<CalculationParameters>();
+  // The request is keyed on the properties the stage names (D-019): each
+  // with its frequencies and components, Raman with its atoms and
+  // directions as written (empty: every atom, x y z).
+  json properties = json::object();
+  for (const auto& name : stage.properties) {
+    if (name == "polarizability")
+      properties[name] = {{"frequencies", stage.frequencies},
+                          {"components", stage.components}};
+    else if (name == "hyperpolarizability")
+      properties[name]
+          = {{"frequencies", stage.hyperpolarizability.frequencies},
+             {"components", stage.hyperpolarizability.components}};
+    else if (name == "raman")
+      properties[name] = {{"frequencies", stage.raman.frequencies},
+                          {"components", stage.raman.components},
+                          {"atoms", stage.raman_atoms},
+                          {"directions", stage.raman_directions},
+                          {"full_set", stage.raman_full_set}};
+    else if (name == "excited_states")
+      properties[name] = {{"roots", stage.excited_states.roots},
+                          {"method", stage.excited_states.method},
+                          {"guess", stage.excited_states.guess},
+                          {"guess_basis", stage.excited_states.guess_basis}};
+    else
+      ResponseCheckpoint::require(false, "unsupported property " + name);
+  }
+  json request = {{"protocol", cp.protocol()},
+                  {"properties", properties},
+                  {"dconv", stage.params.get<ResponseParameters>().dconv()}};
+  const auto targets = molresponse_v3::fd_requested_accuracy_targets(
+      stage.params.get<ResponseParameters>());
+  if (!targets.empty())
+    request["accuracy_targets"] = targets;
+  // Who decides convergence (B8); reuse and property eligibility follow it.
+  request["decided_by"] = stage.params.get<ResponseParameters>().get<bool>(
+                              madness::convergence::use_default_criteria_key)
+                              ? "engine_check"
+                              : "requested_criteria";
+  const auto progress = molresponse_v3::fd_requested_progress(
+      stage.params.get<ResponseParameters>());
+  if (!progress.empty())
+    request["progress"] = progress;
+  const int diagnostic = stage.params.get<ResponseParameters>().get<int>(
+      "diagnostic.iterations_per_rung");
+  if (diagnostic > 0)
+    request["diagnostic_iterations_per_rung"] = diagnostic;
+  return request;
+}
+
+// B6, the planner's record of every response state in `metadata`, one per
+// (perturbation, frequency, rung): identity, reference generation, rung,
+// iterations at the rung across runs (recorded, never compared, D-007), how
+// it ended, whether it diverged, the deciding mode, and the raw
+// measurements (the deciding sample and the saved state, each with the norm
+// its relative limit uses). An excited-state bundle is one state per rung
+// (D-025), judged on its worst root, with the per-root rows inside.
+inline json response_state_records(const json& metadata,
+                                   const std::string& reference_generation,
+                                   const IterationTotals& totals) {
+  json records = json::array();
+  // Held in a local: iterating items() of the temporary value() returns
+  // would dangle.
+  const auto states = metadata.value("fd_states", json::object());
+  for (const auto& channel : states.items())
+    for (const auto& rung : channel.value().items()) {
+      const auto& protocol = metadata.at("protocols").at(rung.key());
+      for (const auto& point : rung.value().items()) {
+        const auto& e = point.value();
+        const auto key = ResponseCheckpoint::state_key(channel.key(),
+                                                       rung.key(), point.key());
+        const int total
+            = iterations_across_runs(totals, key, e.value("iter", 0));
+        std::ostringstream frequency;
+        frequency << std::setprecision(17) << e.at("freq").get<double>();
+        records.push_back(
+            {{"schema", "madqc.response.state.v1"},
+             {"key", key},
+             {"identity", channel.key() + "|" + frequency.str()},
+             {"perturbation", channel.key()},
+             {"frequency", e.at("freq")},
+             {"reference_generation", reference_generation},
+             {"rung",
+              {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
+             {"iterations_at_rung", total},
+             {"stop", response_stop(e)},
+             {"diverged", e.value("diverged", false)},
+             {"decided_by", e.value("checkpoint_decided_by", "engine_check")},
+             {"engine_measurements",
+              e.value("convergence_measurements", json::object())},
+             {"saved_measurements",
+              e.value("saved_state_validation", json::object())
+                  .value("measurements", json::object())}});
+      }
+    }
+  const auto bundles = metadata.value("excited_states", json::object());
+  for (const auto& rung : bundles.items()) {
+    const auto& e = rung.value();
+    const auto& protocol = metadata.at("protocols").at(rung.key());
+    const auto id = molresponse_v3::es_node_id(
+        e.at("type").get<std::string>() == "tda", e.at("n_roots").get<int>());
+    const auto key = ResponseCheckpoint::bundle_key(id, rung.key());
+    json roots = json::array();
+    for (const auto& root : e.at("roots"))
+      roots.push_back(
+          {{"root_id", root.value("root_id", "")},
+           {"omega", root.value("omega", json())},
+           {"converged", root.value("converged", false)},
+           {"locked", root.value("locked", false)},
+           {"stalled", root.value("stalled", false)},
+           {"density_residual", root.value("density_residual", json())},
+           {"omega_residual", root.value("omega_residual", json())}});
+    records.push_back(
+        {{"schema", "madqc.response.state.v1"},
+         {"key", key},
+         {"kind", "excited_states"},
+         {"identity", id},
+         {"perturbation", id},
+         {"frequency", nullptr},
+         {"reference_generation", reference_generation},
+         {"rung", {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
+         {"iterations_at_rung",
+          iterations_across_runs(totals, key, e.value("iter", 0))},
+         {"stop", e.contains("stop_reason")
+                      ? e.at("stop_reason").get<std::string>()
+                      : response_stop(e)},
+         {"diverged", e.value("diverged", false)},
+         {"decided_by", e.value("decided_by", "engine_check")},
+         {"engine_measurements", bundle_measurements(e)},
+         {"saved_measurements", json::object()},
+         {"roots", std::move(roots)}});
+  }
+  return records;
+}
+
+// B6: one plan per state the requested values need (response_needs), from
+// the generation's state records. `own` is the state's finest saved rung
+// the engine can use. Left out: a rung whose engine key equals a requested
+// rung's but whose threshold differs (keys round it; the engine holds one
+// definition per key), and a rung tighter than the final one (R3, deferred
+// for response, D-018): the analysis reads only states at or coarser than
+// the final rung, so such a state is solved again. A state with no usable
+// record starts from the nearest saved frequency (R4/R7, frequency_seed).
+// Quadratic sources are not planned: the engine builds them from their
+// legs and rebuilds one whose leg is solved again. R6 needs nothing here:
+// members() never publishes a diverged state, so the generation holds the
+// state's converged coarser rung and the next rung restarts from it.
+inline ResponsePlans
+plan_response_states(const Stage& stage, const json& stage_request, int natom,
+                     const std::string& reference_generation,
+                     const json& records) {
+  ResponsePlans plans;
+  std::map<std::string, double> requested_rungs;
+  auto request = ResponseCheckpoint::ladder_request(stage, reference_generation,
+                                                    requested_rungs);
+  for (const auto& [perturbation, frequency] :
+       response_needs(stage_request, natom).legs) {
+    std::ostringstream identity;
+    identity << perturbation.description() << '|' << std::setprecision(17)
+             << frequency;
+    request.identity = identity.str();
+    const auto own = ResponseCheckpoint::own_state(
+        records, request.identity, requested_rungs, request.ladder.back());
+    const auto seed = own ? std::nullopt
+                          : ResponseCheckpoint::frequency_seed(
+                                records, perturbation.description(), frequency,
+                                request.reference_generation, requested_rungs,
+                                request.ladder.front());
+    const auto channel = perturbation.description();
+    const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
+    ResponseCheckpoint::adopt(
+        plans, madness::planning::plan_ladder(own, seed, request), own, seed,
+        request, molresponse_v3::fd_node_id(perturbation, frequency),
+        {{"perturbation", channel}, {"frequency", frequency}},
+        [&](const std::string& protocol) {
+          return ResponseCheckpoint::state_key(channel, protocol, fkey);
+        });
+  }
+  // The excited-state bundle (D-025): one state, judged on its worst root
+  // against the engine's own check; no seed (the engine cannot start a
+  // bundle from another root count or method, DESIGN §5).
+  if (const auto bundle = requested_bundle(stage_request)) {
+    request.identity = bundle->id;
+    request.engine_limits
+        = bundle_engine_limits(stage, request.ladder.back().thresh);
+    // The written targets are the dipole legs' (B3: excited states have
+    // none yet; the engine check decides a bundle).
+    for (auto& metric : request.settings.metrics)
+      if (metric.group == madness::convergence::Group::requested_criteria)
+        metric.target.reset();
+    const auto own = ResponseCheckpoint::own_state(
+        records, bundle->id, requested_rungs, request.ladder.back());
+    auto plan = madness::planning::plan_ladder(own, std::nullopt, request);
+    if (!own)
+      for (const auto& record : records)
+        if (record.value("kind", "") == "excited_states") {
+          plan.why += "; the saved bundle is "
+                      + record.at("identity").get<std::string>()
+                      + ", another method or root count, so this one "
+                        "starts fresh";
+          break;
+        }
+    ResponseCheckpoint::adopt(
+        plans, plan, own, std::nullopt, request, bundle->id,
+        {{"kind", "excited_states"},
+         {"method", bundle->tda ? "tda" : "rpa"},
+         {"roots", bundle->roots}},
+        [&](const std::string& protocol) {
+          return ResponseCheckpoint::bundle_key(bundle->id, protocol);
+        });
+  }
+  return plans;
+}
 } // namespace named_stages
