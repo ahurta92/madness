@@ -13,19 +13,21 @@
 
 // Execute the validated stages from NamedStages.hpp using the existing engines.
 // Flow: read/validate -> create output directories -> run stages -> write
-// reports. Application adapters publish immutable ground and response checkpoints.
+// reports. Application adapters publish immutable ground and response
+// checkpoints.
 namespace named_stages {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 // All ranks call this helper. Rank 0 performs the operation, then broadcasts
 // any standard exception so every rank takes the same error path.
-template <class F> void on_root(madness::World &world, F operation) {
+template <class F>
+void on_root(madness::World& world, F operation) {
   std::string error;
   if (world.rank() == 0) {
     try {
       operation();
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
       error = e.what();
     }
   }
@@ -34,8 +36,8 @@ template <class F> void on_root(madness::World &world, F operation) {
     throw std::runtime_error(error);
 }
 // Write an ordinary result report. This is not atomic checkpoint publication.
-inline void write_result(madness::World &world, const fs::path &file,
-                         const json &value) {
+inline void write_result(madness::World& world, const fs::path& file,
+                         const json& value) {
   on_root(world, [&] {
     std::ofstream output(file);
     output.exceptions(std::ios::failbit | std::ios::badbit);
@@ -341,7 +343,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   // The engine's property/evidence JSON exists on root only.
   on_root(world, [&] {
     auto selected = select_response_properties(
-        stage, response.properties, response.vibrational_analysis,
+        stage, response.properties,response.metadata, response.vibrational_analysis,
         response.raman_spectra, static_cast<int>(molecule.natom()));
     converged = all_requested_converged(selected);
     for (auto& [name, record] : selected.items()) {
@@ -399,8 +401,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
 /// Returns false for the existing unnamed input surface. Missing default input
 /// is left to that path, which also accepts geometry supplied on the command
 /// line.
-inline bool run_if_named(madness::World &world,
-                         const madness::commandlineparser &parser) {
+inline bool run_if_named(madness::World& world,
+                         const madness::commandlineparser& parser) {
   // 1. Read once and give every rank the same input text.
   std::string text;
   on_root(world, [&] {
@@ -419,17 +421,17 @@ inline bool run_if_named(madness::World &world,
 
   // 2. Settings belong to named blocks, so global scientific overrides are
   // rejected.
-  for (const auto &option : parser.keyval) {
-    if (option.first != "input" && option.first != "prefix" &&
-        option.first != "continue" &&
-        option.first != "user_defined_input_file" &&
-        option.first != "user_defined_prefix")
+  for (const auto& option : parser.keyval) {
+    if (option.first != "input" && option.first != "prefix"
+        && option.first != "continue"
+        && option.first != "user_defined_input_file"
+        && option.first != "user_defined_prefix")
       throw std::runtime_error("named stages: put settings inside their stage; "
-                               "unsupported option --" +
-                               option.first);
+                               "unsupported option --"
+                               + option.first);
   }
-  auto stages =
-      parse(world, text); // validate the complete deck before creating outputs
+  auto stages = parse(
+      world, text); // validate the complete deck before creating outputs
 
   const bool continuing = parser.key_exists("continue");
 
@@ -445,16 +447,16 @@ inline bool run_if_named(madness::World &world,
     fs::create_directories(root.parent_path());
     if (continuing ? !fs::is_directory(root) : !fs::create_directory(root))
       throw std::runtime_error(
-          "fresh named-stage run requires a new output directory: " +
-          root.string());
+          "fresh named-stage run requires a new output directory: "
+          + root.string());
     root_string = root.string();
     run_id = std::to_string(
-                 std::chrono::system_clock::now().time_since_epoch().count()) +
-             "-" + std::to_string(getpid());
-    for (const auto &stage : stages)
+                 std::chrono::system_clock::now().time_since_epoch().count())
+             + "-" + std::to_string(getpid());
+    for (const auto& stage : stages)
       if (!fs::create_directory(root / stage.name) && !continuing)
-        throw std::runtime_error("stage output directory collision: " +
-                                 stage.name);
+        throw std::runtime_error("stage output directory collision: "
+                                 + stage.name);
   });
   world.gop.broadcast_serializable(root_string, 0);
   world.gop.broadcast_serializable(run_id, 0);
@@ -472,7 +474,7 @@ inline bool run_if_named(madness::World &world,
                 {"stages", json::array()}};
 
   // 4. Execute in input order; parse() has already checked the references.
-  for (auto &stage : stages) {
+  for (auto& stage : stages) {
     const fs::path stage_directory = root / stage.name;
     const fs::path directory = stage_directory / ("attempt-" + run_id);
     on_root(world, [&] {
@@ -498,9 +500,9 @@ inline bool run_if_named(madness::World &world,
     index["stages"].push_back(result);
     write_result(world, root / "results.json", index);
     if (!outcome.converged)
-      throw std::runtime_error("stage " + stage.name +
-                               " did not satisfy its requested convergence "
-                               "criteria; see results.json");
+      throw std::runtime_error("stage " + stage.name
+                               + " did not satisfy its requested convergence "
+                                 "criteria; see results.json");
     outcomes.emplace(stage.name, std::move(outcome));
   }
   if (world.rank() == 0)
