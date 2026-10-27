@@ -471,9 +471,10 @@ best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
 /// (target_thresh, target_k). "Usable" = same type and shell, the same root
 /// count when the entry records one, COARSER-OR-EQUAL to the target, and NOT
 /// `diverged` (never re-seed from a blown-up bundle — review finding C4; the FD
-/// twin above has the same rule). Exact target_key first, else closest-to-target
-/// (max k, then min thresh). "" if none. Pure: reads only the json. Used by
-/// try_load_es_bundle.
+/// twin above has the same rule), and not an entry under the target's own key
+/// saved at another threshold (D-030, as D-022 for the FD twin). Exact
+/// target_key first, else closest-to-target (max k, then min thresh). "" if
+/// none. Pure: reads only the json. Used by try_load_es_bundle.
 inline std::string
 best_usable_es_source_key(const nlohmann::json &meta, const std::string &want_type,
                           const std::string &want_shell, int n_roots,
@@ -493,6 +494,9 @@ best_usable_es_source_key(const nlohmann::json &meta, const std::string &want_ty
     if (!protos.contains(key))                           continue;
     const double t  = protos[key].value("thresh", 0.0);
     const int    kk = protos[key].value("k", 0);
+    if (key == target_key &&
+        std::abs(t - target_thresh) > 1e-12 * std::max(t, target_thresh))
+      continue;  // aliased: the same key under another threshold
     if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
   }
   if (cands.empty()) return {};

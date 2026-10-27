@@ -441,6 +441,23 @@ int main() {
            "the same threshold is still the exact source");
   }
 
+  // ---- best_usable_es_source_key: an aliased bundle is not a source -------
+  std::printf("=== best_usable_es_source_key, aliased key ===\n");
+  {
+    const nlohmann::json bundle = {{"type", "tda"}, {"shell", "closed_shell"},
+                                   {"n_roots", 1}, {"converged", true}};
+    nlohmann::json meta = {
+        {"protocols", {{"1e-04_k6", {{"thresh", 1e-4}, {"k", 6}}},
+                       {"1e-06_k8", {{"thresh", 1.01e-6}, {"k", 8}}}}},
+        {"excited_states", {{"1e-04_k6", bundle}, {"1e-06_k8", bundle}}}};
+    EXPECT(molresponse_v3::best_usable_es_source_key(meta, "tda", "closed_shell", 1,
+                                                     1e-6, 8, "1e-06_k8") == "1e-04_k6",
+           "a bundle saved under another threshold of the same key is skipped");
+    EXPECT(molresponse_v3::best_usable_es_source_key(meta, "tda", "closed_shell", 1,
+                                                     1.01e-6, 8, "1e-06_k8") == "1e-06_k8",
+           "the same threshold is still the exact source");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);
