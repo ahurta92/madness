@@ -638,9 +638,12 @@ class ResponseCheckpoint {
   // rung's but whose threshold differs (keys round it; the engine holds one
   // definition per key), and a rung tighter than the final one (R3, deferred
   // for response, D-018): the analysis reads only states at or coarser than
-  // the final rung, so such a state is solved again. Quadratic sources are
-  // not planned: the engine builds them from their legs and rebuilds one
-  // whose leg is solved again.
+  // the final rung, so such a state is solved again. A state with no usable
+  // record starts from the nearest saved frequency (R4/R7, frequency_seed).
+  // Quadratic sources are not planned: the engine builds them from their
+  // legs and rebuilds one whose leg is solved again. R6 needs nothing here:
+  // members() never publishes a diverged state, so the generation holds the
+  // state's converged coarser rung and the next rung restarts from it.
   void plan_states(const json& records) {
     std::map<std::string, double> requested_rungs;
     auto request = ladder_request(requested_rungs);
@@ -652,9 +655,48 @@ class ResponseCheckpoint {
       request.identity = identity.str();
       const auto own = own_state(records, request.identity, requested_rungs,
                                  request.ladder.back());
-      adopt(madness::planning::plan_ladder(own, std::nullopt, request), own,
+      const auto seed
+          = own ? std::nullopt
+                : frequency_seed(records, perturbation.description(), frequency,
+                                 request.reference_generation, requested_rungs,
+                                 request.ladder.front());
+      adopt(madness::planning::plan_ladder(own, seed, request), own, seed,
             request, perturbation, frequency);
     }
+  }
+
+  // R4/R7: the same perturbation's saved state nearest in frequency (on a
+  // tie the lower), at the finest rung the start rung can load (coarser or
+  // equal, not aliased): the record of the state the engine's picker loads.
+  [[nodiscard]] static std::optional<madness::planning::SavedState>
+  frequency_seed(const json& records, const std::string& perturbation,
+                 double frequency, const std::string& reference_generation,
+                 const std::map<std::string, double>& requested_rungs,
+                 const madness::planning::Rung& start) {
+    std::vector<madness::planning::SavedState> usable;
+    for (const auto& record : records) {
+      if (record.at("perturbation") != perturbation)
+        continue;
+      auto saved = response_saved_state(record);
+      const auto rung = requested_rungs.find(
+          molresponse_v3::protocol_key(saved.rung.thresh, saved.rung.k));
+      const bool aliased
+          = rung != requested_rungs.end() && rung->second != saved.rung.thresh;
+      if (!aliased && saved.rung.thresh >= start.thresh
+          && saved.rung.k <= start.k)
+        usable.push_back(std::move(saved));
+    }
+    auto seed = madness::planning::nearest_seed(
+        usable, perturbation, reference_generation, frequency);
+    if (!seed)
+      return seed;
+    for (const auto& state : usable)
+      if (!state.diverged && state.frequency == seed->frequency
+          && (state.rung.k > seed->rung.k
+              || (state.rung.k == seed->rung.k
+                  && state.rung.thresh < seed->rung.thresh)))
+        seed = state;
+    return seed;
   }
 
   // The request every state of this stage is planned against, less its
@@ -711,17 +753,17 @@ class ResponseCheckpoint {
   // (resumed_) and the record for results.json and the manifest.
   void adopt(const madness::planning::LadderPlan& plan,
              const std::optional<madness::planning::SavedState>& own,
+             const std::optional<madness::planning::SavedState>& seed,
              const madness::planning::LadderRequest& request,
              const molresponse_v3::Perturbation& perturbation,
              double frequency) {
     namespace planning = madness::planning;
     using Kind = molresponse_v3::StatePlan::Kind;
-    require(plan.action != planning::Action::seed,
-            "no response seed was offered");
     const std::map<planning::Action, const char*> words
         = {{planning::Action::load, "loaded"},
            {planning::Action::resume, "resumed"},
-           {planning::Action::fresh, "fresh"}};
+           {planning::Action::fresh, "fresh"},
+           {planning::Action::seed, "seeded"}};
     const auto channel = perturbation.description();
     const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
     const auto& start = request.ladder.at(plan.start_rung);
@@ -755,6 +797,11 @@ class ResponseCheckpoint {
         resumed_.insert(state_key(
             channel, molresponse_v3::protocol_key(start.thresh, start.k),
             fkey));
+    } else if (plan.action == planning::Action::seed) {
+      engine_plan.kind = Kind::seed;
+      engine_plan.seed_frequency = seed->frequency;
+      record["seed_from"] = plan.seed_from;
+      record["seed_frequency"] = seed->frequency;
     } else {
       engine_plan.kind = Kind::fresh;
     }
@@ -889,7 +936,9 @@ public:
                              molresponse_v3::ResponseMetadata::freq_key(
                                  event.at("frequency").get<double>())));
     auto item = event;
-    item["work"] = event.at("seed") == "fd_restart" ? "resumed" : "solved";
+    item["work"] = event.at("seed") == "fd_restart"          ? "resumed"
+                   : event.at("seed") == "nearest_frequency" ? "seeded"
+                                                             : "solved";
     work_items.push_back(item);
     const auto metadata = read_metadata();
     publish(metadata, false, false, event);

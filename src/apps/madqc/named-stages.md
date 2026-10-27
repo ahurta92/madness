@@ -194,8 +194,12 @@ that state's records in the generation (`numerical.states`), by the same
 rules: saved values are re-judged against today's engine limits and written
 targets; a finished rung is never redone; a state that meets the request is
 loaded; a final rung that stalled with the request unmet is loaded and
-reported unmet; a state with no record (a new frequency or channel, or a
-changed exact frequency) is solved fresh. The saved functions and the engine's
+reported unmet; a state with no record (a new frequency, or a changed exact
+frequency) starts at the first rung from the same perturbation's saved state
+at the nearest frequency, the lower one on a tie (`action: seeded`, with
+`seed_from` and `seed_frequency`), and a new perturbation with nothing saved
+is solved fresh. A state the request no longer names is left in the
+generation, neither loaded nor deleted. The saved functions and the engine's
 state entries are copied into a private attempt unchanged (only the derived
 property rows and the Raman normal-mode analysis are left out), and the plans
 are passed to the engine as input. Quadratic sources are not planned: the
@@ -214,8 +218,9 @@ key equals a requested rung's but whose threshold differs (keys round it, e.g.
 every requested rung (the analysis reads only states at or coarser than the
 final rung). The stage's `results.json` `continuation` block has one record
 per state: `state`, `perturbation`, `frequency`, `action` (`loaded`,
-`resumed`, `fresh`), the start `rung`, `iterations_done_at_rung`, `why`,
-`unmet`, `unmet_not_enforceable` and a `summary`; the generation records the
+`resumed`, `seeded`, `fresh`), the start `rung`, `iterations_done_at_rung`,
+`why`, `unmet`, `unmet_not_enforceable` and a `summary` (a seeded state also
+`seed_from` and `seed_frequency`); the generation records the
 same list as `numerical.plans`. The stage's `work` is `analyzed` when only the
 analysis ran, else `resumed`. Adding frequencies preserves compatible saved
 states. `iterations_this_run` counts response iterations across channels and

@@ -551,6 +551,29 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
       seed_kind = "fd_restart";
     }
   }
+  // Named --continue (R4/R7): a new state starts from the same perturbation's
+  // saved state at the nearest frequency, at the start rung only. Any saved
+  // state comes back as (X, Y) (static: Y = X); a static target keeps X.
+  if (!seeded && action != NodeAction::Fresh) {
+    const auto plan = ctx.state_plans.find(fd_node_id(pert, freq));
+    const auto from = plan == ctx.state_plans.end()
+                          ? std::nullopt
+                          : seed_start(plan->second, thresh);
+    if (from) {
+      if (auto xy = detail_exec::load_fd_as_xy<Shell>(world, ctx.calc_dir, pert,
+                                                      *from)) {
+        if constexpr (std::is_same_v<Type, Full>) {
+          s0.responses[0] = std::move(*xy);
+        } else {
+          s0.responses[0].x_alpha = std::move(xy->x_alpha);
+          if constexpr (std::is_same_v<Shell, OpenShell>)
+            s0.responses[0].x_beta = std::move(xy->x_beta);
+        }
+        seeded = true;
+        seed_kind = "nearest_frequency";
+      }
+    }
+  }
   // Cross-type seed: a derived FD (es_root_id set) starts from its converged
   // ES-root vector. The root is ResponseStateX (X only); for FD Full we seed
   // x = y = X. Only Full/ClosedShell derived FDs use it, and only when enabled.

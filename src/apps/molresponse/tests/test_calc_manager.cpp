@@ -716,6 +716,18 @@ int main() {
                      NodeAction::Resume,
            "fresh: a finer rung is solved once in this run even if an entry exists");
 
+    // seed (R4/R7): no entry of its own; the start rung loads the neighbour.
+    StatePlan seed{StatePlan::Kind::seed, 1e-4, ""};
+    seed.seed_frequency = 0.05;
+    EXPECT(fd && planned_action(*fd, empty_meta(), 1e-4, seed, {}) == NodeAction::Restart,
+           "seed: the start rung restarts (from the seed)");
+    EXPECT(seed_start(seed, 1e-4) == std::optional<double>(0.05) &&
+               !seed_start(seed, 1e-6) && !seed_start(resume, 1e-6),
+           "seed_start: the seed frequency at the start rung only, seed plans only");
+    EXPECT(fd && planned_action(*fd, coarse, 1e-6, seed, {fd->id + "|" + k4}) ==
+                     NodeAction::Restart,
+           "seed: a finer rung restarts from the state's own coarser rung");
+
     // schedule: the planned state takes the plan; an unplanned one reconciles.
     const StatePlans plans{{fd ? fd->id : "", resume}};
     auto waves = schedule(dag, P, m, /*max_iters=*/8, 0, plans);

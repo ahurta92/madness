@@ -115,6 +115,26 @@ for path, digest in original.items():
     if path != 'manifest.json':
         assert hashes(added)[path] == digest
 assert hashes(generation) == original
+# R4/R7: the new frequency starts at rung 1 from the nearest saved one (omega 0).
+added_states = {s['frequency']: s for s in result(fresh)['continuation']['states']}
+assert added_states[0.0]['action'] == 'loaded'
+assert added_states[0.02]['action'] == 'seeded' and added_states[0.02]['seed_frequency'] == 0.0
+assert added_states[0.02]['rung']['index'] == 1
+assert [i['work'] for i in result(fresh)['work_items']][0] == 'seeded'
+print('add-frequency iterations (seeded from omega 0):',
+      [(i['protocol'], i['iterations']) for i in result(fresh)['work_items']], flush=True)
+
+# R5: a frequency dropped from the request is not planned, loaded or deleted.
+removed = work / 'Removed'
+shutil.copytree(fresh, removed)
+run('removed-frequency', removed, one, resume=True)
+assert [s['frequency'] for s in result(removed)['continuation']['states']] == [0.0]
+assert result(removed)['iterations_this_run'] == 0
+kept = hashes(published(removed)[0])
+assert any('f0.02000' in path for path in kept)
+for path, digest in hashes(added).items():
+    if 'f0.02000' in path:
+        assert kept[path] == digest, path
 
 # The planner decides each state on its own (DESIGN B6, D-016). Selecting the
 # generation saved after omega 0.02 finished rung 1 leaves omega 0 complete at
