@@ -1860,7 +1860,8 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
   const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   auto fd_acc = [&](const Perturbation &p, double f) -> nlohmann::json {
-    return fd_leg_accuracy(acc_meta, p, f, acc_thr, acc_k, key);  // rank-0 only
+    return fd_leg_accuracy(acc_meta, p, f, acc_thr, acc_k, key,
+                           ctx.state_plans);  // rank-0 only
   };
 
   // Full Raman plans carry the all-atoms nuclear sentinel on the C side; the
@@ -1949,14 +1950,19 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
         // sub-structures. The row is converged iff all three FD legs met the
         // strict target (VBC itself is non-iterative, so its always-true
         // verdict adds no signal — the FD legs carry the real accuracy).
+        // A leg the planner loaded counts as met, and the row says the
+        // planner decided (D-016), as alpha's rows do.
         {
-          bool all_conv = true; double max_res = 0.0;
+          bool all_conv = true, planner = false; double max_res = 0.0;
           for (const auto &leg : row["row_accuracy"]) {
-            all_conv = all_conv && leg.value("converged", false);
+            const bool met = leg.value("met", false);
+            all_conv = all_conv && (leg.value("converged", false) || met);
+            planner  = planner || met;
             max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
           }
           row["converged"]        = all_conv;
           row["max_bsh_residual"] = max_res;
+          if (planner) row["decided_by"] = "planner";
         }
         rows.emplace_back(pkey, std::move(row));
       }

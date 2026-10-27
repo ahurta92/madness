@@ -383,6 +383,45 @@ int main() {
            "other keys are kept");
   }
 
+  // ---- a leg saved again drops the quadratic sources built from it ---------
+  std::printf("=== drop_vbc_built_from ===\n");
+  {
+    auto m = ResponseMetadata::load_or_create((tmp / "vbc.json").string());
+    const std::string f0 = ResponseMetadata::freq_key(0.0);
+    const std::string f2 = ResponseMetadata::freq_key(0.02);
+    const nlohmann::json leg = {{"freq", 0.02}, {"converged", true}, {"iter", 5}};
+    for (const char *key : {"1e-04_k6", "1e-06_k8"}) {
+      m.set_fd_state("dipole_z", key, f2, leg);
+      m.set_fd_state("nuc_1_z", key, f0, leg);
+      for (const char *id : {"vbc:dipole_z__dipole_z@f0.02000_f0.02000",
+                             "vbc:dipole_x__dipole_z@f0.02000_f0.02000",
+                             "vbc:dipole_z__nuc_1_z@f0.02000_f0.00000",
+                             "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+                             "vbc:dipole_x__nuc_1_z@f0.02000_f0.00000"})
+        m.set_vbc_state(id, key, {{"converged", true}});
+    }
+    m.set_fd_state("dipole_z", "1e-06_k8", f2, leg);  // identical: a re-merge
+    EXPECT(m.json()["vbc_states"]["vbc:dipole_z__dipole_z@f0.02000_f0.02000"]
+               .contains("1e-06_k8"),
+           "an identical entry keeps the sources");
+    auto resolved = leg;
+    resolved["iter"] = 3;
+    m.set_fd_state("dipole_z", "1e-06_k8", f2, resolved);  // solved again
+    const auto &vbc = m.json()["vbc_states"];
+    for (const char *id : {"vbc:dipole_z__dipole_z@f0.02000_f0.02000",
+                           "vbc:dipole_x__dipole_z@f0.02000_f0.02000",
+                           "vbc:dipole_z__nuc_1_z@f0.02000_f0.00000"})
+      EXPECT(!vbc[id].contains("1e-06_k8") && vbc[id].contains("1e-04_k6"),
+             "a source built from the leg is dropped at that rung only");
+    EXPECT(vbc["vbc:dipole_z__dipole_z@f0.00000_f0.00000"].contains("1e-06_k8"),
+           "the same channel at another frequency is not an input");
+    EXPECT(vbc["vbc:dipole_x__nuc_1_z@f0.02000_f0.00000"].contains("1e-06_k8"),
+           "a source without the leg is kept");
+    m.drop_fd_rung("1e-04_k6");
+    EXPECT(!vbc["vbc:dipole_x__nuc_1_z@f0.02000_f0.00000"].contains("1e-04_k6"),
+           "a redefined key drops its sources too");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);

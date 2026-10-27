@@ -4,6 +4,7 @@
 
 #include "NamedStages.hpp"
 #include <apps/molresponse/solvers/fd_save_load.hpp>
+#include <apps/molresponse/solvers/vbc_save_load.hpp>
 #include <madness/chem/StageCheckpoint.h>
 
 #include <apps/molresponse/calc/calc_manager.hpp>
@@ -206,8 +207,106 @@ response_saved_state(const json& record) {
   return state;
 }
 
-// Scientific policy for the named HF/polarizability frontend. The engine still
-// owns state serialization, restart guesses, protocol scheduling and analysis.
+// The response states a request's selected values are built from (D-017,
+// D-019): FD legs (perturbation, frequency) and quadratic sources (VBC node
+// ids), in request order, each once. The engine may solve more (it takes one
+// grid and one axis set for every property); those extras feed no selected
+// value.
+//   polarizability alpha_AB(w): the A and B legs at w.
+//   hyperpolarizability beta_ABC(-2w; w, w): the A leg at 2w, the B and C
+//     legs at w, the source of B and C at (w, w).
+//   raman d(alpha_AB)/dQ(w): the A and B legs at w, the nuclear leg Q at 0,
+//     the source of B and Q at (w, 0); Q spans atoms x directions, every atom
+//     of the reference and x, y, z when one is empty (raman_coordinates).
+// A request's properties. One saved before the request named its properties
+// (polarizability only) carried its frequencies and components at the top.
+[[nodiscard]] inline json requested_properties(const json& request) {
+  if (request.contains("properties"))
+    return request.at("properties");
+  return {{"polarizability",
+           {{"frequencies", request.at("frequencies")},
+            {"components", request.at("components")}}}};
+}
+
+struct ResponseNeeds {
+  std::vector<std::pair<molresponse_v3::Perturbation, double>> legs;
+  std::vector<std::string> sources;
+};
+[[nodiscard]] inline ResponseNeeds response_needs(const json& request,
+                                                  int natom) {
+  using molresponse_v3::Perturbation;
+  ResponseNeeds needs;
+  std::set<std::string> seen;
+  const auto leg = [&](const Perturbation& p, double frequency) {
+    if (seen.insert(molresponse_v3::fd_node_id(p, frequency)).second)
+      needs.legs.emplace_back(p, frequency);
+  };
+  const auto source = [&](const Perturbation& b, const Perturbation& c,
+                          double fb, double fc) {
+    auto id = molresponse_v3::vbc_node_id(b, c, fb, fc);
+    if (seen.insert(id).second)
+      needs.sources.push_back(std::move(id));
+  };
+  const auto dipole
+      = [](char axis) { return Perturbation::dipole(axis - 'x'); };
+  const auto properties = requested_properties(request);
+  if (properties.contains("polarizability")) {
+    const auto& r = properties.at("polarizability");
+    std::set<char> axes;
+    for (const auto& component : r.at("components"))
+      for (char axis : component.get<std::string>())
+        axes.insert(axis);
+    for (double frequency : r.at("frequencies"))
+      for (char axis : axes)
+        leg(dipole(axis), frequency);
+  }
+  if (properties.contains("hyperpolarizability")) {
+    const auto& r = properties.at("hyperpolarizability");
+    for (double frequency : r.at("frequencies"))
+      for (const auto& component : r.at("components")) {
+        const auto abc = component.get<std::string>();
+        leg(dipole(abc[0]), 2.0 * frequency);
+        leg(dipole(abc[1]), frequency);
+        leg(dipole(abc[2]), frequency);
+        source(dipole(abc[1]), dipole(abc[2]), frequency, frequency);
+      }
+  }
+  if (properties.contains("raman")) {
+    const auto& r = properties.at("raman");
+    auto atoms = r.at("atoms").get<std::vector<int>>();
+    if (atoms.empty())
+      for (int atom = 0; atom < natom; ++atom)
+        atoms.push_back(atom);
+    auto directions = r.at("directions").get<std::string>();
+    if (directions.empty())
+      directions = "xyz";
+    for (double frequency : r.at("frequencies"))
+      for (int atom : atoms)
+        for (char axis : directions) {
+          const auto nuclear = Perturbation::nuclear(atom, axis - 'x');
+          for (const auto& component : r.at("components")) {
+            const auto ab = component.get<std::string>();
+            leg(dipole(ab[0]), frequency);
+            leg(dipole(ab[1]), frequency);
+            leg(nuclear, 0.0);
+            source(dipole(ab[1]), nuclear, frequency, 0.0);
+          }
+        }
+  }
+  return needs;
+}
+
+// The engine's name for each named response property's rows.
+[[nodiscard]] inline std::string engine_property(const std::string& name) {
+  static const std::map<std::string, std::string> names
+      = {{"polarizability", "alpha"},
+         {"hyperpolarizability", "beta"},
+         {"raman", "raman"}};
+  return names.at(name);
+}
+
+// Scientific policy for the named response frontend. The engine still owns
+// state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
   using Manifest = madness::checkpoint::Manifest;
   madness::World& world_;
@@ -215,6 +314,7 @@ class ResponseCheckpoint {
   std::filesystem::path store_, attempt_;
   std::string run_id_;
   json reference_, request_;
+  int natom_;
   Manifest latest_;
   bool restored_ = false, loaded_ = false;
   std::size_t sequence_ = 0;
@@ -296,13 +396,25 @@ class ResponseCheckpoint {
 
   // Derive the required archive inventory from state definitions, rather than
   // trusting whatever subset happens to be listed in the storage manifest.
+  // Dipole legs and nuclear-displacement legs (nuc_<atom>_<axis>) are FD
+  // states; quadratic sources (vbc_states) are archives of their own.
+  // Excited states wait for B3.
   static std::vector<std::string> members(const json& metadata) {
     std::vector<std::string> names;
-    require(metadata.at("excited_states").empty() && metadata.at("vbc_states").empty(),
+    require(metadata.at("excited_states").empty(),
             "unsupported response bundle kind");
+    const auto nuclear_channel = [](const std::string& channel) {
+      const auto axis = channel.rfind('_');
+      return channel.starts_with("nuc_") && axis > 4
+             && axis + 2 == channel.size()
+             && std::string("xyz").find(channel.back()) != std::string::npos
+             && channel.find_first_not_of("0123456789", 4) == axis;
+    };
     for (const auto& channel : metadata.at("fd_states").items()) {
-      require(channel.key() == "dipole_x" || channel.key() == "dipole_y" ||
-              channel.key() == "dipole_z", "unsupported channel");
+      require(channel.key() == "dipole_x" || channel.key() == "dipole_y"
+                  || channel.key() == "dipole_z"
+                  || nuclear_channel(channel.key()),
+              "unsupported channel");
       for (const auto& rung : channel.value().items()) {
         const auto& protocol = metadata.at("protocols").at(rung.key());
         require(molresponse_v3::protocol_key(protocol.at("thresh"), protocol.at("k")) == rung.key(),
@@ -392,51 +504,81 @@ class ResponseCheckpoint {
         }
       }
     }
+    // A source is built once from two converged legs at its rung and saved
+    // converged; the engine drops it when a leg is solved again there.
+    for (const auto& source : metadata.at("vbc_states").items())
+      for (const auto& rung : source.value().items()) {
+        const auto& protocol = metadata.at("protocols").at(rung.key());
+        require(molresponse_v3::protocol_key(protocol.at("thresh"),
+                                             protocol.at("k"))
+                    == rung.key(),
+                "inconsistent protocol definition");
+        const auto& e = rung.value();
+        const auto name
+            = molresponse_v3::vbc_archive_basename(source.key(), rung.key());
+        require(e.value("converged", false) && !e.value("diverged", false),
+                "invalid quadratic source: not converged");
+        require(e.at("archive") == name && e.at("backend") == "native",
+                "inconsistent quadratic source archive");
+        names.push_back(name);
+      }
     std::sort(names.begin(), names.end());
     require(std::adjacent_find(names.begin(), names.end()) == names.end(), "duplicate state member");
     return names;
   }
 
-  // `loaded`: the state keys the planner loaded (D-016); their verdict is the
-  // planner's, so only their identity is checked here.
+  // Every leg and source the requested values are built from
+  // (response_needs) is at the final rung and converged. `loaded`: the state
+  // keys the planner loaded (D-016); their verdict is the planner's, so only
+  // their identity is checked here.
   static bool request_complete(const json& metadata, const json& request,
+                               int natom,
                                const std::set<std::string>& loaded = {}) {
     const double threshold = request.at("protocol").back();
     const auto key = molresponse_v3::protocol_key(threshold, protocol_k(threshold));
     if (!metadata.at("protocols").contains(key) ||
         metadata.at("protocols").at(key).at("thresh").get<double>() != threshold)
       return false;
-    std::set<char> axes;
-    for (const auto& c : request.at("components"))
-      for (char axis : c.get<std::string>()) axes.insert(axis);
-    for (double frequency : request.at("frequencies")) {
+    const auto needs = response_needs(request, natom);
+    for (const auto& [perturbation, frequency] : needs.legs) {
       const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
-      for (char axis : axes) {
-        const std::string channel = std::string("dipole_") + axis;
-        const auto& states = metadata.at("fd_states");
-        if (!states.contains(channel) || !states.at(channel).contains(key) ||
-            !states.at(channel).at(key).contains(fkey)) return false;
-        const auto& e = states.at(channel).at(key).at(fkey);
-        if (loaded.contains(state_key(channel, key, fkey))) {
-          if (e.at("freq").get<double>() != frequency
-              || e.value("diverged", false))
-            return false;
-          continue;
-        }
-        // Written targets block completion only when they decide (B8).
-        if (request.value("decided_by", "") == "requested_criteria"
-            && request.contains("accuracy_targets")) {
-          const auto measurements = e.value("saved_state_validation", json::object())
-              .value("measurements", json::object());
-          if (madness::evaluate_explicit_criteria(molresponse_v3::fd_accuracy_measurements(measurements),
-              request.at("accuracy_targets")).at("status") != "satisfied") return false;
-        }
-        if (e.at("freq").get<double>() != frequency ||
-            !e.at("converged").get<bool>() || e.value("accepted", false) ||
-            e.value("diverged", false) ||
-            e.at("checkpoint_dconv").get<double>() > request.at("dconv").get<double>()) return false;
+      const auto channel = perturbation.description();
+      const auto& states = metadata.at("fd_states");
+      if (!states.contains(channel) || !states.at(channel).contains(key)
+          || !states.at(channel).at(key).contains(fkey))
+        return false;
+      const auto& e = states.at(channel).at(key).at(fkey);
+      if (loaded.contains(state_key(channel, key, fkey))) {
+        if (e.at("freq").get<double>() != frequency
+            || e.value("diverged", false))
+          return false;
+        continue;
       }
+      // Written targets block completion only when they decide (B8).
+      if (request.value("decided_by", "") == "requested_criteria"
+          && request.contains("accuracy_targets")) {
+        const auto measurements
+            = e.value("saved_state_validation", json::object())
+                  .value("measurements", json::object());
+        if (madness::evaluate_explicit_criteria(
+                molresponse_v3::fd_accuracy_measurements(measurements),
+                request.at("accuracy_targets"))
+                .at("status")
+            != "satisfied")
+          return false;
+      }
+      if (e.at("freq").get<double>() != frequency
+          || !e.at("converged").get<bool>() || e.value("accepted", false)
+          || e.value("diverged", false)
+          || e.at("checkpoint_dconv").get<double>()
+                 > request.at("dconv").get<double>())
+        return false;
     }
+    const auto& sources = metadata.at("vbc_states");
+    for (const auto& id : needs.sources)
+      if (!sources.contains(id) || !sources.at(id).contains(key)
+          || !sources.at(id).at(key).value("converged", false))
+        return false;
     return true;
   }
 
@@ -458,15 +600,25 @@ class ResponseCheckpoint {
     }
     std::sort(actual.begin(), actual.end());
     require(!expected.empty() && expected == actual, "required response inventory is missing or inconsistent");
-    for (const auto& p : m.properties)
-      require(p.at("generation") == m.generation && p.at("name") == "polarizability" &&
-              p.at("value") == m.numerical.at("engine_metadata").at("properties"),
-              "property/state record is inconsistent");
+    // One record per requested property, its value the engine's rows.
+    const auto requested = requested_properties(m.numerical.at("request"));
+    const auto& engine_properties
+        = m.numerical.at("engine_metadata").at("properties");
+    std::set<std::string> recorded;
+    for (const auto& p : m.properties) {
+      const auto name = p.at("name").get<std::string>();
+      require(
+          p.at("generation") == m.generation && requested.contains(name)
+              && recorded.insert(name).second
+              && p.at("value")
+                     == engine_properties.value(engine_property(name), json()),
+          "property/state record is inconsistent");
+    }
     if (m.stop_reason == "converged")
-      require(m.properties.size() == 1
+      require(recorded.size() == requested.size()
                   && request_complete(
                       m.numerical.at("engine_metadata"),
-                      m.numerical.at("request"),
+                      m.numerical.at("request"), natom_,
                       loaded_states(m.numerical.value("plans", json::array()))),
               "completed property lacks converged prerequisites");
   }
@@ -480,31 +632,29 @@ class ResponseCheckpoint {
     return loaded;
   }
 
-  // B6: one plan per requested state, from the generation's state records.
-  // `own` is the state's finest saved rung the engine can use. Left out: a
-  // rung whose engine key equals a requested rung's but whose threshold
-  // differs (keys round it; the engine holds one definition per key), and a
-  // rung tighter than the final one (R3): the analysis reads only states at
-  // or coarser than the final rung, so such a state is solved again.
+  // B6: one plan per state the requested values need (response_needs), from
+  // the generation's state records. `own` is the state's finest saved rung
+  // the engine can use. Left out: a rung whose engine key equals a requested
+  // rung's but whose threshold differs (keys round it; the engine holds one
+  // definition per key), and a rung tighter than the final one (R3, deferred
+  // for response, D-018): the analysis reads only states at or coarser than
+  // the final rung, so such a state is solved again. Quadratic sources are
+  // not planned: the engine builds them from their legs and rebuilds one
+  // whose leg is solved again.
   void plan_states(const json& records) {
     std::map<std::string, double> requested_rungs;
     auto request = ladder_request(requested_rungs);
-    std::set<int> axes;
-    for (const auto& component : stage_.components)
-      for (char axis : component)
-        axes.insert(axis - 'x');
-    for (double frequency : stage_.frequencies)
-      for (int axis : axes) {
-        const auto perturbation = molresponse_v3::Perturbation::dipole(axis);
-        std::ostringstream identity;
-        identity << perturbation.description() << '|' << std::setprecision(17)
-                 << frequency;
-        request.identity = identity.str();
-        const auto own = own_state(records, request.identity, requested_rungs,
-                                   request.ladder.back());
-        adopt(madness::planning::plan_ladder(own, std::nullopt, request), own,
-              request, perturbation, frequency);
-      }
+    for (const auto& [perturbation, frequency] :
+         response_needs(request_, natom_).legs) {
+      std::ostringstream identity;
+      identity << perturbation.description() << '|' << std::setprecision(17)
+               << frequency;
+      request.identity = identity.str();
+      const auto own = own_state(records, request.identity, requested_rungs,
+                                 request.ladder.back());
+      adopt(madness::planning::plan_ladder(own, std::nullopt, request), own,
+            request, perturbation, frequency);
+    }
   }
 
   // The request every state of this stage is planned against, less its
@@ -618,15 +768,39 @@ public:
   std::string work = "solved";
   bool reference_changed = false;
 
+  // `natom`: the reference molecule's atom count, which "every atom" in a
+  // Raman request means.
   ResponseCheckpoint(madness::World& world, const Stage& stage,
                      const std::filesystem::path& stage_directory,
                      const std::filesystem::path& attempt, std::string run_id,
-                     json reference)
+                     json reference, int natom)
       : world_(world), stage_(stage), store_(stage_directory / "checkpoints"),
-        attempt_(attempt), run_id_(std::move(run_id)), reference_(std::move(reference)) {
+        attempt_(attempt), run_id_(std::move(run_id)),
+        reference_(std::move(reference)), natom_(natom) {
     const auto& cp = stage.params.get<CalculationParameters>();
-    request_ = {{"protocol", cp.protocol()}, {"frequencies", stage.frequencies},
-                {"components", stage.components},
+    // The request is keyed on the properties the stage names (D-019): each
+    // with its frequencies and components, Raman with its atoms and
+    // directions as written (empty: every atom, x y z).
+    json properties = json::object();
+    for (const auto& name : stage.properties) {
+      if (name == "polarizability")
+        properties[name] = {{"frequencies", stage.frequencies},
+                            {"components", stage.components}};
+      else if (name == "hyperpolarizability")
+        properties[name]
+            = {{"frequencies", stage.hyperpolarizability.frequencies},
+               {"components", stage.hyperpolarizability.components}};
+      else if (name == "raman")
+        properties[name] = {{"frequencies", stage.raman.frequencies},
+                            {"components", stage.raman.components},
+                            {"atoms", stage.raman_atoms},
+                            {"directions", stage.raman_directions},
+                            {"full_set", stage.raman_full_set}};
+      else
+        require(false, "unsupported property " + name);
+    }
+    request_ = {{"protocol", cp.protocol()},
+                {"properties", properties},
                 {"dconv", stage.params.get<ResponseParameters>().dconv()}};
     const auto targets = molresponse_v3::fd_requested_accuracy_targets(stage.params.get<ResponseParameters>());
     if (!targets.empty()) request_["accuracy_targets"] = targets;
@@ -678,9 +852,9 @@ public:
           = record.at("iterations_at_rung").get<int>();
     plan_states(records);
     // The engine's state entries are copied as saved (D7, D-016); the plans
-    // above steer it. Analysis is derived: old property rows are left out so
-    // they cannot certify this request.
-    metadata["properties"] = json::object();
+    // above steer it. Analysis is derived: old property rows and the Raman
+    // normal-mode analysis are left out so they cannot certify this request.
+    clear_analysis(metadata);
     checkpoint::detail::on_root(world_, [&] {
       for (const auto& a : latest_.archives)
         for (const auto& shard : a.shards)
@@ -702,6 +876,10 @@ public:
   }
   json metadata() const { return latest_.numerical.at("engine_metadata"); }
   json properties() const { return metadata().at("properties"); }
+  // The full Raman set's normal-mode analysis, where the engine keeps it.
+  [[nodiscard]] json analysis(const std::string& key) const {
+    return metadata().value(key, json());
+  }
 
   // Called collectively after native FD save and metadata update have finished.
   void observe(madness::World&, const json& event) {
@@ -726,6 +904,14 @@ public:
   }
 
 private:
+  // The engine's derived analysis: property rows, and the Raman normal-mode
+  // analysis and spectra of a full set.
+  static void clear_analysis(json& metadata) {
+    metadata["properties"] = json::object();
+    metadata.erase("vibrational_analysis");
+    metadata.erase("raman_spectra");
+  }
+
   json read_metadata() const {
     const auto text = madness::checkpoint::detail::on_root(world_, [&] {
       return madness::checkpoint::detail::read_json(attempt_ / "response_metadata.json").dump();
@@ -735,7 +921,8 @@ private:
 
   void publish(json metadata, bool analyzed, bool converged, const json& position) {
     namespace checkpoint = madness::checkpoint;
-    if (!analyzed) metadata["properties"] = json::object();
+    if (!analyzed)
+      clear_analysis(metadata);
     // Native saves replace entries but preserve their sample attempt identity.
     // Keep the corresponding request registry across intermediate publications.
     auto origins = metadata.value("checkpoint_requests", json::object());
@@ -764,14 +951,19 @@ private:
     // Keep analyzed values as diagnostics in engine_metadata, but an unmet
     // explicit request cannot publish them as eligible stage properties.
     if (analyzed && (converged || !targets_decide()))
-      m.properties.push_back({{"name", "polarizability"}, {"generation", m.generation},
-                              {"converged", converged}, {"value", metadata.at("properties")}});
+      for (const auto& name : stage_.properties)
+        m.properties.push_back(
+            {{"name", name},
+             {"generation", m.generation},
+             {"converged", converged},
+             {"value",
+              metadata.at("properties").value(engine_property(name), json())}});
     const auto directory = store_ / m.generation;
     const auto names = members(metadata);
     if (converged)
-      require(
-          request_complete(metadata, request_, loaded_states(plan_records_)),
-          "analysis lacks converged prerequisites");
+      require(request_complete(metadata, request_, natom_,
+                               loaded_states(plan_records_)),
+              "analysis lacks converged prerequisites");
     // Writers have already closed collectively. Copy the complete prerequisite
     // set; immutable generations never share writable files with an attempt.
     checkpoint::detail::on_root(world_, [&] {

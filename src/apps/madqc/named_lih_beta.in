@@ -3,10 +3,8 @@
 # Li-H 1.5949 angstrom), for the curator's V1 comparison through the named
 # path (D-017.5). One rung (protocol 1e-4): alpha_zz(0) and beta_zzz(0;0,0).
 # Run: madqc named_lih_beta.in --prefix=LiH-beta
-# Until the response checkpoint carries quadratic sources (D-017.2), the
-# parser refuses the quadratic stage: "hyperpolarizability and raman wait for
-# the response checkpoint". The same molecule and settings through the
-# unnamed path: src/examples/qc/response_lih_beta (its geometry differs).
+# The same molecule and settings through the unnamed path:
+# src/examples/qc/response_lih_beta (its geometry differs).
 molecule LiH
   units angstrom
   eprec 1e-6

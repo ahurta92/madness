@@ -1,9 +1,7 @@
 // The named property language (D-017) and the selectors that read the
 // engine's rows: pure functions, table-tested on synthetic rows. The parser
 // cases go through named_stages::parse; the mapping cases call
-// translate_response_properties directly, because parse still refuses
-// hyperpolarizability and raman at its end (D-017.2) until the response
-// checkpoint carries quadratic sources.
+// translate_response_properties directly.
 #include "NamedStages.hpp"
 #include "ResponseProperties.hpp"
 #include <iostream>
@@ -299,13 +297,24 @@ int main(int argc, char** argv) {
         "[0.0]\n"
         " hyperpolarizability.frequency_units au\n "
         "hyperpolarizability.components [zzz]\nend\n";
-  // D-017.2: a valid beta deck passes every check and stops at the last one.
-  rejects(geometry + gs + beta_deck, "wait for the response checkpoint");
-  rejects(geometry + gs
-              + "molresponse r\n reference gs\n protocol [1e-4]\n "
-                "requested_properties [raman]\n"
-                " raman.frequencies [0.0]\n raman.frequency_units au\nend\n",
-          "wait for the response checkpoint");
+  // The response checkpoint carries quadratic sources (D-019): valid beta
+  // and Raman decks parse.
+  try {
+    const auto beta = named_stages::parse(world, geometry + gs + beta_deck);
+    check(beta[1].properties
+              == std::vector<std::string>{"polarizability",
+                                          "hyperpolarizability"},
+          "parse: a beta deck is accepted");
+    const auto raman = named_stages::parse(
+        world, geometry + gs
+                   + "molresponse r\n reference gs\n protocol [1e-4]\n "
+                     "requested_properties [raman]\n"
+                     " raman.frequencies [0.0]\n raman.frequency_units "
+                     "au\nend\n");
+    check(raman[1].raman_full_set, "parse: a Raman deck is accepted");
+  } catch (const std::exception& e) {
+    check(false, e.what());
+  }
   try {
     const auto stages = named_stages::parse(
         world, geometry + gs

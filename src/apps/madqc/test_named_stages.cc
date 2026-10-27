@@ -1,5 +1,6 @@
 #include "MoldftCheckpoint.hpp"
 #include "NamedStages.hpp"
+#include "ResponseCheckpoint.hpp"
 #include <iostream>
 #include <stdexcept>
 
@@ -190,6 +191,31 @@ int main(int argc, char** argv) {
                                  key);
         rejects(geometry + gs + response_cadence,
                 "publishes at solve ends only");
+    }
+    // The states a response request's values are built from (D-019): each leg
+    // and source once, nuclear legs at 0, "every atom" from the reference.
+    {
+        const json request = {{"protocol", {1e-4}}, {"properties", {
+            {"polarizability", {{"frequencies", {0.0}}, {"components", {"zz"}}}},
+            {"hyperpolarizability", {{"frequencies", {0.0, 0.05}}, {"components", {"zzz", "xzz"}}}},
+            {"raman", {{"frequencies", {0.05}}, {"components", {"xz"}}, {"atoms", json::array()},
+                       {"directions", "z"}, {"full_set", false}}}}}};
+        const auto needs = named_stages::response_needs(request, 2);
+        std::vector<std::string> legs;
+        for (const auto& [p, f] : needs.legs) legs.push_back(molresponse_v3::fd_node_id(p, f));
+        const std::vector<std::string> expected_legs = {
+            "fd:dipole_z@f0.00000", "fd:dipole_x@f0.00000", "fd:dipole_z@f0.10000",
+            "fd:dipole_z@f0.05000", "fd:dipole_x@f0.10000", "fd:dipole_x@f0.05000",
+            "fd:nuc_0_z@f0.00000", "fd:nuc_1_z@f0.00000"};
+        check(legs == expected_legs, "response_needs: the legs, each once, in request order");
+        const std::vector<std::string> expected_sources = {
+            "vbc:dipole_z__dipole_z@f0.00000_f0.00000", "vbc:dipole_z__dipole_z@f0.05000_f0.05000",
+            "vbc:dipole_z__nuc_0_z@f0.05000_f0.00000", "vbc:dipole_z__nuc_1_z@f0.05000_f0.00000"};
+        check(needs.sources == expected_sources, "response_needs: the B x C sources");
+        const json legacy = {{"protocol", {1e-4}}, {"frequencies", {0.0, 0.02}}, {"components", {"zz"}}};
+        check(named_stages::response_needs(legacy, 2).legs.size() == 2 &&
+                  named_stages::response_needs(legacy, 2).sources.empty(),
+              "response_needs: a request saved before it named properties is polarizability");
     }
     world.gop.sum(failures);
     if (world.rank() == 0) std::cout << "named-stage failures: " << failures << '\n';

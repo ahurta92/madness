@@ -1,8 +1,9 @@
 #pragma once
-#include "MoldftCheckpoint.hpp"
 #include "ConvergenceReport.hpp"
-#include "ResponseCheckpoint.hpp"
+#include "MoldftCheckpoint.hpp"
 #include "NamedStages.hpp"
+#include "ResponseCheckpoint.hpp"
+#include "ResponseProperties.hpp"
 #include <apps/molresponse/madqc_adapter.hpp>
 #include <chrono>
 #include <filesystem>
@@ -42,47 +43,6 @@ inline void write_result(madness::World &world, const fs::path &file,
     output.close();
   });
 }
-// Select requested frequencies/components from the engine's final-rung tensor.
-// The response calculation has already run; this function only formats results.
-inline json selected_alpha(const Stage &stage, const json &properties) {
-  const auto &cp = stage.params.get<CalculationParameters>();
-  const auto pkey = molresponse_v3::protocol_key(
-      cp.protocol().back(), protocol_k(cp.protocol().back()));
-  const auto &rows = properties.at("alpha").at(pkey);
-  json selected = json::array();
-  for (double omega : stage.frequencies) {
-    const json *found = nullptr;
-    for (const auto &row : rows) {
-      if (std::abs(row.at("omega").get<double>() - omega) < 1e-12) {
-        if (found)
-          throw std::runtime_error(
-              "duplicate alpha frequency in engine results");
-        found = &row;
-      }
-    }
-    if (!found)
-      throw std::runtime_error("missing requested polarizability frequency");
-    const std::string dirs = found->at("directions");
-    json values = json::object();
-    for (const auto &component : stage.components) {
-      const auto i = dirs.find(component[0]), j = dirs.find(component[1]);
-      if (i == std::string::npos || j == std::string::npos)
-        throw std::runtime_error("missing requested alpha component");
-      const double value = found->at("alpha").at(i).at(j).get<double>();
-      if (!std::isfinite(value))
-        throw std::runtime_error("nonfinite polarizability");
-      values[component] = value;
-    }
-    selected.push_back({{"frequency", omega},
-                        {"frequency_units", "au"},
-                        {"units", "a0^3"},
-                        {"components", values},
-                        {"converged", found->value("converged", false)},
-                        {"engine_evidence", *found}});
-  }
-  return selected;
-}
-
 // DESIGN A8: what a stage hands to the stages that consume it. Everything a
 // consumer may use travels here, by value; the runner keeps one per stage
 // label.
@@ -355,11 +315,14 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   result["convergence_settings"] = madness::convergence::to_json(settings);
   ResponseCheckpoint checkpoint(
       world, stage, stage_directory, directory, run_id,
-      {{"stage", stage.reference}, {"generation", reference.saved.generation}});
+      {{"stage", stage.reference}, {"generation", reference.saved.generation}},
+      static_cast<int>(molecule.natom()));
   molresponse_v3_lib::Results response;
   if (checkpoint.prepare(continuing)) {
     response.metadata = checkpoint.metadata();
     response.properties = checkpoint.properties();
+    response.vibrational_analysis = checkpoint.analysis("vibrational_analysis");
+    response.raman_spectra = checkpoint.analysis("raman_spectra");
   } else {
     response = molresponse_v3_lib::run_response_on_reference(
         world, stage.params, molecule, directory, reference.saved_prefix,
@@ -377,14 +340,15 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
       = stage.params.get<ResponseParameters>().to_json_if_precedence("defined");
   // The engine's property/evidence JSON exists on root only.
   on_root(world, [&] {
-    auto alpha = selected_alpha(stage, response.properties);
-    converged = std::all_of(alpha.begin(), alpha.end(), [](const json& row) {
-      return row.at("converged").get<bool>();
-    });
-    result["properties"]["polarizability"]
-        = {{"values", alpha},
-           {"source_state_id", state_id},
-           {"reference_state_id", reference.saved.generation}};
+    auto selected = select_response_properties(
+        stage, response.properties, response.vibrational_analysis,
+        response.raman_spectra, static_cast<int>(molecule.natom()));
+    converged = all_requested_converged(selected);
+    for (auto& [name, record] : selected.items()) {
+      record["source_state_id"] = state_id;
+      record["reference_state_id"] = reference.saved.generation;
+      result["properties"][name] = std::move(record);
+    }
     result["engine_metadata"] = response.metadata;
   });
   world.gop.broadcast(converged, 0);
@@ -424,7 +388,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
                        "continuation:", state.at("state").get<std::string>(),
                        "-", state.at("summary").get<std::string>());
   }
-  result["properties"]["polarizability"]["source_state_id"] = state_id;
+  for (auto& [name, record] : result["properties"].items())
+    record["source_state_id"] = state_id;
   outcome.state_id = state_id;
   outcome.converged = converged;
   outcome.result = std::move(result);

@@ -100,20 +100,55 @@ public:
 
   /// A protocol key redefined (keys round the threshold): the FD entries saved
   /// under its old definition cannot be told apart from the new rung's, so
-  /// they are dropped. Their archives are replaced when those states are
-  /// solved again at the new definition.
+  /// they are dropped, with the quadratic sources built from them. Their
+  /// archives are replaced when those states are solved again at the new
+  /// definition.
   void drop_fd_rung(const std::string &protocol_key) {
-    if (!j_.contains("fd_states")) return;
-    for (const auto &channel : j_["fd_states"].items())
-      channel.value().erase(protocol_key);
+    for (const char *kind : {"fd_states", "vbc_states"}) {
+      if (!j_.contains(kind)) continue;
+      for (const auto &state : j_[kind].items())
+        state.value().erase(protocol_key);
+    }
+  }
+
+  /// Drop the quadratic sources at `protocol_key` built from the FD leg
+  /// (`pert`, `freq_key`), the B or C side of their id ("vbc:<B>__<C>@<fB>_<fC>",
+  /// vbc_node_id). A source is derived from its two legs at one rung, so a
+  /// leg saved again there makes it stale; the scheduler rebuilds it from the
+  /// new leg.
+  void drop_vbc_built_from(const std::string &pert, const std::string &freq_key,
+                           const std::string &protocol_key) {
+    if (!j_.contains("vbc_states")) return;
+    for (const auto &source : j_["vbc_states"].items()) {
+      const std::string &id = source.key();
+      const auto pair_end = id.find('@');
+      const auto split = id.find("__");
+      const auto freq_split = id.find('_', pair_end);
+      if (!id.starts_with("vbc:") || pair_end == std::string::npos ||
+          split == std::string::npos || split > pair_end ||
+          freq_split == std::string::npos)
+        continue;
+      const std::string b = id.substr(4, split - 4);
+      const std::string c = id.substr(split + 2, pair_end - split - 2);
+      const std::string fb = id.substr(pair_end + 1, freq_split - pair_end - 1);
+      const std::string fc = id.substr(freq_split + 1);
+      if ((b == pert && fb == freq_key) || (c == pert && fc == freq_key))
+        source.value().erase(protocol_key);
+    }
   }
 
   /// Upsert one FD point: fd_states/<pert>/<protocol_key>/<freq_key> = entry.
+  /// Replacing a different entry (the leg solved again at this rung) drops
+  /// the quadratic sources built from the old one; merging an identical entry
+  /// (a shard read twice) keeps them.
   void set_fd_state(const std::string &pert,
                     const std::string &protocol_key,
                     const std::string &freq_key,
                     const nlohmann::json &entry) {
-    j_["fd_states"][pert][protocol_key][freq_key] = entry;
+    auto &slot = j_["fd_states"][pert][protocol_key][freq_key];
+    if (!slot.is_null() && slot != entry)
+      drop_vbc_built_from(pert, freq_key, protocol_key);
+    slot = entry;
   }
 
   /// Replace the ES bundle entry at this protocol. ES is bundle-at-a-time —

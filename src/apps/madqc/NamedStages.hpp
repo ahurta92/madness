@@ -621,16 +621,6 @@ inline std::vector<Stage> parse(madness::World &world,
       const auto own_protocol = cp.protocol();
       // D-017: the property blocks, validated and mapped onto the engine.
       translate_response_properties(b.name, controls, stage, rp);
-      // D-017.2: until the response checkpoint carries quadratic sources
-      // (builder A, after planner step 4.3), a named stage runs alpha only.
-      // Builder A deletes this check with that change; everything above it
-      // already accepts the other two properties.
-      if (stage.properties != std::vector<std::string>{"polarizability"})
-        throw std::runtime_error(
-            b.name
-            + ": hyperpolarizability and raman wait for the response "
-              "checkpoint to carry quadratic sources; a named stage "
-              "computes polarizability only for now");
       // Defaults must come from this stage, not the upstream SCF maxiter.
       rp.set_user_defined_value("maxiter", rp.get<std::size_t>("maxiter"));
       valid_protocol(own_protocol);

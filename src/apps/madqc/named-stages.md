@@ -185,20 +185,28 @@ enforceable in engine mode" instead of making the stage resume.
 On `--continue`, each response stage validates its own published generation.
 A completed identical request reuses its saved properties with zero response
 iterations (`work: loaded`). Otherwise the moldft planner (`plan_ladder`)
-decides each requested state (perturbation and exact frequency) on its own,
-from that state's records in the generation (`numerical.states`), by the same
+decides each state the requested values are built from on its own (a dipole
+or nuclear-displacement leg at one exact frequency: for `polarizability` the
+dipole legs of each component's axes at each frequency; for
+`hyperpolarizability` `beta_ABC(-2w; w, w)` the A leg at 2w and the B and C
+legs at w; for `raman` the A and B legs at w and the nuclear leg at 0), from
+that state's records in the generation (`numerical.states`), by the same
 rules: saved values are re-judged against today's engine limits and written
 targets; a finished rung is never redone; a state that meets the request is
 loaded; a final rung that stalled with the request unmet is loaded and
 reported unmet; a state with no record (a new frequency or channel, or a
 changed exact frequency) is solved fresh. The saved functions and the engine's
 state entries are copied into a private attempt unchanged (only the derived
-property rows are left out), and the plans are passed to the engine as input.
+property rows and the Raman normal-mode analysis are left out), and the plans
+are passed to the engine as input. Quadratic sources are not planned: the
+engine builds each from its two legs at one rung, and drops and rebuilds one
+whose leg is solved again at that rung.
 From each state's start rung on, every rung is solved once in this run; after
 that the engine's own scheduling continues. A loaded state that meets the
 request counts as met in the analysis: its `row_accuracy` entry carries
 `met: true` and `decided_by: "planner"`, and so does the tensor row built from
-it (`decided_by: "planner"`), while each leg's `converged` keeps the flag the
+it (`decided_by: "planner"`; the same for hyperpolarizability and Raman rows),
+while each leg's `converged` keeps the flag the
 engine recorded, so the two verdicts stay distinguishable. Two kinds of saved
 rung are not planned from, and the state is solved again: a rung whose engine
 key equals a requested rung's but whose threshold differs (keys round it, e.g.
@@ -291,10 +299,10 @@ Each record in `properties.raman.values` names its `coordinate`
 `converged` and the engine rows.
 
 The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
-the benchmark geometry. Until the response checkpoint carries the quadratic
-sources, the parser accepts these requests but refuses to run them
-("hyperpolarizability and raman wait for the response checkpoint"); the
-unnamed `--wf=response` path computes both today.
+the benchmark geometry. The response checkpoint publishes the nuclear legs
+and the quadratic sources with the dipole legs, one property record per
+requested property, and `--continue` judges every leg the requested values
+are built from (above).
 
 2PA, excited states, Nemo, MP2, CC2, and optimization are not exposed
 through this named frontend yet. The broader convergence contract is milestone 2d.
