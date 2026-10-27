@@ -166,16 +166,20 @@ struct LadderSteps {
   std::function<void(json&)> generation_record;
   // What --continue did and why (B6), when there is a record of it.
   std::function<std::optional<json>()> continuation;
-  // 9. The convergence report, and the saved-state outcomes of the table.
-  std::function<void(json&)> report;
+  // 9. The convergence report on the verdict finish returned (B8), the
+  // saved-state outcomes of the table, and the label the table ends with.
+  std::function<void(json&, bool)> report;
   std::function<std::vector<madness::convergence::MetricOutcome>()> outcomes;
+  std::function<std::string(bool)> outcome_label;
   // 8. The properties and the stage's own fields.
   std::function<void(json&)> properties;
 };
 
-// The sequence every ladder stage runs (skeleton spec 2.4 and 3.3; S1, the
-// moldft stage). The shared part of each step is here; the application's
-// part is a LadderSteps closure.
+// The sequence every ladder stage runs (skeleton spec 2.4 and 3.3; moldft
+// and response, D-043: one order). The shared part of each step is here; the
+// application's part is a LadderSteps closure. finish() decides the verdict
+// before the properties are written; the continuation prints before the
+// outcome table.
 inline StageOutcome run_ladder_stage(const StageContext& ctx,
                                      const LadderSteps& steps) {
   auto& world = ctx.world;
@@ -207,18 +211,26 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   if (const auto continuation = steps.continuation()) {
     // B6: what --continue did and why.
     result["continuation"] = *continuation;
-    if (world.rank() == 0)
-      madness::print("stage", stage.name, "continuation:",
-                     result["continuation"]["summary"].get<std::string>());
+    // One summary for the stage, or one per state.
+    if (world.rank() == 0) {
+      if (continuation->contains("states"))
+        for (const auto& state : continuation->at("states"))
+          madness::print("stage", stage.name,
+                         "continuation:", state.at("state").get<std::string>(),
+                         "-", state.at("summary").get<std::string>());
+      else
+        madness::print("stage", stage.name, "continuation:",
+                       continuation->at("summary").get<std::string>());
+    }
   }
   // 9. The outcome table and the record.
-  steps.report(result);
+  steps.report(result, converged);
   const auto outcomes = steps.outcomes();
   result["convergence_report"]["convergence_outcome"]
       = madness::convergence::outcome_to_json(settings, outcomes);
   if (world.rank() == 0)
-    std::cout << madness::convergence::render_outcome_table(settings, outcomes,
-                                                            saved.stop_reason)
+    std::cout << madness::convergence::render_outcome_table(
+        settings, outcomes, steps.outcome_label(converged))
               << '\n'
               << std::flush;
   // 8. The properties.
@@ -309,10 +321,8 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
         .value("saved_state_validation", json::object())
         .value("measurements", json::object());
   };
-  steps.report = [&](json& result) {
+  steps.report = [&](json& result, bool converged) {
     const auto& saved = checkpoint->latest();
-    const bool converged
-        = checkpoint->work == "loaded" || saved.stop_reason == "converged";
     result["checkpoint_metrics"] = saved.metrics;
     result["convergence_report"]
         = ground_convergence_report(saved.metrics, saved.generation, converged);
@@ -322,6 +332,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
         = requested_criteria_report(saved_measurements(), *settings);
   };
   steps.outcomes = [&] { return saved_outcomes(saved_measurements()); };
+  steps.outcome_label = [&](bool) { return checkpoint->latest().stop_reason; };
   steps.properties = [&](json& result) {
     const auto& saved = checkpoint->latest();
     const auto& evidence = std::get<2>(*values);
@@ -351,21 +362,12 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
 }
 
 // A named molresponse stage: the response engine against its declared
-// reference, published through ResponseCheckpoint.
+// reference, published through ResponseCheckpoint, run by run_ladder_stage.
 inline StageOutcome run_response_stage(const StageContext& ctx) {
-  // The names below are those of the former loop body in run_if_named, so
-  // the code reads as it did there (A8: one run function per application).
   auto& world = ctx.world;
   auto& stage = ctx.stage;
-  const auto& stage_directory = ctx.stage_directory;
   const auto& directory = ctx.attempt_directory;
-  const auto& run_id = ctx.run_id;
-  const bool continuing = ctx.continuing;
   auto& cp = stage.params.get<CalculationParameters>();
-  json result = stage_record(ctx);
-  std::string state_id = result.at("state_id").get<std::string>();
-  bool converged = false;
-  StageOutcome outcome;
   // DESIGN A1: the reference is its published generation: the orbital
   // archive, and the consumer context moldft wrote beside it (the molecule
   // as the SCF oriented it, the cell, the final thresh and k).
@@ -389,109 +391,117 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   madness::Molecule molecule;
   molecule.from_json(context.at("molecule"));
   cp.set_user_defined_value("l", context.at("L").get<double>());
-  result["reference_representation"]
-      = {{"L", context.at("L")}, {"k", context.at("k")}};
-  // B9: the stage's convergence settings, shown before the solve and
-  // recorded; the solver stops on the same targets.
-  const auto settings
-      = response_convergence_settings(stage, cp.protocol().back());
-  if (world.rank() == 0)
-    std::cout << '\n'
-              << madness::convergence::render_settings_table(settings) << '\n'
-              << std::flush;
-  result["convergence_settings"] = madness::convergence::to_json(settings);
-  ResponseCheckpoint checkpoint(
-      world, stage, stage_directory, directory, run_id,
-      {{"stage", stage.reference}, {"generation", reference.saved.generation}},
-      static_cast<int>(molecule.natom()));
+  std::optional<madness::convergence::ConvergenceSettings> settings;
+  std::optional<ResponseCheckpoint> checkpoint;
   molresponse_v3_lib::Results response;
-  const bool loaded = checkpoint.prepare(continuing);
-  if (loaded) {
-    response.metadata = checkpoint.metadata();
-    response.properties = checkpoint.properties();
-    response.vibrational_analysis = checkpoint.analysis("vibrational_analysis");
-    response.raman_spectra = checkpoint.analysis("raman_spectra");
-  } else {
-    response = molresponse_v3_lib::run_response_on_reference(
-        world, stage.params, molecule, directory, reference.saved_prefix,
-        [&](madness::World& w, const json& event) {
-          checkpoint.observe(w, event);
-        },
-        checkpoint.state_plans());
-  }
-  result["method"] = "TDHF";
-  result["reference"]
-      = {{"stage", stage.reference}, {"state_id", reference.saved.generation}};
-  result["targets"]
-      = {{"dconv", stage.params.get<ResponseParameters>().dconv()}};
-  result["parameters"]
-      = stage.params.get<ResponseParameters>().to_json_if_precedence("defined");
-  // The engine's property/evidence JSON exists on root only.
-  on_root(world, [&] {
-    // D-025: the bundle's verdict says who decided it, and its transition
-    // analysis is the engine's file of this attempt, or the generation's on a
-    // load.
-    checkpoint.annotate_bundles(response.metadata);
-    json transition = loaded ? checkpoint.transition() : json();
-    const auto analysis
-        = directory / ("es_analysis__" + final_protocol_key(stage) + ".json");
-    if (!loaded && fs::exists(analysis))
-      transition = madness::checkpoint::detail::read_json(analysis);
-    auto selected = select_response_properties(
-        stage, response.properties, response.metadata,
-        response.vibrational_analysis, response.raman_spectra,
-        static_cast<int>(molecule.natom()), transition);
-    converged = all_requested_converged(selected);
-    for (auto& [name, record] : selected.items()) {
-      record["source_state_id"] = state_id;
-      record["reference_state_id"] = reference.saved.generation;
-      result["properties"][name] = std::move(record);
+  bool loaded = false;
+  // The selected property records, chosen by finish() on root and written
+  // by properties() once the generation is known.
+  json selected = json::object();
+  LadderSteps steps;
+  // B9: the solver stops on the same targets.
+  steps.settings = [&] {
+    settings = response_convergence_settings(stage, cp.protocol().back());
+    return *settings;
+  };
+  steps.prepare = [&] {
+    checkpoint.emplace(world, stage, ctx.stage_directory, directory, ctx.run_id,
+                       json{{"stage", stage.reference},
+                            {"generation", reference.saved.generation}},
+                       static_cast<int>(molecule.natom()));
+    loaded = checkpoint->prepare(ctx.continuing);
+  };
+  steps.run_engine = [&] {
+    if (loaded) {
+      response.metadata = checkpoint->metadata();
+      response.properties = checkpoint->properties();
+      response.vibrational_analysis
+          = checkpoint->analysis("vibrational_analysis");
+      response.raman_spectra = checkpoint->analysis("raman_spectra");
+    } else {
+      response = molresponse_v3_lib::run_response_on_reference(
+          world, stage.params, molecule, directory, reference.saved_prefix,
+          [&](madness::World& w, const json& event) {
+            checkpoint->observe(w, event);
+          },
+          checkpoint->state_plans());
     }
-    result["engine_metadata"] = response.metadata;
-  });
-  world.gop.broadcast(converged, 0);
-  checkpoint.finish(response.metadata, converged);
-  state_id = checkpoint.latest().generation;
-  result["state_id"] = state_id;
-  result["identity_kind"] = "checkpoint_generation";
-  result["checkpoint_generation"] = state_id;
-  result["work"] = checkpoint.work;
-  result["iterations_this_run"] = checkpoint.iterations;
-  result["work_items"] = checkpoint.work_items;
-  result["convergence_report"] = response_convergence_report(
-      checkpoint.metadata(), state_id, reference_evidence(reference));
-  result["convergence_report"]["decided_by"]
-      = madness::convergence::to_string(settings.decider);
-  {
+  };
+  steps.finish = [&] {
+    bool converged = false;
+    // The engine's property/evidence JSON exists on root only. The verdict
+    // is whether the requested properties converged.
+    on_root(world, [&] {
+      // D-025: the bundle's verdict says who decided it, and its transition
+      // analysis is the engine's file of this attempt, or the generation's
+      // on a load.
+      checkpoint->annotate_bundles(response.metadata);
+      json transition = loaded ? checkpoint->transition() : json();
+      const auto analysis
+          = directory / ("es_analysis__" + final_protocol_key(stage) + ".json");
+      if (!loaded && fs::exists(analysis))
+        transition = madness::checkpoint::detail::read_json(analysis);
+      selected = select_response_properties(
+          stage, response.properties, response.metadata,
+          response.vibrational_analysis, response.raman_spectra,
+          static_cast<int>(molecule.natom()), transition);
+      converged = all_requested_converged(selected);
+    });
+    world.gop.broadcast(converged, 0);
+    checkpoint->finish(response.metadata, converged);
+    return converged;
+  };
+  steps.latest = [&]() -> const madness::checkpoint::Manifest& {
+    return checkpoint->latest();
+  };
+  steps.work = [&] { return checkpoint->work; };
+  steps.iterations = [&] { return checkpoint->iterations; };
+  steps.generation_record = [&](json& result) {
+    result["work_items"] = checkpoint->work_items;
+    result["reference_changed"] = checkpoint->reference_changed;
+  };
+  // B6: what --continue did per state and why.
+  steps.continuation = [&]() -> std::optional<json> {
+    if (checkpoint->state_plans().empty())
+      return std::nullopt;
+    return checkpoint->continuation();
+  };
+  steps.report = [&](json& result, bool) {
+    result["convergence_report"] = response_convergence_report(
+        checkpoint->metadata(), checkpoint->latest().generation,
+        reference_evidence(reference));
+    result["convergence_report"]["decided_by"]
+        = madness::convergence::to_string(settings->decider);
+  };
+  steps.outcomes = [&] {
     const auto final_protocol = molresponse_v3::protocol_key(
         cp.protocol().back(), protocol_k(cp.protocol().back()));
-    const auto outcomes
-        = response_saved_outcomes(checkpoint.metadata(), final_protocol);
-    result["convergence_report"]["convergence_outcome"]
-        = madness::convergence::outcome_to_json(settings, outcomes);
-    if (world.rank() == 0)
-      std::cout << madness::convergence::render_outcome_table(
-          settings, outcomes, converged ? "converged" : "unconverged")
-                << '\n'
-                << std::flush;
-  }
-  result["reference_changed"] = checkpoint.reference_changed;
-  result["acceleration_history"] = continuing ? "reset" : "fresh";
-  if (!checkpoint.state_plans().empty()) {
-    // B6: what --continue did per state and why.
-    result["continuation"] = checkpoint.continuation();
-    if (world.rank() == 0)
-      for (const auto& state : result["continuation"]["states"])
-        madness::print("stage", stage.name,
-                       "continuation:", state.at("state").get<std::string>(),
-                       "-", state.at("summary").get<std::string>());
-  }
-  for (auto& [name, record] : result["properties"].items())
-    record["source_state_id"] = state_id;
-  outcome.state_id = state_id;
-  outcome.converged = converged;
-  outcome.result = std::move(result);
-  return outcome;
+    return response_saved_outcomes(checkpoint->metadata(), final_protocol);
+  };
+  steps.outcome_label = [](bool converged) -> std::string {
+    return converged ? "converged" : "unconverged";
+  };
+  steps.properties = [&](json& result) {
+    result["reference_representation"]
+        = {{"L", context.at("L")}, {"k", context.at("k")}};
+    result["method"] = "TDHF";
+    result["reference"] = {{"stage", stage.reference},
+                           {"state_id", reference.saved.generation}};
+    result["targets"]
+        = {{"dconv", stage.params.get<ResponseParameters>().dconv()}};
+    result["parameters"]
+        = stage.params.get<ResponseParameters>().to_json_if_precedence(
+            "defined");
+    on_root(world, [&] {
+      for (auto& [name, record] : selected.items()) {
+        record["source_state_id"] = checkpoint->latest().generation;
+        record["reference_state_id"] = reference.saved.generation;
+        result["properties"][name] = std::move(record);
+      }
+      result["engine_metadata"] = response.metadata;
+    });
+  };
+  return run_ladder_stage(ctx, steps);
 }
 
 /// Returns false for the existing unnamed input surface. Missing default input
