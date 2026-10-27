@@ -816,11 +816,16 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   // reloads it from disk at evaluation time (no bundle copy held in memory
   // during the solve — see es_seed_guard.hpp).
   std::optional<EsSeedReference> seed_ref;
+  // Where the bundle started, for the checkpoint observer (D-025): the
+  // oversampled warmup, or a saved bundle (es_restart) at seed_protocol.
+  std::string seed_kind = "warmup", seed_protocol;
   if (action != NodeAction::Fresh) {
     auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir, n_roots);
     if (loaded) {
       seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
                                         loaded->source_protocol_key);
+      seed_kind = "es_restart";
+      seed_protocol = loaded->source_protocol_key;
       s0 = std::move(loaded->state);
       seeded = true;
     }
@@ -834,6 +839,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
         world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
         c_xc, lo, ctx.print_level, ctx.es_guess, ctx.es_guess_basis);
   }
+  const int iter_at_start = s0.iter;
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
   solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
@@ -890,6 +896,19 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
     save_es_roots<TDA, ClosedShell>(world, st, dir,
                                     /*converged=*/converged_now(st, solv),
                                     /*wall_s=*/wall_s);
+    // The named checkpoint publishes at the bundle's save boundary as at the
+    // dipole legs' (DESIGN A3; the FD executor's call in solve_fd_protocol):
+    // the bundle's node id as the perturbation, the rung, the iterations
+    // (the bundle's count, and this rung's) and the seed. D-025.
+    if (ctx.checkpoint_observer)
+      ctx.checkpoint_observer(
+          world, {{"kind", "excited_states"},
+                  {"perturbation", es_node_id(/*tda=*/true, n_roots)},
+                  {"protocol", protocol_key()},
+                  {"iterations", st.iter},
+                  {"iterations_this_rung", st.iter - iter_at_start},
+                  {"seed", seed_kind},
+                  {"seed_protocol", seed_protocol}});
   };
 
   solvers::IterateProtocolPolicy pp;
@@ -974,11 +993,17 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   // below is NOT a seed in this sense (it is this solver's own cold-start
   // artifact), so seed_ref stays empty on that path.
   std::optional<EsSeedReference> seed_ref;
+  // Where the bundle started, for the checkpoint observer (D-025): the
+  // warmup (fresh or from the es_warmup cache), or a saved bundle
+  // (es_restart) at seed_protocol.
+  std::string seed_kind = "warmup", seed_protocol;
   if (action != NodeAction::Fresh) {
     auto loaded = try_load_es_bundle<Full, ClosedShell>(world, ctx.calc_dir, n_roots);
     if (loaded) {
       seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
                                         loaded->source_protocol_key);
+      seed_kind = "es_restart";
+      seed_protocol = loaded->source_protocol_key;
       s0 = std::move(loaded->state);
       seeded = true;
       // An EXTERNAL seed (iteration-0 bundle: DALTON EXCITLAB vectors written by
@@ -1020,6 +1045,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
         try {
           s0 = load_es_roots<Full, ClosedShell>(world, warm_cache);
           used_cache = true;
+          seed_kind = "warmup_cache";
           if (world.rank() == 0)
             madness::print("[CALC] solve_es_full: reusing cached TDA warmup guess"
                            " from", warm_cache, "(skipping warmup)");
@@ -1049,6 +1075,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
       }
     }
   }
+  const int iter_at_start = s0.iter;
 
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
 
@@ -1090,6 +1117,16 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
     save_es_roots<Full, ClosedShell>(world, st, dir,
                                      /*converged=*/converged_now(st, solv),
                                      /*wall_s=*/wall_s);
+    // The checkpoint observer's event for the bundle, as in the TDA path.
+    if (ctx.checkpoint_observer)
+      ctx.checkpoint_observer(
+          world, {{"kind", "excited_states"},
+                  {"perturbation", es_node_id(/*tda=*/false, n_roots)},
+                  {"protocol", protocol_key()},
+                  {"iterations", st.iter},
+                  {"iterations_this_rung", st.iter - iter_at_start},
+                  {"seed", seed_kind},
+                  {"seed_protocol", seed_protocol}});
   };
 
   solvers::IterateProtocolPolicy pp;

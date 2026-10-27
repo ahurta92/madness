@@ -215,9 +215,92 @@ int main(int argc, char** argv) {
               && two_atoms.params.get<ResponseParameters>().raman_frequencies()
                      == std::vector<double>{0.0, 0.05},
           "a list of atoms and directions passes through in deck order");
+
+    // D-025: the excited-state request onto the engine's excited.* knobs.
+    const auto excited = translated(
+        world, {"requested_properties [excited_states, polarizability]",
+                "excited_states.roots 2", "excited_states.method rpa",
+                "polarizability.frequencies [0.0]",
+                "polarizability.frequency_units au",
+                "polarizability.components [zz]"});
+    const auto& erp = excited.params.get<ResponseParameters>();
+    check(excited.excited_states.roots == 2
+              && excited.excited_states.method == "rpa"
+              && excited.excited_states.guess.empty() && erp.excited_enable()
+              && erp.excited_num_states() == 2 && !erp.excited_tda()
+              && !erp.is_user_defined("excited.guess")
+              && !erp.is_user_defined("excited.guess_basis")
+              && !erp.is_user_defined("excited.maxiter")
+              && !erp.is_user_defined("excited.guess_max_iter")
+              && !erp.is_user_defined("excited.maxsub")
+              && erp.dipole_frequencies() == std::vector<double>{0.0}
+              && erp.dipole_directions() == "z",
+          "excited_states: roots and method onto excited.enable, "
+          "excited.num_states and excited.tda; no cap of its own; the "
+          "dipole legs beside it");
+    const auto tda_only = translated(
+        world,
+        {"requested_properties [excited_states]", "excited_states.roots 1",
+         "excited_states.method tda", "excited_states.guess virtual_ao",
+         "excited_states.guess_basis aug-cc-pvtz"});
+    const auto& trp = tda_only.params.get<ResponseParameters>();
+    check(trp.excited_enable() && trp.excited_tda()
+              && trp.excited_num_states() == 1
+              && trp.excited_guess() == "virtual_ao"
+              && trp.excited_guess_basis() == "aug-cc-pvtz"
+              && trp.dipole_frequencies().empty()
+              && tda_only.frequencies.empty(),
+          "excited_states alone with a written guess: excited.tda, the "
+          "guess knobs, no dipole grid");
+    check(erp.is_user_defined("excited.enable")
+              && !all.params.get<ResponseParameters>().is_user_defined(
+                  "excited.enable"),
+          "no excited.* knobs without excited_states");
   } catch (const std::exception& e) {
     check(false, e.what());
   }
+  throws(
+      [&] {
+        translated(world, {"requested_properties [excited_states]",
+                           "excited_states.roots 1"});
+      },
+      "excited_states.method (tda or rpa); neither has a default");
+  throws(
+      [&] {
+        translated(world, {"requested_properties [excited_states]",
+                           "excited_states.method tda"});
+      },
+      "neither has a default");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 0", "excited_states.method tda"});
+      },
+      "at least 1");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 1", "excited_states.method tda",
+                    "excited_states.guess_basis aug-cc-pvtz"});
+      },
+      "guess_basis applies to the virtual_ao guess only");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 1", "excited_states.method cis"});
+      },
+      "excited_states.method");
+  throws(
+      [&] {
+        translated(world, {"requested_properties [polarizability]",
+                           "polarizability.frequencies [0.0]",
+                           "polarizability.frequency_units au",
+                           "excited_states.roots 1"});
+      },
+      "excited_states.roots needs excited_states in requested_properties");
   throws(
       [&] {
         translated(world, {"requested_properties [polarizability]",
@@ -339,6 +422,24 @@ int main(int argc, char** argv) {
               + "moldft bad\n molecule LiH\n xc hf\n requested_properties "
                 "[energy]\n raman.atoms [0]\nend\n",
           "raman belongs to molresponse");
+  const std::string es_deck
+      = "molresponse excited\n reference gs\n protocol [1e-4]\n"
+        " requested_properties [excited_states]\n excited_states.roots 1\n"
+        " excited_states.method tda\nend\n";
+  // D-025: a valid excited-state deck is refused until the response
+  // checkpoint takes a bundle (builder A's seven items).
+  rejects(geometry + gs + es_deck,
+          "excited_states wait for the response checkpoint to take an "
+          "excited-state bundle");
+  {
+    auto deck = es_deck;
+    deck.replace(deck.find(" protocol"), 0, " excited.enable true\n");
+    rejects(geometry + gs + deck, "unsupported parameter");
+  }
+  rejects(geometry
+              + "moldft bad\n molecule LiH\n xc hf\n requested_properties "
+                "[energy]\n excited_states.roots 1\nend\n",
+          "excited_states belongs to molresponse");
 
   // ----- Selectors over synthetic engine rows -----------------------------
   try {
@@ -357,14 +458,14 @@ int main(int argc, char** argv) {
     properties["beta"][pkey] = json::array(
         {quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0, 315.73, true),
          quadratic_row("x", "dipole_z", "dipole_z", 0.0, 0.0, 1.5, false)});
-    const auto beta = named_stages::selected_beta(stage, properties);
+    const auto beta = named_stages::selected_beta(stage, properties, json());
     check(beta.size() == 1 && beta[0].at("components").at("zzz") == 315.73
               && beta[0].at("converged") == true
               && beta[0].at("process") == "static"
               && beta[0].at("engine_evidence").contains("zzz"),
           "static beta_zzz selected with its row as evidence");
-    auto selected = named_stages::select_response_properties(stage, properties,
-                                                             json(), json(), 2);
+    auto selected = named_stages::select_response_properties(
+        stage, properties, json(), json(), json(), 2);
     check(selected.contains("polarizability")
               && selected.contains("hyperpolarizability")
               && selected.at("polarizability")
@@ -375,26 +476,70 @@ int main(int argc, char** argv) {
               && named_stages::all_requested_converged(selected),
           "both properties selected, stage converged");
     stage.hyperpolarizability.components = {"zzz", "xzz"};
-    selected = named_stages::select_response_properties(stage, properties,
-                                                        json(), json(), 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), json(), json(), 2);
     check(!named_stages::all_requested_converged(selected),
           "one unconverged row: the stage is not");
-    stage.hyperpolarizability.components = {"yyy"};
-    throws([&] { named_stages::selected_beta(stage, properties); },
-           "missing requested hyperpolarizability");
-    stage.hyperpolarizability.components = {"zzz"};
+    // D-024: an element the engine wrote no row for is published without a
+    // value, with the engine's reason from run_summary.dropped_work, and the
+    // record is unconverged.
+    json metadata;
+    metadata["run_summary"]["dropped_work"] = json::array(
+        {{{"id", "vbc:dipole_y__dipole_y@f0.00000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason",
+           "prerequisites never converged (gated out of every wave)"}},
+         {{"id", "vbc:dipole_z__dipole_z@f0.00000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason", "stalled (quarantined by the no-progress guard)"}}});
+    stage.hyperpolarizability.components = {"zzz", "yyy"};
+    auto partial = named_stages::selected_beta(stage, properties, metadata);
+    const auto reason_of = [](const json& record, const char* name) {
+      return record.at("components_unavailable").at(name).get<std::string>();
+    };
+    check(partial.size() == 1 && partial[0].at("components").at("zzz") == 315.73
+              && partial[0].at("components").at("yyy").is_null()
+              && partial[0].at("converged") == false
+              && reason_of(partial[0], "yyy").find("vbc:dipole_y__dipole_y")
+                     != std::string::npos
+              && reason_of(partial[0], "yyy").find("prerequisites never")
+                     != std::string::npos
+              && !partial[0].at("engine_evidence").contains("yyy"),
+          "an element without a row: null value, the engine's reason, "
+          "unconverged");
     stage.hyperpolarizability.frequencies = {0.02};
-    throws([&] { named_stages::selected_beta(stage, properties); },
-           "missing requested hyperpolarizability");
+    partial = named_stages::selected_beta(stage, properties, metadata);
+    check(partial[0].at("components").at("zzz").is_null()
+              && reason_of(partial[0], "zzz").find("does not name")
+                     != std::string::npos,
+          "a frequency with no rows and no audit entry: unavailable, the "
+          "audit's silence recorded");
     stage.hyperpolarizability.frequencies = {0.0};
+    stage.hyperpolarizability.components = {"zzz"};
+    stage.properties = {"hyperpolarizability"};
+    selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2);
+    check(selected.at("hyperpolarizability")
+                  .at("values")[0]
+                  .at("components")
+                  .at("zzz")
+                  .is_null()
+              && reason_of(selected.at("hyperpolarizability").at("values")[0],
+                           "zzz")
+                         .find("stalled")
+                     != std::string::npos
+              && !named_stages::all_requested_converged(selected),
+          "the engine assembled no beta at all: a record without a value, "
+          "the stage unconverged");
+    stage.properties = {"polarizability", "hyperpolarizability"};
     properties["beta"][pkey].push_back(
         quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0, 315.73, true));
-    throws([&] { named_stages::selected_beta(stage, properties); },
+    throws([&] { named_stages::selected_beta(stage, properties, json()); },
            "duplicate hyperpolarizability row");
     properties["beta"][pkey] = json::array(
         {quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0,
                        std::numeric_limits<double>::quiet_NaN(), true)});
-    throws([&] { named_stages::selected_beta(stage, properties); },
+    throws([&] { named_stages::selected_beta(stage, properties, json()); },
            "nonfinite hyperpolarizability");
 
     // Raman: a written subset, then the full set with its completeness record.
@@ -411,8 +556,8 @@ int main(int argc, char** argv) {
     stage.raman_atoms = {1};
     stage.raman_directions = "z";
     stage.raman_full_set = false;
-    auto raman
-        = named_stages::selected_raman(stage, properties, json(), json(), 2);
+    auto raman = named_stages::selected_raman(stage, properties, json(), json(),
+                                              json(), 2);
     check(raman.at("values").size() == 1
               && raman.at("values")[0].at("coordinate") == "nuc_1_z"
               && raman.at("values")[0].at("atom") == 1
@@ -423,7 +568,8 @@ int main(int argc, char** argv) {
               && raman.contains("normal_mode_analysis_unavailable"),
           "one written coordinate: its row, no normal modes, and why");
     stage.raman_atoms = {};
-    raman = named_stages::selected_raman(stage, properties, json(), json(), 2);
+    raman = named_stages::selected_raman(stage, properties, json(), json(),
+                                         json(), 2);
     check(raman.at("values").size() == 2
               && raman.at("values")[0].at("coordinate") == "nuc_0_z"
               && raman.at("values")[1].at("coordinate") == "nuc_1_z",
@@ -432,7 +578,8 @@ int main(int argc, char** argv) {
     stage.raman_atoms = {3};
     throws(
         [&] {
-          named_stages::selected_raman(stage, properties, json(), json(), 2);
+          named_stages::selected_raman(stage, properties, json(), json(),
+                                       json(), 2);
         },
         "reference has 2 atom(s)");
     stage.raman_atoms = {};
@@ -444,34 +591,191 @@ int main(int argc, char** argv) {
                        {{"rows_found", 54},
                         {"rows_expected", 54},
                         {"all_rows_converged", true}}}}}};
-    raman = named_stages::selected_raman(stage, properties, vib, spectra, 2);
+    raman = named_stages::selected_raman(stage, properties, json(), vib,
+                                         spectra, 2);
     check(raman.at("values").size() == 6 && raman.at("coordinates") == "all"
               && raman.at("normal_mode_analysis") == true
               && raman.at("spectrum_complete") == true
               && raman.at("vibrational_analysis") == vib
               && raman.at("raman_spectra") == spectra,
           "the full set: 3N rows, the analysis passed through, complete");
-    selected = named_stages::select_response_properties(stage, properties, vib,
-                                                        spectra, 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), vib, spectra, 2);
     check(named_stages::all_requested_converged(selected),
           "full set complete and converged");
     spectra["completeness"]["f0.00000"]["all_rows_converged"] = false;
-    selected = named_stages::select_response_properties(stage, properties, vib,
-                                                        spectra, 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), vib, spectra, 2);
     check(selected.at("raman").at("spectrum_complete") == false
               && !named_stages::all_requested_converged(selected),
           "an incomplete spectrum makes the stage unconverged");
     throws(
         [&] {
-          named_stages::selected_raman(stage, properties, vib, json(), 2);
+          named_stages::selected_raman(stage, properties, json(), vib, json(),
+                                       2);
         },
         "no completeness record");
+    // D-024 for a written coordinate: no row at this frequency.
     stage.raman.frequencies = {0.02};
+    stage.raman_atoms = {1};
+    stage.raman_directions = "z";
+    stage.raman_full_set = false;
+    json raman_metadata;
+    raman_metadata["run_summary"]["dropped_work"] = json::array(
+        {{{"id", "vbc:dipole_z__nuc_1_z@f0.02000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason",
+           "prerequisites never converged (gated out of every wave)"}}});
+    raman = named_stages::selected_raman(stage, properties, raman_metadata,
+                                         json(), json(), 2);
+    check(raman.at("values").size() == 1
+              && raman.at("values")[0].at("coordinate") == "nuc_1_z"
+              && raman.at("values")[0].at("components").at("zz").is_null()
+              && raman.at("values")[0].at("converged") == false
+              && raman.at("values")[0]
+                         .at("components_unavailable")
+                         .at("zz")
+                         .get<std::string>()
+                         .find("vbc:dipole_z__nuc_1_z@f0.02000_f0.00000")
+                     != std::string::npos,
+          "a Raman element without a row: null value, the undelivered "
+          "source named, unconverged");
+    selected = named_stages::select_response_properties(
+        stage, properties, raman_metadata, json(), json(), 2);
+    check(!named_stages::all_requested_converged(selected),
+          "the stage is unconverged with it");
+  } catch (const std::exception& e) {
+    check(false, e.what());
+  }
+
+  // ----- The excited-state selector over a synthetic bundle (D-025) -------
+  try {
+    Stage stage = bare_stage(world);
+    const auto pkey = named_stages::final_protocol_key(stage);
+    stage.properties = {"excited_states"};
+    stage.excited_states.roots = 2;
+    stage.excited_states.method = "tda";
+    auto root = [](int slot, int stable, double omega, bool converged,
+                   bool stalled, bool locked) {
+      return json{{"slot", slot},
+                  {"stable_index", stable},
+                  {"root_id", "es_root_000" + std::to_string(stable)},
+                  {"display_name", "root " + std::to_string(slot)},
+                  {"omega", omega},
+                  {"bsh_residual", 1e-5},
+                  {"density_residual", 2e-6},
+                  {"omega_residual", 3e-7},
+                  {"density_target", 5e-4},
+                  {"omega_target", 5e-4},
+                  {"converged", converged},
+                  {"stalled", stalled},
+                  {"locked", locked},
+                  {"file", "root_0.bin"},
+                  {"coeffs", 12},
+                  {"bytes", 96}};
+    };
+    json metadata;
+    metadata["excited_states"][pkey]
+        = {{"type", "tda"},
+           {"shell", "closed_shell"},
+           {"n_roots", 2},
+           {"bundle_dir", "es__" + pkey},
+           {"converged", true},
+           {"diverged", false},
+           {"stalled", false},
+           {"stop_reason", "converged"},
+           {"iter", 7},
+           {"slot_permutation", {1, 0}},
+           {"kinetic_history", json::array({1.0, 2.0})},
+           {"roots", json::array({root(0, 1, 0.42, true, false, true),
+                                  root(1, 0, 0.47, true, false, false)})}};
+    json transition
+        = {{"analysis", "tda"},
+           {"protocol_key", pkey},
+           {"roots", json::array({{{"slot", 1},
+                                   {"root_id", "es_root_0000"},
+                                   {"oscillator_strength", 0.3}},
+                                  {{"slot", 0},
+                                   {"root_id", "es_root_0001"},
+                                   {"oscillator_strength", 0.1}}})}};
+    auto es
+        = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("method") == "tda" && es.at("roots_requested") == 2
+              && es.at("guess") == "solid_harmonics"
+              && es.at("guess_written") == false
+              && es.at("protocol_key") == pkey
+              && es.at("stop_reason") == "converged"
+              && es.at("iterations_at_rung") == 7
+              && es.at("decided_by") == "engine_check"
+              && es.at("converged") == true && es.at("roots").size() == 2,
+          "a converged bundle: the request, the exit, converged");
+    const auto& first = es.at("roots")[0];
+    check(first.at("root_id") == "es_root_0001" && first.at("slot") == 0
+              && first.at("omega") == 0.42 && first.at("locked") == true
+              && first.at("omega_units") == "au"
+              && first.at("decided_by") == "engine_check"
+              && !first.contains("file") && !first.contains("coeffs")
+              && first.at("transition").at("oscillator_strength") == 0.1
+              && es.at("roots")[1].at("transition").at("oscillator_strength")
+                     == 0.3,
+          "each root keeps the engine's fields, loses the archive "
+          "bookkeeping, and takes its transition analysis by root_id");
+    check(!es.at("engine_evidence").contains("roots")
+              && !es.at("engine_evidence").contains("kinetic_history")
+              && es.at("engine_evidence").at("bundle_dir") == "es__" + pkey,
+          "the bundle entry travels as evidence without the roots");
+    auto selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2, transition);
+    check(selected.contains("excited_states")
+              && named_stages::all_requested_converged(selected),
+          "the stage is converged with the bundle");
+    // A stalled root: the bundle ended converged by the engine's flag, but
+    // a stalled root is never relabelled converged (B5).
+    metadata["excited_states"][pkey]["roots"][1]
+        = root(1, 0, 0.47, false, true, false);
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("converged") == false
+              && es.at("roots")[1].at("stalled") == true,
+          "one stalled root: the record is unconverged");
+    // An iteration-limit exit: unconverged, the transition analysis absent.
+    metadata["excited_states"][pkey]["converged"] = false;
+    metadata["excited_states"][pkey]["stop_reason"] = "iteration_limit";
+    es = named_stages::selected_excited_states(stage, metadata, json());
+    check(es.at("converged") == false
+              && es.at("stop_reason") == "iteration_limit"
+              && es.at("roots")[0]
+                         .at("transition_unavailable")
+                         .get<std::string>()
+                         .find("bundle not converged")
+                     != std::string::npos,
+          "an iteration-limit exit: unconverged, transition unavailable with "
+          "the reason");
+    selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2);
+    check(!named_stages::all_requested_converged(selected),
+          "the stage is unconverged with it");
+    // The planner's verdict on a met load travels through (D-016).
+    metadata["excited_states"][pkey]["decided_by"] = "planner";
+    es = named_stages::selected_excited_states(stage, metadata, json());
+    check(es.at("decided_by") == "planner"
+              && es.at("roots")[0].at("decided_by") == "planner",
+          "decided_by from the bundle entry, inherited by its roots");
+    // No bundle at the final rung: a record without roots, with the reason.
+    es = named_stages::selected_excited_states(stage, json::object(), json());
+    check(es.at("converged") == false && es.at("roots").empty()
+              && es.at("unavailable").get<std::string>().find(pkey)
+                     != std::string::npos,
+          "no bundle at the final rung: unavailable, unconverged");
+    // Another bundle at the rung than the one requested is an error.
+    stage.excited_states.method = "rpa";
     throws(
-        [&] {
-          named_stages::selected_raman(stage, properties, vib, spectra, 2);
-        },
-        "missing requested raman");
+        [&] { named_stages::selected_excited_states(stage, metadata, json()); },
+        "not the requested rpa");
+    stage.excited_states.method = "tda";
+    stage.excited_states.roots = 3;
+    throws(
+        [&] { named_stages::selected_excited_states(stage, metadata, json()); },
+        "not the requested tda with 3");
   } catch (const std::exception& e) {
     check(false, e.what());
   }

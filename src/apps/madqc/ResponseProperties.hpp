@@ -7,8 +7,10 @@
 // One function per property (D-017): the engine writes one row per tensor
 // element it assembled under properties.<alpha|beta|raman>.<protocol key>,
 // and the stage asks for frequencies and Cartesian components. A requested
-// element the engine did not write is an error, never a silent gap, and the
-// row it came from travels along as engine_evidence.
+// element the engine did not write is never a silent gap: alpha treats it as
+// an error; a quadratic element (beta, Raman) is published without a value
+// and with the engine's reason, since its source needs two converged legs
+// (D-024). The row an element came from travels along as engine_evidence.
 namespace named_stages {
 using json = nlohmann::json;
 
@@ -60,11 +62,26 @@ inline std::string final_protocol_key(const Stage& stage) {
                                       protocol_k(cp.protocol().back()));
 }
 
+// The engine's rows of one quadratic property at the stage's final rung, or
+// no rows when it assembled none there (every source undelivered: D-024).
+inline const json& quadratic_rows(const json& properties,
+                                  const std::string& property,
+                                  const std::string& pkey) {
+  static const json none = json::array();
+  if (!properties.is_object() || !properties.contains(property))
+    return none;
+  const auto& by_rung = properties.at(property);
+  if (!by_rung.is_object() || !by_rung.contains(pkey))
+    return none;
+  return by_rung.at(pkey);
+}
+
 // The one engine row of a quadratic property (beta or d(alpha)/dQ) with output
-// axis A and inputs B and C at (freq_b, freq_c). The engine assembles each
-// element once; two rows would mean two assemblies, which is an error here,
-// not a choice.
-inline const json& quadratic_row(const json& rows, const std::string& what,
+// axis A and inputs B and C at (freq_b, freq_c), or nullptr when the engine
+// wrote none (D-024: the caller publishes the element as unavailable). The
+// engine assembles each element once; two rows would mean two assemblies,
+// which is an error here, not a choice.
+inline const json* quadratic_row(const json& rows, const std::string& what,
                                  char a, const std::string& b,
                                  const std::string& c, double freq_b,
                                  double freq_c) {
@@ -81,39 +98,96 @@ inline const json& quadratic_row(const json& rows, const std::string& what,
     found = &row;
   }
   if (!found)
-    throw std::runtime_error("missing requested " + what + " element " + a + " "
-                             + b + " " + c);
+    return nullptr;
   if (!std::isfinite(found->at("beta").get<double>()))
     throw std::runtime_error("nonfinite " + what);
-  return *found;
+  return found;
+}
+
+// Why the engine wrote no row for an element built from the quadratic source
+// (B, C) at (freq_b, freq_c). The run audits the planned sources it never
+// delivered into run_summary.dropped_work (calc_executor.hpp, one entry per
+// source with the engine's reason), keyed by the source's node id
+// (vbc_node_id, calc_manager.hpp): its reason if it names the source, else
+// the fact that it does not.
+inline std::string quadratic_unavailable(const json& metadata,
+                                         const std::string& b,
+                                         const std::string& c, double freq_b,
+                                         double freq_c) {
+  using molresponse_v3::ResponseMetadata;
+  const std::string source = "vbc:" + b + "__" + c + "@"
+                             + ResponseMetadata::freq_key(freq_b) + "_"
+                             + ResponseMetadata::freq_key(freq_c);
+  if (metadata.is_object() && metadata.contains("run_summary")) {
+    const auto& summary = metadata.at("run_summary");
+    if (summary.is_object() && summary.contains("dropped_work"))
+      for (const auto& dropped : summary.at("dropped_work"))
+        if (dropped.value("id", "") == source)
+          return "the engine built no quadratic source " + source + ": "
+                 + dropped.value("reason", "no reason recorded");
+  }
+  return "the engine wrote no row and run_summary.dropped_work does not name "
+         "its quadratic source "
+         + source;
+}
+
+// The requested elements of one quadratic record under construction: each
+// element's value and engine row, the reason for each element without a row,
+// and whether every element's legs met their targets.
+struct QuadraticElements {
+  json values = json::object();
+  json evidence = json::object();
+  json unavailable = json::object();
+  bool converged = true;
+};
+// One requested element: its value and row, or (D-024) a null value, the
+// engine's reason under components_unavailable, and an unconverged record.
+inline void select_quadratic_element(const json* row, const std::string& name,
+                                     const std::string& reason_if_missing,
+                                     QuadraticElements& elements) {
+  if (row != nullptr) {
+    elements.values[name] = row->at("beta").get<double>();
+    elements.converged = elements.converged && row->value("converged", false);
+    elements.evidence[name] = *row;
+    return;
+  }
+  elements.values[name] = nullptr;
+  elements.unavailable[name] = reason_if_missing;
+  elements.converged = false;
 }
 
 // The hyperpolarizability: for each driver frequency w and triple ABC, the
 // engine's SHG row beta_ABC(-2w; w, w) (static beta at w = 0). The value is
-// in atomic units (e^3 a0^3 Eh^-2), the benchmark's convention.
-inline json selected_beta(const Stage& stage, const json& properties) {
-  const auto& rows = properties.at("beta").at(final_protocol_key(stage));
+// in atomic units (e^3 a0^3 Eh^-2), the benchmark's convention. `metadata`
+// is the engine's response_metadata.json, read for the reason behind a
+// missing row.
+inline json selected_beta(const Stage& stage, const json& properties,
+                          const json& metadata) {
+  const auto& rows
+      = quadratic_rows(properties, "beta", final_protocol_key(stage));
   json selected = json::array();
   for (double omega : stage.hyperpolarizability.frequencies) {
-    json values = json::object(), evidence = json::object();
-    bool converged = true;
+    QuadraticElements elements;
     for (const auto& component : stage.hyperpolarizability.components) {
-      const auto& row
-          = quadratic_row(rows, "hyperpolarizability", component[0],
-                          std::string("dipole_") + component[1],
-                          std::string("dipole_") + component[2], omega, omega);
-      values[component] = row.at("beta").get<double>();
-      converged = converged && row.value("converged", false);
-      evidence[component] = row;
+      const std::string b = std::string("dipole_") + component[1];
+      const std::string c = std::string("dipole_") + component[2];
+      select_quadratic_element(
+          quadratic_row(rows, "hyperpolarizability", component[0], b, c, omega,
+                        omega),
+          component, quadratic_unavailable(metadata, b, c, omega, omega),
+          elements);
     }
-    selected.push_back({{"frequency", omega},
-                        {"frequency_units", "au"},
-                        {"process", omega == 0.0 ? "static" : "shg"},
-                        {"output_frequency", 2.0 * omega},
-                        {"units", "e^3 a0^3 Eh^-2"},
-                        {"components", values},
-                        {"converged", converged},
-                        {"engine_evidence", evidence}});
+    json record = {{"frequency", omega},
+                   {"frequency_units", "au"},
+                   {"process", omega == 0.0 ? "static" : "shg"},
+                   {"output_frequency", 2.0 * omega},
+                   {"units", "e^3 a0^3 Eh^-2"},
+                   {"components", elements.values},
+                   {"converged", elements.converged},
+                   {"engine_evidence", elements.evidence}};
+    if (!elements.unavailable.empty())
+      record["components_unavailable"] = elements.unavailable;
+    selected.push_back(std::move(record));
   }
   return selected;
 }
@@ -147,34 +221,38 @@ inline std::vector<std::pair<int, char>> raman_coordinates(const Stage& stage,
 // engine's normal-mode analysis is passed through unchanged, and the stage is
 // converged only if its completeness block says every row was.
 inline json selected_raman(const Stage& stage, const json& properties,
+                           const json& metadata,
                            const json& vibrational_analysis,
                            const json& raman_spectra, int natom) {
   const auto pkey = final_protocol_key(stage);
-  const auto& rows = properties.at("raman").at(pkey);
+  const auto& rows = quadratic_rows(properties, "raman", pkey);
   json values_out = json::array();
   for (double omega : stage.raman.frequencies) {
     for (const auto& [atom, axis] : raman_coordinates(stage, natom)) {
       const std::string coordinate
           = "nuc_" + std::to_string(atom) + "_" + std::string(1, axis);
-      json values = json::object(), evidence = json::object();
-      bool converged = true;
+      QuadraticElements elements;
       for (const auto& component : stage.raman.components) {
-        const auto& row = quadratic_row(rows, "raman", component[0],
-                                        std::string("dipole_") + component[1],
-                                        coordinate, omega, 0.0);
-        values[component] = row.at("beta").get<double>();
-        converged = converged && row.value("converged", false);
-        evidence[component] = row;
+        const std::string b = std::string("dipole_") + component[1];
+        select_quadratic_element(
+            quadratic_row(rows, "raman", component[0], b, coordinate, omega,
+                          0.0),
+            component,
+            quadratic_unavailable(metadata, b, coordinate, omega, 0.0),
+            elements);
       }
-      values_out.push_back({{"frequency", omega},
-                            {"frequency_units", "au"},
-                            {"coordinate", coordinate},
-                            {"atom", atom},
-                            {"axis", std::string(1, axis)},
-                            {"units", "a0^2 per bohr"},
-                            {"components", values},
-                            {"converged", converged},
-                            {"engine_evidence", evidence}});
+      json record = {{"frequency", omega},
+                     {"frequency_units", "au"},
+                     {"coordinate", coordinate},
+                     {"atom", atom},
+                     {"axis", std::string(1, axis)},
+                     {"units", "a0^2 per bohr"},
+                     {"components", elements.values},
+                     {"converged", elements.converged},
+                     {"engine_evidence", elements.evidence}};
+      if (!elements.unavailable.empty())
+        record["components_unavailable"] = elements.unavailable;
+      values_out.push_back(std::move(record));
     }
   }
   json record = {{"values", values_out},
@@ -209,23 +287,146 @@ inline json selected_raman(const Stage& stage, const json& properties,
   return record;
 }
 
+// The transition analysis of one root out of the engine's es_analysis file
+// (es_analysis.hpp: roots[] with slot and, when the bundle carries stable
+// identities, root_id), matched by root_id, else by slot; nullptr when the
+// file has none for it.
+inline const json* transition_of_root(const json& transition,
+                                      const json& root) {
+  if (!transition.is_object() || !transition.contains("roots"))
+    return nullptr;
+  for (const auto& candidate : transition.at("roots")) {
+    if (root.contains("root_id") && candidate.contains("root_id")) {
+      if (candidate.at("root_id") == root.at("root_id"))
+        return &candidate;
+      continue;
+    }
+    if (candidate.value("slot", -1) == root.value("slot", -2))
+      return &candidate;
+  }
+  return nullptr;
+}
+
+// The excited-state bundle the stage requested (D-025). The engine saves one
+// bundle per rung under excited_states.<protocol key> of its
+// response_metadata.json (es_save_load.hpp: the bundle's verdict, stop
+// reason and iterations, one entry per root with its verdict, residuals and
+// targets since B1), and writes the transition analysis of a converged
+// bundle to es_analysis__<key>.json (es_analysis.hpp), passed here as
+// `transition`. The record is the bundle at the stage's final rung: the
+// method, root count and guess the stage asked for (the guess named even
+// when the engine's default), the bundle's exit, and its roots keyed by the
+// engine's stable root_id (the slot and display name can change between
+// rungs, both are kept beside it), each with the engine's fields and the
+// transition properties or the reason they are missing. The bundle is
+// converged when it ended through `converged` and every root is converged
+// and not stalled. A bundle of another method or root count at that rung is
+// an error (the engine keys bundles by rung alone); no bundle at the final
+// rung is a record without roots, unconverged, with the reason.
+inline json selected_excited_states(const Stage& stage, const json& metadata,
+                                    const json& transition) {
+  const auto& request = stage.excited_states;
+  const auto& rp = stage.params.get<ResponseParameters>();
+  const auto pkey = final_protocol_key(stage);
+  json record = {{"method", request.method},
+                 {"roots_requested", request.roots},
+                 {"guess", rp.excited_guess()},
+                 {"guess_basis", rp.excited_guess_basis()},
+                 {"guess_written", !request.guess.empty()},
+                 {"protocol_key", pkey},
+                 {"omega_units", "au"},
+                 {"converged", false},
+                 {"roots", json::array()}};
+  const json* bundle = nullptr;
+  if (metadata.is_object() && metadata.contains("excited_states")) {
+    const auto& bundles = metadata.at("excited_states");
+    if (bundles.is_object() && bundles.contains(pkey))
+      bundle = &bundles.at(pkey);
+  }
+  if (bundle == nullptr) {
+    record["unavailable"]
+        = "the engine saved no excited-state bundle at the final rung " + pkey;
+    return record;
+  }
+  const std::string type = request.method == "tda" ? "tda" : "full";
+  if (bundle->value("type", type) != type
+      || bundle->value("n_roots", request.roots) != request.roots)
+    throw std::runtime_error("the excited-state bundle at " + pkey + " is "
+                             + bundle->value("type", std::string("?"))
+                             + " with "
+                             + std::to_string(bundle->value("n_roots", 0))
+                             + " root(s), not the requested " + request.method
+                             + " with " + std::to_string(request.roots));
+  const std::string stop = bundle->value("stop_reason", std::string());
+  const bool bundle_converged = bundle->value("converged", false)
+                                && stop == "converged"
+                                && !bundle->value("diverged", false)
+                                && !bundle->value("stalled", false);
+  record["stop_reason"] = stop;
+  record["iterations_at_rung"] = bundle->value("iter", 0);
+  record["diverged"] = bundle->value("diverged", false);
+  record["stalled"] = bundle->value("stalled", false);
+  // Who decided the bundle's verdict: the engine's check, or the planner
+  // when a met load certified it (D-016); the checkpoint writes the field.
+  const std::string decided_by
+      = bundle->value("decided_by", std::string("engine_check"));
+  record["decided_by"] = decided_by;
+  bool every_root = true;
+  json roots = json::array();
+  for (const auto& root : bundle->value("roots", json::array())) {
+    json entry = root;
+    // Archive bookkeeping, not the record.
+    for (const auto* key : {"file", "coeffs", "bytes"})
+      entry.erase(key);
+    entry["omega_units"] = "au";
+    entry["decided_by"] = root.value("decided_by", decided_by);
+    every_root = every_root && root.value("converged", false)
+                 && !root.value("stalled", false);
+    if (const json* analysis = transition_of_root(transition, root))
+      entry["transition"] = *analysis;
+    else
+      entry["transition_unavailable"]
+          = bundle_converged ? "no transition analysis for this root"
+                             : "bundle not converged (the engine writes the "
+                               "transition analysis of a converged bundle "
+                               "only)";
+    roots.push_back(std::move(entry));
+  }
+  record["roots"] = std::move(roots);
+  record["converged"] = bundle_converged && every_root;
+  json evidence = *bundle;
+  for (const auto* key : {"roots", "kinetic_history"})
+    evidence.erase(key);
+  record["engine_evidence"] = std::move(evidence);
+  return record;
+}
+
 // Every property the stage requested, keyed by its name, each with its values
 // (the runner adds the state identities). `converged` is the stage's verdict:
-// every selected row converged, and for the full Raman set the spectrum
-// complete.
+// every selected row converged (an element without a value is not), for the
+// full Raman set the spectrum complete, and the excited-state bundle
+// converged. `metadata` is the engine's response_metadata.json of the run
+// (or the saved copy on a load); `transition` its transition analysis of the
+// bundle at the final rung, when one was written.
 inline json select_response_properties(const Stage& stage,
                                        const json& properties,
+                                       const json& metadata,
                                        const json& vibrational_analysis,
-                                       const json& raman_spectra, int natom) {
+                                       const json& raman_spectra, int natom,
+                                       const json& transition = json()) {
   json selected = json::object();
   for (const auto& property : stage.properties) {
     if (property == "polarizability")
       selected[property] = {{"values", selected_alpha(stage, properties)}};
     else if (property == "hyperpolarizability")
-      selected[property] = {{"values", selected_beta(stage, properties)}};
+      selected[property]
+          = {{"values", selected_beta(stage, properties, metadata)}};
     else if (property == "raman")
-      selected[property] = selected_raman(
-          stage, properties, vibrational_analysis, raman_spectra, natom);
+      selected[property]
+          = selected_raman(stage, properties, metadata, vibrational_analysis,
+                           raman_spectra, natom);
+    else if (property == "excited_states")
+      selected[property] = selected_excited_states(stage, metadata, transition);
     else
       throw std::runtime_error("no selector for property " + property);
   }
@@ -233,9 +434,13 @@ inline json select_response_properties(const Stage& stage,
 }
 inline bool all_requested_converged(const json& selected) {
   for (const auto& [name, record] : selected.items()) {
-    for (const auto& row : record.at("values"))
-      if (!row.at("converged").get<bool>())
-        return false;
+    if (record.contains("values")) {
+      for (const auto& row : record.at("values"))
+        if (!row.at("converged").get<bool>())
+          return false;
+    } else if (!record.value("converged", false)) {
+      return false;
+    }
     if (record.contains("spectrum_complete")
         && !record.at("spectrum_complete").get<bool>())
       return false;
