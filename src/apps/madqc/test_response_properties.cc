@@ -348,14 +348,14 @@ int main(int argc, char** argv) {
     properties["beta"][pkey] = json::array(
         {quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0, 315.73, true),
          quadratic_row("x", "dipole_z", "dipole_z", 0.0, 0.0, 1.5, false)});
-    const auto beta = named_stages::selected_beta(stage, properties);
+    const auto beta = named_stages::selected_beta(stage, properties, json());
     check(beta.size() == 1 && beta[0].at("components").at("zzz") == 315.73
               && beta[0].at("converged") == true
               && beta[0].at("process") == "static"
               && beta[0].at("engine_evidence").contains("zzz"),
           "static beta_zzz selected with its row as evidence");
-    auto selected = named_stages::select_response_properties(stage, properties,
-                                                             json(), json(), 2);
+    auto selected = named_stages::select_response_properties(
+        stage, properties, json(), json(), json(), 2);
     check(selected.contains("polarizability")
               && selected.contains("hyperpolarizability")
               && selected.at("polarizability")
@@ -366,26 +366,70 @@ int main(int argc, char** argv) {
               && named_stages::all_requested_converged(selected),
           "both properties selected, stage converged");
     stage.hyperpolarizability.components = {"zzz", "xzz"};
-    selected = named_stages::select_response_properties(stage, properties,
-                                                        json(), json(), 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), json(), json(), 2);
     check(!named_stages::all_requested_converged(selected),
           "one unconverged row: the stage is not");
-    stage.hyperpolarizability.components = {"yyy"};
-    throws([&] { named_stages::selected_beta(stage, properties); },
-           "missing requested hyperpolarizability");
-    stage.hyperpolarizability.components = {"zzz"};
+    // D-024: an element the engine wrote no row for is published without a
+    // value, with the engine's reason from run_summary.dropped_work, and the
+    // record is unconverged.
+    json metadata;
+    metadata["run_summary"]["dropped_work"] = json::array(
+        {{{"id", "vbc:dipole_y__dipole_y@f0.00000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason",
+           "prerequisites never converged (gated out of every wave)"}},
+         {{"id", "vbc:dipole_z__dipole_z@f0.00000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason", "stalled (quarantined by the no-progress guard)"}}});
+    stage.hyperpolarizability.components = {"zzz", "yyy"};
+    auto partial = named_stages::selected_beta(stage, properties, metadata);
+    const auto reason_of = [](const json& record, const char* name) {
+      return record.at("components_unavailable").at(name).get<std::string>();
+    };
+    check(partial.size() == 1 && partial[0].at("components").at("zzz") == 315.73
+              && partial[0].at("components").at("yyy").is_null()
+              && partial[0].at("converged") == false
+              && reason_of(partial[0], "yyy").find("vbc:dipole_y__dipole_y")
+                     != std::string::npos
+              && reason_of(partial[0], "yyy").find("prerequisites never")
+                     != std::string::npos
+              && !partial[0].at("engine_evidence").contains("yyy"),
+          "an element without a row: null value, the engine's reason, "
+          "unconverged");
     stage.hyperpolarizability.frequencies = {0.02};
-    throws([&] { named_stages::selected_beta(stage, properties); },
-           "missing requested hyperpolarizability");
+    partial = named_stages::selected_beta(stage, properties, metadata);
+    check(partial[0].at("components").at("zzz").is_null()
+              && reason_of(partial[0], "zzz").find("does not name")
+                     != std::string::npos,
+          "a frequency with no rows and no audit entry: unavailable, the "
+          "audit's silence recorded");
     stage.hyperpolarizability.frequencies = {0.0};
+    stage.hyperpolarizability.components = {"zzz"};
+    stage.properties = {"hyperpolarizability"};
+    selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2);
+    check(selected.at("hyperpolarizability")
+                  .at("values")[0]
+                  .at("components")
+                  .at("zzz")
+                  .is_null()
+              && reason_of(selected.at("hyperpolarizability").at("values")[0],
+                           "zzz")
+                         .find("stalled")
+                     != std::string::npos
+              && !named_stages::all_requested_converged(selected),
+          "the engine assembled no beta at all: a record without a value, "
+          "the stage unconverged");
+    stage.properties = {"polarizability", "hyperpolarizability"};
     properties["beta"][pkey].push_back(
         quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0, 315.73, true));
-    throws([&] { named_stages::selected_beta(stage, properties); },
+    throws([&] { named_stages::selected_beta(stage, properties, json()); },
            "duplicate hyperpolarizability row");
     properties["beta"][pkey] = json::array(
         {quadratic_row("z", "dipole_z", "dipole_z", 0.0, 0.0,
                        std::numeric_limits<double>::quiet_NaN(), true)});
-    throws([&] { named_stages::selected_beta(stage, properties); },
+    throws([&] { named_stages::selected_beta(stage, properties, json()); },
            "nonfinite hyperpolarizability");
 
     // Raman: a written subset, then the full set with its completeness record.
@@ -402,8 +446,8 @@ int main(int argc, char** argv) {
     stage.raman_atoms = {1};
     stage.raman_directions = "z";
     stage.raman_full_set = false;
-    auto raman
-        = named_stages::selected_raman(stage, properties, json(), json(), 2);
+    auto raman = named_stages::selected_raman(stage, properties, json(), json(),
+                                              json(), 2);
     check(raman.at("values").size() == 1
               && raman.at("values")[0].at("coordinate") == "nuc_1_z"
               && raman.at("values")[0].at("atom") == 1
@@ -414,7 +458,8 @@ int main(int argc, char** argv) {
               && raman.contains("normal_mode_analysis_unavailable"),
           "one written coordinate: its row, no normal modes, and why");
     stage.raman_atoms = {};
-    raman = named_stages::selected_raman(stage, properties, json(), json(), 2);
+    raman = named_stages::selected_raman(stage, properties, json(), json(),
+                                         json(), 2);
     check(raman.at("values").size() == 2
               && raman.at("values")[0].at("coordinate") == "nuc_0_z"
               && raman.at("values")[1].at("coordinate") == "nuc_1_z",
@@ -423,7 +468,8 @@ int main(int argc, char** argv) {
     stage.raman_atoms = {3};
     throws(
         [&] {
-          named_stages::selected_raman(stage, properties, json(), json(), 2);
+          named_stages::selected_raman(stage, properties, json(), json(),
+                                       json(), 2);
         },
         "reference has 2 atom(s)");
     stage.raman_atoms = {};
@@ -435,34 +481,59 @@ int main(int argc, char** argv) {
                        {{"rows_found", 54},
                         {"rows_expected", 54},
                         {"all_rows_converged", true}}}}}};
-    raman = named_stages::selected_raman(stage, properties, vib, spectra, 2);
+    raman = named_stages::selected_raman(stage, properties, json(), vib,
+                                         spectra, 2);
     check(raman.at("values").size() == 6 && raman.at("coordinates") == "all"
               && raman.at("normal_mode_analysis") == true
               && raman.at("spectrum_complete") == true
               && raman.at("vibrational_analysis") == vib
               && raman.at("raman_spectra") == spectra,
           "the full set: 3N rows, the analysis passed through, complete");
-    selected = named_stages::select_response_properties(stage, properties, vib,
-                                                        spectra, 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), vib, spectra, 2);
     check(named_stages::all_requested_converged(selected),
           "full set complete and converged");
     spectra["completeness"]["f0.00000"]["all_rows_converged"] = false;
-    selected = named_stages::select_response_properties(stage, properties, vib,
-                                                        spectra, 2);
+    selected = named_stages::select_response_properties(
+        stage, properties, json(), vib, spectra, 2);
     check(selected.at("raman").at("spectrum_complete") == false
               && !named_stages::all_requested_converged(selected),
           "an incomplete spectrum makes the stage unconverged");
     throws(
         [&] {
-          named_stages::selected_raman(stage, properties, vib, json(), 2);
+          named_stages::selected_raman(stage, properties, json(), vib, json(),
+                                       2);
         },
         "no completeness record");
+    // D-024 for a written coordinate: no row at this frequency.
     stage.raman.frequencies = {0.02};
-    throws(
-        [&] {
-          named_stages::selected_raman(stage, properties, vib, spectra, 2);
-        },
-        "missing requested raman");
+    stage.raman_atoms = {1};
+    stage.raman_directions = "z";
+    stage.raman_full_set = false;
+    json raman_metadata;
+    raman_metadata["run_summary"]["dropped_work"] = json::array(
+        {{{"id", "vbc:dipole_z__nuc_1_z@f0.02000_f0.00000"},
+          {"top_protocol_key", pkey},
+          {"reason",
+           "prerequisites never converged (gated out of every wave)"}}});
+    raman = named_stages::selected_raman(stage, properties, raman_metadata,
+                                         json(), json(), 2);
+    check(raman.at("values").size() == 1
+              && raman.at("values")[0].at("coordinate") == "nuc_1_z"
+              && raman.at("values")[0].at("components").at("zz").is_null()
+              && raman.at("values")[0].at("converged") == false
+              && raman.at("values")[0]
+                         .at("components_unavailable")
+                         .at("zz")
+                         .get<std::string>()
+                         .find("vbc:dipole_z__nuc_1_z@f0.02000_f0.00000")
+                     != std::string::npos,
+          "a Raman element without a row: null value, the undelivered "
+          "source named, unconverged");
+    selected = named_stages::select_response_properties(
+        stage, properties, raman_metadata, json(), json(), 2);
+    check(!named_stages::all_requested_converged(selected),
+          "the stage is unconverged with it");
   } catch (const std::exception& e) {
     check(false, e.what());
   }

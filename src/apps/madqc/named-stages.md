@@ -224,9 +224,14 @@ solves the dipole legs at `w` and `2w` and one quadratic source per `(b, c)`
 pair; `properties.hyperpolarizability.values` holds one record per
 frequency: `frequency`, `process` (`static` or `shg`), `output_frequency`,
 `components`, `converged` (every leg of every requested element met its
-target), and the engine rows as `engine_evidence`. Other processes (optical
-rectification, the electro-optic Pockels effect) have no quadratic source in
-the engine yet and no deck spelling here.
+target), and the engine rows as `engine_evidence`. An element the engine
+wrote no row for (its quadratic source needs two converged legs) is published
+with a null value under `components` and the engine's reason under
+`components_unavailable` (from the run's `run_summary.dropped_work`, which
+names the undelivered source); the record and the stage are unconverged, as
+for the polarizability. Two rows for one element remain an error. Other
+processes (optical rectification, the electro-optic Pockels effect) have no
+quadratic source in the engine yet and no deck spelling here.
 
 **Raman.** A component `ab` is `d(alpha_ab)/dQ` at each optical frequency in
 `raman.frequencies`, for each nuclear coordinate `Q`. The coordinates are
@@ -241,7 +246,8 @@ every derivative row was. A written subset gives derivative rows only
 (`coordinates: written`, `normal_mode_analysis: false` with the reason).
 Each record in `properties.raman.values` names its `coordinate`
 (`nuc_<atom>_<axis>`), `atom`, `axis`, `frequency`, `components`,
-`converged` and the engine rows.
+`converged` and the engine rows; a component without a row is published as
+for the hyperpolarizability (null, `components_unavailable`, unconverged).
 
 The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
 the benchmark geometry. Until the response checkpoint carries the quadratic
