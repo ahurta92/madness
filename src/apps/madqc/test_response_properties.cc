@@ -217,9 +217,92 @@ int main(int argc, char** argv) {
               && two_atoms.params.get<ResponseParameters>().raman_frequencies()
                      == std::vector<double>{0.0, 0.05},
           "a list of atoms and directions passes through in deck order");
+
+    // D-025: the excited-state request onto the engine's excited.* knobs.
+    const auto excited = translated(
+        world, {"requested_properties [excited_states, polarizability]",
+                "excited_states.roots 2", "excited_states.method rpa",
+                "polarizability.frequencies [0.0]",
+                "polarizability.frequency_units au",
+                "polarizability.components [zz]"});
+    const auto& erp = excited.params.get<ResponseParameters>();
+    check(excited.excited_states.roots == 2
+              && excited.excited_states.method == "rpa"
+              && excited.excited_states.guess.empty() && erp.excited_enable()
+              && erp.excited_num_states() == 2 && !erp.excited_tda()
+              && !erp.is_user_defined("excited.guess")
+              && !erp.is_user_defined("excited.guess_basis")
+              && !erp.is_user_defined("excited.maxiter")
+              && !erp.is_user_defined("excited.guess_max_iter")
+              && !erp.is_user_defined("excited.maxsub")
+              && erp.dipole_frequencies() == std::vector<double>{0.0}
+              && erp.dipole_directions() == "z",
+          "excited_states: roots and method onto excited.enable, "
+          "excited.num_states and excited.tda; no cap of its own; the "
+          "dipole legs beside it");
+    const auto tda_only = translated(
+        world,
+        {"requested_properties [excited_states]", "excited_states.roots 1",
+         "excited_states.method tda", "excited_states.guess virtual_ao",
+         "excited_states.guess_basis aug-cc-pvtz"});
+    const auto& trp = tda_only.params.get<ResponseParameters>();
+    check(trp.excited_enable() && trp.excited_tda()
+              && trp.excited_num_states() == 1
+              && trp.excited_guess() == "virtual_ao"
+              && trp.excited_guess_basis() == "aug-cc-pvtz"
+              && trp.dipole_frequencies().empty()
+              && tda_only.frequencies.empty(),
+          "excited_states alone with a written guess: excited.tda, the "
+          "guess knobs, no dipole grid");
+    check(erp.is_user_defined("excited.enable")
+              && !all.params.get<ResponseParameters>().is_user_defined(
+                  "excited.enable"),
+          "no excited.* knobs without excited_states");
   } catch (const std::exception& e) {
     check(false, e.what());
   }
+  throws(
+      [&] {
+        translated(world, {"requested_properties [excited_states]",
+                           "excited_states.roots 1"});
+      },
+      "excited_states.method (tda or rpa); neither has a default");
+  throws(
+      [&] {
+        translated(world, {"requested_properties [excited_states]",
+                           "excited_states.method tda"});
+      },
+      "neither has a default");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 0", "excited_states.method tda"});
+      },
+      "at least 1");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 1", "excited_states.method tda",
+                    "excited_states.guess_basis aug-cc-pvtz"});
+      },
+      "guess_basis applies to the virtual_ao guess only");
+  throws(
+      [&] {
+        translated(world,
+                   {"requested_properties [excited_states]",
+                    "excited_states.roots 1", "excited_states.method cis"});
+      },
+      "excited_states.method");
+  throws(
+      [&] {
+        translated(world, {"requested_properties [polarizability]",
+                           "polarizability.frequencies [0.0]",
+                           "polarizability.frequency_units au",
+                           "excited_states.roots 1"});
+      },
+      "excited_states.roots needs excited_states in requested_properties");
   throws(
       [&] {
         translated(world, {"requested_properties [polarizability]",
@@ -330,6 +413,24 @@ int main(int argc, char** argv) {
               + "moldft bad\n molecule LiH\n xc hf\n requested_properties "
                 "[energy]\n raman.atoms [0]\nend\n",
           "raman belongs to molresponse");
+  const std::string es_deck
+      = "molresponse excited\n reference gs\n protocol [1e-4]\n"
+        " requested_properties [excited_states]\n excited_states.roots 1\n"
+        " excited_states.method tda\nend\n";
+  // D-025: a valid excited-state deck is refused until the response
+  // checkpoint takes a bundle (builder A's seven items).
+  rejects(geometry + gs + es_deck,
+          "excited_states wait for the response checkpoint to take an "
+          "excited-state bundle");
+  {
+    auto deck = es_deck;
+    deck.replace(deck.find(" protocol"), 0, " excited.enable true\n");
+    rejects(geometry + gs + deck, "unsupported parameter");
+  }
+  rejects(geometry
+              + "moldft bad\n molecule LiH\n xc hf\n requested_properties "
+                "[energy]\n excited_states.roots 1\nend\n",
+          "excited_states belongs to molresponse");
 
   // ----- Selectors over synthetic engine rows -----------------------------
   try {
@@ -534,6 +635,138 @@ int main(int argc, char** argv) {
         stage, properties, raman_metadata, json(), json(), 2);
     check(!named_stages::all_requested_converged(selected),
           "the stage is unconverged with it");
+  } catch (const std::exception& e) {
+    check(false, e.what());
+  }
+
+  // ----- The excited-state selector over a synthetic bundle (D-025) -------
+  try {
+    Stage stage = bare_stage(world);
+    const auto pkey = named_stages::final_protocol_key(stage);
+    stage.properties = {"excited_states"};
+    stage.excited_states.roots = 2;
+    stage.excited_states.method = "tda";
+    auto root = [](int slot, int stable, double omega, bool converged,
+                   bool stalled, bool locked) {
+      return json{{"slot", slot},
+                  {"stable_index", stable},
+                  {"root_id", "es_root_000" + std::to_string(stable)},
+                  {"display_name", "root " + std::to_string(slot)},
+                  {"omega", omega},
+                  {"bsh_residual", 1e-5},
+                  {"density_residual", 2e-6},
+                  {"omega_residual", 3e-7},
+                  {"density_target", 5e-4},
+                  {"omega_target", 5e-4},
+                  {"converged", converged},
+                  {"stalled", stalled},
+                  {"locked", locked},
+                  {"file", "root_0.bin"},
+                  {"coeffs", 12},
+                  {"bytes", 96}};
+    };
+    json metadata;
+    metadata["excited_states"][pkey]
+        = {{"type", "tda"},
+           {"shell", "closed_shell"},
+           {"n_roots", 2},
+           {"bundle_dir", "es__" + pkey},
+           {"converged", true},
+           {"diverged", false},
+           {"stalled", false},
+           {"stop_reason", "converged"},
+           {"iter", 7},
+           {"slot_permutation", {1, 0}},
+           {"kinetic_history", json::array({1.0, 2.0})},
+           {"roots", json::array({root(0, 1, 0.42, true, false, true),
+                                  root(1, 0, 0.47, true, false, false)})}};
+    json transition
+        = {{"analysis", "tda"},
+           {"protocol_key", pkey},
+           {"roots", json::array({{{"slot", 1},
+                                   {"root_id", "es_root_0000"},
+                                   {"oscillator_strength", 0.3}},
+                                  {{"slot", 0},
+                                   {"root_id", "es_root_0001"},
+                                   {"oscillator_strength", 0.1}}})}};
+    auto es
+        = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("method") == "tda" && es.at("roots_requested") == 2
+              && es.at("guess") == "solid_harmonics"
+              && es.at("guess_written") == false
+              && es.at("protocol_key") == pkey
+              && es.at("stop_reason") == "converged"
+              && es.at("iterations_at_rung") == 7
+              && es.at("decided_by") == "engine_check"
+              && es.at("converged") == true && es.at("roots").size() == 2,
+          "a converged bundle: the request, the exit, converged");
+    const auto& first = es.at("roots")[0];
+    check(first.at("root_id") == "es_root_0001" && first.at("slot") == 0
+              && first.at("omega") == 0.42 && first.at("locked") == true
+              && first.at("omega_units") == "au"
+              && first.at("decided_by") == "engine_check"
+              && !first.contains("file") && !first.contains("coeffs")
+              && first.at("transition").at("oscillator_strength") == 0.1
+              && es.at("roots")[1].at("transition").at("oscillator_strength")
+                     == 0.3,
+          "each root keeps the engine's fields, loses the archive "
+          "bookkeeping, and takes its transition analysis by root_id");
+    check(!es.at("engine_evidence").contains("roots")
+              && !es.at("engine_evidence").contains("kinetic_history")
+              && es.at("engine_evidence").at("bundle_dir") == "es__" + pkey,
+          "the bundle entry travels as evidence without the roots");
+    auto selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2, transition);
+    check(selected.contains("excited_states")
+              && named_stages::all_requested_converged(selected),
+          "the stage is converged with the bundle");
+    // A stalled root: the bundle ended converged by the engine's flag, but
+    // a stalled root is never relabelled converged (B5).
+    metadata["excited_states"][pkey]["roots"][1]
+        = root(1, 0, 0.47, false, true, false);
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("converged") == false
+              && es.at("roots")[1].at("stalled") == true,
+          "one stalled root: the record is unconverged");
+    // An iteration-limit exit: unconverged, the transition analysis absent.
+    metadata["excited_states"][pkey]["converged"] = false;
+    metadata["excited_states"][pkey]["stop_reason"] = "iteration_limit";
+    es = named_stages::selected_excited_states(stage, metadata, json());
+    check(es.at("converged") == false
+              && es.at("stop_reason") == "iteration_limit"
+              && es.at("roots")[0]
+                         .at("transition_unavailable")
+                         .get<std::string>()
+                         .find("bundle not converged")
+                     != std::string::npos,
+          "an iteration-limit exit: unconverged, transition unavailable with "
+          "the reason");
+    selected = named_stages::select_response_properties(
+        stage, json::object(), metadata, json(), json(), 2);
+    check(!named_stages::all_requested_converged(selected),
+          "the stage is unconverged with it");
+    // The planner's verdict on a met load travels through (D-016).
+    metadata["excited_states"][pkey]["decided_by"] = "planner";
+    es = named_stages::selected_excited_states(stage, metadata, json());
+    check(es.at("decided_by") == "planner"
+              && es.at("roots")[0].at("decided_by") == "planner",
+          "decided_by from the bundle entry, inherited by its roots");
+    // No bundle at the final rung: a record without roots, with the reason.
+    es = named_stages::selected_excited_states(stage, json::object(), json());
+    check(es.at("converged") == false && es.at("roots").empty()
+              && es.at("unavailable").get<std::string>().find(pkey)
+                     != std::string::npos,
+          "no bundle at the final rung: unavailable, unconverged");
+    // Another bundle at the rung than the one requested is an error.
+    stage.excited_states.method = "rpa";
+    throws(
+        [&] { named_stages::selected_excited_states(stage, metadata, json()); },
+        "not the requested rpa");
+    stage.excited_states.method = "tda";
+    stage.excited_states.roots = 3;
+    throws(
+        [&] { named_stages::selected_excited_states(stage, metadata, json()); },
+        "not the requested tda with 3");
   } catch (const std::exception& e) {
     check(false, e.what());
   }

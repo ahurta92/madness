@@ -150,6 +150,18 @@ struct Controls : madness::QCCalculationParametersBase {
                                  "every atom");
     initialize<std::vector<std::string>>("raman.directions", {},
                                          "displacement axes; omitted: x, y, z");
+    // D-025: the excited-state bundle; roots and method are always written.
+    initialize<int>("excited_states.roots", 0,
+                    "how many roots, from the lowest (required)");
+    initialize<std::string>("excited_states.method", "",
+                            "tda or rpa (required)", {"", "tda", "rpa"});
+    initialize<std::string>("excited_states.guess", "",
+                            "initial guess; omitted: the engine's "
+                            "solid_harmonics",
+                            {"", "solid_harmonics", "virtual_ao", "random"});
+    initialize<std::string>("excited_states.guess_basis", "",
+                            "AO basis of the virtual_ao guess; omitted: the "
+                            "engine's aug-cc-pvdz");
     // DESIGN A3: when the stage's observer publishes, and what it keeps.
     initialize<int>("checkpoint.every_iterations", 0,
                     "also publish every K iterations within a rung (K >= 1); "
@@ -187,6 +199,14 @@ struct Stage {
   std::vector<int> raman_atoms;
   std::string raman_directions;
   bool raman_full_set = false;
+  // D-025: the excited-state request: one bundle of the `roots` lowest roots
+  // by `method` (tda or rpa). guess and guess_basis as written, empty for
+  // the engine's defaults (the record names them).
+  struct ExcitedStatesRequest {
+    int roots = 0;
+    std::string method, guess, guess_basis;
+  };
+  ExcitedStatesRequest excited_states;
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
   int checkpoint_every_iterations = 0;
   bool checkpoint_keep_all = false;
@@ -223,14 +243,16 @@ inline int protocol_k(double t) {
   return molresponse_v3::default_k_for_thresh(t);
 }
 
-// The named property language of a molresponse stage (D-017). Each property
-// in requested_properties has its own block: <property>.frequencies and
-// <property>.frequency_units are required (B3: a number is never defaulted),
-// <property>.components is optional and means every Cartesian tuple when
-// omitted. Raman adds raman.atoms and raman.directions (see Stage).
+// The named property language of a molresponse stage (D-017). Each optical
+// property in requested_properties has its own block: <property>.frequencies
+// and <property>.frequency_units are required (B3: a number is never
+// defaulted), <property>.components is optional and means every Cartesian
+// tuple when omitted. Raman adds raman.atoms and raman.directions (see
+// Stage). excited_states (D-025) has excited_states.roots and
+// excited_states.method, both required, and the optional guess.
 inline const std::vector<std::string>& named_response_properties() {
   static const std::vector<std::string> names
-      = {"polarizability", "hyperpolarizability", "raman"};
+      = {"polarizability", "hyperpolarizability", "raman", "excited_states"};
   return names;
 }
 // The tensor rank of a property's Cartesian components: beta_ABC is a
@@ -306,20 +328,22 @@ inline void translate_response_properties(const std::string& stage_name,
     throw std::runtime_error(
         stage_name
         + ": molresponse requested_properties must name at least "
-          "one of polarizability, hyperpolarizability, raman");
+          "one of polarizability, hyperpolarizability, raman, "
+          "excited_states");
   std::set<std::string> requested;
   for (const auto& p : stage.properties)
     if (std::find(known.begin(), known.end(), p) == known.end()
         || !requested.insert(p).second)
       throw std::runtime_error(
           stage_name + ": unsupported or repeated molresponse property " + p
-          + " (polarizability, hyperpolarizability, raman)");
+          + " (polarizability, hyperpolarizability, raman, excited_states)");
   // A property's block without the property is a mistake, not a default.
   for (const auto& p : known) {
     if (requested.contains(p))
       continue;
-    for (const auto* suffix : {".frequencies", ".frequency_units",
-                               ".components", ".atoms", ".directions"})
+    for (const auto* suffix :
+         {".frequencies", ".frequency_units", ".components", ".atoms",
+          ".directions", ".roots", ".method", ".guess", ".guess_basis"})
       if (controls.parameter_exists(p + suffix)
           && controls.is_user_defined(p + suffix))
         throw std::runtime_error(stage_name + ": " + p + suffix + " needs " + p
@@ -404,6 +428,46 @@ inline void translate_response_properties(const std::string& stage_name,
       rp.set_user_defined_value("raman.atoms", stage.raman_atoms);
     if (!stage.raman_directions.empty())
       rp.set_user_defined_value("raman.directions", stage.raman_directions);
+  }
+  if (requested.contains("excited_states")) {
+    // D-025: one bundle of the `roots` lowest roots by `method`. Both are
+    // written: a root count is a number (B3) and TDA against the full (RPA)
+    // response is a method, not a default. The guess is a method choice
+    // with the engine's default. The stage's maxiter caps the bundle's rungs
+    // as it caps the dipole legs' (B5, one cap): excited.maxiter stays
+    // unwritten, so the engine's bundle budget is maxiter
+    // (ExecutorSettings::es_iter_budget).
+    auto& es = stage.excited_states;
+    if (!controls.is_user_defined("excited_states.roots")
+        || !controls.is_user_defined("excited_states.method"))
+      throw std::runtime_error(
+          stage_name
+          + ": excited_states needs excited_states.roots (how many, from the "
+            "lowest) and excited_states.method (tda or rpa); neither has a "
+            "default");
+    es.roots = controls.get<int>("excited_states.roots");
+    if (es.roots < 1)
+      throw std::runtime_error(stage_name
+                               + ": excited_states.roots must be at least 1");
+    es.method = controls.get<std::string>("excited_states.method");
+    if (es.method != "tda" && es.method != "rpa")
+      throw std::runtime_error(stage_name
+                               + ": excited_states.method must be tda or rpa");
+    es.guess = controls.get<std::string>("excited_states.guess");
+    es.guess_basis = controls.get<std::string>("excited_states.guess_basis");
+    if (!es.guess_basis.empty() && es.guess != "virtual_ao")
+      throw std::runtime_error(
+          stage_name
+          + ": excited_states.guess_basis applies to the virtual_ao guess "
+            "only");
+    rp.set_user_defined_value("excited.enable", true);
+    rp.set_user_defined_value("excited.num_states",
+                              static_cast<std::size_t>(es.roots));
+    rp.set_user_defined_value("excited.tda", es.method == "tda");
+    if (!es.guess.empty())
+      rp.set_user_defined_value("excited.guess", es.guess);
+    if (!es.guess_basis.empty())
+      rp.set_user_defined_value("excited.guess_basis", es.guess_basis);
   }
 }
 
@@ -615,6 +679,18 @@ inline std::vector<Stage> parse(madness::World &world,
                                  stage.reference + " for " + b.name);
       if (seen.count("molecule"))
         throw std::runtime_error("molresponse takes reference, not molecule");
+      // D-025: excited states on the named path wait for the response
+      // checkpoint to take a bundle (builder A's seven items). The request
+      // is mapped by translate_response_properties and checked by its unit
+      // tests; the stage is refused here until then. A deletes this check.
+      if (std::find(stage.properties.begin(), stage.properties.end(),
+                    "excited_states")
+          != stage.properties.end())
+        throw std::runtime_error(
+            b.name
+            + ": excited_states wait for the response checkpoint to take an "
+              "excited-state bundle; a named stage computes polarizability, "
+              "hyperpolarizability and raman for now");
       // DESIGN A1: nothing is copied from the reference stage. Its molecule,
       // charge, L and final thresh/k come from its published generation
       // when this stage runs; cp keeps only this stage's protocol.

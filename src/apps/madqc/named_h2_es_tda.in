@@ -1,0 +1,41 @@
+# Named excited states of H2 in the Tamm-Dancoff approximation: the lowest root at
+# one rung (protocol 1e-4) plus the static alpha_zz the same run gives, the
+# named twin of src/examples/qc/response_h2_es_tda (D-025). The stage's
+# maxiter caps the bundle's rung and the dipole leg alike (one cap, B5);
+# the engine's warmup length and subspace size are its defaults, so the
+# unnamed deck to compare with writes no excited.guess_max_iter,
+# excited.maxsub or excited.maxiter and sets maxiter 20.
+# Run: madqc named_h2_es_tda.in --prefix=H2-es-tda
+# Until the response checkpoint takes an excited-state bundle (builder A's
+# seven items after D-025), the parser refuses the stage: "excited_states
+# wait for the response checkpoint to take an excited-state bundle".
+molecule H2
+  units angstrom
+  eprec 1e-5
+  H 0.0 0.0 -0.37
+  H 0.0 0.0 0.37
+end
+
+moldft gs
+  molecule H2
+  xc hf
+  L 100
+  localize canon
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 30
+  requested_properties [energy, dipole]
+end
+
+molresponse excited
+  reference gs
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 20
+  requested_properties [excited_states, polarizability]
+  excited_states.roots 1
+  excited_states.method tda
+  polarizability.frequencies [0.0]
+  polarizability.frequency_units au
+  polarizability.components [zz]
+end

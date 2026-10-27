@@ -249,13 +249,71 @@ Each record in `properties.raman.values` names its `coordinate`
 `converged` and the engine rows; a component without a row is published as
 for the hyperpolarizability (null, `components_unavailable`, unconverged).
 
+## Excited states
+
+A `molresponse` stage may request the lowest excited states of its reference
+(D-025), alone or beside the optical properties, whose dipole legs it shares:
+
+```
+molresponse excited
+  reference gs
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 20
+  requested_properties [excited_states, polarizability]
+  excited_states.roots 1
+  excited_states.method tda
+  polarizability.frequencies [0.0]
+  polarizability.frequency_units au
+  polarizability.components [zz]
+end
+```
+
+`excited_states.roots` (how many roots, from the lowest) and
+`excited_states.method` (`tda`, the Tamm-Dancoff approximation, or `rpa`,
+the full TDHF response) are required: a root count is a number, never
+defaulted, and the two methods are different calculations. Optional:
+`excited_states.guess` (`solid_harmonics`, `virtual_ao` or `random`; omitted,
+the engine's `solid_harmonics`) and, for `virtual_ao` only,
+`excited_states.guess_basis` (omitted, the engine's `aug-cc-pvdz`). The
+engine's `excited.*` spellings are not stage controls. The stage's `maxiter`
+caps the bundle's rung as it caps the dipole legs' (one cap); the engine's
+warmup length and subspace size are its defaults. Two-photon absorption is
+not exposed.
+
+The engine solves the roots together as one bundle per rung, each root
+with its own verdict (a stalled root is never relabelled converged), and
+the bundle is the unit the checkpoint saves and the planner judges on
+`--continue` (on the worst root). `properties.excited_states` is one record:
+`method`, `roots_requested`, `guess` and `guess_basis` (as the engine used
+them, `guess_written` says whether the deck wrote them), `protocol_key` of
+the final rung, `stop_reason`, `iterations_at_rung`, `decided_by` (the
+engine's check, or the planner for a met load), `converged` (the bundle
+ended through `converged` and every root is converged and not stalled), and
+`roots[]`: per root the engine's stable `root_id` (the `slot` and
+`display_name` can change between rungs and are kept beside it), `omega`
+(`omega_units au`), `converged`, `locked`, `stalled`, `omega_residual`,
+`density_residual`, `bsh_residual`, the targets, the `unavailable` reasons
+the engine writes, and the transition analysis (`transition`: oscillator
+strength, transition dipole and quadrupole) or `transition_unavailable` with
+the reason (the engine writes the analysis of a converged bundle only). No
+bundle at the final rung gives a record without roots and `unavailable`
+with the reason; a bundle of another method or root count at that rung is
+an error. The bundle entry travels as `engine_evidence`.
+
+The named decks `named_h2_es_tda.in` and `named_h2_es_rpa.in` are the named
+twins of the `response_h2_es_*` qctest decks. Until the response checkpoint
+takes an excited-state bundle, the parser refuses the stage
+("excited_states wait for the response checkpoint to take an excited-state
+bundle").
+
 The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
 the benchmark geometry. Until the response checkpoint carries the quadratic
 sources, the parser accepts these requests but refuses to run them
 ("hyperpolarizability and raman wait for the response checkpoint"); the
 unnamed `--wf=response` path computes both today.
 
-2PA, excited states, Nemo, MP2, CC2, and optimization are not exposed
+2PA, Nemo, MP2, CC2, and optimization are not exposed
 through this named frontend yet. The broader convergence contract is milestone 2d.
 
 Checkpointing assumes a shared filesystem and supported archive reader counts
