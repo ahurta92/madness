@@ -6,9 +6,8 @@
 # unnamed deck to compare with writes no excited.guess_max_iter,
 # excited.maxsub or excited.maxiter and sets maxiter 20.
 # Run: madqc named_h2_es_tda.in --prefix=H2-es-tda
-# Until the response checkpoint takes an excited-state bundle (builder A's
-# seven items after D-025), the parser refuses the stage: "excited_states
-# wait for the response checkpoint to take an excited-state bundle".
+# The response checkpoint publishes the bundle and plans it on --continue
+# (D-025).
 molecule H2
   units angstrom
   eprec 1e-5

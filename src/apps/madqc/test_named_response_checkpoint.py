@@ -294,6 +294,43 @@ run('independent-stages', twins, ground + 'molresponse first' + response_text +
 rows = json.loads((twins / 'results.json').read_text())['stages']
 assert len({row['state_id'] for row in rows}) == len(rows)
 
+# D-025: an excited-state bundle is one state per rung. The generation holds
+# its per-root archives and its index; a planner load keeps the transition
+# analysis and says who decided; another root count starts fresh.
+es_deck = (Path(a.source) / 'named_h2_es_tda.in').read_text()
+def es_record(root):
+    stage = json.loads((root / 'excited/results.json').read_text())
+    return stage, stage['properties']['excited_states']
+es = work / 'ExcitedStates'
+run('es-fresh', es, es_deck)
+es_dir, es_manifest = published(es, 'excited')
+assert 'es__1e-04_k6/root_0' in [x['basename'] for x in es_manifest['archives']]
+assert es_manifest['numerical']['bundle_indices']['1e-04_k6']['writer_nproc'] == a.ranks
+assert '1e-04_k6' in es_manifest['numerical']['transition_analysis']
+stage, record = es_record(es)
+assert record['converged'] and record['decided_by'] == 'engine_check'
+assert 'transition' in record['roots'][0]
+omega = record['roots'][0]['omega']
+es_added = work / 'ExcitedStatesAdded'
+shutil.copytree(es, es_added)
+run('es-add-frequency', es_added,
+    es_deck.replace('frequencies [0.0]', 'frequencies [0.0, 0.02]'), resume=True)
+stage, record = es_record(es_added)
+plans = {s['state']: s for s in stage['continuation']['states']}
+assert plans['es:tda_n1']['action'] == 'loaded'
+assert record['decided_by'] == 'planner' and record['roots'][0]['omega'] == omega
+assert 'transition' in record['roots'][0]
+assert all(w.get('kind') != 'excited_states' for w in stage['work_items'])
+es_roots = work / 'ExcitedStatesRoots'
+shutil.copytree(es, es_roots)
+run('es-two-roots', es_roots,
+    es_deck.replace('excited_states.roots 1', 'excited_states.roots 2'), resume=True)
+stage, record = es_record(es_roots)
+plans = {s['state']: s for s in stage['continuation']['states']}
+assert plans['es:tda_n2']['action'] == 'fresh'
+assert 'the saved bundle is es:tda_n1' in plans['es:tda_n2']['why']
+assert len(record['roots']) == 2 and record['converged']
+
 summary = {name: {'iterations': result(root)['iterations_this_run'],
                   'work': result(root)['work'], 'alpha_zz': alpha(root)}
            for name, root in [('reused', baseline), ('added_frequency', fresh),

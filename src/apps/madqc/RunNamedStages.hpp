@@ -320,7 +320,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
       {{"stage", stage.reference}, {"generation", reference.saved.generation}},
       static_cast<int>(molecule.natom()));
   molresponse_v3_lib::Results response;
-  if (checkpoint.prepare(continuing)) {
+  const bool loaded = checkpoint.prepare(continuing);
+  if (loaded) {
     response.metadata = checkpoint.metadata();
     response.properties = checkpoint.properties();
     response.vibrational_analysis = checkpoint.analysis("vibrational_analysis");
@@ -342,9 +343,19 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
       = stage.params.get<ResponseParameters>().to_json_if_precedence("defined");
   // The engine's property/evidence JSON exists on root only.
   on_root(world, [&] {
+    // D-025: the bundle's verdict says who decided it, and its transition
+    // analysis is the engine's file of this attempt, or the generation's on a
+    // load.
+    checkpoint.annotate_bundles(response.metadata);
+    json transition = loaded ? checkpoint.transition() : json();
+    const auto analysis
+        = directory / ("es_analysis__" + final_protocol_key(stage) + ".json");
+    if (!loaded && fs::exists(analysis))
+      transition = madness::checkpoint::detail::read_json(analysis);
     auto selected = select_response_properties(
-        stage, response.properties,response.metadata, response.vibrational_analysis,
-        response.raman_spectra, static_cast<int>(molecule.natom()));
+        stage, response.properties, response.metadata,
+        response.vibrational_analysis, response.raman_spectra,
+        static_cast<int>(molecule.natom()), transition);
     converged = all_requested_converged(selected);
     for (auto& [name, record] : selected.items()) {
       record["source_state_id"] = state_id;

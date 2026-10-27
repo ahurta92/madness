@@ -362,10 +362,20 @@ with the reason; a bundle of another method or root count at that rung is
 an error. The bundle entry travels as `engine_evidence`.
 
 The named decks `named_h2_es_tda.in` and `named_h2_es_rpa.in` are the named
-twins of the `response_h2_es_*` qctest decks. Until the response checkpoint
-takes an excited-state bundle, the parser refuses the stage
-("excited_states wait for the response checkpoint to take an excited-state
-bundle").
+twins of the `response_h2_es_*` qctest decks.
+
+The response checkpoint publishes the bundle at each rung as one state: the
+per-root archives under `es__<key>/`, with the bundle's index (`roots.json`,
+with `writer_nproc`) and, for a converged bundle, its transition analysis
+kept in the manifest. On `--continue` the bundle is planned like a dipole
+leg, judged on its worst root against the engine's own check (every root's
+density change below `5 x max(dconv, thresh)` and its excitation energy
+change below the same); the continuation record's entry for it has
+`kind: excited_states`, `method` and `roots`. A loaded bundle that meets
+the request is recorded `decided_by: planner`. A saved bundle of another
+method or root count is not used: the bundle starts fresh, and the record's
+`why` says so. A bundle written on another number of ranks is refused
+("ES bundle in es__<key> was written with N process(es) but loaded with M").
 
 The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
 the benchmark geometry. The response checkpoint publishes the nuclear legs

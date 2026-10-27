@@ -728,6 +728,26 @@ int main() {
                      NodeAction::Restart,
            "seed: a finer rung restarts from the state's own coarser rung");
 
+    // An excited-state bundle (D-025): the source the bundle loader picks,
+    // the same type and root count only.
+    CalcNode es;
+    es.kind = CalcKind::ES; es.tda = true; es.n_roots = 2; es.protocols = P;
+    es.id = es_node_id(true, 2);
+    json bundles = empty_meta();
+    put_es_bundle(bundles, 1e-4, /*converged=*/true, "tda", 2);
+    bundles["excited_states"][k4]["shell"] = "closed_shell";
+    EXPECT(planned_action(es, bundles, 1e-4, resume, {}) == NodeAction::Skip &&
+               planned_action(es, bundles, 1e-6, resume, {}) == NodeAction::Restart,
+           "ES resume: the finer rung restarts from the bundle's coarser rung");
+    StatePlan es_resume{StatePlan::Kind::resume, 1e-4, ""};
+    EXPECT(planned_action(es, bundles, 1e-4, es_resume, {}) == NodeAction::Resume,
+           "ES resume: the bundle at the start rung resumes");
+    EXPECT(planned_action(es, bundles, 1e-4, fresh, {}) == NodeAction::Fresh,
+           "ES fresh: the start rung ignores the saved bundle");
+    bundles["excited_states"][k4]["n_roots"] = 3;
+    EXPECT(planned_action(es, bundles, 1e-6, resume, {}) == NodeAction::Fresh,
+           "ES: a bundle with another root count is not a source");
+
     // schedule: the planned state takes the plan; an unplanned one reconciles.
     const StatePlans plans{{fd ? fd->id : "", resume}};
     auto waves = schedule(dag, P, m, /*max_iters=*/8, 0, plans);

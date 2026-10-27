@@ -679,18 +679,6 @@ inline std::vector<Stage> parse(madness::World &world,
                                  stage.reference + " for " + b.name);
       if (seen.count("molecule"))
         throw std::runtime_error("molresponse takes reference, not molecule");
-      // D-025: excited states on the named path wait for the response
-      // checkpoint to take a bundle (builder A's seven items). The request
-      // is mapped by translate_response_properties and checked by its unit
-      // tests; the stage is refused here until then. A deletes this check.
-      if (std::find(stage.properties.begin(), stage.properties.end(),
-                    "excited_states")
-          != stage.properties.end())
-        throw std::runtime_error(
-            b.name
-            + ": excited_states wait for the response checkpoint to take an "
-              "excited-state bundle; a named stage computes polarizability, "
-              "hyperpolarizability and raman for now");
       // DESIGN A1: nothing is copied from the reference stage. Its molecule,
       // charge, L and final thresh/k come from its published generation
       // when this stage runs; cp keeps only this stage's protocol.

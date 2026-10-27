@@ -426,11 +426,17 @@ int main(int argc, char** argv) {
       = "molresponse excited\n reference gs\n protocol [1e-4]\n"
         " requested_properties [excited_states]\n excited_states.roots 1\n"
         " excited_states.method tda\nend\n";
-  // D-025: a valid excited-state deck is refused until the response
-  // checkpoint takes a bundle (builder A's seven items).
-  rejects(geometry + gs + es_deck,
-          "excited_states wait for the response checkpoint to take an "
-          "excited-state bundle");
+  // D-025: the response checkpoint takes the bundle, so a valid
+  // excited-state deck parses.
+  try {
+    const auto es = named_stages::parse(world, geometry + gs + es_deck);
+    check(es[1].properties == std::vector<std::string>{"excited_states"}
+              && es[1].excited_states.roots == 1
+              && es[1].excited_states.method == "tda",
+          "parse: an excited-state deck is accepted");
+  } catch (const std::exception& e) {
+    check(false, std::string("parse: an excited-state deck: ") + e.what());
+  }
   {
     auto deck = es_deck;
     deck.replace(deck.find(" protocol"), 0, " excited.enable true\n");

@@ -554,10 +554,11 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
 // planned_action — what a planner decision (StatePlan) forces at one rung. Pure.
 // ---------------------------------------------------------------------------
 
-/// The action `plan` forces on FD-family `node` at `thresh`, or nullopt when
-/// reconcile_protocol decides (a rung this run has already solved). The
-/// forced source is the one the loader will pick (best_usable_fd_source_key),
-/// so the trace names what is actually loaded.
+/// The action `plan` forces on an FD-family or ES `node` at `thresh`, or
+/// nullopt when reconcile_protocol decides (a rung this run has already
+/// solved). The forced source is the one the loader will pick
+/// (best_usable_fd_source_key, best_usable_es_source_key), so the trace names
+/// what is actually loaded.
 inline std::optional<NodeAction>
 planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
                const StatePlan &plan, const SolvedRungs &solved) {
@@ -572,6 +573,14 @@ planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
   if (at_start && plan.kind == StatePlan::Kind::fresh) return NodeAction::Fresh;
   // The executor loads the seed (seed_start) for a Restart at the start rung.
   if (at_start && plan.kind == StatePlan::Kind::seed) return NodeAction::Restart;
+  // An excited-state bundle (D-025): the source the bundle loader picks.
+  if (node.kind == CalcKind::ES) {
+    const std::string source = best_usable_es_source_key(
+        meta, node.tda ? "tda" : "full", "closed_shell", node.n_roots, thresh,
+        k, key);
+    if (source.empty()) return NodeAction::Fresh;
+    return source == key ? NodeAction::Resume : NodeAction::Restart;
+  }
   const std::string source = best_usable_fd_source_key(
       meta, node.pert.description(), ResponseMetadata::freq_key(node.freq),
       thresh, k, key);
