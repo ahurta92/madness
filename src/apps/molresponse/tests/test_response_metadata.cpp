@@ -422,6 +422,25 @@ int main() {
            "a redefined key drops its sources too");
   }
 
+  // ---- best_usable_fd_source_key: an aliased entry is not a source --------
+  std::printf("=== best_usable_fd_source_key, aliased key ===\n");
+  {
+    const std::string f0 = ResponseMetadata::freq_key(0.0);
+    nlohmann::json meta = {
+        {"protocols", {{"1e-04_k6", {{"thresh", 1e-4}, {"k", 6}}},
+                       {"1e-06_k8", {{"thresh", 1.01e-6}, {"k", 8}}}}},
+        {"fd_states", {{"dipole_z", {{"1e-04_k6", {{f0, {{"converged", true}}}}},
+                                     {"1e-06_k8", {{f0, {{"converged", true}}}}}}}}}};
+    // The saved 1.01e-6 entry is coarser than a 1e-6 target, so before this
+    // rule it was the exact source and the state resumed from it.
+    EXPECT(molresponse_v3::best_usable_fd_source_key(meta, "dipole_z", f0, 1e-6, 8, "1e-06_k8") ==
+               "1e-04_k6",
+           "an entry saved under another threshold of the same key is skipped");
+    EXPECT(molresponse_v3::best_usable_fd_source_key(meta, "dipole_z", f0, 1.01e-6, 8, "1e-06_k8") ==
+               "1e-06_k8",
+           "the same threshold is still the exact source");
+  }
+
   std::filesystem::remove_all(tmp);
   std::printf("\n%s: %d failure(s)\n",
               failed == 0 ? "ALL PASS" : "FAILED", failed);

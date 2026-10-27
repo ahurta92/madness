@@ -39,6 +39,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -418,7 +419,10 @@ private:
 /// protocol (target_thresh, target_k), from the aggregate metadata json.
 /// "Usable" = present in fd_states, listed in the protocols registry,
 /// COARSER-OR-EQUAL to the target (saved_thresh >= target_thresh AND
-/// saved_k <= target_k), and NOT `diverged`. Convergence is NOT required:
+/// saved_k <= target_k), and NOT `diverged`. An entry under the target's own
+/// key whose registered threshold is not the target's (keys round the
+/// threshold: 1e-6 and 1.01e-6 share one) was saved under another definition
+/// of that rung, so it is not usable either. Convergence is NOT required:
 /// a coarse partial is a perfectly good seed for the finer step. Preference:
 /// exact target_key first, else closest-to-target (max k, then min thresh).
 /// Returns "" if no usable source exists.
@@ -444,6 +448,9 @@ best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
     if (!protos.contains(key))                  continue;
     const double t  = protos[key].value("thresh", 0.0);
     const int    kk = protos[key].value("k", 0);
+    if (key == target_key &&
+        std::abs(t - target_thresh) > 1e-12 * std::max(t, target_thresh))
+      continue;  // aliased: the same key under another threshold
     if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
   }
   if (cands.empty()) return {};
