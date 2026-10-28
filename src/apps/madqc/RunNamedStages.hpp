@@ -248,7 +248,11 @@ struct AppSpec {
 
 // A3, step 6 (skeleton spec 3.3; S3c2): publish one generation of `stage`
 // under `store`, in one order for every application. The application
-// assembled and named the manifest (D-051, D-054); here:
+// assembled the manifest (D-051, D-054); here:
+//   0. every rank (S4c1): the shared fields (set_shared_fields), the name
+//      the next of `names` (D-058), before anything below reads the
+//      manifest: rank 0's check before writing and validate_generation both
+//      compare the property records' generation with the manifest's;
 //   1. rank 0: its check before writing, then the generation directory;
 //   2. every rank: its archives (write_archives);
 //   3. rank 0 (D-052): the archives are the generation's members, the
@@ -261,10 +265,12 @@ struct AppSpec {
 //   5. read it back; then `retain`, the application's retention (D-053).
 inline madness::checkpoint::Manifest publish_generation(
     madness::World& world, const fs::path& store, const AppSpec& spec,
-    const Stage& stage, int natom, GenerationWrite write,
+    const Stage& stage, int natom, GenerationSequence& names,
+    GenerationWrite write,
     const std::function<void(const madness::checkpoint::Manifest&)>& retain) {
   namespace checkpoint = madness::checkpoint;
   auto& m = write.manifest;
+  set_shared_fields(m, stage.name, names.next(), write.iterations_this_run);
   const auto directory = store / m.generation;
   checkpoint::detail::on_root(world, [&] {
     if (write.check_before_write)
@@ -429,13 +435,14 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     settings = moldft_spec().settings(stage, natom);
     return *settings;
   };
+  GenerationSequence names{stage.name, ctx.run_id};
   steps.prepare = [&] {
     checkpoint.emplace(
         world, stage, ctx.stage_directory, ctx.run_id, *settings,
         [&](GenerationWrite write) {
           return publish_generation(
               world, ctx.stage_directory / "checkpoints", moldft_spec(), stage,
-              natom, std::move(write),
+              natom, names, std::move(write),
               [&](const madness::checkpoint::Manifest& published) {
                 // A3: retention unless the deck keeps every generation.
                 if (!settings->checkpoints.keep_all)
@@ -574,15 +581,16 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     settings = response_spec().settings(stage, natom);
     return *settings;
   };
+  GenerationSequence names{stage.name, ctx.run_id};
   steps.prepare = [&] {
     checkpoint.emplace(
-        world, stage, ctx.stage_directory, directory, ctx.run_id,
+        world, stage, ctx.stage_directory, directory,
         json{{"stage", stage.reference},
              {"generation", reference.saved.generation}},
         static_cast<int>(molecule.natom()), [&](GenerationWrite write) {
           // Response keeps every generation (D-053).
           return publish_generation(world, ctx.stage_directory / "checkpoints",
-                                    response_spec(), stage, natom,
+                                    response_spec(), stage, natom, names,
                                     std::move(write), {});
         });
   };

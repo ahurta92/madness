@@ -773,10 +773,13 @@ inline std::vector<Stage> parse(madness::World &world,
 }
 // A3, step 6 (S3c2): one generation for the skeleton to publish
 // (publish_generation). The application decides when to publish and
-// assembles and names the manifest (D-051, D-054); it also says what to check
-// before anything is written and how its archives are written.
+// assembles the manifest (D-051, D-054), all but the fields every manifest
+// shares, which the skeleton fills (S4c1, set_shared_fields); it also says
+// what to check before anything is written and how its archives are written.
 struct GenerationWrite {
   madness::checkpoint::Manifest manifest;
+  // position.iterations_this_run: the engine iterations of this run so far.
+  std::size_t iterations_this_run = 0;
   // What AppSpec::members reads (moldft: nothing; response: the metadata).
   nlohmann::json engine_metadata = nlohmann::json::object();
   // Rank 0, before the generation directory exists; throws why not.
@@ -787,6 +790,37 @@ struct GenerationWrite {
                             madness::checkpoint::Manifest&)>
       write_archives;
 };
+// D-058 (S4c1): the names one stage's run gives its generations,
+// g-<stage>-<run>-<n>, n counting from 1 in publish order. Generations
+// written before S4c1 are named g-<run>-<n> (moldft) and are still read: no
+// reader parses a name (readers follow `latest` or a manifest).
+struct GenerationSequence {
+  std::string stage, run_id;
+  std::size_t n = 0;
+  std::string next() {
+    return "g-" + stage + "-" + run_id + "-" + std::to_string(++n);
+  }
+};
+
+// S4c1: the manifest fields every application's generation shares, filled
+// by the skeleton before anything checks or writes the manifest: the stage,
+// the generation's name, the iterations of this run, the generation each
+// property record belongs to, and the working orbitals' state id, which is
+// the generation (A1: a consumer requires state_id == generation; moldft
+// only, response has no working orbitals).
+inline void set_shared_fields(madness::checkpoint::Manifest& m,
+                              const std::string& stage,
+                              const std::string& generation,
+                              std::size_t iterations_this_run) {
+  m.stage = stage;
+  m.generation = generation;
+  m.position["iterations_this_run"] = iterations_this_run;
+  for (auto& property : m.properties)
+    property["generation"] = generation;
+  if (m.working_orbitals.is_object())
+    m.working_orbitals["state_id"] = generation;
+}
+
 // The skeleton's publish, as the run binding hands it to a checkpoint class:
 // returns the generation as published and read back.
 using GenerationPublisher

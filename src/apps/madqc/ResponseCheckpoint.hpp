@@ -447,12 +447,10 @@ class ResponseCheckpoint {
   madness::World& world_;
   const Stage& stage_;
   std::filesystem::path store_, attempt_;
-  std::string run_id_;
   json reference_, request_;
   int natom_;
   Manifest latest_;
   bool restored_ = false, loaded_ = false;
-  std::size_t sequence_ = 0;
   // B6: this attempt's iteration totals and plans (S3b: the functions that
   // read them take them as arguments).
   IterationTotals totals_;
@@ -987,11 +985,10 @@ public:
   // (publish_generation, S3c2).
   ResponseCheckpoint(madness::World& world, const Stage& stage,
                      const std::filesystem::path& stage_directory,
-                     const std::filesystem::path& attempt, std::string run_id,
-                     json reference, int natom, GenerationPublisher publish)
+                     const std::filesystem::path& attempt, json reference,
+                     int natom, GenerationPublisher publish)
       : world_(world), stage_(stage), store_(stage_directory / "checkpoints"),
-        attempt_(attempt), run_id_(std::move(run_id)),
-        reference_(std::move(reference)), natom_(natom),
+        attempt_(attempt), reference_(std::move(reference)), natom_(natom),
         publish_(std::move(publish)) {
     request_ = response_request(stage);
   }
@@ -1180,9 +1177,7 @@ private:
     origins[attempt_.string()] = request_;
     metadata["checkpoint_requests"] = std::move(origins);
     Manifest m;
-    m.stage = stage_.name;
     m.method = "TDHF";
-    m.generation = "g-" + stage_.name + "-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
     m.reference = reference_;
     m.numerical = {
@@ -1194,7 +1189,6 @@ private:
         {"plans", plans_.records}};
     m.targets = {{"dconv", request_.at("dconv")}};
     m.position = position;
-    m.position["iterations_this_run"] = iterations;
     if (!latest_.generation.empty()) m.position["previous_generation"] = latest_.generation;
     m.stop_reason = converged ? "converged" : analyzed ? "unfinished" : "in_progress";
     // Keep analyzed values as diagnostics in engine_metadata, but an unmet
@@ -1203,12 +1197,12 @@ private:
       for (const auto& name : stage_.properties)
         m.properties.push_back(
             {{"name", name},
-             {"generation", m.generation},
              {"converged", converged},
              {"value",
               property_value(metadata, name, request_final_key(request_))}});
     GenerationWrite write;
     write.manifest = std::move(m);
+    write.iterations_this_run = iterations;
     write.engine_metadata = metadata;
     write.check_before_write = [&](const Manifest&) {
       (void)members(metadata);

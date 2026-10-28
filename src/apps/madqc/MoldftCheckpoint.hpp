@@ -584,7 +584,6 @@ class MoldftCheckpoint {
   const Stage &stage_;
   fs::path store_;
   std::string run_id_;
-  std::size_t sequence_ = 0;
   json physical_;
   madness::checkpoint::Manifest latest_;
   bool has_latest_ = false;
@@ -1015,7 +1014,6 @@ public:
             cadence.every_iterations))
       publish(scf, false, json::array(), metrics,
               {{"iteration", step.iteration},
-               {"iterations_this_run", iterations},
                {"phase", step.final_rotation ? "after_final_rotation"
                                              : "after_orbital_update"},
                {"rung", current_rung_}},
@@ -1150,8 +1148,7 @@ public:
     report["convergence_settings"] = convergence::to_json(settings_);
     report["convergence_outcome"]
         = convergence::outcome_to_json(settings_, saved_outcomes(evidence));
-    json position = {{"phase", "final_properties_on_saved_orbitals"},
-                     {"iterations_this_run", iterations}};
+    json position = {{"phase", "final_properties_on_saved_orbitals"}};
     if (!current_rung_.is_null())
       position["rung"] = current_rung_;
     publish(scf, converged, properties, metrics, position, true);
@@ -1180,9 +1177,7 @@ private:
                const json &metrics, const json &position, bool evaluated) {
     namespace checkpoint = madness::checkpoint;
     checkpoint::Manifest m;
-    m.stage = stage_.name;
     m.method = "HF";
-    m.generation = "g-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = physical_;
     m.numerical = {
         {"threshold", madness::FunctionDefaults<3>::get_thresh()},
@@ -1191,8 +1186,7 @@ private:
         {"protocol", scf.param.protocol()},
         {"parameters", scf.param.to_json()},
         {"consumer_context", moldft_consumer_context(engine_description(scf))}};
-    m.working_orbitals = {{"state_id", m.generation},
-                          {"ordering", "archive_order"}};
+    m.working_orbitals = {{"ordering", "archive_order"}}; // state_id: S4c1
     m.position = position;
     if (has_latest_)
       m.position["previous_generation"] = latest_.generation;
@@ -1206,13 +1200,12 @@ private:
     m.targets["explicit_accuracy"] = convergence::requested_targets(settings_);
     m.targets["decided_by"] = convergence::to_string(settings_.decider);
     m.stop_reason = stop_reason(converged, evaluated);
-    for (auto &p : properties)
-      p["generation"] = m.generation;
     m.properties = properties;
     m.numerical["states"]
         = json::array({moldft_state_record(m, "engine_check")});
     GenerationWrite write;
     write.manifest = std::move(m);
+    write.iterations_this_run = iterations;
     write.check_before_write = [](const checkpoint::Manifest& m) {
       validate_measurements(m.metrics, m.stage, m.numerical);
     };
@@ -1261,13 +1254,9 @@ private:
     namespace checkpoint = madness::checkpoint;
     auto m = latest_;
     const auto source = latest_.generation;
-    m.generation = "g-" + run_id_ + "-" + std::to_string(++sequence_);
     m.stop_reason = "converged";
     m.position["previous_generation"] = source;
-    m.position["iterations_this_run"] = 0;
     m.position["reused_from"] = source;
-    m.working_orbitals
-        = {{"state_id", m.generation}, {"ordering", "archive_order"}};
     m.targets = {{"dconv", scf.param.dconv()},
                  {"effective_dconv",
                   std::max(scf.param.dconv(),
@@ -1284,8 +1273,6 @@ private:
            {"why", plan_.why},
            {"unmet_not_enforceable", plan_.unmet_not_enforceable},
            {"convergence_settings", convergence::to_json(settings_)}};
-    for (auto& property : m.properties)
-      property["generation"] = m.generation;
     m.numerical["states"] = json::array({moldft_state_record(m, "planner")});
     // The copy is byte for byte, so the inventory is the source's; rank 0
     // checks that before publishing, and publish() validates the files again.

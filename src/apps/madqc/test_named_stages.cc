@@ -689,14 +689,18 @@ int main(int argc, char** argv) {
               / ("test_named_stages_publish_" + std::to_string(::getpid()))
               / "checkpoints";
         fs::remove_all(store.parent_path());
-        const auto publish = [&](named_stages::GenerationWrite write) {
-          return named_stages::publish_generation(world, store, moldft, ground,
-                                                  2, std::move(write), {});
+        // S4c1 (D-058): the skeleton names each attempt, refused or not.
+        named_stages::GenerationSequence names{ground.name, "1"};
+        const auto name = [&](int n) {
+          return "g-" + ground.name + "-1-" + std::to_string(n);
         };
-        const auto generation = [&](const std::string& name) {
+        const auto publish = [&](named_stages::GenerationWrite write) {
+          return named_stages::publish_generation(
+              world, store, moldft, ground, 2, names, std::move(write), {});
+        };
+        const auto generation = [&] {
           named_stages::GenerationWrite write;
           write.manifest = scf;
-          write.manifest.generation = name;
           write.manifest.archives.clear();
           write.manifest.numerical["threshold"] = 1e-4;
           write.manifest.numerical["k"] = 6;
@@ -711,38 +715,53 @@ int main(int argc, char** argv) {
           };
           return write;
         };
-        auto refused_early = generation("g-1-1");
-        refused_early.check_before_write = [](const Manifest&) {
+        auto refused_early = generation();
+        refused_early.manifest.generation = "g-set-by-the-application";
+        refused_early.manifest.properties
+            = json::array({{{"name", "energy"}, {"value", -1.0}}});
+        refused_early.iterations_this_run = 7;
+        refused_early.manifest.working_orbitals
+            = {{"ordering", "archive_order"}};
+        Manifest seen;
+        refused_early.check_before_write = [&](const Manifest& m) {
+          seen = m;
           throw std::runtime_error("not before writing");
         };
         rejects_with([&] { (void)publish(refused_early); },
                      "not before writing",
                      "publish_generation: the application's check before "
                      "writing refuses");
-        check(!fs::exists(store / "g-1-1"),
+        check(!fs::exists(store / name(1)),
               "publish_generation: nothing written after that refusal");
-        auto unlisted = generation("g-1-2");
+        check(seen.generation == name(1) && seen.stage == ground.name
+                  && seen.position.at("iterations_this_run") == 7
+                  && seen.properties.at(0).at("generation") == name(1)
+                  && seen.working_orbitals.at("state_id") == name(1),
+              "publish_generation (S4c1): the shared fields are filled before "
+              "the check before writing, the skeleton's name replacing the "
+              "application's");
+        auto unlisted = generation();
         unlisted.write_archives
             = [](const fs::path&, Manifest&) { return std::string{}; };
         rejects_with([&] { (void)publish(unlisted); },
                      "does not hold its members' archives",
                      "publish_generation: archives that are not the members");
-        auto invalid = generation("g-1-3");
+        auto invalid = generation();
         invalid.manifest.numerical["representation"] = "ao";
         rejects_with([&] { (void)publish(invalid); },
                      "unsupported representation",
                      "publish_generation (D-052): a generation that fails "
                      "validate_generation");
-        check(fs::is_directory(store / "g-1-3")
-                  && !fs::exists(store / "g-1-3" / "manifest.json")
+        check(fs::is_directory(store / name(3))
+                  && !fs::exists(store / name(3) / "manifest.json")
                   && !fs::exists(store / "latest"),
               "publish_generation: the refused generation stays unpublished");
-        auto unrecorded = generation("g-1-4");
+        auto unrecorded = generation();
         unrecorded.manifest.numerical.erase("states");
         rejects_with([&] { (void)publish(unrecorded); }, "has no state records",
                      "publish_generation (S4a): a generation without state "
                      "records");
-        check(!fs::exists(store / "g-1-4" / "manifest.json")
+        check(!fs::exists(store / name(4) / "manifest.json")
                   && !fs::exists(store / "latest"),
               "publish_generation: that generation stays unpublished");
         fs::remove_all(store.parent_path());
@@ -1009,6 +1028,39 @@ int main(int argc, char** argv) {
                          == records,
               "spec state_records (response): records derived from the "
               "engine metadata against the generation's own reference");
+      }
+      // S4c1 (D-058): one name form, and the fields every manifest shares.
+      {
+        named_stages::GenerationSequence names{"excited-tda", "20261028-1234"};
+        check(names.next() == "g-excited-tda-20261028-1234-1"
+                  && names.next() == "g-excited-tda-20261028-1234-2",
+              "GenerationSequence: g-<stage>-<run>-<n>, n from 1 in publish "
+              "order");
+        Manifest m;
+        m.position = {{"phase", "property_analysis"},
+                      {"previous_generation", "g-20261027-99-4"}};
+        m.properties = json::array({{{"name", "alpha"}, {"value", 1.0}},
+                                    {{"name", "beta"}, {"value", 2.0}}});
+        named_stages::set_shared_fields(m, "optical", "g-optical-r-3", 12);
+        check(m.stage == "optical" && m.generation == "g-optical-r-3"
+                  && m.position
+                         == json{{"phase", "property_analysis"},
+                                 {"previous_generation", "g-20261027-99-4"},
+                                 {"iterations_this_run", 12}}
+                  && m.properties.at(0).at("generation") == "g-optical-r-3"
+                  && m.properties.at(1).at("generation") == "g-optical-r-3"
+                  && m.working_orbitals.is_null(),
+              "set_shared_fields: stage, name, this run's iterations and the "
+              "property records' generation; the previous generation is the "
+              "application's; no working orbitals stay none (response)");
+        m.working_orbitals
+            = {{"state_id", "g-old"}, {"ordering", "archive_order"}};
+        named_stages::set_shared_fields(m, "gs", "g-gs-r-1", 0);
+        check(m.working_orbitals
+                  == json{{"state_id", "g-gs-r-1"},
+                          {"ordering", "archive_order"}},
+              "set_shared_fields (A1): the working orbitals' state id is the "
+              "generation (moldft, a republished state included)");
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

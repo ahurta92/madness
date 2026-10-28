@@ -66,8 +66,10 @@ def generations(root):
     store = root / 'gs/checkpoints'
     found = [json.loads((d / 'manifest.json').read_text()) for d in store.iterdir()
              if d.is_dir() and not d.name.startswith('.') and (d / 'manifest.json').exists()]
-    # g-<run start time>-<pid>-<sequence>: order by run, then by sequence.
-    return sorted(found, key=lambda m: (int(m['generation'].split('-')[1]),
+    # g-<stage>-<run start time>-<pid>-<sequence> (D-058; g-<run start
+    # time>-<pid>-<sequence> before it): order by run, then by sequence. The
+    # last three fields are fixed; a stage name may contain '-'.
+    return sorted(found, key=lambda m: (int(m['generation'].split('-')[-3]),
                                         int(m['generation'].split('-')[-1])))
 
 
