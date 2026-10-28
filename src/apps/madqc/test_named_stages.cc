@@ -1062,6 +1062,71 @@ int main(int argc, char** argv) {
               "set_shared_fields (A1): the working orbitals' state id is the "
               "generation (moldft, a republished state included)");
       }
+      // S4c2 (D-054): publish_now, and its second output, the rung record.
+      // `ground` has protocol [1e-4, 1e-6], maxiter 25 and
+      // checkpoint.every_iterations 3.
+      {
+        const auto ladder = named_stages::requested_ladder(
+            ground.params.get<CalculationParameters>());
+        const auto sample
+            = [&](std::size_t rung, int iteration, const char* stop) {
+                return json{{"threshold", ladder.at(rung).thresh},
+                            {"k", ladder.at(rung).k},
+                            {"iteration", iteration},
+                            {"rung_stop", stop}};
+              };
+        const json none = json::object();
+        const auto at = [&](const named_stages::Stage& stage, const json& s,
+                            const json& carried) {
+          return moldft.publish_now(stage, 2, s, carried);
+        };
+        auto decision = at(ground, sample(1, 3, "converged"), none);
+        check(decision.publish
+                  && decision.rung
+                         == json{{"index", 2},
+                                 {"thresh", ladder.at(1).thresh},
+                                 {"k", ladder.at(1).k},
+                                 {"iterations_at_rung", 4},
+                                 {"iterations_this_run", 4},
+                                 {"stop", "converged"}},
+              "spec publish_now (moldft): a rung stop publishes; the rung "
+              "record by value, index from 1");
+        check(!at(ground, sample(0, 0, "in_progress"), none).publish
+                  && !at(ground, sample(0, 1, "in_progress"), none).publish
+                  && at(ground, sample(0, 2, "in_progress"), none).publish
+                  && !at(ground, sample(0, 3, "in_progress"), none).publish,
+              "spec publish_now (moldft): within a rung, every K-th "
+              "iteration at the rung (K = 3)");
+        const json resumed
+            = {{"resumed_rung", {{"start_rung", 0}, {"iterations_done", 2}}}};
+        decision = at(ground, sample(0, 0, "in_progress"), resumed);
+        check(decision.publish && decision.rung.at("iterations_at_rung") == 3
+                  && decision.rung.at("iterations_this_run") == 1,
+              "spec publish_now (moldft): a resumed rung counts the "
+              "planner's iterations_done toward K (A3: the cadence holds "
+              "over a restart)");
+        decision = at(ground, sample(1, 0, "in_progress"), resumed);
+        check(!decision.publish && decision.rung.at("iterations_at_rung") == 1,
+              "spec publish_now (moldft): only the resumed rung carries the "
+              "earlier iterations");
+        auto capped = ground;
+        capped.checkpoint_every_iterations = 0;
+        capped.params.get<CalculationParameters>().set_user_defined_value(
+            "maxiter_per_rung", std::vector<int>{30, 2});
+        check(!at(capped, sample(1, 0, "in_progress"), none).publish
+                  && at(capped, sample(1, 1, "in_progress"), none).publish
+                  && !at(capped, sample(0, 1, "in_progress"), none).publish,
+              "spec publish_now (moldft): this run's iterations reaching the "
+              "rung's cap publish (maxiter [30, 2]), at that rung only");
+        auto unknown = sample(0, 0, "in_progress");
+        unknown["threshold"] = 1e-5;
+        rejects_with([&] { (void)at(ground, unknown, none); },
+                     "sample rung is not in the protocol",
+                     "spec publish_now (moldft): a sample off the ladder");
+        decision = molresponse.publish_now(optical, 2, json::object(), none);
+        check(decision.publish && decision.rung.is_null(),
+              "spec publish_now (response): every save event, no rung");
+      }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;

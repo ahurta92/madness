@@ -231,6 +231,14 @@ struct AppSpec {
   std::function<json(const Stage&, int natom, const json& sample,
                      json& carried)>
       observe;
+  // A3 (S4c2, D-054): whether this save boundary publishes, from the same
+  // sample and `carried` (moldft: the planner's resumed rung, resumed_rung,
+  // seeded by the binding), with a second output, the sample's rung record
+  // (PublishDecision::rung, the manifest's position.rung; moldft only). The
+  // run binding's observer calls it after observe.
+  std::function<PublishDecision(const Stage&, int natom, const json& sample,
+                                const json& carried)>
+      publish_now;
   // A1: what a consuming stage reads about this one besides its archives,
   // from a description of the engine; empty for an application nothing
   // consumes (response).
@@ -460,15 +468,19 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     checkpoint->load(*scf, m, plans.value());
   };
   steps.run_engine = [&] {
-    // D-045: what observe carries across the samples of this run.
+    // D-045: what observe carries across the samples of this run; S4c2:
+    // the rung the plan resumed, for publish_now.
     json carried = json::object();
+    if (auto resumed = checkpoint->resumed_rung(); !resumed.is_null())
+      carried["resumed_rung"] = std::move(resumed);
     scf->checkpoint_observer
         = [&](madness::World&, const madness::SCF& state,
               const madness::SCF::IterationCheckpoint& step) {
+            const auto sample = checkpoint->sample(state, step);
+            auto metrics = moldft_spec().observe(stage, natom, sample, carried);
             checkpoint->observe(
-                state, step,
-                moldft_spec().observe(
-                    stage, natom, checkpoint->sample(state, step), carried));
+                state, step, metrics,
+                moldft_spec().publish_now(stage, natom, sample, carried));
           };
     values.emplace(library.run(world, stage.params, NextAction::Redo));
     scf->checkpoint_observer = {};
@@ -616,9 +628,11 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
           world, stage.params, molecule, directory, reference.saved_prefix,
           [&](madness::World& w, const json& event) {
             json carried;
+            auto work_item
+                = response_spec().observe(stage, natom, event, carried);
             checkpoint->observe(
-                w, event,
-                response_spec().observe(stage, natom, event, carried));
+                w, event, work_item,
+                response_spec().publish_now(stage, natom, event, carried));
           },
           checkpoint->state_plans());
     }
@@ -713,6 +727,7 @@ inline AppSpec moldft_fields() {
           .plan = plan_moldft_state,
           .properties = moldft_properties,
           .observe = moldft_observe,
+          .publish_now = moldft_publish_now,
           .consumer_context = moldft_consumer_context,
           .release = released};
 }
@@ -757,6 +772,9 @@ inline AppSpec response_fields() {
                 natom, output.at("transition"));
           },
       .observe = response_observe,
+      // Every save event publishes; response's position has no rung.
+      .publish_now = [](const Stage&, int, const json&,
+                        const json&) { return PublishDecision{true, nullptr}; },
       .consumer_context = {},
       .release = released};
 }

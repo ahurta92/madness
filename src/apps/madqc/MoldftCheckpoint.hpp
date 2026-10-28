@@ -579,6 +579,54 @@ mid_rung(const madness::checkpoint::Manifest& manifest) {
   return metrics;
 }
 
+// A3, the moldft AppSpec's publish_now (S4c2, D-054). Second output, the
+// sample's rung record (B5/B6, the manifest's position.rung): the rung
+// identified by value (the sample's thresh and k) on the stage's requested
+// ladder, with the iterations spent there in this run (what maxiter caps)
+// and in total, earlier --continue runs included (the planner's
+// iterations_done, from carried's resumed_rung, when the plan resumed this
+// rung; recorded only), and how it ended. The decision
+// (checkpoint::publish_now): a rung stop, this run's iterations reaching the
+// rung's cap, or every K-th iteration at the rung
+// (checkpoint.every_iterations).
+[[nodiscard]] inline PublishDecision moldft_publish_now(const Stage& stage, int,
+                                                        const json& sample,
+                                                        const json& carried) {
+  const auto& cp = stage.params.get<CalculationParameters>();
+  const continuation::Rung rung{sample.at("threshold").get<double>(),
+                                sample.at("k").get<int>()};
+  const auto ladder = requested_ladder(cp);
+  std::size_t index = ladder.size();
+  for (std::size_t i = 0; i < ladder.size() && index == ladder.size(); ++i)
+    if (continuation::same_rung(ladder[i], rung))
+      index = i;
+  if (index == ladder.size())
+    throw std::runtime_error(
+        "moldft checkpoint: sample rung is not in the protocol");
+  const auto resumed = carried.value("resumed_rung", json());
+  const int earlier
+      = !resumed.is_null()
+                && resumed.at("start_rung").get<std::size_t>() == index
+            ? resumed.at("iterations_done").get<int>()
+            : 0;
+  const int this_run = sample.at("iteration").get<int>() + 1;
+  const auto stop = sample.at("rung_stop").get<std::string>();
+  json record = {{"index", index + 1},
+                 {"thresh", rung.thresh},
+                 {"k", rung.k},
+                 {"iterations_at_rung", earlier + this_run},
+                 {"iterations_this_run", this_run},
+                 {"stop", stop}};
+  const bool publish = madness::checkpoint::publish_now(
+      stop != continuation::to_string(continuation::RungStop::in_progress),
+      earlier + this_run, this_run,
+      planning::maxiter_at_rung(
+          cp.get<std::vector<int>>("maxiter_per_rung"), cp.maxiter(),
+          cp.get<int>("diagnostic.iterations_per_rung"), index),
+      stage.checkpoint_every_iterations);
+  return {publish, std::move(record)};
+}
+
 class MoldftCheckpoint {
   madness::World &world_;
   const Stage &stage_;
@@ -811,31 +859,6 @@ public:
   }
 
 private:
-  // B5/B6: the rung a sample belongs to, identified by value, with the
-  // iterations spent there in this run (what maxiter caps) and in total,
-  // earlier --continue runs included (recorded only), and how it ended (on
-  // the final-rotation sample).
-  [[nodiscard]] json
-  rung_record(const madness::SCF& scf,
-              const madness::SCF::IterationCheckpoint& step) const {
-    const continuation::Rung rung{step.threshold, scf.amo.at(0).k()};
-    const auto ladder = requested_ladder(scf.param);
-    std::size_t index = ladder.size();
-    for (std::size_t i = 0; i < ladder.size() && index == ladder.size(); ++i)
-      if (continuation::same_rung(ladder[i], rung))
-        index = i;
-    require(index < ladder.size(), "sample rung is not in the protocol");
-    const int earlier = resumed_by_plan_ && index == plan_.start_rung
-                            ? plan_.iterations_done
-                            : 0;
-    return {{"index", index + 1},
-            {"thresh", rung.thresh},
-            {"k", rung.k},
-            {"iterations_at_rung", earlier + step.iteration + 1},
-            {"iterations_this_run", step.iteration + 1},
-            {"stop", continuation::to_string(step.rung_stop)}};
-  }
-
   // DESIGN A1: what moldft_consumer_context needs from the engine: the
   // molecule as the engine used it (bohr, already oriented), the electrons,
   // the cell, the functional, and the final thresh and k.
@@ -949,6 +972,16 @@ public:
 
   const madness::checkpoint::Manifest &latest() const { return latest_; }
 
+  // S4c2: the rung the plan resumed, as the AppSpec's publish_now reads it
+  // from `carried` (resumed_rung): its index in the requested ladder and the
+  // iterations spent there in earlier runs; null unless the plan resumed.
+  [[nodiscard]] json resumed_rung() const {
+    if (!resumed_by_plan_)
+      return nullptr;
+    return {{"start_rung", plan_.start_rung},
+            {"iterations_done", plan_.iterations_done}};
+  }
+
   // D-045: the engine's sample at a save boundary as JSON, for the AppSpec's
   // observe (moldft_observe): the values measured, with the engine settings
   // and the records of earlier runs it reads.
@@ -960,6 +993,7 @@ public:
             {"iteration", step.iteration},
             {"threshold", step.threshold},
             {"k", scf.amo.at(0).k()},
+            {"rung_stop", continuation::to_string(step.rung_stop)},
             {"has_previous", step.has_previous},
             {"input_energy", step.input_energy},
             {"density_alpha", step.density_alpha},
@@ -991,27 +1025,16 @@ public:
   }
 
   // A3: one save boundary. `metrics` is the AppSpec's observe of this
-  // sample; the observer alone decides whether it publishes.
+  // sample; `decision`, its publish_now (S4c2): whether it publishes, and
+  // the sample's rung record.
   void observe(const madness::SCF& scf,
                const madness::SCF::IterationCheckpoint& step,
-               const json& metrics) {
+               const json& metrics, const PublishDecision& decision) {
     ++iterations;
     comparison_ = step;
-    current_rung_ = rung_record(scf, step);
+    current_rung_ = decision.rung;
     last_metrics_ = metrics;
-    // A3: the observer alone decides whether this save boundary publishes.
-    const bool decision_point
-        = step.rung_stop != convergence::StopReason::in_progress;
-    const auto& cadence = settings_.checkpoints;
-    if (madness::checkpoint::publish_now(
-            decision_point, current_rung_.at("iterations_at_rung").get<int>(),
-            current_rung_.at("iterations_this_run").get<int>(),
-            planning::maxiter_at_rung(
-                scf.param.get<std::vector<int>>("maxiter_per_rung"),
-                scf.param.maxiter(),
-                scf.param.get<int>("diagnostic.iterations_per_rung"),
-                current_rung_.at("index").get<std::size_t>() - 1),
-            cadence.every_iterations))
+    if (decision.publish)
       publish(scf, false, json::array(), metrics,
               {{"iteration", step.iteration},
                {"phase", step.final_rotation ? "after_final_rotation"

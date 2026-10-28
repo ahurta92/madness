@@ -790,6 +790,15 @@ struct GenerationWrite {
                             madness::checkpoint::Manifest&)>
       write_archives;
 };
+// A3, D-054 (S4c2): the AppSpec's publish_now at one save boundary: whether
+// it publishes, and, its second output, the rung record of the sample (the
+// published manifest's position.rung): null for an application whose
+// position has no rung (response).
+struct PublishDecision {
+  bool publish = false;
+  nlohmann::json rung = nullptr;
+};
+
 // D-058 (S4c1): the names one stage's run gives its generations,
 // g-<stage>-<run>-<n>, n counting from 1 in publish order. Generations
 // written before S4c1 are named g-<run>-<n> (moldft) and are still read: no

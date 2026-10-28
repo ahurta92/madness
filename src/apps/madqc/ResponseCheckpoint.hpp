@@ -1120,8 +1120,10 @@ public:
 
   // Called collectively after a native FD or bundle save and the metadata
   // update have finished. A bundle's event (D-025) has no frequency.
-  // `work_item` is the AppSpec's observe of the event (response_observe).
-  void observe(madness::World&, const json& event, const json& work_item) {
+  // `work_item` is the AppSpec's observe of the event (response_observe);
+  // `decision`, its publish_now (S4c2: every event).
+  void observe(madness::World&, const json& event, const json& work_item,
+               const PublishDecision& decision) {
     iterations += event.at("iterations").get<std::size_t>();
     const auto& perturbation
         = event.at("perturbation").get_ref<const std::string&>();
@@ -1134,6 +1136,8 @@ public:
                     molresponse_v3::ResponseMetadata::freq_key(
                         event.at("frequency").get<double>())));
     work_items.push_back(work_item);
+    if (!decision.publish)
+      return;
     const auto metadata = read_metadata();
     publish(metadata, false, false, event);
   }
