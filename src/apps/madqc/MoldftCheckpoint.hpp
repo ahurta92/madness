@@ -284,13 +284,74 @@ moldft_state_record(const madness::checkpoint::Manifest& manifest,
           {"saved_measurements", state.saved_measurements}};
 }
 
-// B6: a generation as the planner reads it: its state record, or, for one
-// written before S4a, the manifest itself (saved_state).
-[[nodiscard]] inline planning::SavedState
-moldft_saved_state(const madness::checkpoint::Manifest& manifest) {
+// B6, the moldft AppSpec's state_records (S4b): the generation's records,
+// or, for one written before S4a, the record its rung record and report give
+// (decided by the planner when it was published again with its verdict).
+[[nodiscard]] inline json
+moldft_state_records(const Stage&, int,
+                     const madness::checkpoint::Manifest& manifest) {
   if (manifest.numerical.contains("states"))
-    return saved_state_from_record(manifest.numerical.at("states").at(0));
-  return saved_state(manifest);
+    return manifest.numerical.at("states");
+  return json::array({moldft_state_record(
+      manifest,
+      manifest.position.contains("reused_from") ? "planner" : "engine_check")});
+}
+
+// B6: today's request for the stage's one state: the problem (`identity`,
+// the physical block of the live engine), the ladder, the settings (mode and
+// written targets) and the engine check's limits at the final rung, from the
+// engine's own limit function, all from the stage's parameters.
+[[nodiscard]] inline planning::LadderRequest
+moldft_ladder_request(const Stage& stage, int natom,
+                      const PlanContext& context) {
+  const auto& cp = stage.params.get<CalculationParameters>();
+  planning::LadderRequest request;
+  request.identity = context.identity;
+  request.ladder = requested_ladder(cp);
+  request.settings = moldft_stage_settings(stage, natom);
+  const auto limits = madness::SCF::engine_check_limits(
+      cp.dconv(), cp.protocol().back(), natom, cp.get<bool>("conv_only_dens"));
+  request.engine_limits.push_back(
+      {"density_change", limits.density, 0.0, false});
+  if (limits.bsh_checked)
+    request.engine_limits.push_back({"bsh_residual", limits.bsh, 0.0, false});
+  request.forced_iterations = cp.get<int>("diagnostic.iterations_per_rung") > 0;
+  return request;
+}
+
+// B6, the moldft AppSpec's plan (S4b): the ground state's plan from its
+// record and today's request (D7: one planner), and what --continue did and
+// why, the results.json record.
+[[nodiscard]] inline StagePlans plan_moldft_state(const Stage& stage, int natom,
+                                                  const PlanContext& context,
+                                                  const json& records) {
+  const auto request = moldft_ladder_request(stage, natom, context);
+  const auto saved = saved_state_from_record(records.at(0));
+  PlannedState state;
+  state.identity = records.at(0).at("key").get<std::string>();
+  state.plan = planning::plan_ladder(saved, std::nullopt, request);
+  state.start = request.ladder.at(state.plan.start_rung);
+  state.own_rung = saved.rung;
+  const std::map<planning::Action, const char*> words
+      = {{planning::Action::load, "loaded"},
+         {planning::Action::resume, "resumed"},
+         {planning::Action::seed, "seeded"},
+         {planning::Action::fresh, "fresh"}};
+  const auto& plan = state.plan;
+  StagePlans plans;
+  plans.continuation = {{"action", words.at(plan.action)},
+                        {"rung",
+                         {{"index", plan.start_rung + 1},
+                          {"thresh", state.start.thresh},
+                          {"k", state.start.k}}},
+                        {"iterations_done_at_rung", plan.iterations_done},
+                        {"why", plan.why},
+                        {"unmet", plan.unmet},
+                        {"unmet_not_enforceable", plan.unmet_not_enforceable},
+                        {"planner", "plan_ladder"},
+                        {"summary", planning::describe(plan, request.ladder)}};
+  plans.states.push_back(std::move(state));
+  return plans;
 }
 
 // A3: a generation saved inside a rung, not at a rung end or stop. Older
@@ -831,28 +892,6 @@ public:
         run_id_(std::move(run_id)), settings_(std::move(settings)),
         publish_(std::move(publish)) {}
 
-  // B6: today's request for the stage's one state: the problem, the ladder,
-  // the settings (mode and written targets) and the engine check's limits at
-  // the final rung, from the engine's own limit function.
-  [[nodiscard]] planning::LadderRequest
-  ladder_request(const madness::SCF& scf) const {
-    const auto& cp = scf.param;
-    planning::LadderRequest request;
-    request.identity = physical_.dump();
-    request.ladder = requested_ladder(cp);
-    request.settings = settings_;
-    const auto limits = madness::SCF::engine_check_limits(
-        cp.dconv(), cp.protocol().back(), scf.molecule.natom(),
-        cp.get<bool>("conv_only_dens"));
-    request.engine_limits.push_back(
-        {"density_change", limits.density, 0.0, false});
-    if (limits.bsh_checked)
-      request.engine_limits.push_back({"bsh_residual", limits.bsh, 0.0, false});
-    request.forced_iterations
-        = cp.get<int>("diagnostic.iterations_per_rung") > 0;
-    return request;
-  }
-
   // The engine's progress controls and the problem, before any generation is
   // read.
   void prepare(madness::SCF& scf) {
@@ -860,18 +899,20 @@ public:
     physical_ = physical(scf);
   }
 
-  // The generation --continue read, validated (validate_generation), before
-  // the engine opens an archive. A private copy lets the existing restart
-  // planner use its ordinary prefix without ever changing an immutable
-  // generation or using an AO sidecar.
-  void load(madness::SCF& scf, const madness::checkpoint::Manifest& latest) {
+  // The problem, as the plan's context reads it (PlanContext::identity).
+  [[nodiscard]] std::string identity() const { return physical_.dump(); }
+
+  // The generation --continue read, validated (validate_generation), and its
+  // plan (the AppSpec's plan), applied before the engine opens an archive. A
+  // private copy lets the existing restart planner use its ordinary prefix
+  // without ever changing an immutable generation or using an AO sidecar.
+  void load(madness::SCF& scf, const madness::checkpoint::Manifest& latest,
+            const StagePlans& plans) {
     latest_ = latest;
     const auto &cp = scf.param;
     const auto report
         = latest_.metrics.value("convergence_report", json::object());
-    // B6, D7: one planner decides, from the saved record and today's request.
-    plan_ = planning::plan_ladder(moldft_saved_state(latest_), std::nullopt,
-                                  ladder_request(scf));
+    plan_ = plans.states.at(0).plan;
     if (plan_.action == planning::Action::fresh) {
       // R1: a different problem starts fresh; the old generations stay.
       work = "solved";
@@ -908,29 +949,6 @@ public:
   }
 
   const madness::checkpoint::Manifest &latest() const { return latest_; }
-
-  /// What --continue did and why (B6), for results.json and the manifest.
-  [[nodiscard]] json
-  continuation_record(const CalculationParameters& parameters) const {
-    const auto ladder = requested_ladder(parameters);
-    const auto& start = ladder.at(plan_.start_rung);
-    const std::map<planning::Action, const char*> words
-        = {{planning::Action::load, "loaded"},
-           {planning::Action::resume, "resumed"},
-           {planning::Action::seed, "seeded"},
-           {planning::Action::fresh, "fresh"}};
-    return {{"action", words.at(plan_.action)},
-            {"rung",
-             {{"index", plan_.start_rung + 1},
-              {"thresh", start.thresh},
-              {"k", start.k}}},
-            {"iterations_done_at_rung", plan_.iterations_done},
-            {"why", plan_.why},
-            {"unmet", plan_.unmet},
-            {"unmet_not_enforceable", plan_.unmet_not_enforceable},
-            {"planner", "plan_ladder"},
-            {"summary", planning::describe(plan_, ladder)}};
-  }
 
   // D-045: the engine's sample at a save boundary as JSON, for the AppSpec's
   // observe (moldft_observe): the values measured, with the engine settings

@@ -499,8 +499,9 @@ int main(int argc, char** argv) {
       using Kind = molresponse_v3::StatePlan::Kind;
       const auto node0 = molresponse_v3::fd_node_id(legs[0].first, 0.0);
       const auto node1 = molresponse_v3::fd_node_id(legs[1].first, 0.02);
-      const auto fresh = named_stages::plan_response_states(
-          optical, request, 2, "g-ref", json::array());
+      const auto fresh = named_stages::response_engine_plans(
+          named_stages::plan_response_states(optical, request, 2, "g-ref",
+                                             json::array()));
       check(fresh.engine.size() == 2
                 && fresh.engine.at(node0).kind == Kind::fresh
                 && fresh.engine.at(node1).kind == Kind::fresh
@@ -509,8 +510,9 @@ int main(int argc, char** argv) {
                 && fresh.records[1].at("action") == "fresh"
                 && fresh.resumed.empty(),
             "plan_response_states: no records, every leg fresh");
-      const auto resumed = named_stages::plan_response_states(
-          optical, request, 2, "g-ref", records);
+      const auto resumed = named_stages::response_engine_plans(
+          named_stages::plan_response_states(optical, request, 2, "g-ref",
+                                             records));
       check(resumed.engine.at(node0).kind == Kind::resume
                 && resumed.records[0].at("action") == "resumed"
                 && resumed.records[0].at("iterations_done_at_rung") == 3
@@ -523,8 +525,9 @@ int main(int argc, char** argv) {
                 && resumed.records[1].at("seed_frequency") == 0.0,
             "plan_response_states: a leg with no record starts from the "
             "nearest saved frequency (R4)");
-      const auto changed = named_stages::plan_response_states(
-          optical, request, 2, "g-new", records);
+      const auto changed = named_stages::response_engine_plans(
+          named_stages::plan_response_states(optical, request, 2, "g-new",
+                                             records));
       check(changed.engine.at(node0).kind == Kind::fresh
                 && changed.engine.at(node1).kind == Kind::fresh
                 && changed.resumed.empty(),
@@ -795,12 +798,25 @@ int main(int argc, char** argv) {
           auto recorded = row.manifest;
           recorded.numerical["states"] = json::array(
               {named_stages::moldft_state_record(recorded, "engine_check")});
-          const auto old_plan = planning::plan_ladder(
-              named_stages::moldft_saved_state(row.manifest), std::nullopt,
-              row.request);
+          // Before S4a the planner read the manifest (saved_state); now it
+          // reads the record, written or (S4b) rebuilt by state_records.
+          const auto old_plan
+              = planning::plan_ladder(named_stages::saved_state(row.manifest),
+                                      std::nullopt, row.request);
           const auto new_plan = planning::plan_ladder(
-              named_stages::moldft_saved_state(recorded), std::nullopt,
-              row.request);
+              named_stages::saved_state_from_record(
+                  moldft.state_records(ground, 2, recorded).at(0)),
+              std::nullopt, row.request);
+          const auto rebuilt = planning::plan_ladder(
+              named_stages::saved_state_from_record(
+                  moldft.state_records(ground, 2, row.manifest).at(0)),
+              std::nullopt, row.request);
+          check(rebuilt.action == old_plan.action
+                    && rebuilt.start_rung == old_plan.start_rung
+                    && rebuilt.why == old_plan.why,
+                std::string("spec state_records (moldft, S4b): a generation "
+                            "before S4a plans as before, ")
+                    + row.why);
           check(old_plan.action == row.action
                     && new_plan.action == old_plan.action
                     && new_plan.start_rung == old_plan.start_rung
@@ -922,6 +938,77 @@ int main(int argc, char** argv) {
             [&] { molresponse.validate_generation(optical, 2, es_wrong); },
             "unknown schema",
             "spec validate_generation (response): a present, wrong record");
+        // S4b (D-048, D-064): the state_records and plan fields.
+        auto reused = saved_at(1e-6, 8, "converged");
+        reused.position["reused_from"] = "g-0-1";
+        check(moldft.state_records(ground, 2, reused).at(0).at("decided_by")
+                      == "planner"
+                  && moldft.state_records(ground, 2,
+                                          saved_at(1e-6, 8, "converged"))
+                             .at(0)
+                             .at("decided_by")
+                         == "engine_check",
+              "spec state_records (moldft): a rebuilt record says planner "
+              "when the generation was published again with its verdict");
+        auto with_record = saved_at(1e-4, 6, "iteration_limit");
+        with_record.numerical["states"] = json::array(
+            {named_stages::moldft_state_record(with_record, "engine_check")});
+        check(moldft.state_records(ground, 2, with_record)
+                  == with_record.numerical.at("states"),
+              "spec state_records (moldft): the generation's own records");
+        const named_stages::PlanContext problem{before.physical.dump(), {}};
+        const auto ground_request
+            = named_stages::moldft_ladder_request(ground, 2, problem);
+        const auto& gcp = ground.params.get<CalculationParameters>();
+        check(ground_request.identity == problem.identity
+                  && ground_request.ladder.size() == gcp.protocol().size()
+                  && ground_request.ladder.back().thresh
+                         == gcp.protocol().back()
+                  && ground_request.engine_limits.at(0).measurement
+                         == "density_change",
+              "moldft_ladder_request: the stage's ladder and the engine "
+              "check's limits, the problem from the context");
+        const auto ground_plans = moldft.plan(
+            ground, 2, problem, moldft.state_records(ground, 2, with_record));
+        const auto direct_plan
+            = planning::plan_ladder(named_stages::saved_state(with_record),
+                                    std::nullopt, ground_request);
+        check(ground_plans.states.size() == 1
+                  && ground_plans.states[0].plan.action == direct_plan.action
+                  && ground_plans.states[0].plan.start_rung
+                         == direct_plan.start_rung
+                  && ground_plans.states[0].plan.why == direct_plan.why
+                  && ground_plans.states[0].identity == "ground_state"
+                  && ground_plans.states[0].own_rung->thresh == 1e-4
+                  && ground_plans.continuation.at("planner") == "plan_ladder"
+                  && ground_plans.continuation.at("why") == direct_plan.why
+                  && ground_plans.continuation.at("rung").at("index")
+                         == direct_plan.start_rung + 1,
+              "spec plan (moldft): the planner's plan for the ground state, "
+              "and its continuation record");
+        const auto field_plans
+            = molresponse.plan(optical, 2, {{}, "g-ref"}, records);
+        const auto direct = named_stages::plan_response_states(
+            optical, named_stages::response_request(optical), 2, "g-ref",
+            records);
+        check(field_plans.continuation == direct.continuation
+                  && field_plans.states.size() == 2
+                  && field_plans.states[0].fields.at("node") == node0
+                  && field_plans.states[0].fields.at("key_at_start") == state,
+              "spec plan (response): plan_response_states on the stage's "
+              "request, with the engine names of each state");
+        Manifest unrecorded_response;
+        unrecorded_response.reference
+            = {{"stage", "GS"}, {"generation", "g-ref"}};
+        unrecorded_response.numerical = {{"engine_metadata", fd}};
+        auto recorded_response = unrecorded_response;
+        recorded_response.numerical["states"] = records;
+        check(molresponse.state_records(optical, 2, unrecorded_response)
+                      == named_stages::response_state_records(fd, "g-ref", {})
+                  && molresponse.state_records(optical, 2, recorded_response)
+                         == records,
+              "spec state_records (response): records derived from the "
+              "engine metadata against the generation's own reference");
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

@@ -151,16 +151,24 @@ using RunStage = StageOutcome (*)(const StageContext&);
 // closures over its engine and checkpoint adapter. The working form of the
 // application's AppSpec (S3, D-036).
 struct LadderSteps {
+  // The atom count the AppSpec's fields take (see AppSpec).
+  int natom = 0;
   // 2. The stage's convergence settings (B9), cadence and retention (A3).
   std::function<madness::convergence::ConvergenceSettings()> settings;
   // 3. The application's set-up before any generation is read.
   std::function<void()> prepare;
-  // 3. A2: the checks on the generation read (the AppSpec's
-  // validate_generation); throws why not.
-  std::function<void(const madness::checkpoint::Manifest&)> validate_generation;
-  // 4. The state records and the plan (B6), from the generation read, and
-  // the load of what the plan uses.
-  std::function<void(const madness::checkpoint::Manifest&)> load;
+  // 4. What the plan needs that the stage does not hold, for the generation
+  // read; nothing when the application uses it without planning (response:
+  // another reference, or the stage loads as published).
+  std::function<std::optional<PlanContext>(
+      const madness::checkpoint::Manifest&)>
+      plan_context;
+  // 4. The load of the generation read, with its state records and their
+  // plans (the AppSpec's state_records and plan) when they were planned:
+  // each plan as the engine's input.
+  std::function<void(const madness::checkpoint::Manifest&, const json& records,
+                     const std::optional<StagePlans>& plans)>
+      load;
   // 5. Run the engine with the checkpoint observer.
   std::function<void()> run_engine;
   // 6-7. Validate, publish, retention; returns the stage's verdict.
@@ -171,8 +179,6 @@ struct LadderSteps {
   std::function<std::size_t()> iterations;
   // The application's fields of the generation record.
   std::function<void(json&)> generation_record;
-  // What --continue did and why (B6), when there is a record of it.
-  std::function<std::optional<json>()> continuation;
   // 9. The convergence report on the verdict finish returned (B8), the
   // saved-state outcomes of the table, and the label the table ends with.
   std::function<void(json&, bool)> report;
@@ -188,8 +194,7 @@ struct LadderSteps {
 // through <app>_fields(); <app>_spec() adds the run binding.
 // `natom` is the engine fact both applications need: the atom count of the
 // stage's molecule (moldft) or of its reference (response). The state
-// records and the plan are functions of their arguments since S3b, called
-// by the run bindings; their fields come at S4 (D-048).
+// records and the plan are fields since S4b (D-048), called by the skeleton.
 struct AppSpec {
   std::string name; // the deck's block kind
   // The deck check (B3, B7); empty until S6 (D-047): parse() checks every
@@ -205,6 +210,16 @@ struct AppSpec {
   std::function<void(const Stage&, int natom,
                      const madness::checkpoint::Manifest&)>
       validate_generation;
+  // B6: the generation's per-state records (madqc.state.v1), for the plan;
+  // for a generation written before them, the records it gives.
+  std::function<json(const Stage&, int natom,
+                     const madness::checkpoint::Manifest&)>
+      state_records;
+  // B6, D-064: one plan per state the stage needs, from the records and
+  // today's request, and what --continue did and why.
+  std::function<StagePlans(const Stage&, int natom, const PlanContext&,
+                           const json& records)>
+      plan;
   // The requested property records from the engine's output (D-024:
   // unavailable values are records, not errors).
   std::function<json(const Stage&, int natom, const json& engine_output)>
@@ -312,6 +327,7 @@ inline const AppSpec& response_spec();
 // before the properties are written; the continuation prints before the
 // outcome table.
 inline StageOutcome run_ladder_stage(const StageContext& ctx,
+                                     const AppSpec& spec,
                                      const LadderSteps& steps) {
   auto& world = ctx.world;
   auto& stage = ctx.stage;
@@ -325,14 +341,21 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
               << madness::convergence::render_settings_table(settings) << '\n'
               << std::flush;
   result["convergence_settings"] = madness::convergence::to_json(settings);
-  // 3-4. Read the latest generation, validate it, plan (B6), load if met.
+  // 3-4. Read the latest generation, validate it (A2), plan its states from
+  // their records (B6), load what the plans use.
   steps.prepare();
+  std::optional<StagePlans> plans;
   if (ctx.continuing
       && stage_has_generation(world, ctx.stage_directory / "checkpoints")) {
     const auto latest = madness::checkpoint::read_published(
         world, ctx.stage_directory / "checkpoints");
-    steps.validate_generation(latest);
-    steps.load(latest);
+    spec.validate_generation(stage, steps.natom, latest);
+    json records = json::array();
+    if (const auto context = steps.plan_context(latest)) {
+      records = spec.state_records(stage, steps.natom, latest);
+      plans = spec.plan(stage, steps.natom, *context, records);
+    }
+    steps.load(latest, records, plans);
   }
   // 5-7. Run, publish, judge.
   steps.run_engine();
@@ -347,19 +370,20 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   result["iterations_this_run"] = steps.iterations();
   steps.generation_record(result);
   result["acceleration_history"] = ctx.continuing ? "reset" : "fresh";
-  if (const auto continuation = steps.continuation()) {
+  if (plans && !plans->states.empty()) {
     // B6: what --continue did and why.
-    result["continuation"] = *continuation;
+    const auto& continuation = plans->continuation;
+    result["continuation"] = continuation;
     // One summary for the stage, or one per state.
     if (world.rank() == 0) {
-      if (continuation->contains("states"))
-        for (const auto& state : continuation->at("states"))
+      if (continuation.contains("states"))
+        for (const auto& state : continuation.at("states"))
           madness::print("stage", stage.name,
                          "continuation:", state.at("state").get<std::string>(),
                          "-", state.at("summary").get<std::string>());
       else
         madness::print("stage", stage.name, "continuation:",
-                       continuation->at("summary").get<std::string>());
+                       continuation.at("summary").get<std::string>());
     }
   }
   // 9. The outcome table and the record.
@@ -400,6 +424,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
       values;
   LadderSteps steps;
   const auto natom = static_cast<int>(scf->molecule.natom());
+  steps.natom = natom;
   steps.settings = [&] {
     settings = moldft_spec().settings(stage, natom);
     return *settings;
@@ -419,13 +444,13 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
         });
     checkpoint->prepare(*scf);
   };
-  steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
-    moldft_spec().validate_generation(stage, natom, m);
+  // moldft plans every generation it reads; its problem is the live SCF's.
+  steps.plan_context = [&](const madness::checkpoint::Manifest&) {
+    return std::optional<PlanContext>(PlanContext{checkpoint->identity(), {}});
   };
-  bool read_generation = false;
-  steps.load = [&](const madness::checkpoint::Manifest& m) {
-    read_generation = true;
-    checkpoint->load(*scf, m);
+  steps.load = [&](const madness::checkpoint::Manifest& m, const json&,
+                   const std::optional<StagePlans>& plans) {
+    checkpoint->load(*scf, m, plans.value());
   };
   steps.run_engine = [&] {
     // D-045: what observe carries across the samples of this run.
@@ -461,11 +486,6 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   steps.iterations = [&] { return checkpoint->iterations; };
   steps.generation_record = [&](json& result) {
     result["checkpoint_warnings"] = checkpoint->retention_warnings();
-  };
-  steps.continuation = [&]() -> std::optional<json> {
-    if (!read_generation)
-      return std::nullopt;
-    return checkpoint->continuation_record(cp);
   };
   const auto saved_measurements = [&] {
     return checkpoint->latest()
@@ -506,7 +526,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
       result["properties"][name] = std::move(record);
     }
   };
-  return run_ladder_stage(ctx, steps);
+  return run_ladder_stage(ctx, moldft_spec(), steps);
 }
 
 // A named molresponse stage: the response engine against its declared
@@ -549,6 +569,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   LadderSteps steps;
   // B9: the solver stops on the same targets.
   const auto natom = static_cast<int>(molecule.natom());
+  steps.natom = natom;
   steps.settings = [&] {
     settings = response_spec().settings(stage, natom);
     return *settings;
@@ -565,11 +586,15 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
                                     std::move(write), {});
         });
   };
-  steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
-    response_spec().validate_generation(stage, natom, m);
+  steps.plan_context = [&](const madness::checkpoint::Manifest& m) {
+    if (!checkpoint->accept(m))
+      return std::optional<PlanContext>();
+    return std::optional<PlanContext>(
+        PlanContext{{}, reference.saved.generation});
   };
-  steps.load = [&](const madness::checkpoint::Manifest& m) {
-    loaded = checkpoint->load(m);
+  steps.load = [&](const madness::checkpoint::Manifest&, const json& records,
+                   const std::optional<StagePlans>& plans) {
+    loaded = checkpoint->load(records, plans);
   };
   steps.run_engine = [&] {
     if (loaded) {
@@ -626,12 +651,6 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     result["work_items"] = checkpoint->work_items;
     result["reference_changed"] = checkpoint->reference_changed;
   };
-  // B6: what --continue did per state and why.
-  steps.continuation = [&]() -> std::optional<json> {
-    if (checkpoint->state_plans().empty())
-      return std::nullopt;
-    return checkpoint->continuation();
-  };
   steps.report = [&](json& result, bool) {
     result["convergence_report"] = response_convergence_report(
         checkpoint->metadata(), checkpoint->latest().generation,
@@ -667,7 +686,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
       result["engine_metadata"] = response.metadata;
     });
   };
-  return run_ladder_stage(ctx, steps);
+  return run_ladder_stage(ctx, response_spec(), steps);
 }
 
 // moldft's row (D-040): the SCF stage. The fields alone, without the run
@@ -682,6 +701,8 @@ inline AppSpec moldft_fields() {
                  const madness::checkpoint::Manifest& m) {
                 MoldftCheckpoint::validate_generation(stage.name, m);
               },
+          .state_records = moldft_state_records,
+          .plan = plan_moldft_state,
           .properties = moldft_properties,
           .observe = moldft_observe,
           .consumer_context = moldft_consumer_context,
@@ -712,6 +733,13 @@ inline AppSpec response_fields() {
           [](const Stage& stage, int natom,
              const madness::checkpoint::Manifest& m) {
             ResponseCheckpoint::validate_generation(stage.name, natom, m);
+          },
+      .state_records = response_generation_records,
+      .plan =
+          [](const Stage& stage, int natom, const PlanContext& context,
+             const json& records) {
+            return plan_response_states(stage, response_request(stage), natom,
+                                        context.reference_generation, records);
           },
       .properties =
           [](const Stage& stage, int natom, const json& output) {

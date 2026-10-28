@@ -13,6 +13,7 @@
 #include <madness/chem/LadderPlanner.h>
 #include <madness/chem/StageCheckpoint.h>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -881,5 +882,34 @@ inline void validate_state_records(const nlohmann::json& records) {
                            : record.at("saved_measurements");
   return state;
 }
+
+// B6, S4b (D-048): what the plan needs that the stage does not hold, for
+// every application: moldft the physical block of the live engine, response
+// its reference's generation.
+struct PlanContext {
+  std::string identity;
+  std::string reference_generation;
+};
+
+// One state's plan (D-064): the planner's decision, the requested rung it
+// starts at, the saved state's rung and a seed's frequency, which the run
+// binding turns into its engine's input, and the engine-side names it needs
+// (response: the engine's node id and the state key that resumes; moldft:
+// none).
+struct PlannedState {
+  std::string identity;
+  madness::planning::LadderPlan plan;
+  madness::planning::Rung start;
+  std::optional<madness::planning::Rung> own_rung;
+  std::optional<double> seed_frequency;
+  nlohmann::json fields = nlohmann::json::object();
+};
+
+// The plans of a stage's states, in request order, and what --continue did
+// and why (B6), the results.json record in the application's form.
+struct StagePlans {
+  nlohmann::json continuation = nlohmann::json::object();
+  std::vector<PlannedState> states;
+};
 
 } // namespace named_stages

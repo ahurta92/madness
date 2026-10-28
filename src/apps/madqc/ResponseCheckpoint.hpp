@@ -402,9 +402,10 @@ struct IterationTotals {
   return iter;
 }
 
-// B6, D-016: the planner's decision per requested state, for the engine (by
-// its node id), its record, for the manifest and results.json, and the state
-// keys it resumes at their own saved rung (IterationTotals::resumed).
+// B6, D-016: the plans as this attempt uses them (response_engine_plans):
+// the engine's input per requested state (by its node id), the plan records,
+// for the manifest and results.json, and the state keys it resumes at their
+// own saved rung (IterationTotals::resumed).
 struct ResponsePlans {
   molresponse_v3::StatePlans engine;
   json records = json::array();
@@ -418,10 +419,12 @@ struct ResponsePlans {
 response_state_records(const json& metadata,
                        const std::string& reference_generation,
                        const IterationTotals& totals);
-[[nodiscard]] inline ResponsePlans
+[[nodiscard]] inline StagePlans
 plan_response_states(const Stage& stage, const json& stage_request, int natom,
                      const std::string& reference_generation,
                      const json& records);
+[[nodiscard]] inline ResponsePlans
+response_engine_plans(const StagePlans& plans);
 
 // D-045, the response AppSpec's observe (S3c1): an engine save event as a
 // work item, the event with the work it did. A bundle restarted from its own
@@ -460,7 +463,7 @@ class ResponseCheckpoint {
   friend json response_state_records(const json& metadata,
                                      const std::string& reference_generation,
                                      const IterationTotals& totals);
-  friend ResponsePlans
+  friend StagePlans
   plan_response_states(const Stage& stage, const json& stage_request, int natom,
                        const std::string& reference_generation,
                        const json& records);
@@ -921,23 +924,34 @@ private:
   // node id), the iteration bookkeeping (resumed) and the record for
   // results.json and the manifest. `fields` name the state in the record;
   // `key_at` gives its state key at a rung (by engine protocol key).
+  // B6: one state's plan, as the field returns it (PlannedState) and as
+  // results.json records it; the engine's input is built from it by
+  // response_engine_plans. `key_at` names the state key at a rung.
   static void
-  adopt(ResponsePlans& plans, const madness::planning::LadderPlan& plan,
+  adopt(StagePlans& plans, const madness::planning::LadderPlan& plan,
         const std::optional<madness::planning::SavedState>& own,
         const std::optional<madness::planning::SavedState>& seed,
         const madness::planning::LadderRequest& request,
         const std::string& node_id, const json& fields,
         const std::function<std::string(const std::string&)>& key_at) {
     namespace planning = madness::planning;
-    using Kind = molresponse_v3::StatePlan::Kind;
     const std::map<planning::Action, const char*> words
         = {{planning::Action::load, "loaded"},
            {planning::Action::resume, "resumed"},
            {planning::Action::fresh, "fresh"},
            {planning::Action::seed, "seeded"}};
-    const auto& start = request.ladder.at(plan.start_rung);
-    molresponse_v3::StatePlan engine_plan;
-    engine_plan.start_thresh = start.thresh;
+    PlannedState state;
+    state.identity = request.identity;
+    state.plan = plan;
+    state.start = request.ladder.at(plan.start_rung);
+    if (own)
+      state.own_rung = own->rung;
+    if (seed)
+      state.seed_frequency = seed->frequency;
+    state.fields = {{"node", node_id},
+                    {"key_at_start", key_at(molresponse_v3::protocol_key(
+                                         state.start.thresh, state.start.k))}};
+    const auto& start = state.start;
     json record = {{"state", request.identity},
                    {"action", words.at(plan.action)},
                    {"rung",
@@ -950,29 +964,16 @@ private:
                    {"unmet_not_enforceable", plan.unmet_not_enforceable},
                    {"summary", planning::describe(plan, request.ladder)}};
     record.update(fields);
-    if (plan.action == planning::Action::load) {
-      engine_plan.kind = Kind::load;
-      engine_plan.loaded_key
-          = molresponse_v3::protocol_key(own->rung.thresh, own->rung.k);
-      // R2 loads a stalled final rung with the request unmet: not met.
-      engine_plan.met = plan.unmet.empty();
-      if (engine_plan.met)
-        record["loaded_state"] = key_at(engine_plan.loaded_key);
-    } else if (plan.action == planning::Action::resume) {
-      engine_plan.kind = Kind::resume;
-      if (madness::scf_continuation::same_rung(own->rung, start))
-        plans.resumed.insert(
-            key_at(molresponse_v3::protocol_key(start.thresh, start.k)));
-    } else if (plan.action == planning::Action::seed) {
-      engine_plan.kind = Kind::seed;
-      engine_plan.seed_frequency = seed->frequency;
+    // R2 loads a stalled final rung with the request unmet: not met.
+    if (plan.action == planning::Action::load && plan.unmet.empty())
+      record["loaded_state"]
+          = key_at(molresponse_v3::protocol_key(own->rung.thresh, own->rung.k));
+    else if (plan.action == planning::Action::seed) {
       record["seed_from"] = plan.seed_from;
       record["seed_frequency"] = seed->frequency;
-    } else {
-      engine_plan.kind = Kind::fresh;
     }
-    plans.engine[node_id] = engine_plan;
-    plans.records.push_back(std::move(record));
+    plans.continuation["states"].push_back(std::move(record));
+    plans.states.push_back(std::move(state));
   }
 
 public:
@@ -1000,10 +1001,10 @@ public:
   }
 
   // The generation --continue read, validated (validate_generation): return
-  // true only when the requested analysis itself is already complete.
-  // Otherwise restore prerequisites privately and let the engine schedule work.
-  bool load(const Manifest& latest) {
-    namespace checkpoint = madness::checkpoint;
+  // Whether its states are planned (the plan's context): not when the
+  // reference changed, and not when the requested analysis itself is already
+  // complete (the stage loads as published).
+  bool accept(const Manifest& latest) {
     latest_ = latest;
     reference_changed = latest_.reference != reference_;
     if (reference_changed) return false; // no old descendants enter this attempt
@@ -1011,7 +1012,19 @@ public:
     loaded_ = stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") == 0 &&
               latest_.stop_reason == "converged" &&
               latest_.numerical.at("request") == request_ && !latest_.properties.empty();
-    if (loaded_) { work = "loaded"; return true; }
+    if (loaded_)
+      work = "loaded";
+    return !loaded_;
+  }
+
+  // The accepted generation, with its state records and their plans when
+  // they were planned: returns true only when the requested analysis itself
+  // is already complete. Otherwise restore prerequisites privately and let
+  // the engine schedule work.
+  bool load(const json& records, const std::optional<StagePlans>& plans) {
+    namespace checkpoint = madness::checkpoint;
+    if (!plans)
+      return loaded_;
 
     // A bundle's per-root archives load only with the rank count that wrote
     // them (DESIGN B6, until the N-to-M question of §5 is decided).
@@ -1027,17 +1040,12 @@ public:
                   + std::to_string(writers) + " rank(s)");
     }
     auto metadata = latest_.numerical.at("engine_metadata");
-    // B6: the generation's state records (or, for one written before them,
-    // records derived from its entries): totals so far, and the plans.
-    const auto reference_generation = reference_.value("generation", "");
-    auto records = latest_.numerical.value("states", json::array());
-    if (records.empty())
-      records = response_state_records(metadata, reference_generation, totals_);
+    // B6: the generation's state records (the AppSpec's state_records): the
+    // totals so far; and the plans, as the engine takes them.
     for (const auto& record : records)
       totals_.previous[record.at("key").get<std::string>()]
           = record.at("iterations_at_rung").get<int>();
-    plans_ = plan_response_states(stage_, request_, natom_,
-                                  reference_generation, records);
+    plans_ = response_engine_plans(*plans);
     totals_.resumed = plans_.resumed;
     // The engine's state entries are copied as saved (D7, D-016); the plans
     // above steer it. Analysis is derived: old property rows and the Raman
@@ -1079,10 +1087,6 @@ public:
   const Manifest& latest() const { return latest_; }
   [[nodiscard]] const molresponse_v3::StatePlans& state_plans() const {
     return plans_.engine;
-  }
-  /// What --continue did per state and why (B6), for results.json.
-  [[nodiscard]] json continuation() const {
-    return {{"planner", "plan_ladder"}, {"states", plans_.records}};
   }
   json metadata() const { return latest_.numerical.at("engine_metadata"); }
   json properties() const { return metadata().at("properties"); }
@@ -1414,11 +1418,12 @@ inline json response_state_records(const json& metadata,
 // legs and rebuilds one whose leg is solved again. R6 needs nothing here:
 // members() never publishes a diverged state, so the generation holds the
 // state's converged coarser rung and the next rung restarts from it.
-inline ResponsePlans
-plan_response_states(const Stage& stage, const json& stage_request, int natom,
-                     const std::string& reference_generation,
-                     const json& records) {
-  ResponsePlans plans;
+inline StagePlans plan_response_states(const Stage& stage,
+                                       const json& stage_request, int natom,
+                                       const std::string& reference_generation,
+                                       const json& records) {
+  StagePlans plans;
+  plans.continuation = {{"planner", "plan_ladder"}, {"states", json::array()}};
   std::map<std::string, double> requested_rungs;
   auto request = ResponseCheckpoint::ladder_request(stage, reference_generation,
                                                     requested_rungs);
@@ -1479,5 +1484,59 @@ plan_response_states(const Stage& stage, const json& stage_request, int natom,
         });
   }
   return plans;
+}
+
+// The response binding's half of the plans (S4b): each state's plan as the
+// engine's input (molresponse_v3::StatePlan), the state keys it resumes, and
+// the plan records.
+[[nodiscard]] inline ResponsePlans
+response_engine_plans(const StagePlans& plans) {
+  namespace planning = madness::planning;
+  using Kind = molresponse_v3::StatePlan::Kind;
+  ResponsePlans out;
+  out.records = plans.continuation.at("states");
+  for (const auto& state : plans.states) {
+    molresponse_v3::StatePlan engine_plan;
+    engine_plan.start_thresh = state.start.thresh;
+    switch (state.plan.action) {
+    case planning::Action::load:
+      engine_plan.kind = Kind::load;
+      engine_plan.loaded_key = molresponse_v3::protocol_key(
+          state.own_rung->thresh, state.own_rung->k);
+      // R2 loads a stalled final rung with the request unmet: not met.
+      engine_plan.met = state.plan.unmet.empty();
+      break;
+    case planning::Action::resume:
+      engine_plan.kind = Kind::resume;
+      if (madness::scf_continuation::same_rung(*state.own_rung, state.start))
+        out.resumed.insert(state.fields.at("key_at_start").get<std::string>());
+      break;
+    case planning::Action::seed:
+      engine_plan.kind = Kind::seed;
+      engine_plan.seed_frequency = *state.seed_frequency;
+      break;
+    case planning::Action::fresh:
+      engine_plan.kind = Kind::fresh;
+      break;
+    }
+    out.engine[state.fields.at("node").get<std::string>()] = engine_plan;
+  }
+  return out;
+}
+
+// B6, the response AppSpec's state_records (S4b): the generation's records,
+// or, for one written before them, the records its engine metadata gives,
+// against its own reference (the one this attempt uses: a generation of
+// another reference is not planned, ResponseCheckpoint::accept) and with no
+// iterations of this attempt yet.
+[[nodiscard]] inline json
+response_generation_records(const Stage&, int,
+                            const madness::checkpoint::Manifest& manifest) {
+  auto records = manifest.numerical.value("states", json::array());
+  if (records.empty())
+    records = response_state_records(manifest.numerical.at("engine_metadata"),
+                                     manifest.reference.value("generation", ""),
+                                     {});
+  return records;
 }
 } // namespace named_stages
