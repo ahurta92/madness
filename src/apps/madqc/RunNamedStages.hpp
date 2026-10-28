@@ -236,9 +236,11 @@ struct AppSpec {
 // assembled and named the manifest (D-051, D-054); here:
 //   1. rank 0: its check before writing, then the generation directory;
 //   2. every rank: its archives (write_archives);
-//   3. rank 0 (D-052): the archives are the generation's members and the
-//      finished manifest passes validate_generation; rank 0's manifest is
-//      the one published, so the checks read it there;
+//   3. rank 0 (D-052): the archives are the generation's members, the
+//      manifest has its state records (S4a; the read side accepts a
+//      generation written before them) and the finished manifest passes
+//      validate_generation; rank 0's manifest is the one published, so the
+//      checks read it there;
 //   4. checkpoint::publish, whose collective_error carries any failure from
 //      2-3 to every rank (the generation then stays unpublished);
 //   5. read it back; then `retain`, the application's retention (D-053).
@@ -272,6 +274,9 @@ inline madness::checkpoint::Manifest publish_generation(
         throw std::runtime_error(spec.name + " checkpoint: generation "
                                  + m.generation
                                  + " does not hold its members' archives");
+      if (!m.numerical.contains("states"))
+        throw std::runtime_error(spec.name + " checkpoint: generation "
+                                 + m.generation + " has no state records");
       spec.validate_generation(stage, natom, m);
     } catch (const std::exception& e) {
       error = e.what();

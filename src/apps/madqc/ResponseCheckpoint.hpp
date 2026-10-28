@@ -203,32 +203,6 @@ response_engine_limits(const Stage& stage, double final_thresh) {
           {"density_change", limits.density_residual, limits.rtol, true}};
 }
 
-// B6: a state record (state_records) as the planner reads it. The written
-// targets are judged on the saved state's measurements, under the names the
-// targets use (fd_accuracy_measurements).
-[[nodiscard]] inline madness::planning::SavedState
-response_saved_state(const json& record) {
-  madness::planning::SavedState state;
-  state.identity = record.at("identity").get<std::string>();
-  state.reference_generation
-      = record.at("reference_generation").get<std::string>();
-  state.perturbation = record.at("perturbation").get<std::string>();
-  // An excited-state bundle has no frequency (null).
-  state.frequency = record.at("frequency").is_number()
-                        ? record.at("frequency").get<double>()
-                        : 0.0;
-  state.rung = {record.at("rung").at("thresh").get<double>(),
-                record.at("rung").at("k").get<int>()};
-  state.iterations_at_rung = record.at("iterations_at_rung").get<int>();
-  state.stop = madness::convergence::stop_reason_from_string(
-      record.at("stop").get<std::string>());
-  state.diverged = record.at("diverged").get<bool>();
-  state.engine_measurements = record.at("engine_measurements");
-  state.saved_measurements = molresponse_v3::fd_accuracy_measurements(
-      record.at("saved_measurements"));
-  return state;
-}
-
 // The response states a request's selected values are built from (D-017,
 // D-019): FD legs (perturbation, frequency) and quadratic sources (VBC node
 // ids), in request order, each once. The engine may solve more (it takes one
@@ -371,8 +345,14 @@ bundle_engine_limits(const Stage& stage, double final_thresh) {
 
 // A saved bundle's engine-check sample: per measurement the largest value
 // over the roots, and the root it came from; null when a root has none yet.
+// The phase is the engine's (D-059): the density change between the step's
+// input densities, the eigenvalue change across the step; null with no
+// value (D-063).
 [[nodiscard]] inline json bundle_measurements(const json& bundle) {
   json measurements = json::object();
+  const std::map<std::string, const char*> phases
+      = {{"density_residual", "solver_step_input_before_acceleration"},
+         {"omega_residual", "solver_step_output"}};
   for (const char* name : {"density_residual", "omega_residual"}) {
     json worst = {{"value", nullptr}, {"availability", "unavailable"}};
     bool every_root = true;
@@ -390,6 +370,8 @@ bundle_engine_limits(const Stage& stage, double final_thresh) {
     }
     if (!every_root)
       worst = {{"value", nullptr}, {"availability", "unavailable"}};
+    worst["phase"]
+        = worst.at("value").is_null() ? json(nullptr) : json(phases.at(name));
     measurements[name] = std::move(worst);
   }
   return measurements;
@@ -833,6 +815,10 @@ public:
                       m.numerical.at("request"), natom,
                       loaded_states(m.numerical.value("plans", json::array()))),
               "completed property lacks converged prerequisites");
+    // S4a: state records, when the generation has them (D-052: the same
+    // check on both sides; publish_generation requires them).
+    if (m.numerical.contains("states"))
+      validate_state_records(m.numerical.at("states"));
   }
 
 private:
@@ -857,7 +843,8 @@ private:
     for (const auto& record : records) {
       if (record.at("perturbation") != perturbation)
         continue;
-      auto saved = response_saved_state(record);
+      auto saved = saved_state_from_record(
+          record, molresponse_v3::fd_accuracy_measurements);
       const auto rung = requested_rungs.find(
           molresponse_v3::protocol_key(saved.rung.thresh, saved.rung.k));
       const bool aliased
@@ -913,7 +900,8 @@ private:
     for (const auto& record : records) {
       if (record.at("identity") != identity)
         continue;
-      auto saved = response_saved_state(record);
+      auto saved = saved_state_from_record(
+          record, molresponse_v3::fd_accuracy_measurements);
       const auto rung = requested_rungs.find(
           molresponse_v3::protocol_key(saved.rung.thresh, saved.rung.k));
       const bool aliased
@@ -1318,6 +1306,16 @@ inline json response_request(const Stage& stage) {
   return request;
 }
 
+// D-059, D-063: a state record's measurement rows, each with its phase; the
+// engine writes one on every row it sampled, and a row with no sample (the
+// not-applicable energy change, the placeholder kinetic change) gets null.
+[[nodiscard]] inline json with_phases(json rows) {
+  for (auto& row : rows)
+    if (row.is_object() && !row.contains("phase") && !row.contains("sample"))
+      row["phase"] = nullptr;
+  return rows;
+}
+
 // B6, the planner's record of every response state in `metadata`, one per
 // (perturbation, frequency, rung): identity, reference generation, rung,
 // iterations at the rung across runs (recorded, never compared, D-007), how
@@ -1344,8 +1342,9 @@ inline json response_state_records(const json& metadata,
         std::ostringstream frequency;
         frequency << std::setprecision(17) << e.at("freq").get<double>();
         records.push_back(
-            {{"schema", "madqc.response.state.v1"},
+            {{"schema", state_schema},
              {"key", key},
+             {"kind", "fd"},
              {"identity", channel.key() + "|" + frequency.str()},
              {"perturbation", channel.key()},
              {"frequency", e.at("freq")},
@@ -1357,10 +1356,10 @@ inline json response_state_records(const json& metadata,
              {"diverged", e.value("diverged", false)},
              {"decided_by", e.value("checkpoint_decided_by", "engine_check")},
              {"engine_measurements",
-              e.value("convergence_measurements", json::object())},
+              with_phases(e.value("convergence_measurements", json::object()))},
              {"saved_measurements",
-              e.value("saved_state_validation", json::object())
-                  .value("measurements", json::object())}});
+              with_phases(e.value("saved_state_validation", json::object())
+                              .value("measurements", json::object()))}});
       }
     }
   const auto bundles = metadata.value("excited_states", json::object());
@@ -1381,7 +1380,7 @@ inline json response_state_records(const json& metadata,
            {"density_residual", root.value("density_residual", json())},
            {"omega_residual", root.value("omega_residual", json())}});
     records.push_back(
-        {{"schema", "madqc.response.state.v1"},
+        {{"schema", state_schema},
          {"key", key},
          {"kind", "excited_states"},
          {"identity", id},

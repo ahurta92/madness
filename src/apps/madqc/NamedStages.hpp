@@ -10,6 +10,7 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <madness/chem/LadderPlanner.h>
 #include <madness/chem/StageCheckpoint.h>
 #include <map>
 #include <set>
@@ -789,5 +790,96 @@ struct GenerationWrite {
 // returns the generation as published and read back.
 using GenerationPublisher
     = std::function<madness::checkpoint::Manifest(GenerationWrite)>;
+
+// S4a (D-056): the per-state record every ladder application writes in
+// numerical.states, one per state (B6, skeleton spec 3.4). Response's records
+// written before S4a carry its former name and are still read.
+inline constexpr const char* state_schema = "madqc.state.v1";
+inline constexpr const char* response_state_schema = "madqc.response.state.v1";
+
+// A2, D-052: the checks on a generation's state records, the same on the
+// write side and the read side. A record of the current schema has a kind
+// and a phase on every measurement row (D-059; null for a row with no
+// sample, D-063); one written before S4a may lack both.
+inline void validate_state_records(const nlohmann::json& records) {
+  const auto require = [](bool ok, const std::string& why) {
+    if (!ok)
+      throw std::runtime_error("state record: " + why);
+  };
+  require(records.is_array(), "numerical.states is not a list");
+  for (const auto& record : records) {
+    require(record.is_object(), "not an object");
+    const auto schema = record.value("schema", "");
+    const bool current = schema == state_schema;
+    require(current || schema == response_state_schema,
+            "unknown schema '" + schema + "'");
+    require(record.contains("key") && record.at("key").is_string()
+                && record.contains("identity")
+                && record.at("identity").is_string(),
+            "missing key or identity");
+    const auto where = record.at("key").get<std::string>();
+    require(record.contains("rung") && record.at("rung").contains("thresh")
+                && record.at("rung").contains("k"),
+            where + ": no rung");
+    require(record.contains("iterations_at_rung")
+                && record.at("iterations_at_rung").is_number_integer(),
+            where + ": no iterations_at_rung");
+    require(record.contains("stop") && record.at("stop").is_string()
+                && madness::convergence::to_string(
+                       madness::convergence::stop_reason_from_string(
+                           record.at("stop").get<std::string>()))
+                       == record.at("stop").get<std::string>(),
+            where + ": unknown stop");
+    require(record.contains("diverged") && record.at("diverged").is_boolean()
+                && record.contains("decided_by")
+                && record.at("decided_by").is_string(),
+            where + ": no diverged or decided_by");
+    for (const char* part : {"engine_measurements", "saved_measurements"})
+      require(record.contains(part) && record.at(part).is_object(),
+              where + ": no " + part);
+    if (!current)
+      continue;
+    require(record.contains("kind") && record.at("kind").is_string(),
+            where + ": no kind");
+    for (const char* part : {"engine_measurements", "saved_measurements"})
+      for (const auto& row : record.at(part).items())
+        require(row.value().is_object() && row.value().contains("phase"),
+                where + ": " + part + "/" + row.key() + " has no phase");
+  }
+}
+
+// B6, S4a: a state record as the planner reads it, for every application.
+// The response-only fields are read when present; `saved_measurements`
+// renames the saved state's measurements to the names the written targets
+// use (response: fd_accuracy_measurements), and is the identity when empty.
+[[nodiscard]] inline madness::planning::SavedState saved_state_from_record(
+    const nlohmann::json& record,
+    const std::function<nlohmann::json(const nlohmann::json&)>&
+        saved_measurements
+    = {}) {
+  const auto schema = record.value("schema", "");
+  if (schema != state_schema && schema != response_state_schema)
+    throw std::runtime_error("state record: unknown schema '" + schema + "'");
+  madness::planning::SavedState state;
+  state.identity = record.at("identity").get<std::string>();
+  state.reference_generation = record.value("reference_generation", "");
+  state.perturbation = record.value("perturbation", "");
+  // An excited-state bundle has no frequency (null); moldft none at all.
+  state.frequency
+      = record.contains("frequency") && record.at("frequency").is_number()
+            ? record.at("frequency").get<double>()
+            : 0.0;
+  state.rung = {record.at("rung").at("thresh").get<double>(),
+                record.at("rung").at("k").get<int>()};
+  state.iterations_at_rung = record.at("iterations_at_rung").get<int>();
+  state.stop = madness::convergence::stop_reason_from_string(
+      record.at("stop").get<std::string>());
+  state.diverged = record.at("diverged").get<bool>();
+  state.engine_measurements = record.at("engine_measurements");
+  state.saved_measurements
+      = saved_measurements ? saved_measurements(record.at("saved_measurements"))
+                           : record.at("saved_measurements");
+  return state;
+}
 
 } // namespace named_stages

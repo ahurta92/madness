@@ -262,6 +262,37 @@ saved_state(const madness::checkpoint::Manifest& manifest) {
   return state;
 }
 
+// S4a (D-056): the generation's per-state record, in the one form every
+// ladder application writes (numerical.states): the ground state, read from
+// the manifest's rung record and convergence report as saved_state reads
+// them. `decided_by`: engine_check, or planner for a generation published
+// again with the planner's verdict (D-016, as response's loaded states).
+[[nodiscard]] inline json
+moldft_state_record(const madness::checkpoint::Manifest& manifest,
+                    const std::string& decided_by) {
+  const auto state = saved_state(manifest);
+  return {{"schema", state_schema},
+          {"key", "ground_state"},
+          {"kind", "ground_state"},
+          {"identity", state.identity},
+          {"rung", {{"thresh", state.rung.thresh}, {"k", state.rung.k}}},
+          {"iterations_at_rung", state.iterations_at_rung},
+          {"stop", convergence::to_string(state.stop)},
+          {"diverged", false}, // moldft has no divergence exit
+          {"decided_by", decided_by},
+          {"engine_measurements", state.engine_measurements},
+          {"saved_measurements", state.saved_measurements}};
+}
+
+// B6: a generation as the planner reads it: its state record, or, for one
+// written before S4a, the manifest itself (saved_state).
+[[nodiscard]] inline planning::SavedState
+moldft_saved_state(const madness::checkpoint::Manifest& manifest) {
+  if (manifest.numerical.contains("states"))
+    return saved_state_from_record(manifest.numerical.at("states").at(0));
+  return saved_state(manifest);
+}
+
 // A3: a generation saved inside a rung, not at a rung end or stop. Older
 // generations without a rung record are mid-rung when saved after an orbital
 // update.
@@ -703,6 +734,20 @@ public:
     require(m.numerical.at("representation") == "mo",
             "unsupported representation");
     validate_measurements(m.metrics, m.stage, m.numerical);
+    // S4a: the state record, when the generation has one (D-052: the same
+    // check on both sides; publish_generation requires it): one current
+    // record, the one this generation's own rung record and report give.
+    if (m.numerical.contains("states")) {
+      const auto& states = m.numerical.at("states");
+      validate_state_records(states);
+      require(states.size() == 1 && states[0].at("schema") == state_schema,
+              "the ground state needs one " + std::string(state_schema)
+                  + " record");
+      const auto decided_by = states[0].at("decided_by").get<std::string>();
+      require((decided_by == "engine_check" || decided_by == "planner")
+                  && states[0] == moldft_state_record(m, decided_by),
+              "state record disagrees with its generation");
+    }
   }
 
 private:
@@ -825,7 +870,7 @@ public:
     const auto report
         = latest_.metrics.value("convergence_report", json::object());
     // B6, D7: one planner decides, from the saved record and today's request.
-    plan_ = planning::plan_ladder(saved_state(latest_), std::nullopt,
+    plan_ = planning::plan_ladder(moldft_saved_state(latest_), std::nullopt,
                                   ladder_request(scf));
     if (plan_.action == planning::Action::fresh) {
       // R1: a different problem starts fresh; the old generations stay.
@@ -1146,6 +1191,8 @@ private:
     for (auto &p : properties)
       p["generation"] = m.generation;
     m.properties = properties;
+    m.numerical["states"]
+        = json::array({moldft_state_record(m, "engine_check")});
     GenerationWrite write;
     write.manifest = std::move(m);
     write.check_before_write = [](const checkpoint::Manifest& m) {
@@ -1221,6 +1268,7 @@ private:
            {"convergence_settings", convergence::to_json(settings_)}};
     for (auto& property : m.properties)
       property["generation"] = m.generation;
+    m.numerical["states"] = json::array({moldft_state_record(m, "planner")});
     // The copy is byte for byte, so the inventory is the source's; rank 0
     // checks that before publishing, and publish() validates the files again.
     m.archives = latest_.archives;

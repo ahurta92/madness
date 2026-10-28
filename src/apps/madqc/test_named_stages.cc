@@ -695,6 +695,11 @@ int main(int argc, char** argv) {
           write.manifest = scf;
           write.manifest.generation = name;
           write.manifest.archives.clear();
+          write.manifest.numerical["threshold"] = 1e-4;
+          write.manifest.numerical["k"] = 6;
+          write.manifest.numerical["states"]
+              = json::array({named_stages::moldft_state_record(
+                  write.manifest, "engine_check")});
           write.write_archives = [](const fs::path&, Manifest& m) {
             // The inventory, without files: the checks before publish read
             // the manifest only.
@@ -729,7 +734,194 @@ int main(int argc, char** argv) {
                   && !fs::exists(store / "g-1-3" / "manifest.json")
                   && !fs::exists(store / "latest"),
               "publish_generation: the refused generation stays unpublished");
+        auto unrecorded = generation("g-1-4");
+        unrecorded.manifest.numerical.erase("states");
+        rejects_with([&] { (void)publish(unrecorded); }, "has no state records",
+                     "publish_generation (S4a): a generation without state "
+                     "records");
+        check(!fs::exists(store / "g-1-4" / "manifest.json")
+                  && !fs::exists(store / "latest"),
+              "publish_generation: that generation stays unpublished");
         fs::remove_all(store.parent_path());
+      }
+      // S4a (D-056, D-059, D-063): one per-state record for both
+      // applications, one reader, one check on both sides (D-052).
+      {
+        namespace planning = madness::planning;
+        // A moldft generation as written before S4a: its rung record and its
+        // report, no numerical.states.
+        Manifest before;
+        before.physical = {{"schema", "madqc.moldft.v1"}, {"molecule", "H2"}};
+        before.numerical = {{"threshold", 1e-6}, {"k", 8}};
+        const auto saved_at = [&](double thresh, int k, const char* stop) {
+          auto m = before;
+          m.position = {{"rung",
+                         {{"thresh", thresh},
+                          {"k", k},
+                          {"iterations_at_rung", 5},
+                          {"stop", stop}}}};
+          m.metrics
+              = {{"convergence_report",
+                  {{"measurements",
+                    {{"density_change",
+                      {{"value", 2e-5},
+                       {"phase", "successive_iteration_input_densities"}}}}},
+                   {"saved_state_validation",
+                    {{"measurements",
+                      {{"density_change",
+                        {{"value", 3e-5},
+                         {"phase", "saved_orbitals_before_archive"}}}}}}}}}};
+          return m;
+        };
+        planning::LadderRequest request;
+        request.identity = before.physical.dump();
+        request.ladder = {{1e-4, 6}, {1e-6, 8}};
+        request.engine_limits = {{"density_change", 1e-4, 0.0, false}};
+        auto elsewhere = request;
+        elsewhere.identity = "another problem";
+        struct PlanRow {
+          Manifest manifest;
+          planning::LadderRequest request;
+          planning::Action action;
+          const char* why;
+        };
+        for (const auto& row : std::vector<PlanRow>{
+                 {saved_at(1e-6, 8, "converged"), request,
+                  planning::Action::load, "loaded"},
+                 {saved_at(1e-4, 6, "iteration_limit"), request,
+                  planning::Action::resume, "resumed"},
+                 {saved_at(1e-6, 8, "converged"), elsewhere,
+                  planning::Action::fresh, "fresh"}}) {
+          auto recorded = row.manifest;
+          recorded.numerical["states"] = json::array(
+              {named_stages::moldft_state_record(recorded, "engine_check")});
+          const auto old_plan = planning::plan_ladder(
+              named_stages::moldft_saved_state(row.manifest), std::nullopt,
+              row.request);
+          const auto new_plan = planning::plan_ladder(
+              named_stages::moldft_saved_state(recorded), std::nullopt,
+              row.request);
+          check(old_plan.action == row.action
+                    && new_plan.action == old_plan.action
+                    && new_plan.start_rung == old_plan.start_rung
+                    && new_plan.iterations_done == old_plan.iterations_done
+                    && new_plan.why == old_plan.why,
+                std::string("moldft state record (S4a): plans as the "
+                            "generation before it, ")
+                    + row.why);
+        }
+        // The record on both sides (D-052): absent, accepted on the read
+        // side (publish_generation refuses it, above); present, it must be
+        // the one the generation's own rung record and report give.
+        auto gs = scf;
+        gs.numerical["threshold"] = 1e-4;
+        gs.numerical["k"] = 6;
+        moldft.validate_generation(ground, 2, gs);
+        check(true, "spec validate_generation (moldft): a generation without "
+                    "state records, written before S4a, is read");
+        gs.numerical["states"]
+            = json::array({named_stages::moldft_state_record(gs, "planner")});
+        moldft.validate_generation(ground, 2, gs);
+        check(gs.numerical.at("states").at(0).at("kind") == "ground_state"
+                  && gs.numerical.at("states").at(0).at("schema")
+                         == "madqc.state.v1",
+              "spec validate_generation (moldft): its state record");
+        auto wrong = gs;
+        wrong.numerical["states"][0]["rung"]["k"] = 7;
+        rejects_with([&] { moldft.validate_generation(ground, 2, wrong); },
+                     "state record disagrees with its generation",
+                     "spec validate_generation (moldft): a record with "
+                     "another rung");
+        wrong = gs;
+        wrong.numerical["states"][0]["schema"] = "madqc.other.v1";
+        rejects_with([&] { moldft.validate_generation(ground, 2, wrong); },
+                     "unknown schema",
+                     "spec validate_generation (moldft): an unknown schema");
+        wrong = gs;
+        wrong.numerical["states"].push_back(wrong.numerical["states"][0]);
+        rejects_with([&] { moldft.validate_generation(ground, 2, wrong); },
+                     "needs one",
+                     "spec validate_generation (moldft): two records");
+        // Response: FD records get kind fd; every measurement row a phase,
+        // null for a row with no sample (D-063); bundle rows the engine's.
+        auto sampled = fd;
+        sampled["fd_states"][channel][key][fkey]["convergence_measurements"]
+            = {{"bsh_residual",
+                {{"value", 1e-5},
+                 {"phase", "solver_step_input_before_acceleration"},
+                 {"sample", {{"iteration", 2}}}}},
+               {"energy_change",
+                {{"value", nullptr}, {"availability", "not_applicable"}}}};
+        const auto fd_records
+            = named_stages::response_state_records(sampled, "g-ref", {});
+        const auto& rows = fd_records.at(0).at("engine_measurements");
+        check(fd_records.at(0).at("schema") == "madqc.state.v1"
+                  && fd_records.at(0).at("kind") == "fd"
+                  && rows.at("bsh_residual").at("phase")
+                         == "solver_step_input_before_acceleration"
+                  && rows.at("energy_change").at("phase").is_null(),
+              "response_state_records (S4a): kind fd; a sampled row keeps "
+              "its phase, a row with no sample has phase null");
+        auto measured = metadata;
+        measured["excited_states"][key]["roots"][0]["density_residual"] = 1e-5;
+        measured["excited_states"][key]["roots"][0]["omega_residual"] = 1e-6;
+        const auto bundle_rows
+            = named_stages::response_state_records(measured, "g-ref", {})
+                  .at(0)
+                  .at("engine_measurements");
+        check(bundle_rows.at("density_residual").at("phase")
+                      == "solver_step_input_before_acceleration"
+                  && bundle_rows.at("omega_residual").at("phase")
+                         == "solver_step_output"
+                  && bundles.at(0)
+                         .at("engine_measurements")
+                         .at("density_residual")
+                         .at("phase")
+                         .is_null(),
+              "response_state_records (S4a): a bundle's rows carry the "
+              "engine's phase, null with no value");
+        named_stages::validate_state_records(fd_records);
+        named_stages::validate_state_records(bundles);
+        check(true, "validate_state_records: response's FD and bundle "
+                    "records");
+        // The old response name is still read, without kind or phases.
+        auto old = fd_records;
+        old[0]["schema"] = "madqc.response.state.v1";
+        old[0].erase("kind");
+        old[0]["engine_measurements"]["energy_change"].erase("phase");
+        named_stages::validate_state_records(old);
+        const auto fd_reader = molresponse_v3::fd_accuracy_measurements;
+        const auto read_old
+            = named_stages::saved_state_from_record(old[0], fd_reader);
+        const auto read_new
+            = named_stages::saved_state_from_record(fd_records[0], fd_reader);
+        check(read_old.identity == read_new.identity
+                  && read_old.rung.thresh == read_new.rung.thresh
+                  && read_old.rung.k == read_new.rung.k
+                  && read_old.reference_generation == "g-ref"
+                  && read_old.iterations_at_rung == read_new.iterations_at_rung
+                  && read_old.stop == read_new.stop,
+              "saved_state_from_record: the pre-S4a response name is read");
+        auto unknown = fd_records;
+        unknown[0]["schema"] = "madqc.other.v1";
+        rejects_with(
+            [&] { (void)named_stages::saved_state_from_record(unknown[0]); },
+            "unknown schema", "saved_state_from_record: an unknown schema");
+        rejects_with([&] { named_stages::validate_state_records(unknown); },
+                     "unknown schema",
+                     "validate_state_records: an unknown schema");
+        auto phaseless = fd_records;
+        phaseless[0]["engine_measurements"]["energy_change"].erase("phase");
+        rejects_with([&] { named_stages::validate_state_records(phaseless); },
+                     "has no phase",
+                     "validate_state_records: a current record's row without "
+                     "a phase");
+        auto es_wrong = es;
+        es_wrong.numerical["states"] = unknown;
+        rejects_with(
+            [&] { molresponse.validate_generation(optical, 2, es_wrong); },
+            "unknown schema",
+            "spec validate_generation (response): a present, wrong record");
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

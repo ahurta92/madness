@@ -504,6 +504,8 @@ for stage in ('gs', 'optical'):
     mfile = store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json'
     manifest = json.loads(mfile.read_text())
     if stage == 'gs':
+        # Written before S4a too: no state record (numerical.states).
+        manifest['numerical'].pop('states')
         report = manifest['metrics']['convergence_report']
         report['measurements']['bsh_residual'].pop('per_function')
         report['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
@@ -567,6 +569,8 @@ for stage in ('gs', 'optical'):
     mfile = store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json'
     m = json.loads(mfile.read_text())
     if stage == 'gs':
+        # Written before S4a too: no state record (numerical.states).
+        m['numerical'].pop('states')
         m['metrics'].pop('convergence_report')
     else:
         for channel in m['numerical']['engine_metadata']['fd_states'].values():

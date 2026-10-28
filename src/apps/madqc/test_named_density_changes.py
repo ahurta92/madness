@@ -105,6 +105,8 @@ legacy = work / 'Legacy'; shutil.copytree(root, legacy)
 store = legacy / 'gs/checkpoints'
 mf = store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json'
 m = json.loads(mf.read_text())
+# Written before S4a too: no state record (numerical.states).
+m['numerical'].pop('states')
 r = m['metrics']['convergence_report']
 for measurements in [r['measurements'], r['saved_state_validation']['measurements']]:
     del measurements['charge_density_change'], measurements['spin_density_change']
