@@ -155,10 +155,6 @@ struct LadderSteps {
   std::function<madness::convergence::ConvergenceSettings()> settings;
   // 3. The application's set-up before any generation is read.
   std::function<void()> prepare;
-  // 3. D-049: whether --continue reads a generation (collective). moldft
-  // reads one always and refuses without it; response reads one only when
-  // the stage has one, else starts fresh.
-  std::function<bool()> has_generation;
   // 3. A2: the checks on the generation read (the AppSpec's
   // validate_generation); throws why not.
   std::function<void(const madness::checkpoint::Manifest&)> validate_generation;
@@ -288,6 +284,19 @@ inline madness::checkpoint::Manifest publish_generation(
   return published;
 }
 
+// D-049: --continue reads a generation only when the stage has one; a stage
+// with none (added to the deck after the first run, or stopped before its
+// first save) starts fresh, for every application. Collective.
+inline bool stage_has_generation(madness::World& world, const fs::path& store) {
+  bool exists = false;
+  madness::checkpoint::detail::on_root(world, [&] {
+    exists = fs::exists(store / "latest");
+    return std::string{};
+  });
+  world.gop.broadcast(exists, 0);
+  return exists;
+}
+
 // The two rows, defined below the run functions they name.
 inline const AppSpec& moldft_spec();
 inline const AppSpec& response_spec();
@@ -313,7 +322,8 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   result["convergence_settings"] = madness::convergence::to_json(settings);
   // 3-4. Read the latest generation, validate it, plan (B6), load if met.
   steps.prepare();
-  if (ctx.continuing && steps.has_generation()) {
+  if (ctx.continuing
+      && stage_has_generation(world, ctx.stage_directory / "checkpoints")) {
     const auto latest = madness::checkpoint::read_published(
         world, ctx.stage_directory / "checkpoints");
     steps.validate_generation(latest);
@@ -404,11 +414,12 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
         });
     checkpoint->prepare(*scf);
   };
-  steps.has_generation = [] { return true; };
   steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
     moldft_spec().validate_generation(stage, natom, m);
   };
+  bool read_generation = false;
   steps.load = [&](const madness::checkpoint::Manifest& m) {
+    read_generation = true;
     checkpoint->load(*scf, m);
   };
   steps.run_engine = [&] {
@@ -447,7 +458,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     result["checkpoint_warnings"] = checkpoint->retention_warnings();
   };
   steps.continuation = [&]() -> std::optional<json> {
-    if (!ctx.continuing)
+    if (!read_generation)
       return std::nullopt;
     return checkpoint->continuation_record(cp);
   };
@@ -549,7 +560,6 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
                                     std::move(write), {});
         });
   };
-  steps.has_generation = [&] { return checkpoint->has_generation(); };
   steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {
     response_spec().validate_generation(stage, natom, m);
   };

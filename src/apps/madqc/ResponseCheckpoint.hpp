@@ -1011,19 +1011,6 @@ public:
     return request_.value("decided_by", "") == "requested_criteria";
   }
 
-  // D-049: --continue reads a generation only when the stage has one; a
-  // stage with none (newly added, or no completed first save) starts fresh.
-  // Collective.
-  [[nodiscard]] bool has_generation() const {
-    bool exists = false;
-    madness::checkpoint::detail::on_root(world_, [&] {
-      exists = std::filesystem::exists(store_ / "latest");
-      return std::string{};
-    });
-    world_.gop.broadcast(exists, 0);
-    return exists;
-  }
-
   // The generation --continue read, validated (validate_generation): return
   // true only when the requested analysis itself is already complete.
   // Otherwise restore prerequisites privately and let the engine schedule work.

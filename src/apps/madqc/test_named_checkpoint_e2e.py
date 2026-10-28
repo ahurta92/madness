@@ -67,6 +67,20 @@ assert result(fresh)['work'] == 'loaded'
 assert result(fresh)['iterations_this_run'] == 0
 assert published(fresh)[0] == generation and hashes(generation) == original
 
+# D-049: a stage added to the deck after the first run has no generation;
+# --continue solves it fresh while the first stage loads as before.
+added = work / 'Added'
+shutil.copytree(fresh, added)
+run('added-stage', added, deck + deck[deck.index('moldft gs'):].replace('moldft gs', 'moldft gs2'),
+    resume=True)
+assert result(added)['work'] == 'loaded' and result(added)['iterations_this_run'] == 0
+assert published(added)[0].name == generation.name and hashes(published(added)[0]) == original
+second = json.loads((added / 'gs2/results.json').read_text())
+assert second['work'] == 'solved' and 'continuation' not in second, second.get('continuation')
+assert second['iterations_this_run'] > 0
+assert (added / 'gs2/checkpoints/latest').exists()
+assert abs(second['properties']['energy']['value'] - energy) < 2e-7
+
 # Changing a target the deciding check enforces forces iteration; old
 # convergence cannot certify an update that never reached the solver's
 # convergence test (which starts at iteration 1). In engine mode that is
