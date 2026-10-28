@@ -528,6 +528,153 @@ int main(int argc, char** argv) {
                 && changed.resumed.empty(),
             "plan_response_states: records of another reference are not used "
             "(R1)");
+      // S3c1 (D-045): observe, one engine sample as its record.
+      const auto residuals = [](double first, double second) {
+        return madness::function_residual_record(
+            madness::FunctionResidualBlocks{{"alpha", {first, second}}});
+      };
+      json first_sample = {{"run_id", "r1"},
+                           {"iteration", 0},
+                           {"threshold", 1e-4},
+                           {"k", 6},
+                           {"has_previous", false},
+                           {"input_energy", -1.1},
+                           {"density_alpha", 0.0},
+                           {"density_beta", 0.0},
+                           {"density_charge", 0.0},
+                           {"density_spin", 0.0},
+                           {"previous_bsh_residual", 0.0},
+                           {"previous_function_residuals", nullptr},
+                           {"input_kinetic", 1.2},
+                           {"input_kinetic_diagonal", residuals(0.5, 0.25)},
+                           {"energy_change", 0.0},
+                           {"kinetic_change", 0.0},
+                           {"explicit_accuracy", json::object()},
+                           {"configured_progress", json::object()},
+                           {"engine_check_passed", false},
+                           {"dconv", 1e-5},
+                           {"conv_only_dens", false},
+                           {"econv", 1e-6},
+                           {"requested_econv", nullptr},
+                           {"diagnostic_iterations_per_rung", 0},
+                           {"decided_by", "engine_check"},
+                           {"earlier_runs_iteration_history", json::array()}};
+      json carried = json::object();
+      const auto first = moldft.observe(ground, 2, first_sample, carried);
+      const auto& first_evidence
+          = first.at("convergence_report").at("measurements");
+      check(first.at("energy").at("value") == -1.1
+                && !first.contains("density_change")
+                && first_evidence.at("density_change").at("availability")
+                       == "unavailable"
+                && first_evidence.at("density_change").at("value").is_null()
+                && first.at("kinetic_trace").at("value") == 0.75
+                && first.at("kinetic_trace").at("sample").at("stage") == "GS"
+                && first.at("convergence_report").at("iteration_history").size()
+                       == 1
+                && !first.at("convergence_report")
+                        .contains("earlier_runs_iteration_history"),
+            "spec observe (moldft): a first sample has no changes, one row of "
+            "history");
+      check(first_evidence.at("energy_change").at("set_by")
+                    == "engine_default_not_a_target"
+                && first_evidence.at("energy_change").at("engine_default")
+                       == 1e-6,
+            "spec observe (moldft): econv not written is the engine's, not a "
+            "target");
+      auto second_sample = first_sample;
+      second_sample["iteration"] = 1;
+      second_sample["has_previous"] = true;
+      second_sample["density_alpha"] = 2e-5;
+      second_sample["density_beta"] = 3e-5;
+      second_sample["previous_bsh_residual"] = 6e-4;
+      second_sample["previous_function_residuals"] = residuals(1e-4, 5e-5);
+      second_sample["input_kinetic_diagonal"] = residuals(0.5, 0.5);
+      second_sample["energy_change"] = 1e-7;
+      second_sample["requested_econv"] = 1e-6;
+      second_sample["earlier_runs_iteration_history"]
+          = json::array({{{"x", 1}}});
+      const auto second = moldft.observe(ground, 2, second_sample, carried);
+      const auto& evidence = second.at("convergence_report").at("measurements");
+      // The density limit is max(dconv, thresh) x max(5, natom); the BSH
+      // residual's is 5 x max(dconv, thresh), sampled one iteration back.
+      check(
+          second.at("density_change").at("beta") == 3e-5
+              && evidence.at("density_change").at("value") == 3e-5
+              && evidence.at("density_change").at("effective_limit") == 1e-4 * 5
+              && evidence.at("density_change").at("satisfied") == true
+              && evidence.at("bsh_residual").at("effective_limit") == 5.0 * 1e-4
+              && evidence.at("bsh_residual").at("satisfied") == false
+              && evidence.at("bsh_residual").at("sample").at("iteration") == 0
+              && evidence.at("bsh_residual").at("per_function")
+                     == residuals(1e-4, 5e-5),
+          "spec observe (moldft): changes measured against their limits");
+      check(evidence.at("energy_change").at("set_by") == "user"
+                && evidence.at("energy_change").at("relation")
+                       == "less_than_or_equal"
+                && evidence.at("energy_change").at("satisfied") == true,
+            "spec observe (moldft): a written econv is reported against, <=");
+      check(
+          evidence.at("delta_kinetic_energy").at("value") == 0.25
+              && second.at("convergence_report").at("iteration_history").size()
+                     == 2
+              && second.at("convergence_report")
+                         .at("earlier_runs_iteration_history")
+                     == json::array({{{"x", 1}}})
+              && carried.at("previous_kinetic_blocks")
+                     == residuals(0.5, 0.5).at("blocks"),
+          "spec observe (moldft): the kinetic trace change from the carried "
+          "blocks, the history across samples and earlier runs");
+      json none;
+      for (const auto& [seed, work] :
+           std::vector<std::pair<std::string, std::string>>{
+               {"fd_restart", "resumed"},
+               {"es_restart", "resumed"},
+               {"nearest_frequency", "seeded"},
+               {"fresh", "solved"}}) {
+        const json event = {{"seed", seed}, {"iterations", 4}};
+        auto expected = event;
+        expected["work"] = work;
+        std::string why = "spec observe (response): seed ";
+        why += seed;
+        why += " is ";
+        why += work;
+        check(molresponse.observe(optical, 2, event, none) == expected, why);
+      }
+      // consumer_context (A1): what a consuming stage reads, from the
+      // engine's description; response has none.
+      const json engine
+          = {{"molecule_parameters",
+              {{"units", "angstrom"},
+               {"no_orient", false},
+               {"source_name", "h2.in"},
+               {"source_type", "file"},
+               {"eprec", 1e-4}}},
+             {"atoms",
+              {{{"atomic_number", 1}, {"x", 0.0}, {"y", 0.0}, {"z", -0.7}},
+               {{"atomic_number", 1}, {"x", 0.0}, {"y", 0.0}, {"z", 0.7}}}},
+             {"charge", 0.0},
+             {"nalpha", 1},
+             {"nbeta", 1},
+             {"L", 50.0},
+             {"functional", "hf"},
+             {"spin_restricted", true},
+             {"thresh", 1e-6},
+             {"k", 8}};
+      const auto context = moldft.consumer_context(engine);
+      check(context.at("molecule").at("symbols") == json{"H", "H"}
+                && context.at("molecule").at("geometry")
+                       == json{{0.0, 0.0, -0.7}, {0.0, 0.0, 0.7}}
+                && context.at("molecule").at("parameters")
+                       == json{{"units", "atomic"},
+                               {"no_orient", true},
+                               {"eprec", 1e-4}}
+                && context.at("multiplicity") == 1 && context.at("L") == 50.0
+                && context.at("thresh") == 1e-6 && context.at("k") == 8,
+            "spec consumer_context (moldft): bohr, not reoriented, no file "
+            "provenance, the multiplicity from the electrons");
+      check(!molresponse.consumer_context,
+            "spec consumer_context (response): none");
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;

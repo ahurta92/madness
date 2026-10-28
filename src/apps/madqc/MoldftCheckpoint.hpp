@@ -275,6 +275,218 @@ mid_rung(const madness::checkpoint::Manifest& manifest) {
 }
 
 // Application policy lives here; StageCheckpoint only checks physical storage.
+// DESIGN A1, the moldft AppSpec's consumer_context (S3c1): everything a
+// consuming stage needs about this ground state, besides the orbital archive,
+// so it never reads a live engine object; from the engine's description
+// (MoldftCheckpoint::engine_description). The molecule is stored exactly as
+// the engine used it (bohr, already oriented), so rebuilding it gives the
+// same coordinates bit for bit.
+[[nodiscard]] inline json moldft_consumer_context(const json& engine) {
+  json molecule = {{"symbols", json::array()}, {"geometry", json::array()}};
+  molecule["parameters"] = engine.at("molecule_parameters");
+  molecule["parameters"]["units"] = "atomic";
+  molecule["parameters"]["no_orient"] = true;
+  // File provenance changes each attempt and is not molecular identity.
+  molecule["parameters"].erase("source_name");
+  molecule["parameters"].erase("source_type");
+  for (const auto& atom : engine.at("atoms")) {
+    molecule["symbols"].push_back(
+        madness::get_atomic_data(atom.at("atomic_number").get<unsigned int>())
+            .symbol);
+    molecule["geometry"].push_back({atom.at("x"), atom.at("y"), atom.at("z")});
+  }
+  return {{"schema", "madqc.moldft.consumer_context.v1"},
+          {"molecule", molecule},
+          {"charge", engine.at("charge")},
+          {"multiplicity",
+           engine.at("nalpha").get<int>() - engine.at("nbeta").get<int>() + 1},
+          {"L", engine.at("L")},
+          {"functional", engine.at("functional")},
+          {"spin_restricted", engine.at("spin_restricted")},
+          {"thresh", engine.at("thresh")},
+          {"k", engine.at("k")}};
+}
+
+// The unweighted kinetic trace of a function residual record's blocks.
+[[nodiscard]] inline json moldft_kinetic_trace(const json& blocks) {
+  auto result = madness::function_metric_trace(blocks);
+  result["blocks"] = blocks;
+  result["quantity"] = "unweighted_kinetic_trace";
+  result["units"] = "hartree";
+  result["collection_definition"]
+      = "stored alpha and optional unrestricted beta orbitals; restricted "
+        "alpha counted once";
+  return result;
+}
+
+// D-045, the moldft AppSpec's observe (S3c1): one engine sample
+// (MoldftCheckpoint::sample) as the generation's metrics record: the
+// sample's values, each measurement against its limit, and the convergence
+// report with the iteration history. `carried` is what the observer keeps
+// across the samples of one run: the iteration history and the previous
+// sample's kinetic blocks.
+[[nodiscard]] inline json moldft_observe(const Stage& stage, int natom,
+                                         const json& sample, json& carried) {
+  const bool has_previous = sample.at("has_previous").get<bool>();
+  const int iteration = sample.at("iteration").get<int>();
+  const double threshold = sample.at("threshold").get<double>();
+  const auto value
+      = [&](const char* name) { return sample.at(name).get<double>(); };
+  json metrics = {{"energy",
+                   {{"value", value("input_energy")},
+                    {"units", "hartree"},
+                    {"phase", "iteration_input_before_rotation_and_update"}}}};
+  if (has_previous) {
+    metrics["density_change"]
+        = {{"alpha", value("density_alpha")},
+           {"beta", value("density_beta")},
+           {"phase", "successive_iteration_input_densities"}};
+    metrics["bsh_residual"] = {{"value", value("previous_bsh_residual")},
+                               {"phase", "previous_iteration_update"}};
+  }
+  // Measurements describe iteration evaluations, not the archived output
+  // after update/rotation. Keep that distinction even in a completed report.
+  metrics["kinetic_energy"]
+      = {{"value", value("input_kinetic")},
+         {"units", "hartree"},
+         {"phase", "iteration_kinetic_evaluation_before_update"}};
+  metrics["occupation_weighted_physical_kinetic_energy"]
+      = metrics.at("kinetic_energy");
+  const auto current_blocks = sample.at("input_kinetic_diagonal").at("blocks");
+  metrics["kinetic_trace"] = moldft_kinetic_trace(current_blocks);
+  metrics["kinetic_trace"]["phase"]
+      = "iteration_input_before_rotation_and_update";
+  metrics["kinetic_trace"]["sample"] = {{"run_id", sample.at("run_id")},
+                                        {"stage", stage.name},
+                                        {"threshold", threshold},
+                                        {"k", sample.at("k")},
+                                        {"iteration", iteration}};
+  const double effective = std::max(value("dconv"), threshold);
+  auto measured = [&](double value, const std::string& units,
+                      const std::string& phase, bool active, json target,
+                      json limit, int sample_iteration) {
+    const bool available = has_previous;
+    const bool finite = std::isfinite(value);
+    return json{{"value", available && finite ? json(value) : json(nullptr)},
+                {"availability", !available ? "unavailable"
+                                 : finite   ? "measured"
+                                            : "invalid"},
+                {"reason", available ? "" : "no_comparable_previous_sample"},
+                {"units", units},
+                {"phase", phase},
+                {"active_gate", active},
+                {"target", target},
+                {"effective_limit", limit},
+                {"satisfied", available && finite && !limit.is_null()
+                                  ? json(value < limit.get<double>())
+                                  : json(nullptr)},
+                {"valid_for_saved_state", false},
+                {"sample",
+                 {{"run_id", sample.at("run_id")},
+                  {"stage", stage.name},
+                  {"threshold", threshold},
+                  {"k", sample.at("k")},
+                  {"iteration", sample_iteration}}}};
+  };
+  json evidence;
+  evidence["density_change"]
+      = measured(std::max(value("density_alpha"), value("density_beta")),
+                 "a0^(-3/2)", "successive_iteration_input_densities", true,
+                 value("dconv"), effective * std::max(5, natom), iteration);
+  evidence["density_change"]["reduction"]
+      = "maximum_over_spin_density_L2_norms";
+  evidence["density_change"]["components"]
+      = has_previous ? json{{"alpha", value("density_alpha")},
+                            {"beta", value("density_beta")}}
+                     : json(nullptr);
+  // These candidate measures have no default or inferred threshold. Keep
+  // the existing spin-resolved gate beside them for an explicit comparison.
+  evidence["charge_density_change"]
+      = measured(value("density_charge"), "a0^(-3/2)",
+                 "successive_iteration_input_densities", false, nullptr,
+                 nullptr, iteration);
+  evidence["spin_density_change"]
+      = measured(value("density_spin"), "a0^(-3/2)",
+                 "successive_iteration_input_densities", false, nullptr,
+                 nullptr, iteration);
+  evidence["charge_density_change"]["density_definition"]
+      = "rho_alpha + rho_beta";
+  evidence["spin_density_change"]["density_definition"]
+      = "rho_alpha - rho_beta";
+  for (const auto* name : {"charge_density_change", "spin_density_change"})
+    evidence[name]["reduction"] = "L2_norm_of_field_difference";
+  evidence["bsh_residual"]
+      = measured(value("previous_bsh_residual"), "dimensionless",
+                 "raw_fixed_point_difference_before_previous_update",
+                 !sample.at("conv_only_dens").get<bool>(), nullptr,
+                 5.0 * effective, iteration - 1);
+  evidence["bsh_residual"]["reduction"]
+      = "maximum_over_orbital_and_spin_L2_norms";
+  if (has_previous && !sample.at("previous_function_residuals").is_null())
+    evidence["bsh_residual"]["per_function"]
+        = sample.at("previous_function_residuals");
+  // D8: reported against a user-written econv only, never enforced here; the
+  // engine check alone still stops the run.
+  const json econv_target = sample.at("requested_econv");
+  const bool econv = econv_target.is_number();
+  evidence["energy_change"]
+      = measured(value("energy_change"), "hartree",
+                 "successive_iteration_energy_evaluations", false, econv_target,
+                 econv_target, iteration);
+  auto& energy_change = evidence["energy_change"];
+  energy_change["set_by"] = econv ? "user" : "engine_default_not_a_target";
+  if (!econv)
+    energy_change["engine_default"] = value("econv");
+  if (econv) {
+    // Requested criteria compare with <= (evaluate_explicit_criteria).
+    energy_change["relation"] = "less_than_or_equal";
+    energy_change["satisfied"]
+        = energy_change.at("value").is_number()
+              ? json(energy_change.at("value").get<double>()
+                     <= econv_target.get<double>())
+              : json(nullptr);
+  }
+  evidence["delta_kinetic_energy"]
+      = measured(value("kinetic_change"), "hartree",
+                 "successive_iteration_kinetic_evaluations", false, nullptr,
+                 nullptr, iteration);
+  if (!has_previous)
+    carried["previous_kinetic_blocks"] = json::object();
+  evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(
+      current_blocks,
+      carried.value("previous_kinetic_blocks", json::object())));
+  evidence["delta_kinetic_energy"]["quantity"]
+      = "absolute_kinetic_trace_change";
+  carried["previous_kinetic_blocks"] = current_blocks;
+  // B2: each row keeps the raw total energy of its sample, so every change
+  // in the history can be re-derived from the record alone.
+  if (!carried.contains("iteration_history"))
+    carried["iteration_history"] = json::array();
+  carried["iteration_history"].push_back(
+      {{"measurements", evidence},
+       {"energy", metrics.at("energy")},
+       {"kinetic_trace", metrics.at("kinetic_trace")},
+       {"occupation_weighted_physical_kinetic_energy",
+        metrics.at("occupation_weighted_physical_kinetic_energy")},
+       {"explicit_accuracy", sample.at("explicit_accuracy")},
+       {"configured_progress", sample.at("configured_progress")},
+       {"engine_check_passed", sample.at("engine_check_passed")}});
+  metrics["convergence_report"]
+      = {{"schema", "madqc.convergence.v1"},
+         {"decided_by", sample.at("decided_by")},
+         {"engine_check_passed", sample.at("engine_check_passed")},
+         {"explicit_accuracy", sample.at("explicit_accuracy")},
+         {"configured_progress", sample.at("configured_progress")},
+         {"diagnostic_iterations_per_rung",
+          sample.at("diagnostic_iterations_per_rung")},
+         {"measurements", evidence},
+         {"iteration_history", carried.at("iteration_history")}};
+  const auto& earlier = sample.at("earlier_runs_iteration_history");
+  if (!earlier.empty())
+    metrics["convergence_report"]["earlier_runs_iteration_history"] = earlier;
+  return metrics;
+}
+
 class MoldftCheckpoint {
   madness::World &world_;
   const Stage &stage_;
@@ -285,8 +497,6 @@ class MoldftCheckpoint {
   madness::checkpoint::Manifest latest_;
   bool has_latest_ = false;
   std::optional<madness::SCF::IterationCheckpoint> comparison_;
-  json previous_kinetic_blocks_ = json::object();
-  json iteration_history_ = json::array();
   // A3: the per-iteration history of earlier --continue runs, carried into
   // every manifest of this run so it survives retention. Record only: it is
   // not re-validated against this run's settings.
@@ -310,13 +520,7 @@ class MoldftCheckpoint {
     return madness::function_residual_record(values).at("blocks");
   }
   static json trace_record(const madness::FunctionResidualBlocks& values) {
-    auto blocks = kinetic_blocks(values);
-    auto result = madness::function_metric_trace(blocks);
-    result["blocks"] = blocks;
-    result["quantity"] = "unweighted_kinetic_trace";
-    result["units"] = "hartree";
-    result["collection_definition"] = "stored alpha and optional unrestricted beta orbitals; restricted alpha counted once";
-    return result;
+    return moldft_kinetic_trace(kinetic_blocks(values));
   }
 
 public:
@@ -525,28 +729,24 @@ private:
             {"stop", continuation::to_string(step.rung_stop)}};
   }
 
-  // DESIGN A1: everything a consuming stage needs about this ground state,
-  // besides the orbital archive, so it never reads a live engine object. The
-  // molecule is stored exactly as the engine used it (bohr, already
-  // oriented), so rebuilding it gives the same coordinates bit for bit.
-  static json consumer_context(const madness::SCF& scf) {
-    json molecule = {{"symbols", json::array()}, {"geometry", json::array()}};
-    molecule["parameters"] = scf.molecule.parameters.to_json()["parameters"];
-    molecule["parameters"]["units"] = "atomic";
-    molecule["parameters"]["no_orient"] = true;
-    // File provenance changes each attempt and is not molecular identity.
-    molecule["parameters"].erase("source_name");
-    molecule["parameters"].erase("source_type");
+  // DESIGN A1: what moldft_consumer_context needs from the engine: the
+  // molecule as the engine used it (bohr, already oriented), the electrons,
+  // the cell, the functional, and the final thresh and k.
+  static json engine_description(const madness::SCF& scf) {
+    json atoms = json::array();
     for (std::size_t i = 0; i < scf.molecule.natom(); ++i) {
       const auto& atom = scf.molecule.get_atom(i);
-      molecule["symbols"].push_back(
-          madness::get_atomic_data(atom.atomic_number).symbol);
-      molecule["geometry"].push_back({atom.x, atom.y, atom.z});
+      atoms.push_back({{"atomic_number", atom.atomic_number},
+                       {"x", atom.x},
+                       {"y", atom.y},
+                       {"z", atom.z}});
     }
-    return {{"schema", "madqc.moldft.consumer_context.v1"},
-            {"molecule", molecule},
+    return {{"molecule_parameters",
+             scf.molecule.parameters.to_json()["parameters"]},
+            {"atoms", atoms},
             {"charge", scf.param.charge()},
-            {"multiplicity", scf.param.nalpha() - scf.param.nbeta() + 1},
+            {"nalpha", scf.param.nalpha()},
+            {"nbeta", scf.param.nbeta()},
             {"L", scf.param.L()},
             {"functional", scf.param.xc()},
             {"spin_restricted", scf.param.spin_restricted()},
@@ -682,125 +882,55 @@ public:
             {"summary", planning::describe(plan_, ladder)}};
   }
 
-  void observe(const madness::SCF &scf,
-               const madness::SCF::IterationCheckpoint &step) {
+  // D-045: the engine's sample at a save boundary as JSON, for the AppSpec's
+  // observe (moldft_observe): the values measured, with the engine settings
+  // and the records of earlier runs it reads.
+  [[nodiscard]] json
+  sample(const madness::SCF& scf,
+         const madness::SCF::IterationCheckpoint& step) const {
+    const auto econv = requested_econv(scf.param);
+    return {{"run_id", run_id_},
+            {"iteration", step.iteration},
+            {"threshold", step.threshold},
+            {"k", scf.amo.at(0).k()},
+            {"has_previous", step.has_previous},
+            {"input_energy", step.input_energy},
+            {"density_alpha", step.density_alpha},
+            {"density_beta", step.density_beta},
+            {"density_charge", step.density_charge},
+            {"density_spin", step.density_spin},
+            {"previous_bsh_residual", step.previous_bsh_residual},
+            {"previous_function_residuals",
+             step.previous_function_residuals.empty()
+                 ? json(nullptr)
+                 : madness::function_residual_record(
+                       step.previous_function_residuals)},
+            {"input_kinetic", step.input_kinetic},
+            {"input_kinetic_diagonal",
+             madness::function_residual_record(step.input_kinetic_diagonal)},
+            {"energy_change", step.energy_change},
+            {"kinetic_change", step.kinetic_change},
+            {"explicit_accuracy", step.explicit_accuracy},
+            {"configured_progress", step.configured_progress},
+            {"engine_check_passed", step.engine_check_passed},
+            {"dconv", scf.param.dconv()},
+            {"conv_only_dens", scf.param.get<bool>("conv_only_dens")},
+            {"econv", scf.param.econv()},
+            {"requested_econv", econv ? json(*econv) : json(nullptr)},
+            {"diagnostic_iterations_per_rung",
+             scf.param.get<int>("diagnostic.iterations_per_rung")},
+            {"decided_by", convergence::to_string(settings_.decider)},
+            {"earlier_runs_iteration_history", earlier_history_}};
+  }
+
+  // A3: one save boundary. `metrics` is the AppSpec's observe of this
+  // sample; the observer alone decides whether it publishes.
+  void observe(const madness::SCF& scf,
+               const madness::SCF::IterationCheckpoint& step,
+               const json& metrics) {
     ++iterations;
     comparison_ = step;
     current_rung_ = rung_record(scf, step);
-    json metrics = {
-        {"energy",
-         {{"value", step.input_energy},
-          {"units", "hartree"},
-          {"phase", "iteration_input_before_rotation_and_update"}}}};
-    if (step.has_previous) {
-      metrics["density_change"] = {
-          {"alpha", step.density_alpha},
-          {"beta", step.density_beta},
-          {"phase", "successive_iteration_input_densities"}};
-      metrics["bsh_residual"] = {{"value", step.previous_bsh_residual},
-                                 {"phase", "previous_iteration_update"}};
-    }
-    // Measurements describe iteration evaluations, not the archived output
-    // after update/rotation. Keep that distinction even in a completed report.
-    metrics["kinetic_energy"] = {{"value", step.input_kinetic}, {"units", "hartree"},
-        {"phase", "iteration_kinetic_evaluation_before_update"}};
-    metrics["occupation_weighted_physical_kinetic_energy"] = metrics.at("kinetic_energy");
-    metrics["kinetic_trace"] = trace_record(step.input_kinetic_diagonal);
-    metrics["kinetic_trace"]["phase"] = "iteration_input_before_rotation_and_update";
-    metrics["kinetic_trace"]["sample"] = {{"run_id", run_id_}, {"stage", stage_.name},
-        {"threshold", step.threshold}, {"k", scf.amo.at(0).k()}, {"iteration", step.iteration}};
-    const double effective = std::max(scf.param.dconv(), step.threshold);
-    auto measured = [&](double value, const std::string& units,
-                        const std::string& phase, bool active, json target,
-                        json limit, int sample_iteration) {
-      const bool available = step.has_previous;
-      const bool finite = std::isfinite(value);
-      return json{{"value", available && finite ? json(value) : json(nullptr)},
-                  {"availability", !available ? "unavailable" : finite ? "measured" : "invalid"},
-                  {"reason", available ? "" : "no_comparable_previous_sample"},
-                  {"units", units}, {"phase", phase}, {"active_gate", active},
-                  {"target", target}, {"effective_limit", limit},
-                  {"satisfied", available && finite && !limit.is_null()
-                      ? json(value < limit.get<double>()) : json(nullptr)},
-                  {"valid_for_saved_state", false},
-                  {"sample", {{"run_id", run_id_}, {"stage", stage_.name},
-                              {"threshold", step.threshold}, {"k", scf.amo.at(0).k()},
-                              {"iteration", sample_iteration}}}};
-    };
-    json evidence;
-    evidence["density_change"] = measured(std::max(step.density_alpha, step.density_beta),
-        "a0^(-3/2)", "successive_iteration_input_densities", true, scf.param.dconv(),
-        effective * std::max(std::size_t(5), scf.molecule.natom()), step.iteration);
-    evidence["density_change"]["reduction"] = "maximum_over_spin_density_L2_norms";
-    evidence["density_change"]["components"] = step.has_previous
-        ? json{{"alpha", step.density_alpha}, {"beta", step.density_beta}} : json(nullptr);
-    // These candidate measures have no default or inferred threshold. Keep
-    // the existing spin-resolved gate beside them for an explicit comparison.
-    evidence["charge_density_change"] = measured(step.density_charge, "a0^(-3/2)",
-        "successive_iteration_input_densities", false, nullptr, nullptr, step.iteration);
-    evidence["spin_density_change"] = measured(step.density_spin, "a0^(-3/2)",
-        "successive_iteration_input_densities", false, nullptr, nullptr, step.iteration);
-    evidence["charge_density_change"]["density_definition"] = "rho_alpha + rho_beta";
-    evidence["spin_density_change"]["density_definition"] = "rho_alpha - rho_beta";
-    for (const auto* name : {"charge_density_change", "spin_density_change"})
-      evidence[name]["reduction"] = "L2_norm_of_field_difference";
-    evidence["bsh_residual"] = measured(step.previous_bsh_residual, "dimensionless",
-        "raw_fixed_point_difference_before_previous_update", !scf.param.get<bool>("conv_only_dens"),
-        nullptr, 5.0 * effective, step.iteration - 1);
-    evidence["bsh_residual"]["reduction"] = "maximum_over_orbital_and_spin_L2_norms";
-    if (step.has_previous && !step.previous_function_residuals.empty())
-      evidence["bsh_residual"]["per_function"] = madness::function_residual_record(step.previous_function_residuals);
-    // D8: reported against a user-written econv only, never enforced here; the
-    // engine check alone still stops the run.
-    const auto econv = requested_econv(scf.param);
-    const json econv_target = econv ? json(*econv) : json(nullptr);
-    evidence["energy_change"]
-        = measured(step.energy_change, "hartree",
-                   "successive_iteration_energy_evaluations", false,
-                   econv_target, econv_target, step.iteration);
-    auto& energy_change = evidence["energy_change"];
-    energy_change["set_by"] = econv ? "user" : "engine_default_not_a_target";
-    if (!econv)
-      energy_change["engine_default"] = scf.param.econv();
-    if (econv) {
-      // Requested criteria compare with <= (evaluate_explicit_criteria).
-      energy_change["relation"] = "less_than_or_equal";
-      energy_change["satisfied"]
-          = energy_change.at("value").is_number()
-                ? json(energy_change.at("value").get<double>() <= *econv)
-                : json(nullptr);
-    }
-    evidence["delta_kinetic_energy"] = measured(step.kinetic_change, "hartree",
-        "successive_iteration_kinetic_evaluations", false, nullptr, nullptr, step.iteration);
-    const auto current_blocks = kinetic_blocks(step.input_kinetic_diagonal);
-    if (!step.has_previous) previous_kinetic_blocks_ = json::object();
-    evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(current_blocks, previous_kinetic_blocks_));
-    evidence["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
-    previous_kinetic_blocks_ = current_blocks;
-    // B2: each row keeps the raw total energy of its sample, so every change
-    // in the history can be re-derived from the record alone.
-    iteration_history_.push_back(
-        {{"measurements", evidence},
-         {"energy", metrics.at("energy")},
-         {"kinetic_trace", metrics.at("kinetic_trace")},
-         {"occupation_weighted_physical_kinetic_energy",
-          metrics.at("occupation_weighted_physical_kinetic_energy")},
-         {"explicit_accuracy", step.explicit_accuracy},
-         {"configured_progress", step.configured_progress},
-         {"engine_check_passed", step.engine_check_passed}});
-    metrics["convergence_report"]
-        = {{"schema", "madqc.convergence.v1"},
-           {"decided_by", convergence::to_string(settings_.decider)},
-           {"engine_check_passed", step.engine_check_passed},
-           {"explicit_accuracy", step.explicit_accuracy},
-           {"configured_progress", step.configured_progress},
-           {"diagnostic_iterations_per_rung",
-            scf.param.get<int>("diagnostic.iterations_per_rung")},
-           {"measurements", evidence},
-           {"iteration_history", iteration_history_}};
-    if (!earlier_history_.empty())
-      metrics["convergence_report"]["earlier_runs_iteration_history"]
-          = earlier_history_;
     last_metrics_ = metrics;
     // A3: the observer alone decides whether this save boundary publishes.
     const bool decision_point
@@ -986,12 +1116,13 @@ private:
     m.method = "HF";
     m.generation = "g-" + run_id_ + "-" + std::to_string(++sequence_);
     m.physical = physical_;
-    m.numerical = {{"threshold", madness::FunctionDefaults<3>::get_thresh()},
-                   {"k", madness::FunctionDefaults<3>::get_k()},
-                   {"representation", "mo"},
-                   {"protocol", scf.param.protocol()},
-                   {"parameters", scf.param.to_json()},
-                   {"consumer_context", consumer_context(scf)}};
+    m.numerical = {
+        {"threshold", madness::FunctionDefaults<3>::get_thresh()},
+        {"k", madness::FunctionDefaults<3>::get_k()},
+        {"representation", "mo"},
+        {"protocol", scf.param.protocol()},
+        {"parameters", scf.param.to_json()},
+        {"consumer_context", moldft_consumer_context(engine_description(scf))}};
     m.working_orbitals = {{"state_id", m.generation},
                           {"ordering", "archive_order"}};
     m.position = position;

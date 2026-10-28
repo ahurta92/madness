@@ -192,8 +192,7 @@ struct LadderSteps {
 // `natom` is the engine fact both applications need: the atom count of the
 // stage's molecule (moldft) or of its reference (response). The state
 // records and the plan are functions of their arguments since S3b, called
-// by the run bindings; their fields come at S4 (D-048). S3c adds the
-// observer's sample record (D-045).
+// by the run bindings; their fields come at S4 (D-048).
 struct AppSpec {
   std::string name; // the deck's block kind
   // The deck check (B3, B7); empty until S6 (D-047): parse() checks every
@@ -213,6 +212,17 @@ struct AppSpec {
   // unavailable values are records, not errors).
   std::function<json(const Stage&, int natom, const json& engine_output)>
       properties;
+  // D-045: one engine sample (as JSON) as its record: moldft's metrics
+  // record, response's work item. `carried` is what the observer keeps
+  // across the samples of one run. The run binding's observer calls it
+  // before the publish decision.
+  std::function<json(const Stage&, int natom, const json& sample,
+                     json& carried)>
+      observe;
+  // A1: what a consuming stage reads about this one besides its archives,
+  // from a description of the engine; empty for an application nothing
+  // consumes (response).
+  std::function<json(const json& engine)> consumer_context;
   // B5: may a dependent stage bind to this outcome.
   std::function<bool(const StageOutcome&)> release;
   // A8: the run binding, which runs the stage through run_ladder_stage.
@@ -338,10 +348,15 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     checkpoint->load(*scf, m);
   };
   steps.run_engine = [&] {
+    // D-045: what observe carries across the samples of this run.
+    json carried = json::object();
     scf->checkpoint_observer
         = [&](madness::World&, const madness::SCF& state,
               const madness::SCF::IterationCheckpoint& step) {
-            checkpoint->observe(state, step);
+            checkpoint->observe(
+                state, step,
+                moldft_spec().observe(
+                    stage, natom, checkpoint->sample(state, step), carried));
           };
     values.emplace(library.run(world, stage.params, NextAction::Redo));
     scf->checkpoint_observer = {};
@@ -482,7 +497,10 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
       response = molresponse_v3_lib::run_response_on_reference(
           world, stage.params, molecule, directory, reference.saved_prefix,
           [&](madness::World& w, const json& event) {
-            checkpoint->observe(w, event);
+            json carried;
+            checkpoint->observe(
+                w, event,
+                response_spec().observe(stage, natom, event, carried));
           },
           checkpoint->state_plans());
     }
@@ -580,6 +598,8 @@ inline AppSpec moldft_fields() {
                 MoldftCheckpoint::validate_generation(stage.name, m);
               },
           .properties = moldft_properties,
+          .observe = moldft_observe,
+          .consumer_context = moldft_consumer_context,
           .release = released};
 }
 inline const AppSpec& moldft_spec() {
@@ -615,6 +635,8 @@ inline AppSpec response_fields() {
                 output.at("vibrational_analysis"), output.at("raman_spectra"),
                 natom, output.at("transition"));
           },
+      .observe = response_observe,
+      .consumer_context = {},
       .release = released};
 }
 inline const AppSpec& response_spec() {

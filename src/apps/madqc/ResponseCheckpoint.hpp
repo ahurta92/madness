@@ -441,6 +441,20 @@ plan_response_states(const Stage& stage, const json& stage_request, int natom,
                      const std::string& reference_generation,
                      const json& records);
 
+// D-045, the response AppSpec's observe (S3c1): an engine save event as a
+// work item, the event with the work it did. A bundle restarted from its own
+// saved rungs is resumed, as an FD state restarted from its own is. Nothing
+// is carried across events.
+[[nodiscard]] inline json response_observe(const Stage&, int, const json& event,
+                                           json&) {
+  const auto& seed = event.at("seed");
+  auto item = event;
+  item["work"] = seed == "fd_restart" || seed == "es_restart" ? "resumed"
+                 : seed == "nearest_frequency"                ? "seeded"
+                                                              : "solved";
+  return item;
+}
+
 // Scientific policy for the named response frontend. The engine still owns
 // state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -1124,7 +1138,8 @@ public:
 
   // Called collectively after a native FD or bundle save and the metadata
   // update have finished. A bundle's event (D-025) has no frequency.
-  void observe(madness::World&, const json& event) {
+  // `work_item` is the AppSpec's observe of the event (response_observe).
+  void observe(madness::World&, const json& event, const json& work_item) {
     iterations += event.at("iterations").get<std::size_t>();
     const auto& perturbation
         = event.at("perturbation").get_ref<const std::string&>();
@@ -1136,14 +1151,7 @@ public:
           state_key(perturbation, protocol,
                     molresponse_v3::ResponseMetadata::freq_key(
                         event.at("frequency").get<double>())));
-    // A bundle restarted from its own saved rungs is resumed, as an FD state
-    // restarted from its own is.
-    const auto& seed = event.at("seed");
-    auto item = event;
-    item["work"] = seed == "fd_restart" || seed == "es_restart" ? "resumed"
-                   : seed == "nearest_frequency"                ? "seeded"
-                                                                : "solved";
-    work_items.push_back(item);
+    work_items.push_back(work_item);
     const auto metadata = read_metadata();
     publish(metadata, false, false, event);
   }
