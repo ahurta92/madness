@@ -5,9 +5,12 @@
 #include <madness/chem/SCF.h>
 
 #include <apps/molresponse/ResponseProtocol.hpp>
-#include <apps/molresponse/solvers/response_metadata.hpp>
 #include <apps/molresponse/solvers/fd_explicit_accuracy.hpp>
+#include <apps/molresponse/solvers/response_metadata.hpp>
 #include <cmath>
+#include <filesystem>
+#include <functional>
+#include <madness/chem/StageCheckpoint.h>
 #include <map>
 #include <set>
 #include <sstream>
@@ -766,4 +769,25 @@ inline std::vector<Stage> parse(madness::World &world,
     throw std::runtime_error("named input has no application stages");
   return stages;
 }
+// A3, step 6 (S3c2): one generation for the skeleton to publish
+// (publish_generation). The application decides when to publish and
+// assembles and names the manifest (D-051, D-054); it also says what to check
+// before anything is written and how its archives are written.
+struct GenerationWrite {
+  madness::checkpoint::Manifest manifest;
+  // What AppSpec::members reads (moldft: nothing; response: the metadata).
+  nlohmann::json engine_metadata = nlohmann::json::object();
+  // Rank 0, before the generation directory exists; throws why not.
+  std::function<void(const madness::checkpoint::Manifest&)> check_before_write;
+  // Every rank: write the archives into `directory` and add them to the
+  // manifest (rank 0's is the one published); returns this rank's error.
+  std::function<std::string(const std::filesystem::path& directory,
+                            madness::checkpoint::Manifest&)>
+      write_archives;
+};
+// The skeleton's publish, as the run binding hands it to a checkpoint class:
+// returns the generation as published and read back.
+using GenerationPublisher
+    = std::function<madness::checkpoint::Manifest(GenerationWrite)>;
+
 } // namespace named_stages

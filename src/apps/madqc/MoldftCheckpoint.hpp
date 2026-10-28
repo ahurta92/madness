@@ -516,6 +516,8 @@ class MoldftCheckpoint {
   planning::LadderPlan plan_;
   bool resumed_by_plan_ = false;
   json current_rung_ = nullptr;
+  // The skeleton's publish (publish_generation), from the run binding.
+  GenerationPublisher publish_;
   static json kinetic_blocks(const madness::FunctionResidualBlocks& values) {
     return madness::function_residual_record(values).at("blocks");
   }
@@ -523,7 +525,6 @@ class MoldftCheckpoint {
     return moldft_kinetic_trace(kinetic_blocks(values));
   }
 
-public:
   static void require(bool condition, const std::string &message) {
     if (!condition)
       throw std::runtime_error("moldft checkpoint: " + message);
@@ -689,6 +690,7 @@ public:
       validate(report.at("saved_state_validation").at("measurements"));
   }
 
+public:
   // A2: the checks on a generation --continue reads, before the plan: its
   // stage and method, its orbital inventory and representation, and its
   // measurements. The moldft AppSpec's validate_generation (S3b).
@@ -775,11 +777,14 @@ public:
   std::size_t iterations = 0;
   std::string work = "solved";
 
+  // `publish`: the skeleton's publish (publish_generation, S3c2).
   MoldftCheckpoint(madness::World& world, const Stage& stage,
                    const fs::path& directory, std::string run_id,
-                   convergence::ConvergenceSettings settings)
+                   convergence::ConvergenceSettings settings,
+                   GenerationPublisher publish)
       : world_(world), stage_(stage), store_(directory / "checkpoints"),
-        run_id_(std::move(run_id)), settings_(std::move(settings)) {}
+        run_id_(std::move(run_id)), settings_(std::move(settings)),
+        publish_(std::move(publish)) {}
 
   // B6: today's request for the stage's one state: the problem, the ladder,
   // the settings (mode and written targets) and the engine check's limits at
@@ -1141,44 +1146,44 @@ private:
     for (auto &p : properties)
       p["generation"] = m.generation;
     m.properties = properties;
-    const auto directory = store_ / m.generation;
-    checkpoint::detail::on_root(world_, [&] {
+    GenerationWrite write;
+    write.manifest = std::move(m);
+    write.check_before_write = [](const checkpoint::Manifest& m) {
       validate_measurements(m.metrics, m.stage, m.numerical);
-      fs::create_directories(store_);
-      require(fs::create_directory(directory), "generation already exists");
-      return std::string{};
-    });
-    auto meta = scf.orbital_metadata();
-    if (!evaluated)
-      meta.current_energy =
-          1.e10; // input energy is not an output-state property
-    if (!converged) {
-      meta.converged_for_thresh = 1.e10;
-      meta.converged_for_dconv = 1.e10;
-    }
-    std::string error =
-        scf.write_mos(world_, (directory / "state.restartdata").string(), meta);
-    // Inventory is built only after every writer has closed. The header records
-    // the actual writer count, including the parallel archive's clamp.
-    checkpoint::detail::collective_error(world_, error);
-    world_.gop.fence();
-    if (world_.rank() == 0) {
-      try {
-        const int writers = checkpoint::detail::header(
-            directory / "state.restartdata.00000", true);
-        m.archives.push_back(checkpoint::inspect_archive(
-            directory, "orbitals", "state.restartdata", {}, writers));
-      } catch (const std::exception &e) {
-        error = e.what();
-      }
-    }
-    checkpoint::publish(world_, store_, m, error);
+    };
+    write.write_archives
+        = [&](const fs::path& directory, checkpoint::Manifest& m) {
+            auto meta = scf.orbital_metadata();
+            if (!evaluated)
+              meta.current_energy
+                  = 1.e10; // input energy is not an output-state property
+            if (!converged) {
+              meta.converged_for_thresh = 1.e10;
+              meta.converged_for_dconv = 1.e10;
+            }
+            std::string error = scf.write_mos(
+                world_, (directory / "state.restartdata").string(), meta);
+            // Inventory is built only after every writer has closed. The header
+            // records the actual writer count, including the parallel archive's
+            // clamp.
+            checkpoint::detail::collective_error(world_, error);
+            world_.gop.fence();
+            if (world_.rank() == 0) {
+              try {
+                const int writers = checkpoint::detail::header(
+                    directory / "state.restartdata.00000", true);
+                m.archives.push_back(checkpoint::inspect_archive(
+                    directory, "orbitals", "state.restartdata", {}, writers));
+              } catch (const std::exception& e) {
+                error = e.what();
+              }
+            }
+            return error;
+          };
     // Reading back also gives every rank the exact, validated published
     // inventory.
-    latest_ = checkpoint::read_published(world_, store_);
+    latest_ = publish_(std::move(write));
     has_latest_ = true;
-    if (!settings_.checkpoints.keep_all)
-      apply_retention();
   }
 
   // A1, B6: a loaded generation re-judged as meeting today's request is
@@ -1219,44 +1224,46 @@ private:
     // The copy is byte for byte, so the inventory is the source's; rank 0
     // checks that before publishing, and publish() validates the files again.
     m.archives = latest_.archives;
-    const auto directory = store_ / m.generation;
-    checkpoint::detail::on_root(world_, [&] {
-      const auto& orbitals = latest_.archives.at(0);
-      require(fs::create_directory(directory), "generation already exists");
-      for (const auto& shard : orbitals.shards)
-        fs::copy_file(store_ / source / shard.path, directory / shard.path,
-                      fs::copy_options::none);
-      const auto copied = checkpoint::inspect_archive(
-          directory, orbitals.role, orbitals.basename, orbitals.indices,
-          orbitals.writers);
-      for (std::size_t i = 0; i < orbitals.shards.size(); ++i)
-        require(copied.shards.at(i).checksum == orbitals.shards.at(i).checksum,
-                "copied orbital shard differs from its source");
-      return std::string{};
-    });
-    checkpoint::publish(world_, store_, m);
-    latest_ = checkpoint::read_published(world_, store_);
-    if (!settings_.checkpoints.keep_all)
-      apply_retention();
+    GenerationWrite write;
+    write.manifest = std::move(m);
+    write.write_archives
+        = [&](const fs::path& directory, const checkpoint::Manifest&) {
+            return checkpoint::detail::on_root(world_, [&] {
+              const auto& orbitals = latest_.archives.at(0);
+              for (const auto& shard : orbitals.shards)
+                fs::copy_file(store_ / source / shard.path,
+                              directory / shard.path, fs::copy_options::none);
+              const auto copied = checkpoint::inspect_archive(
+                  directory, orbitals.role, orbitals.basename, orbitals.indices,
+                  orbitals.writers);
+              for (std::size_t i = 0; i < orbitals.shards.size(); ++i)
+                require(copied.shards.at(i).checksum
+                            == orbitals.shards.at(i).checksum,
+                        "copied orbital shard differs from its source");
+              return std::string{};
+            });
+          };
+    latest_ = publish_(std::move(write));
   }
 
-  // A3, save and replace: after a successful publish, delete this stage's
-  // older mid-rung generations, keeping latest, every rung end and stop, and
-  // any generation another stage's manifest references (A1). Other stages are
-  // read only when there is something to delete.
-  void apply_retention() {
+public:
+  // A3, save and replace: after a successful publish of `latest`, delete this
+  // stage's older mid-rung generations, keeping latest, every rung end and
+  // stop, and any generation another stage's manifest references (A1). Other
+  // stages are read only when there is something to delete. The run binding
+  // hands it to the skeleton's publish (D-053).
+  void apply_retention(const std::string& latest) {
     namespace checkpoint = madness::checkpoint;
     std::vector<checkpoint::GenerationSummary> summaries;
     for (const auto& manifest :
          checkpoint::read_generation_manifests(world_, store_))
       if (manifest.stage == stage_.name)
         summaries.push_back({manifest.generation, mid_rung(manifest)});
-    if (checkpoint::generations_to_delete(summaries, latest_.generation)
-            .empty())
+    if (checkpoint::generations_to_delete(summaries, latest).empty())
       return;
     const auto warning = checkpoint::remove_generations(
         world_, store_,
-        checkpoint::generations_to_delete(summaries, latest_.generation,
+        checkpoint::generations_to_delete(summaries, latest,
                                           referenced_generations()));
     if (warning.empty())
       return;
@@ -1269,6 +1276,7 @@ private:
                 << std::flush;
   }
 
+private:
   // A1: this stage's generations that another stage of the run names as its
   // reference. Rank 0 reads the other stages' manifests; every rank gets the
   // same set.

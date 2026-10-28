@@ -472,6 +472,8 @@ class ResponseCheckpoint {
   // read them take them as arguments).
   IterationTotals totals_;
   ResponsePlans plans_;
+  // The skeleton's publish (publish_generation), from the run binding.
+  GenerationPublisher publish_;
 
   friend json response_state_records(const json& metadata,
                                      const std::string& reference_generation,
@@ -691,6 +693,7 @@ public:
     return names;
   }
 
+private:
   // Every leg and source the requested values are built from
   // (response_needs) is at the final rung and converged. `loaded`: the state
   // keys the planner loaded (D-016); their verdict is the planner's, so only
@@ -760,6 +763,7 @@ public:
     return true;
   }
 
+public:
   // A2: the science checks on a complete generation of stage `stage`, whose
   // reference has `natom` atoms.
   static void validate_generation(const std::string& stage, int natom,
@@ -831,6 +835,7 @@ public:
               "completed property lacks converged prerequisites");
   }
 
+private:
   // The state keys a generation's plan records say were loaded and met.
   static std::set<std::string> loaded_states(const json& plan_records) {
     std::set<std::string> loaded;
@@ -840,7 +845,6 @@ public:
     return loaded;
   }
 
-private:
   // R4/R7: the same perturbation's saved state nearest in frequency (on a
   // tie the lower), at the finest rung the start rung can load (coarser or
   // equal, not aliased): the record of the state the engine's picker loads.
@@ -990,14 +994,16 @@ public:
   bool reference_changed = false;
 
   // `natom`: the reference molecule's atom count, which "every atom" in a
-  // Raman request means.
+  // Raman request means. `publish`: the skeleton's publish
+  // (publish_generation, S3c2).
   ResponseCheckpoint(madness::World& world, const Stage& stage,
                      const std::filesystem::path& stage_directory,
                      const std::filesystem::path& attempt, std::string run_id,
-                     json reference, int natom)
+                     json reference, int natom, GenerationPublisher publish)
       : world_(world), stage_(stage), store_(stage_directory / "checkpoints"),
         attempt_(attempt), run_id_(std::move(run_id)),
-        reference_(std::move(reference)), natom_(natom) {
+        reference_(std::move(reference)), natom_(natom),
+        publish_(std::move(publish)) {
     request_ = response_request(stage);
   }
 
@@ -1222,45 +1228,53 @@ private:
              {"converged", converged},
              {"value",
               property_value(metadata, name, request_final_key(request_))}});
-    const auto directory = store_ / m.generation;
-    const auto names = members(metadata);
-    if (converged)
-      require(request_complete(metadata, request_, natom_,
-                               loaded_states(plans_.records)),
-              "analysis lacks converged prerequisites");
+    GenerationWrite write;
+    write.manifest = std::move(m);
+    write.engine_metadata = metadata;
+    write.check_before_write = [&](const Manifest&) {
+      (void)members(metadata);
+      if (converged)
+        require(request_complete(metadata, request_, natom_,
+                                 loaded_states(plans_.records)),
+                "analysis lacks converged prerequisites");
+    };
     // Writers have already closed collectively. Copy the complete prerequisite
     // set; immutable generations never share writable files with an attempt.
-    checkpoint::detail::on_root(world_, [&] {
-      std::filesystem::create_directories(store_);
-      require(std::filesystem::create_directory(directory), "generation already exists");
-      for (const auto& name : names) {
-        const int writers = checkpoint::detail::header(attempt_ / (name + ".00000"), true);
-        const auto inventory = checkpoint::inspect_archive(attempt_, "response", name, {}, writers);
-        for (const auto& shard : inventory.shards) {
-          std::filesystem::create_directories(
-              (directory / shard.path).parent_path());
-          std::filesystem::copy_file(attempt_ / shard.path, directory / shard.path);
+    write.write_archives = [&](const std::filesystem::path& directory,
+                               Manifest& m) {
+      return checkpoint::detail::on_root(world_, [&] {
+        for (const auto& name : members(metadata)) {
+          const int writers
+              = checkpoint::detail::header(attempt_ / (name + ".00000"), true);
+          const auto inventory = checkpoint::inspect_archive(
+              attempt_, "response", name, {}, writers);
+          for (const auto& shard : inventory.shards) {
+            std::filesystem::create_directories(
+                (directory / shard.path).parent_path());
+            std::filesystem::copy_file(attempt_ / shard.path,
+                                       directory / shard.path);
+          }
+          m.archives.push_back(checkpoint::inspect_archive(
+              directory, "response", name, {}, writers));
         }
-        m.archives.push_back(checkpoint::inspect_archive(directory, "response", name, {}, writers));
-      }
-      // A bundle's index (roots.json) is not an archive: the manifest keeps
-      // it, and the transition analysis of a converged bundle with it.
-      json indices = json::object(), analyses = json::object();
-      for (const auto& rung : metadata.at("excited_states").items()) {
-        indices[rung.key()] = checkpoint::detail::read_json(
-            attempt_ / bundle_directory(rung.key()) / "roots.json");
-        const auto analysis = attempt_ / analysis_file(rung.key());
-        if (rung.value().value("converged", false)
-            && std::filesystem::exists(analysis))
-          analyses[rung.key()] = checkpoint::detail::read_json(analysis);
-      }
-      m.numerical["bundle_indices"] = std::move(indices);
-      if (!analyses.empty())
-        m.numerical["transition_analysis"] = std::move(analyses);
-      return std::string{};
-    });
-    checkpoint::publish(world_, store_, m);
-    latest_ = checkpoint::read_published(world_, store_);
+        // A bundle's index (roots.json) is not an archive: the manifest keeps
+        // it, and the transition analysis of a converged bundle with it.
+        json indices = json::object(), analyses = json::object();
+        for (const auto& rung : metadata.at("excited_states").items()) {
+          indices[rung.key()] = checkpoint::detail::read_json(
+              attempt_ / bundle_directory(rung.key()) / "roots.json");
+          const auto analysis = attempt_ / analysis_file(rung.key());
+          if (rung.value().value("converged", false)
+              && std::filesystem::exists(analysis))
+            analyses[rung.key()] = checkpoint::detail::read_json(analysis);
+        }
+        m.numerical["bundle_indices"] = std::move(indices);
+        if (!analyses.empty())
+          m.numerical["transition_analysis"] = std::move(analyses);
+        return std::string{};
+      });
+    };
+    latest_ = publish_(std::move(write));
   }
 };
 

@@ -4,6 +4,7 @@
 #include "NamedStages.hpp"
 #include "ResponseCheckpoint.hpp"
 #include "ResponseProperties.hpp"
+#include <algorithm>
 #include <apps/molresponse/madqc_adapter.hpp>
 #include <chrono>
 #include <filesystem>
@@ -234,6 +235,59 @@ struct AppSpec {
   return outcome.converged;
 }
 
+// A3, step 6 (skeleton spec 3.3; S3c2): publish one generation of `stage`
+// under `store`, in one order for every application. The application
+// assembled and named the manifest (D-051, D-054); here:
+//   1. rank 0: its check before writing, then the generation directory;
+//   2. every rank: its archives (write_archives);
+//   3. rank 0 (D-052): the archives are the generation's members and the
+//      finished manifest passes validate_generation; rank 0's manifest is
+//      the one published, so the checks read it there;
+//   4. checkpoint::publish, whose collective_error carries any failure from
+//      2-3 to every rank (the generation then stays unpublished);
+//   5. read it back; then `retain`, the application's retention (D-053).
+inline madness::checkpoint::Manifest publish_generation(
+    madness::World& world, const fs::path& store, const AppSpec& spec,
+    const Stage& stage, int natom, GenerationWrite write,
+    const std::function<void(const madness::checkpoint::Manifest&)>& retain) {
+  namespace checkpoint = madness::checkpoint;
+  auto& m = write.manifest;
+  const auto directory = store / m.generation;
+  checkpoint::detail::on_root(world, [&] {
+    if (write.check_before_write)
+      write.check_before_write(m);
+    fs::create_directories(store);
+    if (!fs::create_directory(directory))
+      throw std::runtime_error(spec.name + " checkpoint: generation "
+                               + m.generation + " already exists");
+    return std::string{};
+  });
+  auto error = write.write_archives(directory, m);
+  if (world.rank() == 0 && error.empty()) {
+    try {
+      std::vector<std::string> written;
+      written.reserve(m.archives.size());
+      for (const auto& archive : m.archives)
+        written.push_back(archive.basename);
+      auto expected = spec.members(write.engine_metadata);
+      std::sort(written.begin(), written.end());
+      std::sort(expected.begin(), expected.end());
+      if (written != expected)
+        throw std::runtime_error(spec.name + " checkpoint: generation "
+                                 + m.generation
+                                 + " does not hold its members' archives");
+      spec.validate_generation(stage, natom, m);
+    } catch (const std::exception& e) {
+      error = e.what();
+    }
+  }
+  checkpoint::publish(world, store, m, error);
+  auto published = checkpoint::read_published(world, store);
+  if (retain)
+    retain(published);
+  return published;
+}
+
 // The two rows, defined below the run functions they name.
 inline const AppSpec& moldft_spec();
 inline const AppSpec& response_spec();
@@ -336,8 +390,18 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     return *settings;
   };
   steps.prepare = [&] {
-    checkpoint.emplace(world, stage, ctx.stage_directory, ctx.run_id,
-                       *settings);
+    checkpoint.emplace(
+        world, stage, ctx.stage_directory, ctx.run_id, *settings,
+        [&](GenerationWrite write) {
+          return publish_generation(
+              world, ctx.stage_directory / "checkpoints", moldft_spec(), stage,
+              natom, std::move(write),
+              [&](const madness::checkpoint::Manifest& published) {
+                // A3: retention unless the deck keeps every generation.
+                if (!settings->checkpoints.keep_all)
+                  checkpoint->apply_retention(published.generation);
+              });
+        });
     checkpoint->prepare(*scf);
   };
   steps.has_generation = [] { return true; };
@@ -474,10 +538,16 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     return *settings;
   };
   steps.prepare = [&] {
-    checkpoint.emplace(world, stage, ctx.stage_directory, directory, ctx.run_id,
-                       json{{"stage", stage.reference},
-                            {"generation", reference.saved.generation}},
-                       static_cast<int>(molecule.natom()));
+    checkpoint.emplace(
+        world, stage, ctx.stage_directory, directory, ctx.run_id,
+        json{{"stage", stage.reference},
+             {"generation", reference.saved.generation}},
+        static_cast<int>(molecule.natom()), [&](GenerationWrite write) {
+          // Response keeps every generation (D-053).
+          return publish_generation(world, ctx.stage_directory / "checkpoints",
+                                    response_spec(), stage, natom,
+                                    std::move(write), {});
+        });
   };
   steps.has_generation = [&] { return checkpoint->has_generation(); };
   steps.validate_generation = [&](const madness::checkpoint::Manifest& m) {

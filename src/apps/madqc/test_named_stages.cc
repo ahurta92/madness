@@ -2,8 +2,10 @@
 #include "NamedStages.hpp"
 #include "ResponseCheckpoint.hpp"
 #include "RunNamedStages.hpp"
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <unistd.h>
 
 int main(int argc, char** argv) {
     auto& world = madness::initialize(argc, argv);
@@ -675,6 +677,60 @@ int main(int argc, char** argv) {
             "provenance, the multiplicity from the electrons");
       check(!molresponse.consumer_context,
             "spec consumer_context (response): none");
+      // S3c2 (D-052, D-055): the skeleton's publish refuses a generation
+      // before it is published; the refused one stays unpublished.
+      {
+        namespace fs = std::filesystem;
+        const auto store
+            = fs::temp_directory_path()
+              / ("test_named_stages_publish_" + std::to_string(::getpid()))
+              / "checkpoints";
+        fs::remove_all(store.parent_path());
+        const auto publish = [&](named_stages::GenerationWrite write) {
+          return named_stages::publish_generation(world, store, moldft, ground,
+                                                  2, std::move(write), {});
+        };
+        const auto generation = [&](const std::string& name) {
+          named_stages::GenerationWrite write;
+          write.manifest = scf;
+          write.manifest.generation = name;
+          write.manifest.archives.clear();
+          write.write_archives = [](const fs::path&, Manifest& m) {
+            // The inventory, without files: the checks before publish read
+            // the manifest only.
+            m.archives = {{"orbitals", "state.restartdata", {}, 1, {}}};
+            return std::string{};
+          };
+          return write;
+        };
+        auto refused_early = generation("g-1-1");
+        refused_early.check_before_write = [](const Manifest&) {
+          throw std::runtime_error("not before writing");
+        };
+        rejects_with([&] { (void)publish(refused_early); },
+                     "not before writing",
+                     "publish_generation: the application's check before "
+                     "writing refuses");
+        check(!fs::exists(store / "g-1-1"),
+              "publish_generation: nothing written after that refusal");
+        auto unlisted = generation("g-1-2");
+        unlisted.write_archives
+            = [](const fs::path&, Manifest&) { return std::string{}; };
+        rejects_with([&] { (void)publish(unlisted); },
+                     "does not hold its members' archives",
+                     "publish_generation: archives that are not the members");
+        auto invalid = generation("g-1-3");
+        invalid.manifest.numerical["representation"] = "ao";
+        rejects_with([&] { (void)publish(invalid); },
+                     "unsupported representation",
+                     "publish_generation (D-052): a generation that fails "
+                     "validate_generation");
+        check(fs::is_directory(store / "g-1-3")
+                  && !fs::exists(store / "g-1-3" / "manifest.json")
+                  && !fs::exists(store / "latest"),
+              "publish_generation: the refused generation stays unpublished");
+        fs::remove_all(store.parent_path());
+      }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;
