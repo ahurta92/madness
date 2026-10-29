@@ -23,7 +23,14 @@ env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
 env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
-deck = (Path(a.source) / 'named_h2.in').read_text()
+# The cases below compare a generation with the ones before it and restart
+# from intermediate generations, so the response stage keeps every one
+# (checkpoint.keep_all, D-070); the default retention has its own case at the
+# end.
+default_deck = (Path(a.source) / 'named_h2.in').read_text()
+deck = default_deck.replace('molresponse optical\n',
+                            'molresponse optical\n  checkpoint.keep_all true\n')
+assert deck != default_deck
 one = deck.replace('[0.0, 0.02]', '[0.0]')
 
 def run(label, root, text=one, resume=False, success=True):
@@ -330,6 +337,25 @@ plans = {s['state']: s for s in stage['continuation']['states']}
 assert plans['es:tda_n2']['action'] == 'fresh'
 assert 'the saved bundle is es:tda_n1' in plans['es:tda_n2']['why']
 assert len(record['roots']) == 2 and record['converged']
+
+# D-070, D-072: by default each stage keeps one generation (the latest, or
+# one another stage references), after a fresh run and after --continue, and
+# the attempt directories hold no archive shards, only text and records.
+def single_copy(root):
+    for stage in ('gs', 'optical'):
+        store = root / stage / 'checkpoints'
+        names = [d.name for d in store.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        assert names == [published(root, stage)[0].name], (stage, sorted(names))
+        shards = [f for d in (root / stage).glob('attempt-*') for f in d.rglob('*')
+                  if f.is_file() and f.suffix[1:].isdigit()]
+        assert not shards, (stage, shards)
+retained = work / 'DefaultRetention'
+run('retained-fresh', retained, default_deck.replace('[0.0, 0.02]', '[0.0]'))
+single_copy(retained)
+assert result(retained)['checkpoint_warnings'] == []
+run('retained-added', retained, default_deck, resume=True)
+single_copy(retained)
+assert result(retained)['convergence_settings']['checkpoints']['keep_all'] is False
 
 summary = {name: {'iterations': result(root)['iterations_this_run'],
                   'work': result(root)['work'], 'alpha_zz': alpha(root)}

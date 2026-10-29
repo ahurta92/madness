@@ -180,6 +180,9 @@ struct LadderSteps {
   std::function<std::size_t()> iterations;
   // The application's fields of the generation record.
   std::function<void(json&)> generation_record;
+  // A3: the deletions retention could not make in this stage's publishes
+  // (extra files only), the same on every rank.
+  std::function<std::vector<std::string>()> checkpoint_warnings;
   // 9. The convergence report on the skeleton's verdict (B8), with each
   // needed state's evaluation of the written targets (`states`, the shared
   // verdict's), the saved-state outcomes of the table, and the label the
@@ -337,6 +340,96 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
   return {{"converged", converged}, {"states", std::move(states)}};
 }
 
+// A1: the generations of stage `stage` that another stage's manifest under
+// the same run root names as its reference. Rank 0 reads the other stages'
+// manifests; every rank gets the same set. Collective.
+inline std::set<std::string> referenced_generations(madness::World& world,
+                                                    const fs::path& store,
+                                                    const std::string& stage) {
+  namespace checkpoint = madness::checkpoint;
+  const auto text = checkpoint::detail::on_root(world, [&] {
+    json names = json::array();
+    const auto stage_directory = store.parent_path();
+    for (const auto& other_stage :
+         fs::directory_iterator(stage_directory.parent_path())) {
+      const auto other = other_stage.path() / "checkpoints";
+      if (other_stage.path() == stage_directory || !fs::is_directory(other))
+        continue;
+      for (const auto& entry : fs::directory_iterator(other)) {
+        if (!checkpoint::detail::generation_name(
+                entry.path().filename().string()))
+          continue;
+        try {
+          const auto reference
+              = checkpoint::read_manifest(entry.path()).reference;
+          if (reference.is_object() && reference.value("stage", "") == stage)
+            names.push_back(reference.value("generation", ""));
+        } catch (const std::exception&) {
+          // No readable manifest: not a published generation; it references
+          // nothing.
+        }
+      }
+    }
+    return names.dump();
+  });
+  std::set<std::string> referenced;
+  for (const auto& name : json::parse(text))
+    referenced.insert(name.get<std::string>());
+  return referenced;
+}
+
+// A3, D-070 (a): one copy of each saved function. After a publish of
+// `latest` succeeds, every other generation of the stage is deleted except
+// those another stage's manifest references (A1); checkpoint.keep_all is the
+// request for more (the caller's). Other stages are read only when there is
+// something to delete, which after a run's first publish is always: a handful
+// of manifest reads, one generation per stage being left. A store written
+// before D-070 loses every older generation at its first publish, old-form
+// names included. Collective; returns the deletions it could not make (extra
+// files only), the same on every rank, empty on success.
+inline std::string retain_generations(madness::World& world,
+                                      const fs::path& store,
+                                      const std::string& stage,
+                                      const std::string& latest) {
+  namespace checkpoint = madness::checkpoint;
+  std::vector<std::string> generations;
+  for (const auto& manifest :
+       checkpoint::read_generation_manifests(world, store))
+    if (manifest.stage == stage)
+      generations.push_back(manifest.generation);
+  if (checkpoint::generations_to_delete(generations, latest).empty())
+    return {};
+  return checkpoint::remove_generations(
+      world, store,
+      checkpoint::generations_to_delete(
+          generations, latest, referenced_generations(world, store, stage)));
+}
+
+// A3, D-072 (a): after the stage ends, the attempt directory's copies of the
+// stage's latest generation's archive shards are deleted (the engine's
+// working files and the copies a load makes), so the generation is the only
+// copy at rest. The published inventory names the shards by the same paths
+// the attempt uses, for every application; the attempt keeps its text output
+// and JSON records. Collective (rank 0 deletes); returns the deletions it
+// could not make, the same on every rank, empty on success.
+inline std::string
+delete_attempt_copies(madness::World& world, const fs::path& attempt,
+                      const madness::checkpoint::Manifest& latest) {
+  return madness::checkpoint::detail::on_root(world, [&] {
+    std::string warning;
+    for (const auto& archive : latest.archives)
+      for (const auto& shard : archive.shards) {
+        const auto copy = attempt / shard.path;
+        std::error_code error;
+        if (fs::is_regular_file(fs::symlink_status(copy, error))
+            && !fs::remove(copy, error) && error)
+          warning += (warning.empty() ? "" : "; ") + copy.string() + ": "
+                     + error.message();
+      }
+    return warning;
+  });
+}
+
 // A3, step 6 (skeleton spec 3.3; S3c2): publish one generation of `stage`
 // under `store`, in one order for every application. The application
 // decided to publish and gathered its publish sample (D-051, D-054); here:
@@ -357,12 +450,13 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
 //      checks read it there;
 //   4. checkpoint::publish, whose collective_error carries any failure from
 //      2-3 to every rank (the generation then stays unpublished);
-//   5. read it back; then `retain`, the application's retention (D-053).
-inline madness::checkpoint::Manifest publish_generation(
-    madness::World& world, const fs::path& store, const AppSpec& spec,
-    const Stage& stage, int natom, GenerationSequence& names,
-    GenerationWrite write,
-    const std::function<void(const madness::checkpoint::Manifest&)>& retain) {
+//   5. read it back; then retention (retain_generations, D-070) unless the
+//      deck writes checkpoint.keep_all, its warnings added to `warnings`.
+inline madness::checkpoint::Manifest
+publish_generation(madness::World& world, const fs::path& store,
+                   const AppSpec& spec, const Stage& stage, int natom,
+                   GenerationSequence& names,
+                   std::vector<std::string>& warnings, GenerationWrite write) {
   namespace checkpoint = madness::checkpoint;
   if (write.final) {
     // D-077 (S4d2): the stage's verdict, from the state records of the
@@ -412,8 +506,19 @@ inline madness::checkpoint::Manifest publish_generation(
   }
   checkpoint::publish(world, store, m, error);
   auto published = checkpoint::read_published(world, store);
-  if (retain)
-    retain(published);
+  if (!stage.checkpoint_keep_all) {
+    const auto warning
+        = retain_generations(world, store, stage.name, published.generation);
+    if (!warning.empty()) {
+      warnings.push_back(warning);
+      if (world.rank() == 0)
+        std::cout << "stage " << stage.name
+                  << ": retention could not delete every older generation "
+                     "(extra files only): "
+                  << warning << '\n'
+                  << std::flush;
+    }
+  }
   return published;
 }
 
@@ -517,6 +622,15 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
               << std::flush;
   // 8. The properties.
   steps.properties(result);
+  // A3, D-072, D-083 (a): the stage has ended with its latest generation,
+  // published in this run or used as published; the attempt's copies of its
+  // shards go, and so do retention's leftovers' warnings into the record.
+  auto warnings = steps.checkpoint_warnings();
+  if (const auto warning
+      = delete_attempt_copies(world, ctx.attempt_directory, saved);
+      !warning.empty())
+    warnings.push_back("attempt copies: " + warning);
+  result["checkpoint_warnings"] = warnings;
   // 10. What the stage hands on (A8).
   StageOutcome outcome;
   outcome.state_id = state_id;
@@ -549,19 +663,16 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     return *settings;
   };
   GenerationSequence names{stage.name, ctx.run_id};
+  std::vector<std::string> warnings;
+  steps.checkpoint_warnings = [&] { return warnings; };
   steps.prepare = [&] {
-    checkpoint.emplace(
-        world, stage, ctx.stage_directory, ctx.run_id, *settings,
-        [&](GenerationWrite write) {
-          return publish_generation(
-              world, ctx.stage_directory / "checkpoints", moldft_spec(), stage,
-              natom, names, std::move(write),
-              [&](const madness::checkpoint::Manifest& published) {
-                // A3: retention unless the deck keeps every generation.
-                if (!settings->checkpoints.keep_all)
-                  checkpoint->apply_retention(published.generation);
-              });
-        });
+    checkpoint.emplace(world, stage, ctx.stage_directory, ctx.run_id, *settings,
+                       [&](GenerationWrite write) {
+                         return publish_generation(
+                             world, ctx.stage_directory / "checkpoints",
+                             moldft_spec(), stage, natom, names, warnings,
+                             std::move(write));
+                       });
     checkpoint->prepare(*scf);
   };
   // moldft plans every generation it reads; its problem is the live SCF's.
@@ -604,9 +715,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   };
   steps.work = [&] { return checkpoint->work; };
   steps.iterations = [&] { return checkpoint->iterations; };
-  steps.generation_record = [&](json& result) {
-    result["checkpoint_warnings"] = checkpoint->retention_warnings();
-  };
+  steps.generation_record = [](json&) {};
   const auto saved_measurements = [&] {
     return checkpoint->latest()
         .metrics.value("convergence_report", json::object())
@@ -697,16 +806,17 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     return *settings;
   };
   GenerationSequence names{stage.name, ctx.run_id};
+  std::vector<std::string> warnings;
+  steps.checkpoint_warnings = [&] { return warnings; };
   steps.prepare = [&] {
     checkpoint.emplace(
         world, stage, ctx.stage_directory, directory,
         json{{"stage", stage.reference},
              {"generation", reference.saved.generation}},
         static_cast<int>(molecule.natom()), [&](GenerationWrite write) {
-          // Response keeps every generation (D-053).
           return publish_generation(world, ctx.stage_directory / "checkpoints",
                                     response_spec(), stage, natom, names,
-                                    std::move(write), {});
+                                    warnings, std::move(write));
         });
   };
   steps.plan_context = [&](const madness::checkpoint::Manifest& m) {

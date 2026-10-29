@@ -125,10 +125,15 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
   settings.iteration_caps = {
       {static_cast<int>(rp.maxiter())},
       stage.written.contains("maxiter") ? SetBy::user : SetBy::engine_default};
-  // A3: no save boundary inside a solve yet (DESIGN §1.4).
+  // A3: no save boundary inside a solve yet (DESIGN §1.4); what it keeps is
+  // the one retention's (D-070), checkpoint.keep_all the request for more.
   settings.checkpoints.fixed
       = "at every solve end (molresponse has no save boundary inside a "
-        "solve); every generation kept";
+        "solve)";
+  settings.checkpoints.keep_all = stage.checkpoint_keep_all;
+  settings.checkpoints.keep_all_set_by
+      = stage.written.contains("checkpoint.keep_all") ? SetBy::user
+                                                      : SetBy::engine_default;
   settings.warnings = cv::unenforced_target_warnings(settings);
   for (auto& warning : cv::incomplete_request_warnings(
            settings, {"charge_density_change", "bsh_residual"}))

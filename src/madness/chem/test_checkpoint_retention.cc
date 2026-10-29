@@ -48,12 +48,8 @@ int main() {
               == c.expected,
           std::string("publish_now: ") + c.name);
 
-  // generations_to_delete: g1..g5 of one stage; g2 and g4 are rung ends.
-  const std::vector<GenerationSummary> store = {{"g-1", true},
-                                                {"g-2", false},
-                                                {"g-3", true},
-                                                {"g-4", false},
-                                                {"g-5", true}};
+  // generations_to_delete (D-070): g1..g5 of one stage.
+  const std::vector<std::string> store = {"g-1", "g-2", "g-3", "g-4", "g-5"};
   struct RetentionCase {
     const char* name;
     std::string latest;
@@ -61,26 +57,28 @@ int main() {
     std::vector<std::string> expected;
   };
   const std::vector<RetentionCase> retention = {
-      {"mid-rung generations go; rung ends and latest stay",
+      {"every generation but latest goes",
        "g-5",
        {},
-       {"g-1", "g-3"}},
-      {"a latest that is a rung end: every mid-rung generation goes",
-       "g-4",
+       {"g-1", "g-2", "g-3", "g-4"}},
+      {"a latest in the middle keeps only itself",
+       "g-3",
        {},
-       {"g-1", "g-3", "g-5"}},
-      {"a referenced mid-rung generation is kept", "g-5", {"g-3"}, {"g-1"}},
-      {"a referenced rung end changes nothing", "g-5", {"g-2"}, {"g-1", "g-3"}},
+       {"g-1", "g-2", "g-4", "g-5"}},
+      {"a referenced generation is kept",
+       "g-5",
+       {"g-3"},
+       {"g-1", "g-2", "g-4"}},
       {"everything referenced or latest: nothing goes",
        "g-5",
-       {"g-1", "g-3"},
+       {"g-1", "g-2", "g-3", "g-4"},
        {}},
   };
   for (const auto& c : retention)
     check(generations_to_delete(store, c.latest, c.referenced) == c.expected,
           std::string("generations_to_delete: ") + c.name);
-  check(generations_to_delete({{"g-2", false}, {"g-4", false}}, "g-4").empty(),
-        "generations_to_delete: only rung ends: no candidates, no scan needed");
+  check(generations_to_delete({"g-4"}, "g-4").empty(),
+        "generations_to_delete: only latest: no candidates, no scan needed");
   check(generations_to_delete({}, "g-1").empty(),
         "generations_to_delete: an empty store");
 

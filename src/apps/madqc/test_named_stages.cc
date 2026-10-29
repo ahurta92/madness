@@ -202,13 +202,22 @@ int main(int argc, char** argv) {
     zero_cadence.replace(zero_cadence.find(" dconv 1e-5\n"), 0,
                          " checkpoint.every_iterations 0\n");
     rejects(geometry + zero_cadence, "must be at least 1");
-    for (const auto* key :
-         {" checkpoint.every_iterations 2\n", " checkpoint.keep_all true\n"}) {
-        auto response_cadence = response;
-        response_cadence.replace(response_cadence.find(" dconv 2e-4\n"), 0,
-                                 key);
-        rejects(geometry + gs + response_cadence,
-                "publishes at solve ends only");
+    {
+      auto response_cadence = response;
+      response_cadence.replace(response_cadence.find(" dconv 2e-4\n"), 0,
+                               " checkpoint.every_iterations 2\n");
+      rejects(geometry + gs + response_cadence, "publishes at solve ends only");
+    }
+    // D-070: checkpoint.keep_all is every application's.
+    try {
+      auto keep = response;
+      keep.replace(keep.find(" dconv 2e-4\n"), 0,
+                   " checkpoint.keep_all true\n");
+      const auto stages = named_stages::parse(world, geometry + gs + keep);
+      check(stages[1].checkpoint_keep_all,
+            "checkpoint.keep_all is accepted for molresponse (D-070)");
+    } catch (const std::exception& e) {
+      check(false, std::string("molresponse keep_all: ") + e.what());
     }
     // The states a response request's values are built from (D-019): each leg
     // and source once, nuclear legs at 0, "every atom" from the reference.
@@ -695,6 +704,7 @@ int main(int argc, char** argv) {
         fs::remove_all(store.parent_path());
         // S4c1 (D-058): the skeleton names each attempt, refused or not.
         named_stages::GenerationSequence names{ground.name, "1"};
+        std::vector<std::string> warnings;
         const auto name = [&](int n) {
           return "g-" + ground.name + "-1-" + std::to_string(n);
         };
@@ -712,8 +722,9 @@ int main(int argc, char** argv) {
         const auto publish = [&](named_stages::GenerationWrite write,
                                  const Manifest& manifest) {
           assembled = manifest;
-          return named_stages::publish_generation(
-              world, store, assembling, ground, 2, names, std::move(write), {});
+          return named_stages::publish_generation(world, store, assembling,
+                                                  ground, 2, names, warnings,
+                                                  std::move(write));
         };
         const auto generation = [&] {
           auto m = scf;
@@ -810,6 +821,42 @@ int main(int argc, char** argv) {
                               : "publish_generation (D-077): a state off the "
                                 "final rung makes the final sample "
                                 "unconverged");
+        }
+        // D-072: the attempt's copies of the latest generation's shards go;
+        // its text output and records stay.
+        {
+          const auto attempt = store.parent_path() / "attempt-test";
+          fs::create_directories(attempt / "es_bundle");
+          for (const auto* name :
+               {"state.restartdata.00000", "state.restartdata.00001",
+                "resolved.in", "es_bundle/root_0.00000",
+                "es_bundle/roots.json"})
+            std::ofstream(attempt / name) << "x";
+          Manifest latest;
+          latest.archives = {{"orbitals",
+                              "state.restartdata",
+                              {},
+                              2,
+                              {{"state.restartdata.00000", 1, ""},
+                               {"state.restartdata.00001", 1, ""}}},
+                             {"response",
+                              "es_bundle/root_0",
+                              {},
+                              1,
+                              {{"es_bundle/root_0.00000", 1, ""}}}};
+          const auto warning
+              = named_stages::delete_attempt_copies(world, attempt, latest);
+          check(warning.empty()
+                    && !fs::exists(attempt / "state.restartdata.00000")
+                    && !fs::exists(attempt / "state.restartdata.00001")
+                    && !fs::exists(attempt / "es_bundle/root_0.00000")
+                    && fs::exists(attempt / "resolved.in")
+                    && fs::exists(attempt / "es_bundle/roots.json"),
+                "delete_attempt_copies (D-072): the shards go, the records "
+                "stay");
+          check(named_stages::delete_attempt_copies(world, attempt, latest)
+                    .empty(),
+                "delete_attempt_copies: nothing left to delete is no warning");
         }
         fs::remove_all(store.parent_path());
       }
@@ -1211,6 +1258,20 @@ int main(int argc, char** argv) {
         rejects_with([&] { (void)moldft.manifest(stages[0], 2, unknown); },
                      "unknown publish sample kind",
                      "spec manifest (moldft): a sample of no known kind");
+        // R-039: the reuse publish takes the skeleton's verdict, as the
+        // other final publishes do; without it the loaded stop reason stands.
+        auto reuse = cases.at("moldft_reuse").at("sample");
+        const auto reuse_stages = named_stages::parse(
+            world, cases.at("moldft_reuse").at("deck").get<std::string>());
+        reuse["converged"] = false;
+        check(moldft.manifest(reuse_stages[0], 2, reuse).stop_reason
+                  == reuse.at("loaded").at("stop_reason").get<std::string>(),
+              "spec manifest (moldft reuse): an unconverged verdict keeps the "
+              "loaded stop reason");
+        reuse["converged"] = true;
+        check(moldft.manifest(reuse_stages[0], 2, reuse).stop_reason
+                  == "converged",
+              "spec manifest (moldft reuse): the verdict converged");
       }
       // S4d1 (D-046, D-057): the shared verdict from the state records.
       {

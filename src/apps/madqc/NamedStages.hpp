@@ -628,12 +628,12 @@ inline std::vector<Stage> parse(madness::World &world,
 
     // A3: a stage publishes inside a solve only where it has a save boundary
     // there; molresponse publishes at solve ends only (DESIGN §1.4).
-    for (const auto* k : {"checkpoint.every_iterations", "checkpoint.keep_all"})
-      if (seen.contains(k) && b.kind != "moldft")
-        throw std::runtime_error(
-            b.name + ": " + k
-            + " is not available for molresponse, which publishes at solve "
-              "ends only");
+    // checkpoint.keep_all is every application's (D-070).
+    if (seen.contains("checkpoint.every_iterations") && b.kind != "moldft")
+      throw std::runtime_error(
+          b.name
+          + ": checkpoint.every_iterations is not available for molresponse, "
+            "which publishes at solve ends only");
     stage.checkpoint_every_iterations
         = controls.get<int>("checkpoint.every_iterations");
     stage.checkpoint_keep_all = controls.get<bool>("checkpoint.keep_all");

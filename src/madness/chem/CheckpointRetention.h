@@ -35,26 +35,19 @@ namespace madness::checkpoint {
          && iterations_at_rung % every_iterations == 0;
 }
 
-/// What retention needs to know about one published generation of a stage.
-struct GenerationSummary {
-  std::string name;
-  bool mid_rung = false; ///< saved inside a rung, not at a rung end or stop
-};
-
-/// The generations retention deletes after a successful publish (A3: save
-/// and replace): this stage's mid-rung generations, except the one `latest`
-/// names and any another stage's manifest references (A1). Rung ends and
-/// stops are always kept. With no `referenced` set this gives the candidates,
-/// so a caller can skip reading other stages when there are none.
+/// The generations retention deletes after a successful publish (A3, D-070:
+/// one copy of each saved function): every one of this stage's generations
+/// except the one `latest` names and any another stage's manifest references
+/// (A1). With no `referenced` set this gives the candidates, so a caller can
+/// skip reading other stages when there are none.
 [[nodiscard]] inline std::vector<std::string>
-generations_to_delete(const std::vector<GenerationSummary>& generations,
+generations_to_delete(const std::vector<std::string>& generations,
                       const std::string& latest,
                       const std::set<std::string>& referenced = {}) {
   std::vector<std::string> doomed;
   for (const auto& generation : generations)
-    if (generation.mid_rung && generation.name != latest
-        && !referenced.contains(generation.name))
-      doomed.push_back(generation.name);
+    if (generation != latest && !referenced.contains(generation))
+      doomed.push_back(generation);
   return doomed;
 }
 

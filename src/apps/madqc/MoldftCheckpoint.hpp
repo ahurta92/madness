@@ -354,18 +354,6 @@ moldft_ladder_request(const Stage& stage, int natom,
   return plans;
 }
 
-// A3: a generation saved inside a rung, not at a rung end or stop. Older
-// generations without a rung record are mid-rung when saved after an orbital
-// update.
-[[nodiscard]] inline bool
-mid_rung(const madness::checkpoint::Manifest& manifest) {
-  const auto phase = manifest.position.value("phase", "");
-  if (!manifest.position.contains("rung"))
-    return phase == "after_orbital_update";
-  return manifest.position.at("rung").value("stop", "") == "in_progress"
-         && phase != "final_properties_on_saved_orbitals";
-}
-
 // Application policy lives here; StageCheckpoint only checks physical storage.
 // DESIGN A1, the moldft AppSpec's consumer_context (S3c1): everything a
 // consuming stage needs about this ground state, besides the orbital archive,
@@ -681,7 +669,11 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
     auto m = madness::checkpoint::from_json_record(sample.at("loaded"));
     const auto source = m.generation;
     const auto stop_before = m.stop_reason;
-    m.stop_reason = "converged";
+    // The skeleton's verdict, as the other final publishes take it (D-077):
+    // a loaded state's planner record converges; otherwise the loaded
+    // generation's stop reason stands.
+    if (sample.at("converged").get<bool>())
+      m.stop_reason = "converged";
     m.position["previous_generation"] = source;
     m.position["reused_from"] = source;
     m.targets = targets(m.numerical.at("threshold").get<double>());
@@ -760,7 +752,6 @@ class MoldftCheckpoint {
   // The metrics of the last observed sample, published or not (A3: within a
   // rung only some samples are published); finish() starts from them.
   json last_metrics_ = nullptr;
-  std::vector<std::string> retention_warnings_;
   // The stage's convergence settings (B9), built once by the runner and kept
   // as an immutable copy: observe() is an engine callback and needs them at
   // every iteration (A7: owned, explicit, never changed).
@@ -1160,11 +1151,6 @@ public:
               false);
   }
 
-  /// Deletions retention could not make (A3), the same on every rank.
-  [[nodiscard]] const std::vector<std::string>& retention_warnings() const {
-    return retention_warnings_;
-  }
-
   // Only these final properties have actually been evaluated on the saved
   // state.
   // `engine_converged`: the engine's own verdict at the final rung, recorded
@@ -1365,6 +1351,7 @@ private:
     // The reuse kind of publish sample (moldft_manifest, D-067).
     write.publish_sample
         = {{"kind", "reuse"},
+           {"converged", false}, // the skeleton's verdict replaces it (D-077)
            {"loaded", checkpoint::to_json_record(latest_)},
            {"why", plan_.why},
            {"unmet_not_enforceable", plan_.unmet_not_enforceable}};
@@ -1387,74 +1374,6 @@ private:
             });
           };
     latest_ = publish_(std::move(write));
-  }
-
-public:
-  // A3, save and replace: after a successful publish of `latest`, delete this
-  // stage's older mid-rung generations, keeping latest, every rung end and
-  // stop, and any generation another stage's manifest references (A1). Other
-  // stages are read only when there is something to delete. The run binding
-  // hands it to the skeleton's publish (D-053).
-  void apply_retention(const std::string& latest) {
-    namespace checkpoint = madness::checkpoint;
-    std::vector<checkpoint::GenerationSummary> summaries;
-    for (const auto& manifest :
-         checkpoint::read_generation_manifests(world_, store_))
-      if (manifest.stage == stage_.name)
-        summaries.push_back({manifest.generation, mid_rung(manifest)});
-    if (checkpoint::generations_to_delete(summaries, latest).empty())
-      return;
-    const auto warning = checkpoint::remove_generations(
-        world_, store_,
-        checkpoint::generations_to_delete(summaries, latest,
-                                          referenced_generations()));
-    if (warning.empty())
-      return;
-    retention_warnings_.push_back(warning);
-    if (world_.rank() == 0)
-      std::cout << "stage " << stage_.name
-                << ": retention could not delete every older generation "
-                   "(extra files only): "
-                << warning << '\n'
-                << std::flush;
-  }
-
-private:
-  // A1: this stage's generations that another stage of the run names as its
-  // reference. Rank 0 reads the other stages' manifests; every rank gets the
-  // same set.
-  [[nodiscard]] std::set<std::string> referenced_generations() const {
-    namespace checkpoint = madness::checkpoint;
-    const auto text = checkpoint::detail::on_root(world_, [&] {
-      json names = json::array();
-      const auto stage_directory = store_.parent_path();
-      for (const auto& stage :
-           fs::directory_iterator(stage_directory.parent_path())) {
-        const auto other = stage.path() / "checkpoints";
-        if (stage.path() == stage_directory || !fs::is_directory(other))
-          continue;
-        for (const auto& entry : fs::directory_iterator(other)) {
-          if (!checkpoint::detail::generation_name(
-                  entry.path().filename().string()))
-            continue;
-          try {
-            const auto reference
-                = checkpoint::read_manifest(entry.path()).reference;
-            if (reference.is_object()
-                && reference.value("stage", "") == stage_.name)
-              names.push_back(reference.value("generation", ""));
-          } catch (const std::exception&) {
-            // No readable manifest: not a published generation; it
-            // references nothing.
-          }
-        }
-      }
-      return names.dump();
-    });
-    std::set<std::string> referenced;
-    for (const auto& name : json::parse(text))
-      referenced.insert(name.get<std::string>());
-    return referenced;
   }
 };
 } // namespace named_stages

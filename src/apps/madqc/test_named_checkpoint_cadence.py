@@ -3,13 +3,14 @@
 --continue from a kept mid-rung generation (B6).
 
 - By default a stage publishes only at decision points (every rung end and
-  stop) and keeps only those: older mid-rung generations are deleted after
+  stop) and keeps one generation (D-070): every older one is deleted after
   each publish. The stop manifest carries the full per-iteration history.
 - checkpoint.every_iterations K also publishes every K-th iteration at a rung;
   checkpoint.keep_all true keeps every generation.
 - --continue from a kept mid-rung generation resumes that rung at the next
-  iteration; retention then deletes the generation it resumed from, and the
-  earlier run's history moves into the new manifests.
+  iteration; retention then deletes every older generation, the one it
+  resumed from included, and the earlier run's history moves into the new
+  manifests.
 - A deletion that fails is a warning on every rank; the stage still finishes
   (DESIGN P1: the failure is on rank 0's file work only)."""
 import argparse
@@ -88,22 +89,20 @@ def latest(root):
                        'manifest.json').read_text())
 
 
-# 1. Default: decision points only; nothing mid-rung kept; full history at the stop.
+# 1. Default: decision points only; one generation kept (D-070), the stop,
+# with the full history.
 fresh = work / 'Default'
 log = run('default', fresh)
 kept = generations(fresh)
-assert all(is_decision_point(m) for m in kept), [m['position'] for m in kept]
-ends = [m for m in kept if m['position']['phase'] == 'after_final_rotation']
-assert [rung(m)['index'] for m in ends] == [1, 2], [rung(m) for m in ends]
-assert [rung(m)['stop'] for m in ends] == ['converged', 'converged'], [rung(m) for m in ends]
-assert kept[-1]['position']['phase'] == 'final_properties_on_saved_orbitals'
-assert len(kept) == 3, [m['position'] for m in kept]
-lengths = {rung(m)['index']: rung(m)['iterations_at_rung'] for m in ends}
+assert len(kept) == 1, [m['position'] for m in kept]
+assert kept[0]['position']['phase'] == 'final_properties_on_saved_orbitals'
 iterations = result(fresh)['iterations_this_run']
-assert sum(lengths.values()) == iterations, (lengths, iterations)
 # The stop manifest carries the whole per-iteration history (A3, B2), one
 # segment per rung, each counted from iteration 0.
 history = latest(fresh)['metrics']['convergence_report']['iteration_history']
+thresholds = [row['kinetic_trace']['sample']['threshold'] for row in history]
+lengths = {1: thresholds.count(1e-4), 2: thresholds.count(1e-6)}
+assert sum(lengths.values()) == iterations, (lengths, iterations)
 assert len(history) == iterations, (len(history), iterations)
 for row in history:
     assert {'measurements', 'energy', 'kinetic_trace', 'explicit_accuracy', 'configured_progress',
@@ -131,16 +130,22 @@ mid = [(rung(m)['index'], rung(m)['iterations_at_rung']) for m in published if n
 expected = [(r, i) for r in (1, 2) for i in range(1, lengths[r]) if i % 3 == 0]
 assert mid == expected, (mid, expected)
 assert sum(is_decision_point(m) for m in published) == 3, [m['position'] for m in published]
+# The rung ends (kept here only because the deck keeps every generation).
+ends = [m for m in published if m['position']['phase'] == 'after_final_rotation']
+assert [rung(m)['index'] for m in ends] == [1, 2], [rung(m) for m in ends]
+assert [rung(m)['stop'] for m in ends] == ['converged', 'converged'], [rung(m) for m in ends]
+assert [rung(m)['iterations_at_rung'] for m in ends] == [lengths[1], lengths[2]], [rung(m) for m in ends]
 settings = result(every3)['convergence_settings']['checkpoints']
 assert settings['every_iterations'] == 3 and settings['keep_all'], settings
 assert settings['every_iterations_set_by'] == 'user' and settings['keep_all_set_by'] == 'user'
 assert 'Checkpoints: every 3 iterations within a rung (user)' in log
 
-# 3. K = 3 with retention: the mid-rung generations are replaced as the stage goes on.
+# 3. K = 3 with retention: each publish replaces the one before; the stop is left.
 every3_retained = work / 'Every3'
 run('every3', every3_retained, with_keys('checkpoint.every_iterations 3'))
 kept = generations(every3_retained)
-assert all(is_decision_point(m) for m in kept) and len(kept) == 3, [m['position'] for m in kept]
+assert len(kept) == 1 and kept[0]['position']['phase'] == 'final_properties_on_saved_orbitals', \
+    [m['position'] for m in kept]
 assert not [d for d in (every3_retained / 'gs/checkpoints').iterdir() if d.name.startswith('.deleting-')]
 
 # 4. --continue from a kept mid-rung generation (crash simulated right after it).
@@ -164,12 +169,11 @@ assert record['summary'] == 'resumed at rung 2 (thresh 1e-06, k 8), iteration %d
 assert result(inside)['status'] == 'completed'
 after = generations(inside)
 names = {m['generation'] for m in after}
-# Default retention in the resumed run: the mid-rung generations, including
-# the one it resumed from, are gone; rung ends and the new stop remain.
+# Default retention in the resumed run (D-070): every older generation, the
+# one it resumed from included, is gone; the new stop remains.
 assert chosen['generation'] not in names, sorted(names)
-assert all(is_decision_point(m) for m in after), [m['position'] for m in after]
-assert [m['generation'] for m in after if m['generation'] in before] == \
-       [m['generation'] for m in ordered if m['generation'] in before and is_decision_point(m)]
+assert len(after) == 1 and after[0]['generation'] not in before, sorted(names)
+assert after[0]['position']['phase'] == 'final_properties_on_saved_orbitals', after[0]['position']
 final = latest(inside)
 assert rung(final)['iterations_at_rung'] == done + rung(final)['iterations_this_run'], rung(final)
 report = final['metrics']['convergence_report']

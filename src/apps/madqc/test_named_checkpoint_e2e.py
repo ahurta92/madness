@@ -22,7 +22,13 @@ env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
 env.setdefault('MAD_NUM_THREADS', '10')  # dd convention; override from the environment
 launch = [] if a.ranks == 1 else [a.mpiexec, '-n', str(a.ranks)]
-deck = (Path(a.source) / 'named_h2.in').read_text().split('molresponse optical')[0]
+# This test checks again and again that a later run leaves an earlier
+# generation's files untouched, so the ground state keeps every generation
+# (checkpoint.keep_all, D-070); the default retention is checked in
+# test_named_response_checkpoint.py.
+def keep_all(text):
+    return text.replace('moldft gs\n', 'moldft gs\n  checkpoint.keep_all true\n')
+deck = keep_all((Path(a.source) / 'named_h2.in').read_text().split('molresponse optical')[0])
 
 def run(label, root, text=deck, resume=False, success=True):
     inp = work / (label + '.in')
@@ -111,7 +117,9 @@ run('reuse-after-failure', fresh, resume=True)
 assert published(fresh)[0] == generation
 
 partial = work / 'Partial'
-run('limited', partial, (Path(a.source) / 'named_h2.in').read_text().replace('maxiter 30', 'maxiter 2'), success=False)
+run('limited', partial,
+    keep_all((Path(a.source) / 'named_h2.in').read_text().replace('maxiter 30', 'maxiter 2')),
+    success=False)
 old_dir, old = published(partial)
 assert old['stop_reason'] != 'converged'
 assert result(partial)['status'] == 'unconverged'

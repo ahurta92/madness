@@ -72,16 +72,18 @@ struct IterationCaps {
 };
 
 /// When a stage publishes checkpoints and what it keeps (A3). By default only
-/// at decision points (every rung end and every stop), with older mid-rung
-/// generations deleted after each publish.
+/// at decision points (every rung end and every stop), with every older
+/// generation deleted after each publish except those another stage
+/// references (D-070).
 struct CheckpointCadence {
   int every_iterations
       = 0; ///< K within a rung (opt-in); 0: decision points only
   SetBy every_iterations_set_by = SetBy::engine_default;
   bool keep_all = false; ///< true: retention off (debugging)
   SetBy keep_all_set_by = SetBy::engine_default;
-  /// Non-empty when the application cannot change its cadence yet: what it
-  /// does instead (e.g. molresponse publishes at solve ends only).
+  /// Non-empty when the application cannot change when it publishes yet:
+  /// what it does instead (e.g. molresponse publishes at solve ends only).
+  /// What it keeps is keep_all's either way.
   std::string fixed;
 };
 
@@ -383,7 +385,9 @@ inline std::string padded(std::string text, std::size_t width) {
 [[nodiscard]] inline nlohmann::json
 checkpoints_to_json(const CheckpointCadence& checkpoints) {
   if (!checkpoints.fixed.empty())
-    return {{"fixed", checkpoints.fixed}};
+    return {{"fixed", checkpoints.fixed},
+            {"keep_all", checkpoints.keep_all},
+            {"keep_all_set_by", to_string(checkpoints.keep_all_set_by)}};
   return {
       {"every_iterations", checkpoints.every_iterations > 0
                                ? nlohmann::json(checkpoints.every_iterations)
@@ -398,10 +402,9 @@ checkpoints_to_json(const CheckpointCadence& checkpoints) {
 /// The "Checkpoints" line of the settings table (A3, B9).
 [[nodiscard]] inline std::string
 checkpoints_text(const CheckpointCadence& checkpoints) {
-  if (!checkpoints.fixed.empty())
-    return checkpoints.fixed;
   const std::string when
-      = checkpoints.every_iterations > 0
+      = !checkpoints.fixed.empty() ? checkpoints.fixed
+        : checkpoints.every_iterations > 0
             ? "every " + std::to_string(checkpoints.every_iterations)
                   + " iterations within a rung ("
                   + detail::words(
@@ -416,7 +419,8 @@ checkpoints_text(const CheckpointCadence& checkpoints) {
       = checkpoints.keep_all
             ? "every generation kept (checkpoint.keep_all, "
                   + detail::words(to_string(checkpoints.keep_all_set_by)) + ")"
-            : "older mid-rung generations deleted after each publish ("
+            : "older generations deleted after each publish, except any "
+              "another stage references ("
                   + detail::words(to_string(checkpoints.keep_all_set_by)) + ")";
   return when + "; " + kept;
 }

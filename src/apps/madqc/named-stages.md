@@ -39,7 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -148,14 +148,23 @@ limit), plus the final properties. Saving the orbitals is not cheap for large
 systems, so it does not publish after every update by default.
 `checkpoint.every_iterations K` (K >= 1) also publishes every K-th iteration
 at a rung, counted across `--continue` runs, so an interrupted run can resume
-from inside the rung. After each publish, older mid-rung generations of the
-stage are deleted (save and replace); `latest`, every rung end and stop, and
-any generation another stage's manifest references are kept. A deletion first
-renames the directory to `.deleting-<generation>`; one that fails leaves extra
-files only and is reported in the stage's `checkpoint_warnings`.
-`checkpoint.keep_all true` keeps every generation, for debugging. The settings
-table shows both settings and who set them. molresponse rejects both keys: it
-publishes at solve ends only, having no save boundary inside a solve yet.
+from inside the rung. molresponse publishes at solve ends only, having no
+save boundary inside a solve yet, and rejects `checkpoint.every_iterations`.
+
+Every stage keeps one copy of each saved function (D-070): after each publish,
+every older generation of the stage is deleted except `latest` and any
+generation another stage's manifest references. `checkpoint.keep_all true`
+keeps every generation, for any application. A deletion first renames the
+directory to `.deleting-<generation>`; one that fails leaves extra files only
+and is reported in the stage's `checkpoint_warnings`. When the stage ends, the
+attempt directory's copies of its latest generation's archives (the engine's
+working files, and the copies a `--continue` load makes) are deleted too
+(D-072); the attempt keeps its text output and JSON records. The first
+`--continue` on an output directory written before this rule deletes every
+older generation of each stage that publishes, older-form names included,
+unless the deck writes `checkpoint.keep_all true`: that is the rule applied
+to an existing store, not data loss. The settings table shows both settings
+and who set them.
 A rung-end or stop generation carries the whole per-iteration history of this
 run (`convergence_report.iteration_history`) and, after `--continue`, the
 history of earlier runs (`earlier_runs_iteration_history`, a record only), so
