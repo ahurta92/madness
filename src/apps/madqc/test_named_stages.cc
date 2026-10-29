@@ -2,7 +2,9 @@
 #include "NamedStages.hpp"
 #include "ResponseCheckpoint.hpp"
 #include "RunNamedStages.hpp"
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <unistd.h>
@@ -694,19 +696,35 @@ int main(int argc, char** argv) {
         const auto name = [&](int n) {
           return "g-" + ground.name + "-1-" + std::to_string(n);
         };
-        const auto publish = [&](named_stages::GenerationWrite write) {
+        // S4c3: the skeleton assembles the manifest with the AppSpec's
+        // manifest field. A stand-in field here returns the manifest each
+        // row shapes (`assembled`) and keeps the publish sample it was given.
+        Manifest assembled;
+        json given;
+        auto assembling = moldft;
+        assembling.manifest
+            = [&](const named_stages::Stage&, int, const json& sample) {
+                given = sample;
+                return assembled;
+              };
+        const auto publish = [&](named_stages::GenerationWrite write,
+                                 const Manifest& manifest) {
+          assembled = manifest;
           return named_stages::publish_generation(
-              world, store, moldft, ground, 2, names, std::move(write), {});
+              world, store, assembling, ground, 2, names, std::move(write), {});
         };
         const auto generation = [&] {
+          auto m = scf;
+          m.archives.clear();
+          m.numerical["threshold"] = 1e-4;
+          m.numerical["k"] = 6;
+          m.numerical["states"] = json::array(
+              {named_stages::moldft_state_record(m, "engine_check")});
+          return m;
+        };
+        const auto writing = [&](const char* row) {
           named_stages::GenerationWrite write;
-          write.manifest = scf;
-          write.manifest.archives.clear();
-          write.manifest.numerical["threshold"] = 1e-4;
-          write.manifest.numerical["k"] = 6;
-          write.manifest.numerical["states"]
-              = json::array({named_stages::moldft_state_record(
-                  write.manifest, "engine_check")});
+          write.publish_sample = {{"row", row}};
           write.write_archives = [](const fs::path&, Manifest& m) {
             // The inventory, without files: the checks before publish read
             // the manifest only.
@@ -715,24 +733,26 @@ int main(int argc, char** argv) {
           };
           return write;
         };
-        auto refused_early = generation();
-        refused_early.manifest.generation = "g-set-by-the-application";
-        refused_early.manifest.properties
-            = json::array({{{"name", "energy"}, {"value", -1.0}}});
+        auto refused_early = writing("refused early");
+        auto early = generation();
+        early.generation = "g-set-by-the-application";
+        early.properties = json::array({{{"name", "energy"}, {"value", -1.0}}});
+        early.working_orbitals = {{"ordering", "archive_order"}};
         refused_early.iterations_this_run = 7;
-        refused_early.manifest.working_orbitals
-            = {{"ordering", "archive_order"}};
         Manifest seen;
         refused_early.check_before_write = [&](const Manifest& m) {
           seen = m;
           throw std::runtime_error("not before writing");
         };
-        rejects_with([&] { (void)publish(refused_early); },
+        rejects_with([&] { (void)publish(refused_early, early); },
                      "not before writing",
                      "publish_generation: the application's check before "
                      "writing refuses");
         check(!fs::exists(store / name(1)),
               "publish_generation: nothing written after that refusal");
+        check(given == json{{"row", "refused early"}},
+              "publish_generation (S4c3): the manifest field reads the "
+              "application's publish sample");
         check(seen.generation == name(1) && seen.stage == ground.name
                   && seen.position.at("iterations_this_run") == 7
                   && seen.properties.at(0).at("generation") == name(1)
@@ -740,15 +760,15 @@ int main(int argc, char** argv) {
               "publish_generation (S4c1): the shared fields are filled before "
               "the check before writing, the skeleton's name replacing the "
               "application's");
-        auto unlisted = generation();
+        auto unlisted = writing("unlisted");
         unlisted.write_archives
             = [](const fs::path&, Manifest&) { return std::string{}; };
-        rejects_with([&] { (void)publish(unlisted); },
+        rejects_with([&] { (void)publish(unlisted, generation()); },
                      "does not hold its members' archives",
                      "publish_generation: archives that are not the members");
         auto invalid = generation();
-        invalid.manifest.numerical["representation"] = "ao";
-        rejects_with([&] { (void)publish(invalid); },
+        invalid.numerical["representation"] = "ao";
+        rejects_with([&] { (void)publish(writing("invalid"), invalid); },
                      "unsupported representation",
                      "publish_generation (D-052): a generation that fails "
                      "validate_generation");
@@ -757,8 +777,9 @@ int main(int argc, char** argv) {
                   && !fs::exists(store / "latest"),
               "publish_generation: the refused generation stays unpublished");
         auto unrecorded = generation();
-        unrecorded.manifest.numerical.erase("states");
-        rejects_with([&] { (void)publish(unrecorded); }, "has no state records",
+        unrecorded.numerical.erase("states");
+        rejects_with([&] { (void)publish(writing("unrecorded"), unrecorded); },
+                     "has no state records",
                      "publish_generation (S4a): a generation without state "
                      "records");
         check(!fs::exists(store / name(4) / "manifest.json")
@@ -1126,6 +1147,44 @@ int main(int argc, char** argv) {
         decision = molresponse.publish_now(optical, 2, json::object(), none);
         check(decision.publish && decision.rung.is_null(),
               "spec publish_now (response): every save event, no rung");
+      }
+      // S4c3 (D-054, D-067): the manifest field against recorded publish
+      // samples, in test_named_stages_publish_samples.json beside this file:
+      // H2 runs (the record check's deck; the reuse case from
+      // test_named_reference_from_generation), each with its deck and stage.
+      // The expected manifest is the one the class assembled for that sample
+      // (the S4c3 guard), before the shared fields; the histories the fields
+      // copy unchanged are cut to their first entry on both sides.
+      {
+        const auto path = std::filesystem::path(__FILE__).parent_path()
+                          / "test_named_stages_publish_samples.json";
+        std::ifstream in(path);
+        check(in.good(), "publish samples: cannot read " + path.string());
+        const auto cases = json::parse(in);
+        check(cases.size() == 5, "publish samples: five cases");
+        for (const auto& [name, recorded] : cases.items()) {
+          const bool is_moldft = name.starts_with("moldft");
+          const auto stages = named_stages::parse(
+              world, recorded.at("deck").get<std::string>());
+          const auto stage
+              = std::find_if(stages.begin(), stages.end(), [&](const auto& s) {
+                  return s.name == recorded.at("stage").get<std::string>();
+                });
+          const auto& spec = is_moldft ? moldft : molresponse;
+          const auto assembled
+              = spec.manifest(*stage, 2, recorded.at("sample"));
+          check(madness::checkpoint::to_json_record(assembled)
+                    == recorded.at("manifest"),
+                "spec manifest (" + name
+                    + "): the class's manifest for the recorded sample");
+        }
+        auto unknown = cases.at("moldft_save").at("sample");
+        unknown["kind"] = "other";
+        const auto stages = named_stages::parse(
+            world, cases.at("moldft_save").at("deck").get<std::string>());
+        rejects_with([&] { (void)moldft.manifest(stages[0], 2, unknown); },
+                     "unknown publish sample kind",
+                     "spec manifest (moldft): a sample of no known kind");
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

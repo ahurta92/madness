@@ -747,6 +747,94 @@ private:
   }
 
 public:
+  // D-016, D-025: the bundle verdicts in `metadata` as a generation records
+  // them: a bundle the planner loaded as meeting today's request
+  // (`planner_key`, null when it loaded none) says decided_by planner, and
+  // no other bundle carries a decided_by. A stage that loads as published
+  // (`loaded`) keeps its metadata as published.
+  static void mark_bundle_verdicts(json& metadata, bool loaded,
+                                   const json& planner_key) {
+    if (loaded || !metadata.contains("excited_states"))
+      return;
+    for (auto& entry : metadata.at("excited_states"))
+      entry.erase("decided_by");
+    if (!planner_key.is_null()
+        && metadata.at("excited_states")
+               .contains(planner_key.get<std::string>()))
+      metadata["excited_states"][planner_key.get<std::string>()]["decided_by"]
+          = "planner";
+  }
+
+  // A3, the response AppSpec's manifest (S4c3, D-054): every field of a
+  // response generation but the shared ones (set_shared_fields) and the
+  // archives (with the bundle indices and transition analyses the binding
+  // adds while copying them), from the publish sample: the engine's
+  // metadata as read, whether it holds the stage's analysis (`analyzed`) and
+  // its verdict, the position (the save event, or the analysis), the
+  // previous generation (D-066: any generation read or published), the
+  // previous generation's request registry when its reference is today's,
+  // the attempt directory, the reference, this attempt's iteration totals,
+  // the plan records, and the bundle verdicts' inputs. The request is the
+  // stage's (response_request).
+  static Manifest manifest(const Stage& stage, int, const json& sample) {
+    const auto request = response_request(stage);
+    const bool analyzed = sample.at("analyzed").get<bool>();
+    const bool converged = sample.at("converged").get<bool>();
+    auto metadata = sample.at("metadata");
+    if (!analyzed)
+      clear_analysis(metadata);
+    const auto& verdicts = sample.at("bundle_verdicts");
+    mark_bundle_verdicts(metadata, verdicts.at("loaded").get<bool>(),
+                         verdicts.at("planner_key"));
+    // Native saves replace entries but preserve their sample attempt
+    // identity. Keep the corresponding request registry across
+    // intermediate publications.
+    auto origins = metadata.value("checkpoint_requests", json::object());
+    const auto& previous = sample.at("previous_checkpoint_requests");
+    if (!previous.is_null())
+      for (const auto& origin : previous.items())
+        origins[origin.key()] = origin.value();
+    origins[sample.at("attempt_directory").get<std::string>()] = request;
+    metadata["checkpoint_requests"] = std::move(origins);
+    const auto& reference = sample.at("reference");
+    const auto& totals_record = sample.at("totals");
+    IterationTotals totals;
+    totals.previous
+        = totals_record.at("previous").get<std::map<std::string, int>>();
+    totals.resumed = totals_record.at("resumed").get<std::set<std::string>>();
+    totals.solved = totals_record.at("solved").get<std::set<std::string>>();
+    Manifest m;
+    m.method = "TDHF";
+    m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
+    m.reference = reference;
+    m.numerical
+        = {{"request", request},
+           {"attempt_directory", sample.at("attempt_directory")},
+           {"engine_metadata", metadata},
+           {"states", response_state_records(
+                          metadata, reference.value("generation", ""), totals)},
+           {"plans", sample.at("plans")}};
+    m.targets = {{"dconv", request.at("dconv")}};
+    m.position = sample.at("position");
+    if (!sample.at("previous_generation").is_null())
+      m.position["previous_generation"] = sample.at("previous_generation");
+    m.stop_reason = converged  ? "converged"
+                    : analyzed ? "unfinished"
+                               : "in_progress";
+    // Keep analyzed values as diagnostics in engine_metadata, but an unmet
+    // explicit request cannot publish them as eligible stage properties.
+    const bool targets_decide
+        = request.value("decided_by", "") == "requested_criteria";
+    if (analyzed && (converged || !targets_decide))
+      for (const auto& name : stage.properties)
+        m.properties.push_back(
+            {{"name", name},
+             {"converged", converged},
+             {"value",
+              property_value(metadata, name, request_final_key(request))}});
+    return m;
+  }
+
   // A2: the science checks on a complete generation of stage `stage`, whose
   // reference has `natom` atoms.
   static void validate_generation(const std::string& stage, int natom,
@@ -1101,21 +1189,7 @@ public:
   // loaded and found met, else the engine check (no field). Rank 0's
   // metadata, before the selection reads it.
   void annotate_bundles(json& metadata) const {
-    // A loaded generation is used as it was published.
-    if (loaded_ || !metadata.contains("excited_states"))
-      return;
-    for (auto& entry : metadata.at("excited_states"))
-      entry.erase("decided_by");
-    const auto bundle = requested_bundle(request_);
-    if (!bundle)
-      return;
-    const auto plan = plans_.engine.find(bundle->id);
-    if (plan != plans_.engine.end()
-        && plan->second.kind == molresponse_v3::StatePlan::Kind::load
-        && plan->second.met
-        && metadata.at("excited_states").contains(plan->second.loaded_key))
-      metadata["excited_states"][plan->second.loaded_key]["decided_by"]
-          = "planner";
+    mark_bundle_verdicts(metadata, loaded_, planner_bundle_key());
   }
 
   // Called collectively after a native FD or bundle save and the metadata
@@ -1166,49 +1240,50 @@ private:
     return json::parse(text);
   }
 
+  // The bundle the planner loaded as meeting today's request, as a key of
+  // the engine metadata's excited_states; null when it loaded none.
+  [[nodiscard]] json planner_bundle_key() const {
+    const auto bundle = requested_bundle(request_);
+    if (!bundle)
+      return nullptr;
+    const auto plan = plans_.engine.find(bundle->id);
+    if (plan != plans_.engine.end()
+        && plan->second.kind == molresponse_v3::StatePlan::Kind::load
+        && plan->second.met)
+      return plan->second.loaded_key;
+    return nullptr;
+  }
+
   void publish(json metadata, bool analyzed, bool converged, const json& position) {
     namespace checkpoint = madness::checkpoint;
-    if (!analyzed)
-      clear_analysis(metadata);
-    annotate_bundles(metadata);
-    // Native saves replace entries but preserve their sample attempt identity.
-    // Keep the corresponding request registry across intermediate publications.
-    auto origins = metadata.value("checkpoint_requests", json::object());
-    if (!latest_.generation.empty() && latest_.reference == reference_) {
-      const auto previous = latest_.numerical.at("engine_metadata").value("checkpoint_requests", json::object());
-      for (const auto& origin : previous.items()) origins[origin.key()] = origin.value();
-    }
-    origins[attempt_.string()] = request_;
-    metadata["checkpoint_requests"] = std::move(origins);
-    Manifest m;
-    m.method = "TDHF";
-    m.physical = {{"schema", "madqc.response.v1"}, {"shell", "closed_shell"}};
-    m.reference = reference_;
-    m.numerical = {
-        {"request", request_},
-        {"attempt_directory", attempt_.string()},
-        {"engine_metadata", metadata},
-        {"states", response_state_records(
-                       metadata, reference_.value("generation", ""), totals_)},
-        {"plans", plans_.records}};
-    m.targets = {{"dconv", request_.at("dconv")}};
-    m.position = position;
-    if (!latest_.generation.empty()) m.position["previous_generation"] = latest_.generation;
-    m.stop_reason = converged ? "converged" : analyzed ? "unfinished" : "in_progress";
-    // Keep analyzed values as diagnostics in engine_metadata, but an unmet
-    // explicit request cannot publish them as eligible stage properties.
-    if (analyzed && (converged || !targets_decide()))
-      for (const auto& name : stage_.properties)
-        m.properties.push_back(
-            {{"name", name},
-             {"converged", converged},
-             {"value",
-              property_value(metadata, name, request_final_key(request_))}});
     GenerationWrite write;
-    write.manifest = std::move(m);
+    // The publish sample (the AppSpec's manifest,
+    // ResponseCheckpoint::manifest).
+    const bool same_reference
+        = !latest_.generation.empty() && latest_.reference == reference_;
+    write.publish_sample = {
+        {"metadata", std::move(metadata)},
+        {"analyzed", analyzed},
+        {"converged", converged},
+        {"position", position},
+        {"previous_generation",
+         latest_.generation.empty() ? json(nullptr) : json(latest_.generation)},
+        {"previous_checkpoint_requests",
+         same_reference ? latest_.numerical.at("engine_metadata")
+                              .value("checkpoint_requests", json::object())
+                        : json(nullptr)},
+        {"attempt_directory", attempt_.string()},
+        {"reference", reference_},
+        {"totals",
+         {{"previous", totals_.previous},
+          {"resumed", totals_.resumed},
+          {"solved", totals_.solved}}},
+        {"plans", plans_.records},
+        {"bundle_verdicts",
+         {{"loaded", loaded_}, {"planner_key", planner_bundle_key()}}}};
     write.iterations_this_run = iterations;
-    write.engine_metadata = metadata;
-    write.check_before_write = [&](const Manifest&) {
+    write.check_before_write = [&](const Manifest& m) {
+      const auto& metadata = m.numerical.at("engine_metadata");
       (void)members(metadata);
       if (converged)
         require(request_complete(metadata, request_, natom_,
@@ -1220,6 +1295,7 @@ private:
     write.write_archives = [&](const std::filesystem::path& directory,
                                Manifest& m) {
       return checkpoint::detail::on_root(world_, [&] {
+        const auto metadata = m.numerical.at("engine_metadata");
         for (const auto& name : members(metadata)) {
           const int writers
               = checkpoint::detail::header(attempt_ / (name + ".00000"), true);

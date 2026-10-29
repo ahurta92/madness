@@ -239,6 +239,13 @@ struct AppSpec {
   std::function<PublishDecision(const Stage&, int natom, const json& sample,
                                 const json& carried)>
       publish_now;
+  // A3 (S4c3, D-054, D-067): the generation's manifest, every field but the
+  // shared ones (set_shared_fields) and the archives the binding writes,
+  // from the application's publish sample (JSON, D-045's pattern).
+  // publish_generation calls it on every rank.
+  std::function<madness::checkpoint::Manifest(const Stage&, int natom,
+                                              const json& publish_sample)>
+      manifest;
   // A1: what a consuming stage reads about this one besides its archives,
   // from a description of the engine; empty for an application nothing
   // consumes (response).
@@ -256,8 +263,10 @@ struct AppSpec {
 
 // A3, step 6 (skeleton spec 3.3; S3c2): publish one generation of `stage`
 // under `store`, in one order for every application. The application
-// assembled the manifest (D-051, D-054); here:
-//   0. every rank (S4c1): the shared fields (set_shared_fields), the name
+// decided to publish and gathered its publish sample (D-051, D-054); here:
+//   0. every rank: the manifest, assembled by the AppSpec's manifest field
+//      from the publish sample (S4c3); then (S4c1) the shared fields
+//      (set_shared_fields), the name
 //      the next of `names` (D-058), before anything below reads the
 //      manifest: rank 0's check before writing and validate_generation both
 //      compare the property records' generation with the manifest's;
@@ -277,7 +286,7 @@ inline madness::checkpoint::Manifest publish_generation(
     GenerationWrite write,
     const std::function<void(const madness::checkpoint::Manifest&)>& retain) {
   namespace checkpoint = madness::checkpoint;
-  auto& m = write.manifest;
+  auto m = spec.manifest(stage, natom, write.publish_sample);
   set_shared_fields(m, stage.name, names.next(), write.iterations_this_run);
   const auto directory = store / m.generation;
   checkpoint::detail::on_root(world, [&] {
@@ -296,7 +305,10 @@ inline madness::checkpoint::Manifest publish_generation(
       written.reserve(m.archives.size());
       for (const auto& archive : m.archives)
         written.push_back(archive.basename);
-      auto expected = spec.members(write.engine_metadata);
+      // The engine metadata the generation records, which the read side's
+      // check reads too (response); moldft records none.
+      auto expected
+          = spec.members(m.numerical.value("engine_metadata", json::object()));
       std::sort(written.begin(), written.end());
       std::sort(expected.begin(), expected.end());
       if (written != expected)
@@ -728,6 +740,7 @@ inline AppSpec moldft_fields() {
           .properties = moldft_properties,
           .observe = moldft_observe,
           .publish_now = moldft_publish_now,
+          .manifest = moldft_manifest,
           .consumer_context = moldft_consumer_context,
           .release = released};
 }
@@ -775,6 +788,7 @@ inline AppSpec response_fields() {
       // Every save event publishes; response's position has no rung.
       .publish_now = [](const Stage&, int, const json&,
                         const json&) { return PublishDecision{true, nullptr}; },
+      .manifest = ResponseCheckpoint::manifest,
       .consumer_context = {},
       .release = released};
 }

@@ -772,16 +772,16 @@ inline std::vector<Stage> parse(madness::World &world,
   return stages;
 }
 // A3, step 6 (S3c2): one generation for the skeleton to publish
-// (publish_generation). The application decides when to publish and
-// assembles the manifest (D-051, D-054), all but the fields every manifest
-// shares, which the skeleton fills (S4c1, set_shared_fields); it also says
-// what to check before anything is written and how its archives are written.
+// (publish_generation). The application gathers its publish sample, from
+// which the AppSpec's manifest field assembles the manifest (S4c3, D-054),
+// all but the fields every manifest shares (S4c1, set_shared_fields) and the
+// archives; it also says what to check before anything is written and how
+// its archives are written.
 struct GenerationWrite {
-  madness::checkpoint::Manifest manifest;
+  // What AppSpec::manifest reads, as JSON (D-045's pattern).
+  nlohmann::json publish_sample;
   // position.iterations_this_run: the engine iterations of this run so far.
   std::size_t iterations_this_run = 0;
-  // What AppSpec::members reads (moldft: nothing; response: the metadata).
-  nlohmann::json engine_metadata = nlohmann::json::object();
   // Rank 0, before the generation directory exists; throws why not.
   std::function<void(const madness::checkpoint::Manifest&)> check_before_write;
   // Every rank: write the archives into `directory` and add them to the

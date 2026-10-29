@@ -627,6 +627,105 @@ mid_rung(const madness::checkpoint::Manifest& manifest) {
   return {publish, std::move(record)};
 }
 
+// B5: which exit ended the stage, from the verdict, whether the saved state
+// was evaluated, and the final rung's record. "unmet_requested_accuracy" is
+// the one extra case of criteria mode: the final rung stopped on the written
+// targets, but the saved orbitals no longer meet them.
+[[nodiscard]] inline std::string
+moldft_stop_reason(bool converged, bool evaluated, const json& rung) {
+  if (converged)
+    return "converged";
+  if (!evaluated)
+    return "in_progress";
+  const auto stop = rung.is_null() ? std::string("iteration_limit")
+                                   : rung.value("stop", "iteration_limit");
+  if (stop == "stalled")
+    return "stalled";
+  if (stop == "converged")
+    return "unmet_requested_accuracy";
+  return "iteration_limit";
+}
+
+// A3, the moldft AppSpec's manifest (S4c3, D-054): every field of a moldft
+// generation but the shared ones (set_shared_fields) and the archives, from
+// one of two kinds of publish sample (D-067):
+//  - "engine", a generation of the live engine at a save boundary or with
+//    the final properties: the engine's values (FunctionDefaults' threshold
+//    and k, its parameters, which hold the values the SCF derives, and its
+//    description for the consumer context), the problem (`physical`), the
+//    metrics, properties and position, the verdict, whether the saved state
+//    was evaluated, and the previous generation (D-066: moldft omits it
+//    after a fresh plan);
+//  - "reuse", a loaded generation that met today's request, published again
+//    with that verdict (A1, B6; generations are immutable, A3): the loaded
+//    manifest's record (read back by checkpoint::from_json_record), the
+//    plan's why and unmet_not_enforceable. The orbital shards are the
+//    source's, byte for byte, so the inventory is the source's.
+// The written targets and the settings are the stage's (B9; D8: econv only
+// when written).
+[[nodiscard]] inline madness::checkpoint::Manifest
+moldft_manifest(const Stage& stage, int natom, const json& sample) {
+  const auto& cp = stage.params.get<CalculationParameters>();
+  const auto settings = moldft_stage_settings(stage, natom);
+  const auto targets = [&](double threshold) {
+    json written = {{"dconv", cp.dconv()},
+                    {"effective_dconv", std::max(cp.dconv(), threshold)}};
+    if (const auto econv = requested_econv(cp))
+      written["econv"] = *econv;
+    written["explicit_accuracy"] = convergence::requested_targets(settings);
+    written["decided_by"] = convergence::to_string(settings.decider);
+    return written;
+  };
+  const auto kind = sample.at("kind").get<std::string>();
+  if (kind == "reuse") {
+    auto m = madness::checkpoint::from_json_record(sample.at("loaded"));
+    const auto source = m.generation;
+    const auto stop_before = m.stop_reason;
+    m.stop_reason = "converged";
+    m.position["previous_generation"] = source;
+    m.position["reused_from"] = source;
+    m.targets = targets(m.numerical.at("threshold").get<double>());
+    m.metrics["convergence_report"]["reuse_verdict"]
+        = {{"work", "loaded"},
+           {"from_generation", source},
+           {"stop_reason_before", stop_before},
+           {"decided_by", convergence::to_string(settings.decider)},
+           {"why", sample.at("why")},
+           {"unmet_not_enforceable", sample.at("unmet_not_enforceable")},
+           {"convergence_settings", convergence::to_json(settings)}};
+    m.numerical["states"] = json::array({moldft_state_record(m, "planner")});
+    return m;
+  }
+  if (kind != "engine")
+    throw std::runtime_error("moldft checkpoint: unknown publish sample kind "
+                             + kind);
+  const auto& engine = sample.at("engine");
+  const auto threshold = engine.at("threshold").get<double>();
+  madness::checkpoint::Manifest m;
+  m.method = "HF";
+  m.physical = sample.at("physical");
+  m.numerical = {
+      {"threshold", threshold},
+      {"k", engine.at("k")},
+      {"representation", "mo"},
+      {"protocol", cp.protocol()},
+      {"parameters", engine.at("parameters")},
+      {"consumer_context", moldft_consumer_context(engine.at("description"))}};
+  m.working_orbitals = {{"ordering", "archive_order"}}; // state_id: S4c1
+  m.position = sample.at("position");
+  if (!sample.at("previous_generation").is_null())
+    m.position["previous_generation"] = sample.at("previous_generation");
+  m.metrics = sample.at("metrics");
+  m.targets = targets(threshold);
+  const auto& position = m.position;
+  m.stop_reason = moldft_stop_reason(sample.at("converged").get<bool>(),
+                                     sample.at("evaluated").get<bool>(),
+                                     position.value("rung", json()));
+  m.properties = sample.at("properties");
+  m.numerical["states"] = json::array({moldft_state_record(m, "engine_check")});
+  return m;
+}
+
 class MoldftCheckpoint {
   madness::World &world_;
   const Stage &stage_;
@@ -1056,7 +1155,7 @@ public:
       // as anything but converged, record the new verdict on disk, so a
       // consumer reading the generation agrees with this run (A1).
       if (latest_.stop_reason != "converged")
-        publish_reuse_verdict(scf);
+        publish_reuse_verdict();
       return;
     }
     const auto evaluation = scf.evaluate_restricted_hf(world_);
@@ -1178,56 +1277,26 @@ public:
   }
 
 private:
-  // B5: which exit ended the stage. "unmet_requested_accuracy" is the one
-  // extra case of criteria mode: the final rung stopped on the written
-  // targets, but the saved orbitals no longer meet them.
-  [[nodiscard]] std::string stop_reason(bool converged, bool evaluated) const {
-    if (converged)
-      return "converged";
-    if (!evaluated)
-      return "in_progress";
-    const auto stop = current_rung_.is_null()
-                          ? std::string("iteration_limit")
-                          : current_rung_.value("stop", "iteration_limit");
-    if (stop == "stalled")
-      return "stalled";
-    if (stop == "converged")
-      return "unmet_requested_accuracy";
-    return "iteration_limit";
-  }
-
   void publish(const madness::SCF &scf, bool converged, json properties,
                const json &metrics, const json &position, bool evaluated) {
     namespace checkpoint = madness::checkpoint;
-    checkpoint::Manifest m;
-    m.method = "HF";
-    m.physical = physical_;
-    m.numerical = {
-        {"threshold", madness::FunctionDefaults<3>::get_thresh()},
-        {"k", madness::FunctionDefaults<3>::get_k()},
-        {"representation", "mo"},
-        {"protocol", scf.param.protocol()},
-        {"parameters", scf.param.to_json()},
-        {"consumer_context", moldft_consumer_context(engine_description(scf))}};
-    m.working_orbitals = {{"ordering", "archive_order"}}; // state_id: S4c1
-    m.position = position;
-    if (has_latest_)
-      m.position["previous_generation"] = latest_.generation;
-    m.metrics = metrics;
-    m.targets = {{"dconv", scf.param.dconv()},
-                 {"effective_dconv",
-                  std::max(scf.param.dconv(),
-                           madness::FunctionDefaults<3>::get_thresh())}};
-    if (const auto econv = requested_econv(scf.param)) // D8: user-written only
-      m.targets["econv"] = *econv;
-    m.targets["explicit_accuracy"] = convergence::requested_targets(settings_);
-    m.targets["decided_by"] = convergence::to_string(settings_.decider);
-    m.stop_reason = stop_reason(converged, evaluated);
-    m.properties = properties;
-    m.numerical["states"]
-        = json::array({moldft_state_record(m, "engine_check")});
     GenerationWrite write;
-    write.manifest = std::move(m);
+    // The engine kind of publish sample (moldft_manifest).
+    write.publish_sample
+        = {{"kind", "engine"},
+           {"engine",
+            {{"threshold", madness::FunctionDefaults<3>::get_thresh()},
+             {"k", madness::FunctionDefaults<3>::get_k()},
+             {"parameters", scf.param.to_json()},
+             {"description", engine_description(scf)}}},
+           {"physical", physical_},
+           {"metrics", metrics},
+           {"properties", std::move(properties)},
+           {"position", position},
+           {"previous_generation",
+            has_latest_ ? json(latest_.generation) : json(nullptr)},
+           {"converged", converged},
+           {"evaluated", evaluated}};
     write.iterations_this_run = iterations;
     write.check_before_write = [](const checkpoint::Manifest& m) {
       validate_measurements(m.metrics, m.stage, m.numerical);
@@ -1273,35 +1342,16 @@ private:
   // a record of the request it met and the generation it came from.
   // Generations are immutable (A3), so the verdict cannot be written into the
   // old one.
-  void publish_reuse_verdict(const madness::SCF& scf) {
+  void publish_reuse_verdict() {
     namespace checkpoint = madness::checkpoint;
-    auto m = latest_;
     const auto source = latest_.generation;
-    m.stop_reason = "converged";
-    m.position["previous_generation"] = source;
-    m.position["reused_from"] = source;
-    m.targets = {{"dconv", scf.param.dconv()},
-                 {"effective_dconv",
-                  std::max(scf.param.dconv(),
-                           m.numerical.at("threshold").get<double>())}};
-    if (const auto econv = requested_econv(scf.param)) // D8: user-written only
-      m.targets["econv"] = *econv;
-    m.targets["explicit_accuracy"] = convergence::requested_targets(settings_);
-    m.targets["decided_by"] = convergence::to_string(settings_.decider);
-    m.metrics["convergence_report"]["reuse_verdict"]
-        = {{"work", "loaded"},
-           {"from_generation", source},
-           {"stop_reason_before", latest_.stop_reason},
-           {"decided_by", convergence::to_string(settings_.decider)},
-           {"why", plan_.why},
-           {"unmet_not_enforceable", plan_.unmet_not_enforceable},
-           {"convergence_settings", convergence::to_json(settings_)}};
-    m.numerical["states"] = json::array({moldft_state_record(m, "planner")});
-    // The copy is byte for byte, so the inventory is the source's; rank 0
-    // checks that before publishing, and publish() validates the files again.
-    m.archives = latest_.archives;
     GenerationWrite write;
-    write.manifest = std::move(m);
+    // The reuse kind of publish sample (moldft_manifest, D-067).
+    write.publish_sample
+        = {{"kind", "reuse"},
+           {"loaded", checkpoint::to_json_record(latest_)},
+           {"why", plan_.why},
+           {"unmet_not_enforceable", plan_.unmet_not_enforceable}};
     write.write_archives
         = [&](const fs::path& directory, const checkpoint::Manifest&) {
             return checkpoint::detail::on_root(world_, [&] {
