@@ -807,6 +807,10 @@ struct GenerationWrite {
   nlohmann::json publish_sample;
   // position.iterations_this_run: the engine iterations of this run so far.
   std::size_t iterations_this_run = 0;
+  // D-077 (S4d2): this run's final generation of the stage. The skeleton
+  // forms the shared verdict from its state records before it is published
+  // and sets the publish sample's `converged` to it.
+  bool final = false;
   // Rank 0, before the generation directory exists; throws why not.
   std::function<void(const madness::checkpoint::Manifest&)> check_before_write;
   // Every rank: write the archives into `directory` and add them to the

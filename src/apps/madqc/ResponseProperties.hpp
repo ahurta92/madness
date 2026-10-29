@@ -483,19 +483,4 @@ inline json select_response_properties(const Stage& stage,
   }
   return selected;
 }
-inline bool all_requested_converged(const json& selected) {
-  for (const auto& [name, record] : selected.items()) {
-    if (record.contains("values")) {
-      for (const auto& row : record.at("values"))
-        if (!row.at("converged").get<bool>())
-          return false;
-    } else if (!record.value("converged", false)) {
-      return false;
-    }
-    if (record.contains("spectrum_complete")
-        && !record.at("spectrum_complete").get<bool>())
-      return false;
-  }
-  return true;
-}
 } // namespace named_stages

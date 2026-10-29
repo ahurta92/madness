@@ -114,28 +114,30 @@ int main(int argc, char** argv) {
                 && engine_mode.warnings.front().find("econv 1.0e-06")
                        != std::string::npos,
             "engine mode warns about the unenforced econv");
-      const auto met = named_stages::requested_criteria_report(
-          saved(5e-7, "measured"), engine_mode);
+      // The report annotates the shared verdict's evaluation (S4d2).
+      const auto judged = [](const json& measurements,
+                             const cv::ConvergenceSettings& settings) {
+        return named_stages::requested_criteria_report(
+            madness::evaluate_explicit_criteria(
+                measurements, cv::requested_targets(settings)),
+            settings);
+      };
+      const auto met = judged(saved(5e-7, "measured"), engine_mode);
       check(met.at("status") == "satisfied" && met.at("enforced") == false,
             "met by evidence, reported in engine mode");
-      const auto unmet = named_stages::requested_criteria_report(
-          saved(2e-6, "measured"), engine_mode);
+      const auto unmet = judged(saved(2e-6, "measured"), engine_mode);
       check(unmet.at("status") == "unmet"
                 && unmet.at("criteria").at("energy_change").at("outcome")
                        == "unmet, not enforceable in engine mode",
             "unmet evidence is reported, not enforced, in engine mode");
-      check(named_stages::requested_criteria_report(json::object(), engine_mode)
-                    .at("status")
-                == "unavailable",
+      check(judged(json::object(), engine_mode).at("status") == "unavailable",
             "missing evidence does not meet a request");
       requested.set_user_defined_value(
           std::string(cv::use_default_criteria_key), false);
       const auto criteria_mode
           = named_stages::moldft_convergence_settings("gs", requested, 3);
       check(criteria_mode.decider == cv::Decider::requested_criteria
-                && named_stages::requested_criteria_report(
-                       saved(2e-6, "measured"), criteria_mode)
-                           .at("enforced")
+                && judged(saved(2e-6, "measured"), criteria_mode).at("enforced")
                        == true,
             "criteria mode enforces the written targets");
       check(criteria_mode.warnings.size() == 2,
@@ -785,6 +787,30 @@ int main(int argc, char** argv) {
         check(!fs::exists(store / name(4) / "manifest.json")
                   && !fs::exists(store / "latest"),
               "publish_generation: that generation stays unpublished");
+        // S4d2 (D-077): a final write's sample takes the shared verdict of
+        // the state records it assembles to, before the manifest is
+        // assembled for publishing. Each row stops at the check before
+        // writing.
+        for (const bool at_final_rung : {true, false}) {
+          auto last = generation();
+          json state = named_stages::moldft_state_record(last, "engine_check");
+          state["stop"] = "converged";
+          if (at_final_rung)
+            state["rung"] = moldft.requested_states(ground, 2)[0].at("rung");
+          last.numerical["states"] = json::array({state});
+          auto write = writing("final");
+          write.final = true;
+          write.check_before_write
+              = [](const Manifest&) { throw std::runtime_error("stop here"); };
+          rejects_with([&] { (void)publish(write, last); }, "stop here",
+                       "publish_generation (S4d2): a final write");
+          check(given.at("converged") == at_final_rung,
+                at_final_rung ? "publish_generation (D-077): the final sample "
+                                "takes the verdict converged"
+                              : "publish_generation (D-077): a state off the "
+                                "final rung makes the final sample "
+                                "unconverged");
+        }
         fs::remove_all(store.parent_path());
       }
       // S4a (D-056, D-059, D-063): one per-state record for both
