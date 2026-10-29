@@ -1186,6 +1186,91 @@ int main(int argc, char** argv) {
                      "unknown publish sample kind",
                      "spec manifest (moldft): a sample of no known kind");
       }
+      // S4d1 (D-046, D-057): the shared verdict from the state records.
+      {
+        const auto needed = moldft.requested_states(ground, 2);
+        check(needed.size() == 1 && needed[0].at("key") == "ground_state"
+                  && needed[0].at("rung").at("thresh") == 1e-6,
+              "spec requested_states (moldft): the ground state at the final "
+              "rung");
+        const auto final_rung = needed[0].at("rung");
+        const json measured = {
+            {"availability", "measured"}, {"units", "a.u."}, {"value", 1e-7}};
+        const auto record = [&](const char* stop, const char* decided_by) {
+          return json{{"key", "ground_state"},
+                      {"rung", final_rung},
+                      {"stop", stop},
+                      {"diverged", false},
+                      {"decided_by", decided_by},
+                      {"saved_measurements",
+                       {{"bsh_residual", measured},
+                        {"charge_density_change",
+                         {{"availability", "measured"},
+                          {"units", "a0^(-3/2)"},
+                          {"value", 1e-6}}}}}};
+        };
+        const auto verdict
+            = [&](const json& records,
+                  const madness::convergence::ConvergenceSettings& settings) {
+                Manifest published;
+                published.numerical["states"] = records;
+                return named_stages::shared_verdict(moldft, ground, 2, settings,
+                                                    published);
+              };
+        auto settings = moldft.settings(ground, 2);
+        settings.decider = madness::convergence::Decider::engine_check;
+        check(verdict(json::array({record("converged", "engine_check")}),
+                      settings)
+                  .at("converged"),
+              "shared verdict: the needed state stopped converged at its rung");
+        check(!verdict(json::array({record("iteration_limit", "engine_check")}),
+                       settings)
+                   .at("converged"),
+              "shared verdict: a state that hit its iteration limit");
+        check(verdict(json::array({record("iteration_limit", "planner")}),
+                      settings)
+                  .at("converged"),
+              "shared verdict (D-016): a state loaded under a met request");
+        auto coarse = record("converged", "engine_check");
+        coarse["rung"]["thresh"] = 1e-4;
+        check(!verdict(json::array({coarse}), settings).at("converged"),
+              "shared verdict: a state converged at another rung");
+        auto diverged = record("converged", "engine_check");
+        diverged["diverged"] = true;
+        check(!verdict(json::array({diverged}), settings).at("converged"),
+              "shared verdict: a diverged state");
+        const auto missing = verdict(json::array(), settings);
+        check(!missing.at("converged")
+                  && !missing.at("states")[0].at("found").get<bool>(),
+              "shared verdict: a needed state without a record");
+        auto criteria = settings;
+        criteria.decider = madness::convergence::Decider::requested_criteria;
+        for (auto& metric : criteria.metrics)
+          if (metric.measurement == "bsh_residual") {
+            metric.group = madness::convergence::Group::requested_criteria;
+            metric.target = 1e-8;
+            metric.units = "a.u.";
+            metric.quantity.clear();
+          }
+        const auto unmet = verdict(
+            json::array({record("converged", "engine_check")}), criteria);
+        check(!unmet.at("converged")
+                  && unmet.at("states")[0].at("requested_accuracy").at("status")
+                         == "unmet",
+              "shared verdict (B8): under the written targets, a converged "
+              "stop whose saved state misses them, the unmet target listed");
+        check(verdict(json::array({record("iteration_limit", "planner")}),
+                      criteria)
+                  .at("converged"),
+              "shared verdict (D-016): a loaded state's met request stands "
+              "under the written targets too");
+        const auto response_needed = molresponse.requested_states(optical, 2);
+        check(response_needed.size() == 2
+                  && response_needed[0].at("key")
+                         == "dipole_z|1e-04_k6|f0.00000",
+              "spec requested_states (response): one FD state per requested "
+              "frequency at the final protocol");
+      }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;

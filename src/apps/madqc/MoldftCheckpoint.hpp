@@ -726,6 +726,24 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
   return m;
 }
 
+// B8 (S4d1), the moldft AppSpec's requested_states: the ground state, at the
+// requested ladder's final rung.
+[[nodiscard]] inline json moldft_requested_states(const Stage& stage, int) {
+  const auto final_rung
+      = requested_ladder(stage.params.get<CalculationParameters>()).back();
+  return json::array(
+      {{{"key", "ground_state"},
+        {"rung", {{"thresh", final_rung.thresh}, {"k", final_rung.k}}}}});
+}
+
+// B1, B8 (S4d1), the moldft AppSpec's saved_measurements: the record's
+// saved-state measurements are keyed as moldft's written targets already
+// (requested_criteria_report reads the same values).
+[[nodiscard]] inline json moldft_saved_measurements(const Stage&, int,
+                                                    const json& record) {
+  return record.at("saved_measurements");
+}
+
 class MoldftCheckpoint {
   madness::World &world_;
   const Stage &stage_;

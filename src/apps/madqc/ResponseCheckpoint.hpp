@@ -835,6 +835,39 @@ public:
     return m;
   }
 
+  // B8 (S4d1), the response AppSpec's requested_states: the FD states the
+  // request needs (response_needs) and its excited-state bundle, at the
+  // request's final protocol, as request_complete lists them.
+  static json requested_states(const Stage& stage, int natom) {
+    const auto request = response_request(stage);
+    const double threshold = request.at("protocol").back();
+    const int k = protocol_k(threshold);
+    const auto key = molresponse_v3::protocol_key(threshold, k);
+    const json rung = {{"thresh", threshold}, {"k", k}};
+    json states = json::array();
+    for (const auto& [perturbation, frequency] :
+         response_needs(request, natom).legs)
+      states.push_back(
+          {{"key",
+            state_key(perturbation.description(), key,
+                      molresponse_v3::ResponseMetadata::freq_key(frequency))},
+           {"rung", rung}});
+    if (const auto bundle = requested_bundle(request))
+      states.push_back({{"key", bundle_key(bundle->id, key)}, {"rung", rung}});
+    return states;
+  }
+
+  // B1, B8 (S4d1), the response AppSpec's saved_measurements: an FD state's
+  // saved-state measurements under the names of the written targets
+  // (fd_accuracy_measurements, as request_complete reads them); a bundle
+  // records none.
+  static json saved_measurements(const Stage&, int, const json& record) {
+    if (record.at("kind") != "fd")
+      return json::object();
+    return molresponse_v3::fd_accuracy_measurements(
+        record.at("saved_measurements"));
+  }
+
   // A2: the science checks on a complete generation of stage `stage`, whose
   // reference has `natom` atoms.
   static void validate_generation(const std::string& stage, int natom,
