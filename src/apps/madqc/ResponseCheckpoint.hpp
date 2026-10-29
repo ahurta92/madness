@@ -1249,12 +1249,15 @@ public:
     publish(metadata, false, false, event);
   }
 
-  void finish(const json& root_metadata, bool converged) {
+  // The analysed generation; the skeleton forms its verdict from its state
+  // records and the publish takes it (D-077).
+  void finish(const json& root_metadata) {
     if (loaded_) return;
     std::string text = world_.rank() == 0 ? root_metadata.dump() : std::string{};
     world_.gop.broadcast_serializable(text, 0);
     work = iterations == 0 ? "analyzed" : restored_ ? "resumed" : "solved";
-    publish(json::parse(text), true, converged, {{"phase", "property_analysis"}});
+    publish(json::parse(text), true, false, {{"phase", "property_analysis"}},
+            true);
   }
 
 private:
@@ -1287,7 +1290,8 @@ private:
     return nullptr;
   }
 
-  void publish(json metadata, bool analyzed, bool converged, const json& position) {
+  void publish(json metadata, bool analyzed, bool converged,
+               const json& position, bool final = false) {
     namespace checkpoint = madness::checkpoint;
     GenerationWrite write;
     // The publish sample (the AppSpec's manifest,
@@ -1315,10 +1319,11 @@ private:
         {"bundle_verdicts",
          {{"loaded", loaded_}, {"planner_key", planner_bundle_key()}}}};
     write.iterations_this_run = iterations;
+    write.final = final;
     write.check_before_write = [&](const Manifest& m) {
       const auto& metadata = m.numerical.at("engine_metadata");
       (void)members(metadata);
-      if (converged)
+      if (m.stop_reason == "converged")
         require(request_complete(metadata, request_, natom_,
                                  loaded_states(plans_.records)),
                 "analysis lacks converged prerequisites");

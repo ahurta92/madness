@@ -122,15 +122,15 @@ moldft_convergence_settings(const std::string& stage,
   return settings;
 }
 
-// B8: every written target judged on the saved state, and whether this mode
-// enforces it. In engine mode an unmet target is reported, not enforced, and
-// does not make --continue resume: resuming would stop on the engine check
-// again at once (Adrian, 2026-10-21).
+// B8: every written target judged on the saved state (`evaluation`, the
+// evaluate_explicit_criteria result the shared verdict formed), and whether
+// this mode enforces it. In engine mode an unmet target is reported, not
+// enforced, and does not make --continue resume: resuming would stop on the
+// engine check again at once (Adrian, 2026-10-21).
 [[nodiscard]] inline json
-requested_criteria_report(const json& saved_measurements,
+requested_criteria_report(json evaluation,
                           const convergence::ConvergenceSettings& settings) {
-  auto report = madness::evaluate_explicit_criteria(
-      saved_measurements, convergence::requested_targets(settings));
+  auto report = std::move(evaluation);
   const bool enforced
       = settings.decider == convergence::Decider::requested_criteria;
   report["enforced"] = enforced;
@@ -1167,7 +1167,9 @@ public:
 
   // Only these final properties have actually been evaluated on the saved
   // state.
-  void finish(madness::SCF &scf, bool converged) {
+  // `engine_converged`: the engine's own verdict at the final rung, recorded
+  // in the report; the stage's verdict is the skeleton's (D-077).
+  void finish(madness::SCF& scf, bool engine_converged) {
     if (work == "loaded" && iterations == 0) {
       // A loaded state met today's request (B6). If its generation stopped
       // as anything but converged, record the new verdict on disk, so a
@@ -1274,15 +1276,6 @@ public:
         evidence, convergence::requested_targets(settings_));
     auto& report = metrics["convergence_report"];
     report["saved_state_validation"]["explicit_accuracy"] = requested_accuracy;
-    // B8: the selected group decides. `engine_converged` is the engine's own
-    // verdict at the final rung; the written targets decide only when the
-    // final rung stopped on them and the saved state still meets them.
-    const bool engine_converged = converged;
-    const bool criteria_converged
-        = current_rung_.value("stop", "") == "converged"
-          && requested_accuracy.at("status") == "satisfied";
-    converged = convergence::converged(settings_.decider, engine_converged,
-                                       criteria_converged);
     report["engine_check_passed"] = engine_converged;
     report["decided_by"] = convergence::to_string(settings_.decider);
     report["convergence_settings"] = convergence::to_json(settings_);
@@ -1291,12 +1284,15 @@ public:
     json position = {{"phase", "final_properties_on_saved_orbitals"}};
     if (!current_rung_.is_null())
       position["rung"] = current_rung_;
-    publish(scf, converged, properties, metrics, position, true);
+    // The skeleton forms the verdict from this generation's state record
+    // and the publish takes it (D-077).
+    publish(scf, false, properties, metrics, position, true, true);
   }
 
 private:
-  void publish(const madness::SCF &scf, bool converged, json properties,
-               const json &metrics, const json &position, bool evaluated) {
+  void publish(const madness::SCF& scf, bool converged, json properties,
+               const json& metrics, const json& position, bool evaluated,
+               bool final = false) {
     namespace checkpoint = madness::checkpoint;
     GenerationWrite write;
     // The engine kind of publish sample (moldft_manifest).
@@ -1316,6 +1312,7 @@ private:
            {"converged", converged},
            {"evaluated", evaluated}};
     write.iterations_this_run = iterations;
+    write.final = final;
     write.check_before_write = [](const checkpoint::Manifest& m) {
       validate_measurements(m.metrics, m.stage, m.numerical);
     };
@@ -1325,7 +1322,8 @@ private:
             if (!evaluated)
               meta.current_energy
                   = 1.e10; // input energy is not an output-state property
-            if (!converged) {
+            // The verdict the generation was published with (D-077).
+            if (m.stop_reason != "converged") {
               meta.converged_for_thresh = 1.e10;
               meta.converged_for_dconv = 1.e10;
             }
@@ -1370,6 +1368,7 @@ private:
            {"loaded", checkpoint::to_json_record(latest_)},
            {"why", plan_.why},
            {"unmet_not_enforceable", plan_.unmet_not_enforceable}};
+    write.final = true;
     write.write_archives
         = [&](const fs::path& directory, const checkpoint::Manifest&) {
             return checkpoint::detail::on_root(world_, [&] {

@@ -45,6 +45,26 @@ json quadratic_row(const std::string& a, const std::string& b,
 }
 } // namespace
 
+// The selected records' own flags: every requested row converged and a
+// Raman spectrum complete. The stage's verdict read this until S4d2; it now
+// comes from the state records (shared_verdict, D-077).
+static bool every_row_converged(const nlohmann::json& selected) {
+
+  for (const auto& [name, record] : selected.items()) {
+    if (record.contains("values")) {
+      for (const auto& row : record.at("values"))
+        if (!row.at("converged").get<bool>())
+          return false;
+    } else if (!record.value("converged", false)) {
+      return false;
+    }
+    if (record.contains("spectrum_complete")
+        && !record.at("spectrum_complete").get<bool>())
+      return false;
+  }
+  return true;
+}
+
 int main(int argc, char** argv) {
   auto& world = madness::initialize(argc, argv);
   int failures = 0;
@@ -479,12 +499,12 @@ int main(int argc, char** argv) {
                          .at("components")
                          .at("zz")
                      == 22.15
-              && named_stages::all_requested_converged(selected),
+              && every_row_converged(selected),
           "both properties selected, stage converged");
     stage.hyperpolarizability.components = {"zzz", "xzz"};
     selected = named_stages::select_response_properties(
         stage, properties, json(), json(), json(), 2);
-    check(!named_stages::all_requested_converged(selected),
+    check(!every_row_converged(selected),
           "one unconverged row: the stage is not");
     // D-024: an element the engine wrote no row for is published without a
     // value, with the engine's reason from run_summary.dropped_work, and the
@@ -534,7 +554,7 @@ int main(int argc, char** argv) {
                            "zzz")
                          .find("stalled")
                      != std::string::npos
-              && !named_stages::all_requested_converged(selected),
+              && !every_row_converged(selected),
           "the engine assembled no beta at all: a record without a value, "
           "the stage unconverged");
     stage.properties = {"polarizability", "hyperpolarizability"};
@@ -607,13 +627,12 @@ int main(int argc, char** argv) {
           "the full set: 3N rows, the analysis passed through, complete");
     selected = named_stages::select_response_properties(
         stage, properties, json(), vib, spectra, 2);
-    check(named_stages::all_requested_converged(selected),
-          "full set complete and converged");
+    check(every_row_converged(selected), "full set complete and converged");
     spectra["completeness"]["f0.00000"]["all_rows_converged"] = false;
     selected = named_stages::select_response_properties(
         stage, properties, json(), vib, spectra, 2);
     check(selected.at("raman").at("spectrum_complete") == false
-              && !named_stages::all_requested_converged(selected),
+              && !every_row_converged(selected),
           "an incomplete spectrum makes the stage unconverged");
     throws(
         [&] {
@@ -648,8 +667,7 @@ int main(int argc, char** argv) {
           "source named, unconverged");
     selected = named_stages::select_response_properties(
         stage, properties, raman_metadata, json(), json(), 2);
-    check(!named_stages::all_requested_converged(selected),
-          "the stage is unconverged with it");
+    check(!every_row_converged(selected), "the stage is unconverged with it");
   } catch (const std::exception& e) {
     check(false, e.what());
   }
@@ -732,8 +750,7 @@ int main(int argc, char** argv) {
           "the bundle entry travels as evidence without the roots");
     auto selected = named_stages::select_response_properties(
         stage, json::object(), metadata, json(), json(), 2, transition);
-    check(selected.contains("excited_states")
-              && named_stages::all_requested_converged(selected),
+    check(selected.contains("excited_states") && every_row_converged(selected),
           "the stage is converged with the bundle");
     // A stalled root: the bundle ended converged by the engine's flag, but
     // a stalled root is never relabelled converged (B5).
@@ -758,8 +775,7 @@ int main(int argc, char** argv) {
           "the reason");
     selected = named_stages::select_response_properties(
         stage, json::object(), metadata, json(), json(), 2);
-    check(!named_stages::all_requested_converged(selected),
-          "the stage is unconverged with it");
+    check(!every_row_converged(selected), "the stage is unconverged with it");
     // The planner's verdict on a met load travels through (D-016).
     metadata["excited_states"][pkey]["decided_by"] = "planner";
     es = named_stages::selected_excited_states(stage, metadata, json());

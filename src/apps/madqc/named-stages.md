@@ -646,6 +646,18 @@ Stop reasons (B5): `converged`, `stalled` (configured progress), and
 `unmet_requested_accuracy` means the final rung stopped on its targets but the
 saved orbitals no longer meet them.
 
+One verdict for every stage (D-046, D-077): a stage is converged when every
+state its request needs (moldft: the ground state; molresponse: each
+perturbation and frequency the properties need, and the excited-state bundle)
+has a record at the request's final rung that is not diverged and either was
+loaded under a met request (`decided_by: planner`) or stopped `converged`
+and, with the written targets deciding, its saved measurements meet them. The
+records are the generation's `numerical.states`. The written targets are
+judged once per state; a molresponse stage records the result at
+`convergence_report.requested_accuracy` too, one entry per state key, in the
+same form as moldft's. An excited-state bundle records no saved-state
+measurements, so with the written targets deciding it is not converged.
+
 Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify
 unmet explicit accuracy.

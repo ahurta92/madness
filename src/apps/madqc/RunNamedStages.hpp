@@ -171,17 +171,20 @@ struct LadderSteps {
       load;
   // 5. Run the engine with the checkpoint observer.
   std::function<void()> run_engine;
-  // 6-7. Validate, publish, retention; returns the stage's verdict.
-  std::function<bool()> finish;
+  // 6. Validate, publish, retention; the final publish takes the skeleton's
+  // verdict (D-077).
+  std::function<void()> finish;
   // The published generation, the work done, the iterations of this run.
   std::function<const madness::checkpoint::Manifest&()> latest;
   std::function<std::string()> work;
   std::function<std::size_t()> iterations;
   // The application's fields of the generation record.
   std::function<void(json&)> generation_record;
-  // 9. The convergence report on the verdict finish returned (B8), the
-  // saved-state outcomes of the table, and the label the table ends with.
-  std::function<void(json&, bool)> report;
+  // 9. The convergence report on the skeleton's verdict (B8), with each
+  // needed state's evaluation of the written targets (`states`, the shared
+  // verdict's), the saved-state outcomes of the table, and the label the
+  // table ends with.
+  std::function<void(json&, bool, const json& states)> report;
   std::function<std::vector<madness::convergence::MetricOutcome>()> outcomes;
   std::function<std::string(bool)> outcome_label;
   // 8. The properties and the stage's own fields.
@@ -270,11 +273,77 @@ struct AppSpec {
   return outcome.converged;
 }
 
+// B6, B8, D-046 (S4d1; the stage's verdict since S4d2, D-077): the shared
+// verdict (skeleton spec 3.3 step 7), from a generation's state records
+// (AppSpec::state_records, which also rebuilds those of a generation written
+// before S4a): converged when every state the request needs
+// (AppSpec::requested_states) has a record at its rung, not diverged, and was
+// either loaded under a met request (decided_by planner, D-016) or stopped
+// converged and, when the written targets decide (B8), its saved measurements
+// meet them. The targets are judged by one call of evaluate_explicit_criteria
+// per state (B1); its result is the state's requested_accuracy, the unmet
+// targets B8 lists separately. Returns {converged, states: [...]}. An
+// excited-state bundle records no saved-state measurements, so under written
+// targets it is not converged (no test reaches the case; B's D-061 row fills
+// and tests it).
+inline json
+shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
+               const madness::convergence::ConvergenceSettings& settings,
+               const madness::checkpoint::Manifest& published) {
+  namespace convergence = madness::convergence;
+  const auto records = spec.state_records(stage, natom, published);
+  const auto targets = convergence::requested_targets(settings);
+  const bool enforced
+      = settings.decider == convergence::Decider::requested_criteria;
+  bool converged = true;
+  json states = json::array();
+  for (const auto& needed : spec.requested_states(stage, natom)) {
+    const auto& key = needed.at("key");
+    const madness::scf_continuation::Rung rung{
+        needed.at("rung").at("thresh").get<double>(),
+        needed.at("rung").at("k").get<int>()};
+    json state = {{"key", key}, {"rung", needed.at("rung")}};
+    const auto record
+        = std::find_if(records.begin(), records.end(),
+                       [&](const json& r) { return r.at("key") == key; });
+    bool met = false;
+    if (record == records.end()) {
+      state["found"] = false;
+    } else {
+      const madness::scf_continuation::Rung at{
+          record->at("rung").at("thresh").get<double>(),
+          record->at("rung").at("k").get<int>()};
+      const auto accuracy = madness::evaluate_explicit_criteria(
+          spec.saved_measurements(stage, natom, *record), targets);
+      const bool loaded = record->at("decided_by") == "planner";
+      const bool stopped = record->at("stop") == "converged";
+      const bool targets_met
+          = !enforced || accuracy.at("status") == "satisfied";
+      state["found"] = true;
+      state["at_rung"] = madness::scf_continuation::same_rung(at, rung);
+      state["stop"] = record->at("stop");
+      state["diverged"] = record->at("diverged");
+      state["decided_by"] = record->at("decided_by");
+      state["requested_accuracy"] = accuracy;
+      state["enforced"] = enforced;
+      met = state.at("at_rung").get<bool>()
+            && !record->at("diverged").get<bool>()
+            && (loaded || (stopped && targets_met));
+    }
+    state["converged"] = met;
+    converged = converged && met;
+    states.push_back(std::move(state));
+  }
+  return {{"converged", converged}, {"states", std::move(states)}};
+}
+
 // A3, step 6 (skeleton spec 3.3; S3c2): publish one generation of `stage`
 // under `store`, in one order for every application. The application
 // decided to publish and gathered its publish sample (D-051, D-054); here:
-//   0. every rank: the manifest, assembled by the AppSpec's manifest field
-//      from the publish sample (S4c3); then (S4c1) the shared fields
+//   0. every rank: for the stage's final generation, the verdict
+//      (shared_verdict, D-077); the manifest, assembled by the AppSpec's
+//      manifest field from the publish sample (S4c3); then (S4c1) the
+//      shared fields
 //      (set_shared_fields), the name
 //      the next of `names` (D-058), before anything below reads the
 //      manifest: rank 0's check before writing and validate_generation both
@@ -295,6 +364,15 @@ inline madness::checkpoint::Manifest publish_generation(
     GenerationWrite write,
     const std::function<void(const madness::checkpoint::Manifest&)>& retain) {
   namespace checkpoint = madness::checkpoint;
+  if (write.final) {
+    // D-077 (S4d2): the stage's verdict, from the state records of the
+    // generation about to be published (they do not depend on the verdict);
+    // the final publish takes it.
+    write.publish_sample["converged"]
+        = shared_verdict(spec, stage, natom, spec.settings(stage, natom),
+                         spec.manifest(stage, natom, write.publish_sample))
+              .at("converged");
+  }
   auto m = spec.manifest(stage, natom, write.publish_sample);
   set_shared_fields(m, stage.name, names.next(), write.iterations_this_run);
   const auto directory = store / m.generation;
@@ -352,67 +430,6 @@ inline bool stage_has_generation(madness::World& world, const fs::path& store) {
   return exists;
 }
 
-// B6, B8, D-046 (S4d1): the shared verdict (skeleton spec 3.3 step 7), from
-// the published generation's state records (AppSpec::state_records, which
-// also rebuilds those of a generation written before S4a): converged when
-// every state the request needs (AppSpec::requested_states) has a record at
-// its rung, not diverged, and was either loaded under a met request
-// (decided_by planner, D-016) or stopped converged and, when the written
-// targets decide (B8), its saved measurements meet them. The targets are
-// judged by one call of evaluate_explicit_criteria per state (B1); its
-// result is the state's requested_accuracy, the unmet targets B8 lists
-// separately. Returns {converged, states: [...]}.
-inline json
-shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
-               const madness::convergence::ConvergenceSettings& settings,
-               const madness::checkpoint::Manifest& published) {
-  namespace convergence = madness::convergence;
-  const auto records = spec.state_records(stage, natom, published);
-  const auto targets = convergence::requested_targets(settings);
-  const bool enforced
-      = settings.decider == convergence::Decider::requested_criteria;
-  bool converged = true;
-  json states = json::array();
-  for (const auto& needed : spec.requested_states(stage, natom)) {
-    const auto& key = needed.at("key");
-    const madness::scf_continuation::Rung rung{
-        needed.at("rung").at("thresh").get<double>(),
-        needed.at("rung").at("k").get<int>()};
-    json state = {{"key", key}, {"rung", needed.at("rung")}};
-    const auto record
-        = std::find_if(records.begin(), records.end(),
-                       [&](const json& r) { return r.at("key") == key; });
-    bool met = false;
-    if (record == records.end()) {
-      state["found"] = false;
-    } else {
-      const madness::scf_continuation::Rung at{
-          record->at("rung").at("thresh").get<double>(),
-          record->at("rung").at("k").get<int>()};
-      const auto accuracy = madness::evaluate_explicit_criteria(
-          spec.saved_measurements(stage, natom, *record), targets);
-      const bool loaded = record->at("decided_by") == "planner";
-      const bool stopped = record->at("stop") == "converged";
-      const bool targets_met
-          = !enforced || accuracy.at("status") == "satisfied";
-      state["found"] = true;
-      state["at_rung"] = madness::scf_continuation::same_rung(at, rung);
-      state["stop"] = record->at("stop");
-      state["diverged"] = record->at("diverged");
-      state["decided_by"] = record->at("decided_by");
-      state["requested_accuracy"] = accuracy;
-      state["enforced"] = enforced;
-      met = state.at("at_rung").get<bool>()
-            && !record->at("diverged").get<bool>()
-            && (loaded || (stopped && targets_met));
-    }
-    state["converged"] = met;
-    converged = converged && met;
-    states.push_back(std::move(state));
-  }
-  return {{"converged", converged}, {"states", std::move(states)}};
-}
-
 // The two rows, defined below the run functions they name.
 inline const AppSpec& moldft_spec();
 inline const AppSpec& response_spec();
@@ -455,19 +472,15 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   }
   // 5-7. Run, publish, judge.
   steps.run_engine();
-  const bool converged = steps.finish();
+  steps.finish();
   // The published generation is the stage's identity (A1).
   const auto& saved = steps.latest();
-  // D-057 (S4d1): the shared verdict beside the application's, recorded
-  // only; the stage's verdict is still the application's until S4d2.
-  {
-    auto shared = shared_verdict(spec, stage, steps.natom, settings, saved);
-    const bool agree = shared.at("converged").get<bool>() == converged;
-    result["verdict_check"] = {{"today", converged},
-                               {"shared", shared.at("converged")},
-                               {"agree", agree},
-                               {"states", std::move(shared.at("states"))}};
-  }
+  // 7. The verdict (D-046, D-057, D-077): the shared verdict of the stage's
+  // latest generation. A generation published in this run was published
+  // with it; one used as published (loaded) is judged here.
+  const auto verdict
+      = shared_verdict(spec, stage, steps.natom, settings, saved);
+  const bool converged = verdict.at("converged").get<bool>();
   const std::string state_id = saved.generation;
   result["state_id"] = state_id;
   result["identity_kind"] = "checkpoint_generation";
@@ -493,7 +506,7 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
     }
   }
   // 9. The outcome table and the record.
-  steps.report(result, converged);
+  steps.report(result, converged, verdict.at("states"));
   const auto outcomes = steps.outcomes();
   result["convergence_report"]["convergence_outcome"]
       = madness::convergence::outcome_to_json(settings, outcomes);
@@ -585,10 +598,6 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
                          && evidence.converged_for_dconv
                                 <= std::max(cp.dconv(), cp.protocol().back());
     checkpoint->finish(*scf, claimed);
-    // A loaded state was judged against this request by prepare() and met
-    // it (B6); a solved state is converged when its stop reason says so.
-    return checkpoint->work == "loaded"
-           || checkpoint->latest().stop_reason == "converged";
   };
   steps.latest = [&]() -> const madness::checkpoint::Manifest& {
     return checkpoint->latest();
@@ -604,15 +613,17 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
         .value("saved_state_validation", json::object())
         .value("measurements", json::object());
   };
-  steps.report = [&](json& result, bool converged) {
+  steps.report = [&](json& result, bool converged, const json& states) {
     const auto& saved = checkpoint->latest();
     result["checkpoint_metrics"] = saved.metrics;
     result["convergence_report"]
         = ground_convergence_report(saved.metrics, saved.generation, converged);
-    // The current request, judged on the saved state (B6, B8), also when the
-    // generation was reused from an earlier request.
+    // B8: the current request judged on the saved state, also when the
+    // generation was reused from an earlier request: the shared verdict's
+    // evaluation of the ground state.
     result["convergence_report"]["requested_accuracy"]
-        = requested_criteria_report(saved_measurements(), *settings);
+        = requested_criteria_report(states.at(0).at("requested_accuracy"),
+                                    *settings);
   };
   steps.outcomes = [&] { return saved_outcomes(saved_measurements()); };
   steps.outcome_label = [&](bool) { return checkpoint->latest().stop_reason; };
@@ -730,9 +741,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     }
   };
   steps.finish = [&] {
-    bool converged = false;
-    // The engine's property/evidence JSON exists on root only. The verdict
-    // is whether the requested properties converged.
+    // The engine's property/evidence JSON exists on root only.
     on_root(world, [&] {
       // D-025: the bundle's verdict says who decided it, and its transition
       // analysis is the engine's file of this attempt, or the generation's
@@ -750,11 +759,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
            {"vibrational_analysis", response.vibrational_analysis},
            {"raman_spectra", response.raman_spectra},
            {"transition", transition}});
-      converged = all_requested_converged(selected);
     });
-    world.gop.broadcast(converged, 0);
-    checkpoint->finish(response.metadata, converged);
-    return converged;
+    checkpoint->finish(response.metadata);
   };
   steps.latest = [&]() -> const madness::checkpoint::Manifest& {
     return checkpoint->latest();
@@ -765,12 +771,21 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     result["work_items"] = checkpoint->work_items;
     result["reference_changed"] = checkpoint->reference_changed;
   };
-  steps.report = [&](json& result, bool) {
+  steps.report = [&](json& result, bool, const json& states) {
     result["convergence_report"] = response_convergence_report(
         checkpoint->metadata(), checkpoint->latest().generation,
         reference_evidence(reference));
     result["convergence_report"]["decided_by"]
         = madness::convergence::to_string(settings->decider);
+    // B8: each needed state's written targets judged on its saved state,
+    // the shared verdict's evaluation, by state key.
+    auto& accuracy = result["convergence_report"]["requested_accuracy"];
+    accuracy = json::object();
+    for (const auto& state : states)
+      if (state.contains("requested_accuracy"))
+        accuracy[state.at("key").get<std::string>()]
+            = requested_criteria_report(state.at("requested_accuracy"),
+                                        *settings);
   };
   steps.outcomes = [&] {
     const auto final_protocol = molresponse_v3::protocol_key(
