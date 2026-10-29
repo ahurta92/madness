@@ -39,7 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis` and `econv`, the excitation energy change target (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -377,6 +377,26 @@ method or root count is not used: the bundle starts fresh, and the record's
 `why` says so. A bundle written on another number of ranks is refused
 ("ES bundle in es__<key> was written with N process(es) but loaded with M").
 
+`econv` on a stage that requests `excited_states` is the target of the
+excitation energy change per root (DESIGN D8: a written value only; the
+engine's default `econv` is not a request): the eigenvalue change of each
+root across its last step, judged on the worst root with `<=`, in hartree.
+It is reported, never enforced: an excited-state solve takes the engine
+check, whose own gate on the same quantity is `5 x max(dconv, thresh)`,
+strict, per root (the `dconv` engine row of the settings table). The
+settings table shows it as the requested row "excitation energy change per
+root" (keyword `econv`, metric `omega_residual`), and a stage that wrote it
+starts with the warning "econv 1.0e-06 is reported, not enforced: the engine
+check compares each root's eigenvalue change against 5.0e-04 (5 x max(dconv,
+thresh)), strictly". The bundle's state record carries the worst root's
+`omega_residual` with its units as the saved measurement the shared verdict
+judges the target on (one judge, B1: `requested_accuracy` under the stage's
+convergence report holds the status and, in engine mode, the "unmet, not
+enforceable in engine mode" outcome). On `--continue` a saved bundle that
+passes the engine check but not `econv` is loaded and reported unmet (B8).
+On a `molresponse` stage without `excited_states`, `econv` is rejected: a
+driven response has no local energy.
+
 The named deck `named_lih_beta.in` requests the static `beta_zzz` of LiH on
 the benchmark geometry. The response checkpoint publishes the nuclear legs
 and the quadratic sources with the dipole legs, one property record per
@@ -665,7 +685,11 @@ written values are targets on their own metrics, and
 These response quantities include the perturbation amplitude scale and must not
 be read as a ground-state energy or density. A driven response has no local
 energy, so there is no energy target; `accuracy.energy_change` is rejected
-with that message, and `accuracy.density_change` is replaced by `dconv`.
+with that message, and `accuracy.density_change` is replaced by `dconv`. The
+one exception is `econv` on a stage that requests `excited_states`: the
+excitation energy change target of its bundle, reported and never enforced
+(see "Excited states"); on any other `molresponse` stage `econv` is rejected
+with the same message.
 
 - **Engine check decides** (default): each leg converges when `||dx|| <= 5
   max(dconv, thresh) (1 + ||x||)` and `||drho|| <= 5 max(dconv, thresh) (1 +

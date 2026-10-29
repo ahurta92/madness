@@ -1,5 +1,6 @@
 #pragma once
 #include "NamedStages.hpp"
+#include <madness/chem/ConvergenceSettings.h>
 #include <nlohmann/json.hpp>
 
 // Select what a molresponse stage requested out of the engine's property rows.
@@ -399,6 +400,56 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
     evidence.erase(key);
   record["engine_evidence"] = std::move(evidence);
   return record;
+}
+
+// D-061: a written econv on a stage that requests excited_states is the
+// target of the excitation energy change per root (D8: the engine's default
+// is never a request), judged on the worst root with <=, in hartree. It is
+// reported, not enforced: the engine's own gate on the same quantity is
+// 5 x max(dconv, thresh), strict, per root (the dconv engine row, D-025).
+// This is the row's place in the settings table (B9); `engine_omega_limit`
+// is that gate at the stage's final rung. The response settings table
+// (ResponseCheckpoint.hpp) places it in place of its "energy change" row.
+[[nodiscard]] inline madness::convergence::MetricSetting
+excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
+  namespace cv = madness::convergence;
+  const auto& target = stage.excited_states.omega_target;
+  cv::MetricSetting row;
+  row.group = cv::Group::requested_criteria;
+  row.name = "excitation energy change per root";
+  row.keyword = "econv";
+  row.measurement = "omega_residual";
+  row.units = "hartree";
+  row.target = target;
+  row.set_by = target ? cv::SetBy::user : cv::SetBy::not_set;
+  row.relation = cv::Relation::less_than_or_equal;
+  if (!target)
+    row.note = "not set; the engine's omega gate is the dconv row above "
+               "(D-025), not a target (D8)";
+  row.engine_check_instead = "compares each root's eigenvalue change against "
+                             + cv::detail::scientific(engine_omega_limit)
+                             + " (5 x max(dconv, thresh)), strictly";
+  return row;
+}
+
+// D-061, B1: the saved bundle's measurement under the name of its written
+// target, for the shared judge (evaluate_explicit_criteria over
+// convergence::requested_targets, which needs value, availability and
+// units): the engine's worst-root eigenvalue change, the omega_residual row
+// of the bundle's engine measurements (value, root_id, availability, phase;
+// ResponseCheckpoint::bundle_measurements) with its units. The change across
+// the last step is the saved bundle's evidence: the bundle saved is that
+// step's output. A row without a value (a root with no eigenvalue step yet)
+// stays unavailable. No engine rows, no judged row.
+[[nodiscard]] inline json
+bundle_saved_measurements(const json& engine_measurements) {
+  json saved = json::object();
+  if (!engine_measurements.contains("omega_residual"))
+    return saved;
+  json row = engine_measurements.at("omega_residual");
+  row["units"] = "hartree";
+  saved["omega_residual"] = std::move(row);
+  return saved;
 }
 
 // Every property the stage requested, keyed by its name, each with its values
