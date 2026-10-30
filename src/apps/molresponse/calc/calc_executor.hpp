@@ -761,6 +761,62 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 // Excited-state bundle solve (15b-i: TDA closed-shell only).
 // ---------------------------------------------------------------------------
 
+/// D-089 (a): the transition analysis is written after a solve, and a bundle
+/// the planner loads is not solved, so a restart between the bundle's
+/// save-boundary publish and its analysis left the transition properties
+/// missing for good. For an excited-state node the manager skips under a
+/// load plan: when the bundle saved at this rung's exact key is converged and
+/// calc_dir has no es_analysis__<key>.json, prepare the ground state at the
+/// rung as the solvers do and compute the analysis from the saved states
+/// (analyze_es_bundle_from_disk: load, reproject, report; no iterations).
+/// Returns whether an analysis was written. Collective: rank 0 decides from
+/// the metadata and broadcasts.
+template <typename Type, typename Shell>
+bool analyze_loaded_es_bundle(ExecutorContext& ctx, int n_roots,
+                              double thresh) {
+  using namespace madness;
+  World& world = ctx.world;
+  set_response_protocol(world, ctx.L, thresh);
+  const std::string key = protocol_key();
+  const std::string analysis = ctx.calc_dir + "/es_analysis__" + key + ".json";
+  int needed = 0;
+  if (world.rank() == 0) {
+    const std::string meta_path = ctx.calc_dir + "/response_metadata.json";
+    if (std::filesystem::exists(meta_path)
+        && !std::filesystem::exists(analysis)) {
+      auto meta = ResponseMetadata::load_or_create(meta_path);
+      const auto& j = meta.json();
+      if (j.contains("excited_states")
+          && j.at("excited_states").contains(key)) {
+        const auto& e = j.at("excited_states").at(key);
+        needed = e.value("converged", false) && !e.value("diverged", false)
+                 && e.value("type", std::string{})
+                        == detail_save_load::type_tag<Type>()
+                 && e.value("shell", std::string{})
+                        == detail_save_load::shell_tag<Shell>()
+                 && (n_roots <= 0 || e.value("n_roots", 0) == n_roots);
+      }
+    }
+  }
+  world.gop.broadcast_serializable(needed, 0);
+  if (!needed)
+    return false;
+  GroundState& gs = ctx.gs;
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop
+        = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+  if (world.rank() == 0)
+    madness::print("[ANALYZE] D-089: bundle", key,
+                   "loaded converged without its transition analysis; "
+                   "computing it from the saved states (no iterations)");
+  return analyze_es_bundle_from_disk<Type, Shell>(world, gs, ctx.calc_dir,
+                                                  ctx.print_level)
+         == 0;
+}
+
 /// Solve a TDA closed-shell excited-state bundle of `n_roots` at one protocol
 /// step. Mirrors solve_fd_protocol: set protocol -> prepare GS -> build problem
 /// -> guess (Fresh = fresh solid-harmonics trial; else nearest on-disk bundle

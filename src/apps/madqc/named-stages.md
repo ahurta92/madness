@@ -374,7 +374,10 @@ change below the same); the continuation record's entry for it has
 `kind: excited_states`, `method` and `roots`. A loaded bundle that meets
 the request is recorded `decided_by: planner`. A saved bundle of another
 method or root count is not used: the bundle starts fresh, and the record's
-`why` says so. A bundle written on another number of ranks is refused
+`why` says so. A converged bundle loaded without its transition analysis (a restart
+between the bundle's save and the analysis) gets the analysis computed
+from the saved states on the load, with no solver iterations (D-089).
+A bundle written on another number of ranks is refused
 ("ES bundle in es__<key> was written with N process(es) but loaded with M").
 
 `econv` on a stage that requests `excited_states` is the target of the

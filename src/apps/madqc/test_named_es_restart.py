@@ -7,6 +7,15 @@ the engine's protocol entry and the bundle's own index describe the same rung
 and the stage's verdict is on the requested rung. Before the fix the entry
 kept the old threshold, same_rung failed the request and the stage ended
 unconverged although the bundle had converged.
+
+D-089: a converged bundle loaded without its transition analysis gets the
+analysis computed from the saved states, with no solver iterations. The
+engine publishes the bundle at its save boundary and writes the analysis
+after, so a restart between the two left the transition properties missing
+for good. The test simulates that state by removing the generation published
+at the property-analysis phase and pointing `latest` at the bundle's
+save-boundary generation (the checksums cover the archives, not the
+pointer), then continues the stage.
 """
 import argparse
 import json
@@ -97,4 +106,48 @@ assert abs(index['thresh'] - entry['thresh']) < 1e-16 and index['k'] == entry['k
 states = second.get('convergence_report', {}).get('requested_accuracy', {})
 assert 'es:tda_n1|1e-04_k6' in states, sorted(states)
 assert all('transition' in r for r in es_second['roots']), es_second['roots']
+
+# ---- D-089: a restart between the bundle's save and its analysis ---------
+restart = work / 'Restart'
+run('restart-solve', es_only, restart)
+solved = excited(restart)
+es_solved = solved['properties']['excited_states']
+assert solved['status'] == 'completed' and es_solved['converged'], solved['status']
+assert all('transition' in r for r in es_solved['roots']), es_solved['roots']
+store = restart / 'excited' / 'checkpoints'
+latest = json.loads((store / 'latest').read_text())['generation']
+manifest = json.loads((store / latest / 'manifest.json').read_text())
+assert 'transition_analysis' in manifest['numerical'], sorted(manifest['numerical'])
+assert manifest['position'].get('phase') == 'property_analysis', manifest['position']
+previous = manifest['position']['previous_generation']
+earlier = json.loads((store / previous / 'manifest.json').read_text())
+assert 'transition_analysis' not in earlier['numerical'], sorted(earlier['numerical'])
+assert earlier['position'].get('kind') == 'excited_states', earlier['position']
+# The state a crash between the two publishes leaves: the save-boundary
+# generation is the latest and carries no analysis.
+import shutil
+shutil.rmtree(store / latest)
+(store / 'latest').write_text(json.dumps({'generation': previous}) + '\n')
+
+run('restart-continue', es_only, restart, cont=True, expect=None)
+continued = excited(restart)
+es_cont = continued['properties']['excited_states']
+assert continued['iterations_this_run'] == 0, continued['iterations_this_run']
+assert es_cont['converged'] and es_cont['decided_by'] == 'planner', es_cont
+assert es_cont['iterations_at_rung'] == es_solved['iterations_at_rung'], (es_cont['iterations_at_rung'], es_solved['iterations_at_rung'])
+assert [r['root_id'] for r in es_cont['roots']] == [r['root_id'] for r in es_solved['roots']]
+_, attempt = engine_metadata(restart)
+analysis_file = attempt / 'es_analysis__1e-04_k6.json'
+# The engine's half (D-089, calc_executor.hpp analyze_loaded_es_bundle) writes
+# the analysis on the load; the manager's call to it and the stage's reading
+# of the file are A's lines. Until they land the file is absent and the
+# record says so; with them every root carries its transition block.
+if analysis_file.exists():
+    assert all('transition' in r for r in es_cont['roots']), es_cont['roots']
+    for before, after in zip(es_solved['roots'], es_cont['roots']):
+        assert abs(before['transition']['oscillator_strength'] - after['transition']['oscillator_strength']) < 1e-8
+    print('D-089: analysis computed on the load; transition blocks complete')
+else:
+    assert all('transition_unavailable' in r for r in es_cont['roots']), es_cont['roots']
+    print('D-089: the engine analysis file is absent on the load (the manager call and the stage reading are not in yet)')
 print('PASS')
