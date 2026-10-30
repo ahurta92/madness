@@ -1,0 +1,45 @@
+# Named full vibrational Raman of LiH: the named twin of
+# src/examples/qc/response_lih_raman_full (same molecule, rung and settings).
+# One rung (protocol 1e-4, k 6): the static polarizability tensor and the
+# complete polarizability gradient over all 3N = 6 nuclear coordinates
+# (raman.atoms and raman.directions omitted: every atom, every axis), so the
+# engine builds the Hessian from the same six nuclear response states and
+# passes its normal-mode analysis through (one mode, its Raman activity and
+# depolarization ratio). Legs: 3 dipole + 6 nuclear-displacement; 18 quadratic
+# sources. The numbers are a regression baseline at k 6, not converged Raman
+# values (see the twin's header).
+# Run: madqc named_lih_raman.in --prefix=LiH-raman
+molecule LiH
+  units angstrom
+  eprec 1e-6
+  no_orient true
+  Li 0.0 0.0 -0.803105264950
+  H  0.0 0.0  0.803105264950
+end
+
+moldft gs
+  molecule LiH
+  xc hf
+  L 50
+  localize new
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 30
+  requested_properties [energy, dipole]
+end
+
+molresponse raman
+  reference gs
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 60
+  kain true
+  print_level 1
+  requested_properties [polarizability, raman]
+  polarizability.frequencies [0.0]
+  polarizability.frequency_units au
+  polarizability.components [xx, yy, zz]
+  raman.frequencies [0.0]
+  raman.frequency_units au
+  raman.components [xx, yy, zz, xy, xz, yz]
+end
