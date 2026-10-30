@@ -3,7 +3,7 @@
 the fixture test_named_replay reads, and replay verdicts with no engine.
 
   replay_verdict.py capture <run-root> <deck> <capture-dir> [--label L]
-                            [--since T]
+                            [--since T] [--arg A ...]
       Capture a finished run: the deck, the run's id and arguments, and for
       every stage of <run-root> that this run wrote (its record names this
       run's attempt directory; the run's index results.json was written at
@@ -87,7 +87,10 @@ def natom(case_dir, manifest):
 
 
 def reduced(manifest):
-    if "states" not in manifest["numerical"]:
+    # Kept whole: a manifest written before S4a, whose records are rebuilt
+    # from the rest, and one whose state list is empty (response's records
+    # are then derived from its engine metadata).
+    if not manifest["numerical"].get("states"):
         return manifest
     out = dict(manifest)
     out["numerical"] = {"states": [{k: s[k] for k in STATE_KEYS if k in s}
@@ -134,6 +137,8 @@ def main():
     c.add_argument("out")
     c.add_argument("--label", default="run")
     c.add_argument("--since", type=float, default=0.0)
+    c.add_argument("--arg", action="append", default=[],
+                   help="one of the run's arguments, recorded in run.json")
     p = sub.add_parser("pack")
     p.add_argument("captures")
     p.add_argument("fixture")
@@ -143,7 +148,7 @@ def main():
     r.add_argument("--driver", required=True)
     a = ap.parse_args()
     if a.cmd == "capture":
-        print(capture(a.root, a.deck, a.out, a.label, a.since))
+        print(capture(a.root, a.deck, a.out, a.label, a.since, a.arg))
     elif a.cmd == "pack":
         print("%d cases, %d decks" % pack(a.captures, a.fixture, a.commit))
     else:

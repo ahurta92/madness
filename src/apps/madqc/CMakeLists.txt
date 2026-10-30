@@ -132,6 +132,14 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
 endif()
 
 if(BUILD_TESTING AND Python3_EXECUTABLE)
+  # D-079, D-080: continued from the stored generations (make_test_store.py);
+  # skipped unless MADQC_TEST_STORE is set.
+  add_test(NAME madness/test/madqc/test_named_from_store/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_from_store.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR}
+      --mpiexec ${MPIEXEC_EXECUTABLE})
+  set_tests_properties(madness/test/madqc/test_named_from_store/run
+    PROPERTIES LABELS "applications;medium" TIMEOUT 900 SKIP_RETURN_CODE 77)
   add_test(NAME madness/test/madqc/test_named_checkpoint_e2e/run
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_named_checkpoint_e2e.py
       --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
