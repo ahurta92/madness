@@ -535,6 +535,48 @@ int main(int argc, char** argv) {
       check(false, std::string("parse: criteria mode, mixed: ") + e.what());
     }
   }
+  // D-099 (B3): stall.window and stall.ratio, the bundle's plateau detector.
+  {
+    auto stall = es_deck;
+    stall.insert(stall.rfind("end\n"), " stall.window 10\n stall.ratio 0.2\n");
+    try {
+      const auto st = named_stages::parse(world, geometry + gs + stall);
+      const auto rows = named_stages::bundle_stall_rows(st[1]);
+      check(rows.size() == 2 && rows[0].keyword == "stall.window"
+                && rows[0].target == 10.0 && rows[0].effective_limit == 10.0
+                && rows[0].units == "iterations"
+                && rows[0].set_by == madness::convergence::SetBy::user
+                && rows[0].group == madness::convergence::Group::engine_check
+                && rows[1].keyword == "stall.ratio" && rows[1].target == 0.2
+                && rows[1].set_by == madness::convergence::SetBy::user,
+            "stall keys written: two engine rows, set by the user");
+      const auto plain = named_stages::parse(world, geometry + gs + es_deck);
+      const auto defaults = named_stages::bundle_stall_rows(plain[1]);
+      check(defaults[0].target == 6.0
+                && defaults[0].set_by
+                       == madness::convergence::SetBy::engine_default
+                && defaults[1].target == 0.1
+                && defaults[1].set_by
+                       == madness::convergence::SetBy::engine_default,
+            "stall keys unwritten: the engine's defaults, 6 and 0.1");
+      auto off = es_deck;
+      off.insert(off.rfind("end\n"), " stall.window 0\n");
+      const auto disabled = named_stages::bundle_stall_rows(
+          named_stages::parse(world, geometry + gs + off)[1]);
+      check(disabled[0].target == 0.0
+                && disabled[0].note.find("detector off") != std::string::npos,
+            "stall.window 0: the detector is off, the row says so");
+    } catch (const std::exception& e) {
+      check(false, std::string("parse: stall keys: ") + e.what());
+    }
+    rejects(geometry + gs
+                + "molresponse optical\n reference gs\n protocol [1e-4]\n"
+                  " requested_properties [polarizability]\n"
+                  " polarizability.frequencies [0.0]\n"
+                  " polarizability.frequency_units au\n"
+                  " polarizability.components [zz]\n stall.window 10\nend\n",
+            "drives the excited-state bundle's plateau detector");
+  }
   {
     auto zero = es_deck;
     zero.insert(zero.rfind("end\n"), " econv 0\n");

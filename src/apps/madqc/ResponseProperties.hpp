@@ -491,6 +491,49 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
   return row;
 }
 
+// D-099 (B3): the bundle's plateau detector as two engine rows of the
+// settings table: a root is stalled when neither its density change nor its
+// eigenvalue change has improved by stall.ratio over stall.window
+// iterations while the other active roots are converged or likewise flat;
+// the solve then stops as stalled. The keys are the engine's own; unwritten,
+// its defaults apply (6 iterations, 0.1). stall.window 0 disables the
+// detector, so the bundle runs to maxiter and --continue resumes it. The
+// legs' detector takes progress.* instead. Not a target: no relation to a
+// measurement, the limit is the setting itself. The response settings table
+// (ResponseCheckpoint.hpp) places them beside the bundle's engine rows.
+[[nodiscard]] inline std::vector<madness::convergence::MetricSetting>
+bundle_stall_rows(const Stage& stage) {
+  namespace cv = madness::convergence;
+  const auto& rp = stage.params.get<ResponseParameters>();
+  auto row = [&](const char* name, const char* keyword, const char* units,
+                 double value, bool written, std::string note) {
+    cv::MetricSetting r;
+    r.group = cv::Group::engine_check;
+    r.name = name;
+    r.keyword = keyword;
+    r.measurement = keyword;
+    r.units = units;
+    r.target = value;
+    r.set_by = written ? cv::SetBy::user : cv::SetBy::engine_default;
+    r.effective_limit = value;
+    r.note = std::move(note);
+    return r;
+  };
+  const bool window_written = rp.is_user_defined("stall.window");
+  const bool ratio_written = rp.is_user_defined("stall.ratio");
+  const int window = rp.stall_window();
+  return {row("bundle stall window", "stall.window", "iterations",
+              static_cast<double>(window), window_written,
+              window == 0 ? "detector off: the bundle runs to maxiter"
+                          : "a root is stalled when neither its density "
+                            "change nor its eigenvalue change improves by "
+                            "stall.ratio over this many iterations"),
+          row("bundle stall ratio", "stall.ratio", "fraction", rp.stall_ratio(),
+              ratio_written,
+              "the relative improvement over stall.window that counts as "
+              "progress; the legs take progress.* instead")};
+}
+
 // D-061, B1: the saved bundle's measurement under the name of its written
 // target, for the shared judge (evaluate_explicit_criteria over
 // convergence::requested_targets, which needs value, availability and
