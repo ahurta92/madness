@@ -219,6 +219,10 @@ struct Stage {
   struct ExcitedStatesRequest {
     int roots = 0;
     std::string method, guess, guess_basis;
+    // D-061: a written econv, the target of the excitation energy change per
+    // root (D8); empty when the deck wrote none (the engine's default econv
+    // is not a request).
+    std::optional<double> omega_target;
   };
   ExcitedStatesRequest excited_states;
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
@@ -613,6 +617,11 @@ inline std::vector<Stage> parse(madness::World &world,
         read_value(world, controls, line);
       else if (k == "protocol" || (b.kind == "moldft" && scf_keys.count(k)))
         read_value(world, cp, line);
+      else if (b.kind == "molresponse" && k == "econv")
+        // D-061: the excitation energy change target of an excited-state
+        // stage (D8), read where the key lives; refused below on a stage
+        // without excited_states.
+        read_value(world, cp, line);
       else if (b.kind == "molresponse" && response_keys.count(k) &&
                rp.parameter_exists(k))
         read_value(world, rp, line);
@@ -749,6 +758,22 @@ inline std::vector<Stage> parse(madness::World &world,
       const auto own_protocol = cp.protocol();
       // D-017: the property blocks, validated and mapped onto the engine.
       translate_response_properties(b.name, controls, stage, rp);
+      // D-061: econv on a molresponse stage is the excitation energy change
+      // target of its excited-state bundle, per root, reported under the
+      // engine check (D8, B8). A driven response has no local energy, so
+      // without excited_states it is refused as accuracy.energy_change is.
+      if (seen.contains("econv")) {
+        if (std::find(stage.properties.begin(), stage.properties.end(),
+                      "excited_states")
+            == stage.properties.end())
+          throw std::runtime_error(
+              b.name
+              + ": econv is not applicable: a driven response has no local "
+                "energy (see the reference stage's energy change); on a "
+                "stage that requests excited_states it is the excitation "
+                "energy change target (D8)");
+        stage.excited_states.omega_target = cp.econv();
+      }
       // Defaults must come from this stage, not the upstream SCF maxiter.
       rp.set_user_defined_value("maxiter", rp.get<std::size_t>("maxiter"));
       valid_protocol(own_protocol);

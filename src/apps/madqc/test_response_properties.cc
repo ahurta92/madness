@@ -5,6 +5,7 @@
 #include "NamedStages.hpp"
 #include "ResponseProperties.hpp"
 #include <iostream>
+#include <madness/chem/ExplicitCriteria.h>
 #include <stdexcept>
 
 namespace {
@@ -466,6 +467,42 @@ int main(int argc, char** argv) {
               + "moldft bad\n molecule LiH\n xc hf\n requested_properties "
                 "[energy]\n excited_states.roots 1\nend\n",
           "excited_states belongs to molresponse");
+  // D-061: econv on an excited-state stage is the target of the excitation
+  // energy change per root (D8: written only); on any other molresponse
+  // stage it is refused, a driven response having no local energy.
+  try {
+    auto last = es_deck;
+    last.insert(last.rfind("end\n"), " econv 1e-6\n");
+    const auto es = named_stages::parse(world, geometry + gs + last);
+    check(es[1].excited_states.omega_target == 1e-6
+              && es[1].written.contains("econv"),
+          "parse: econv on an excited-state stage is its omega target");
+    auto first = es_deck;
+    first.insert(first.find(" protocol"), " econv 1e-6\n");
+    check(named_stages::parse(world, geometry + gs + first)[1]
+                  .excited_states.omega_target
+              == 1e-6,
+          "parse: econv written before requested_properties");
+    const auto plain = named_stages::parse(world, geometry + gs + es_deck);
+    check(!plain[1].excited_states.omega_target
+              && !plain[1].written.contains("econv"),
+          "parse: without econv there is no omega target");
+  } catch (const std::exception& e) {
+    check(false,
+          std::string("parse: econv on an excited-state stage: ") + e.what());
+  }
+  rejects(geometry + gs
+              + "molresponse optical\n reference gs\n protocol [1e-4]\n"
+                " requested_properties [polarizability]\n"
+                " polarizability.frequencies [0.0]\n"
+                " polarizability.frequency_units au\n"
+                " polarizability.components [zz]\n econv 1e-6\nend\n",
+          "econv is not applicable: a driven response has no local energy");
+  {
+    auto zero = es_deck;
+    zero.insert(zero.rfind("end\n"), " econv 0\n");
+    rejects(geometry + gs + zero, "positive finite econv");
+  }
 
   // ----- Selectors over synthetic engine rows -----------------------------
   try {
@@ -748,6 +785,67 @@ int main(int argc, char** argv) {
               && !es.at("engine_evidence").contains("kinetic_history")
               && es.at("engine_evidence").at("bundle_dir") == "es__" + pkey,
           "the bundle entry travels as evidence without the roots");
+    // D-061: the written econv beside the engine's gate, in the record: the
+    // request and the evidence, never a status (that is the shared verdict's,
+    // convergence_report.requested_accuracy under the bundle's state key).
+    const auto& none = es.at("requested_omega_target");
+    check(none.at("target").is_null() && none.at("set_by") == "not_set"
+              && none.at("units") == "hartree"
+              && none.at("relation") == "less_than_or_equal"
+              && none.at("worst").at("value") == 3e-7
+              && none.at("worst").at("root_id") == "es_root_0001"
+              && none.at("verdict_in").at("path")
+                     == "convergence_report.requested_accuracy"
+              && none.at("verdict_in").at("state_key") == "es:tda_n2|" + pkey
+              && none.at("verdict_in").at("criterion") == "omega_residual"
+              && !none.contains("status") && !none.contains("enforced")
+              && !none.contains("outcome")
+              && !first.contains("omega_residual_within_requested"),
+          "no econv: target null, not_set, the worst root still named, no "
+          "per-root field, no status of its own");
+    stage.excited_states.omega_target = 1e-6;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("requested_omega_target").at("target") == 1e-6
+              && es.at("requested_omega_target").at("set_by") == "user"
+              && es.at("roots")[0].at("omega_residual_within_requested") == true
+              && es.at("roots")[1].at("omega_residual_within_requested") == true
+              && es.at("requested_omega_target").at("worst").at("value")
+                     == 3e-7,
+          "econv 1e-6 over 3e-7 on both roots: within on both");
+    stage.excited_states.omega_target = 1e-7;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(
+        es.at("requested_omega_target").at("target") == 1e-7
+            && es.at("roots")[0].at("omega_residual_within_requested") == false
+            && es.at("roots")[1].at("omega_residual_within_requested") == false
+            && es.at("requested_omega_target").at("worst").at("root_id")
+                   == "es_root_0001"
+            && es.at("converged") == true,
+        "econv 1e-7 under 3e-7: not within on either root; the bundle's "
+        "converged is the engine's and stays true");
+    metadata["excited_states"][pkey]["roots"][1]["omega_residual"] = nullptr;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("requested_omega_target").at("worst").is_null()
+              && es.at("roots")[0].at("omega_residual_within_requested")
+                     == false
+              && es.at("roots")[1]
+                     .at("omega_residual_within_requested")
+                     .is_null(),
+          "a root without an eigenvalue step: worst null, that root null");
+    const auto absent
+        = named_stages::selected_excited_states(stage, json::object(), json());
+    check(absent.at("requested_omega_target").at("target") == 1e-7
+              && absent.at("requested_omega_target").at("worst").is_null()
+              && absent.at("requested_omega_target")
+                         .at("verdict_in")
+                         .at("state_key")
+                     == "es:tda_n2|" + pkey,
+          "no bundle at the final rung: the request is still described, "
+          "worst null");
+    stage.excited_states.omega_target.reset();
+    metadata["excited_states"][pkey]["roots"][1]
+        = root(1, 0, 0.47, true, false, false);
+    es = named_stages::selected_excited_states(stage, metadata, transition);
     auto selected = named_stages::select_response_properties(
         stage, json::object(), metadata, json(), json(), 2, transition);
     check(selected.contains("excited_states") && every_row_converged(selected),
@@ -800,6 +898,111 @@ int main(int argc, char** argv) {
         "not the requested tda with 3");
   } catch (const std::exception& e) {
     check(false, e.what());
+  }
+
+  // ----- D-061: the econv row of the settings table and the bundle's judged
+  // row, through the shared judge (B1) ----------------------------------------
+  try {
+    namespace cv = madness::convergence;
+    Stage stage = bare_stage(world);
+    stage.properties = {"excited_states"};
+    stage.excited_states.roots = 2;
+    stage.excited_states.method = "tda";
+    const std::string instead
+        = "compares each root's eigenvalue change against 5.0e-04 (5 x "
+          "max(dconv, thresh)), strictly";
+    const auto unset
+        = named_stages::excited_state_omega_target_row(stage, 5e-4);
+    check(unset.group == cv::Group::requested_criteria
+              && unset.name == "excitation energy change per root"
+              && unset.keyword == "econv"
+              && unset.measurement == "omega_residual" && unset.quantity.empty()
+              && unset.units == "hartree" && !unset.target
+              && unset.set_by == cv::SetBy::not_set
+              && unset.relation == cv::Relation::less_than_or_equal
+              && !unset.effective_limit && unset.limit_formula.empty()
+              && unset.note.find("not a target (D8)") != std::string::npos
+              && unset.engine_check_instead == instead,
+          "econv row: unset, the engine's gate named as what is enforced "
+          "instead");
+    stage.excited_states.omega_target = 1e-6;
+    const auto row = named_stages::excited_state_omega_target_row(stage, 5e-4);
+    check(row.target == 1e-6 && row.set_by == cv::SetBy::user
+              && row.note.empty() && row.engine_check_instead == instead,
+          "econv row: a written econv is the target, set by the user");
+    cv::ConvergenceSettings settings;
+    settings.stage = "excited";
+    settings.decider = cv::Decider::engine_check;
+    settings.metrics.push_back(row);
+    const auto warnings = cv::unenforced_target_warnings(settings);
+    check(warnings.size() == 1
+              && warnings.front()
+                     == "econv 1.0e-06 is reported, not enforced: the engine "
+                        "check "
+                            + instead + ". Set " + cv::use_default_criteria_key
+                            + " false to enforce your targets.",
+          "econv row: the engine-mode warning at stage start");
+    const auto targets = cv::requested_targets(settings);
+    check(targets.size() == 1
+              && targets.at("omega_residual").at("value") == 1e-6
+              && targets.at("omega_residual").at("units") == "hartree"
+              && !targets.at("omega_residual").contains("quantity"),
+          "econv row: the requested target the shared judge takes");
+    // The bundle's engine rows as the state record carries them
+    // (bundle_measurements): the worst root per measurement.
+    const json engine = {{"density_residual",
+                          {{"value", 2e-6},
+                           {"availability", "measured"},
+                           {"root_id", "es_root_0001"},
+                           {"phase", "solver_step_input_before_acceleration"}}},
+                         {"omega_residual",
+                          {{"value", 3e-7},
+                           {"availability", "measured"},
+                           {"root_id", "es_root_0001"},
+                           {"phase", "solver_step_output"}}}};
+    const auto saved = named_stages::bundle_saved_measurements(engine);
+    check(saved.size() == 1 && saved.at("omega_residual").at("value") == 3e-7
+              && saved.at("omega_residual").at("units") == "hartree"
+              && saved.at("omega_residual").at("availability") == "measured"
+              && saved.at("omega_residual").at("root_id") == "es_root_0001"
+              && saved.at("omega_residual").at("phase") == "solver_step_output",
+          "the bundle's judged row: the worst root's eigenvalue change with "
+          "its units");
+    const auto met = madness::evaluate_explicit_criteria(saved, targets);
+    check(met.at("status") == "satisfied"
+              && met.at("criteria").at("omega_residual").at("value") == 3e-7,
+          "the shared judge: 3e-7 meets econv 1e-6");
+    stage.excited_states.omega_target = 1e-7;
+    settings.metrics
+        = {named_stages::excited_state_omega_target_row(stage, 5e-4)};
+    check(madness::evaluate_explicit_criteria(saved,
+                                              cv::requested_targets(settings))
+                  .at("status")
+              == "unmet",
+          "the shared judge: 3e-7 misses econv 1e-7");
+    json none = engine;
+    none["omega_residual"] = {{"value", nullptr},
+                              {"availability", "unavailable"},
+                              {"phase", nullptr}};
+    check(madness::evaluate_explicit_criteria(
+              named_stages::bundle_saved_measurements(none),
+              cv::requested_targets(settings))
+                  .at("status")
+              == "unavailable",
+          "the shared judge: a root without an eigenvalue step yet");
+    stage.excited_states.omega_target.reset();
+    settings.metrics
+        = {named_stages::excited_state_omega_target_row(stage, 5e-4)};
+    check(cv::requested_targets(settings).empty()
+              && madness::evaluate_explicit_criteria(
+                     saved, cv::requested_targets(settings))
+                         .at("status")
+                     == "not_requested",
+          "no econv: nothing requested, nothing judged");
+    check(named_stages::bundle_saved_measurements(json::object()).empty(),
+          "no engine rows: no judged row");
+  } catch (const std::exception& e) {
+    check(false, std::string("econv row: ") + e.what());
   }
 
   world.gop.sum(failures);
