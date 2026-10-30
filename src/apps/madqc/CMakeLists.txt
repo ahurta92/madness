@@ -96,6 +96,12 @@ if(BUILD_TESTING)
     set_tests_properties(madness/test/madqc/test_named_stages/mpi2
       PROPERTIES LABELS "unittests;short" TIMEOUT 60)
   endif()
+  # D-078, D-079: verdicts replayed from recorded files (the from-store tier).
+  add_mad_executable(test_named_replay "test_named_replay.cc" "MADchem")
+  add_test(NAME madness/test/madqc/test_named_replay/run
+    COMMAND test_named_replay ${CMAKE_CURRENT_SOURCE_DIR}/test_named_replay_fixture.json)
+  set_tests_properties(madness/test/madqc/test_named_replay/run
+    PROPERTIES LABELS "unittests;short" TIMEOUT 60)
   add_mad_executable(test_response_properties "test_response_properties.cc" "MADchem")
   add_test(NAME madness/test/madqc/test_response_properties/run COMMAND test_response_properties)
   set_tests_properties(madness/test/madqc/test_response_properties/run
