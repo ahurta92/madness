@@ -460,8 +460,10 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
 // D-061: a written econv on a stage that requests excited_states is the
 // target of the excitation energy change per root (D8: the engine's default
 // is never a request), judged on the worst root with <=, in hartree. It is
-// reported, not enforced: the engine's own gate on the same quantity is
-// 5 x max(dconv, thresh), strict, per root (the dconv engine row, D-025).
+// never the loop's target: the bundle's solve stops on the engine's own gate
+// on the same quantity, 5 x max(dconv, thresh), strict, per root (the dconv
+// engine row, D-025), in both modes (D-092); in criteria mode the written
+// econv is enforced as the stage verdict, by the shared judge (B1, B8).
 // This is the row's place in the settings table (B9); `engine_omega_limit`
 // is that gate at the stage's final rung. The response settings table
 // (ResponseCheckpoint.hpp) places it in place of its "energy change" row.
@@ -479,11 +481,13 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
   row.set_by = target ? cv::SetBy::user : cv::SetBy::not_set;
   row.relation = cv::Relation::less_than_or_equal;
   if (!target)
-    row.note = "not set; the engine's omega gate is the dconv row above "
-               "(D-025), not a target (D8)";
-  row.engine_check_instead = "compares each root's eigenvalue change against "
-                             + cv::detail::scientific(engine_omega_limit)
-                             + " (5 x max(dconv, thresh)), strictly";
+    row.note = "not set; the bundle stops on the engine's omega gate in both "
+               "modes (the dconv row above, D-025, D-092), not a target (D8)";
+  row.engine_check_instead
+      = "stops the bundle when each root's eigenvalue change is below "
+        + cv::detail::scientific(engine_omega_limit)
+        + " (5 x max(dconv, thresh)), strictly, in both modes; a written "
+          "econv is judged by the stage verdict (D-092)";
   return row;
 }
 

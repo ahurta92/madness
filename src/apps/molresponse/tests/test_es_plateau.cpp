@@ -128,6 +128,33 @@ int main() {
            "non-finite omega change -> not within");
   }
 
+  {
+    // D-092: the bundle's rung exits on the engine check whatever the
+    // stage's decider; the sample carries engine_check as what decided.
+    using madness::convergence::Decider;
+    using madness::convergence::rung_exit;
+    using madness::convergence::StopReason;
+    std::printf(
+        "\n=== bundle_rung_sample: the engine check in both modes ===\n");
+    const auto passed = bundle_rung_sample(true, false, 3, 20, 0);
+    expect(passed.decider == Decider::engine_check && !passed.criteria_met,
+           "the sample's decider is the engine check, criteria_met false");
+    expect(rung_exit(passed) == StopReason::converged,
+           "engine check passed -> converged, whatever the stage wrote");
+    expect(rung_exit(bundle_rung_sample(false, false, 20, 20, 0))
+               == StopReason::iteration_limit,
+           "not passed at the cap -> iteration_limit");
+    expect(rung_exit(bundle_rung_sample(false, true, 7, 20, 0))
+               == StopReason::stalled,
+           "not passed, stalled -> stalled");
+    expect(rung_exit(bundle_rung_sample(false, false, 7, 20, 0))
+               == StopReason::in_progress,
+           "not passed, under the cap, no stall -> the rung goes on");
+    expect(rung_exit(bundle_rung_sample(true, false, 2, 20, 4))
+               == StopReason::in_progress,
+           "forced iterations: no exit before the last one");
+  }
+
   std::printf("\n%s: %d failure(s)\n", failed == 0 ? "ALL PASS" : "FAILED",
               failed);
   return failed == 0 ? 0 : 1;

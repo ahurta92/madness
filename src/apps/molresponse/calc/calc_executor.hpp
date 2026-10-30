@@ -348,17 +348,6 @@ inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s) {
   return p;
 }
 
-/// DESIGN B8/B3: excited states have no written targets yet (they are not on
-/// the named path), so only the engine check can decide an ES solve. Refuse
-/// the other decider instead of running every rung to the cap.
-inline void
-require_engine_check_for_excited_states(const ExecutorSettings& settings) {
-  MADNESS_CHECK_THROW(
-      settings.policy.decider == madness::convergence::Decider::engine_check,
-      "excited states take the engine check until their named port defines "
-      "their targets; set convergence.use_default_criteria true");
-}
-
 /// Remove the wall-clock and RSS fields from every `metrics` object in a
 /// metadata subtree. They are measurements OF the run, not results of it: two
 /// re-solves of the same stuck state agree on every number that matters and
@@ -787,7 +776,6 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   using Solver = ESSolver<TDA, ClosedShell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
-  detail_exec::require_engine_check_for_excited_states(ctx);
   const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
 
   set_response_protocol(world, ctx.L, thresh);
@@ -964,7 +952,6 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   using Solver = ESSolver<Full, ClosedShell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
-  detail_exec::require_engine_check_for_excited_states(ctx);
   const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
 
   set_response_protocol(world, ctx.L, thresh);

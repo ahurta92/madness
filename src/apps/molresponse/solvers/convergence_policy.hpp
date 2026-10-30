@@ -353,6 +353,24 @@ inline bool es_root_within(double density_residual, double omega_residual,
          && omega_residual < t.omega_residual;
 }
 
+/// D-092: the sample rung_exit judges an excited-state bundle on. The
+/// bundle's solve stops on the engine check in both modes (the decider is
+/// engine_check whatever the stage wrote, criteria_met false): a written
+/// econv is the stage verdict's target, judged outside the loop, never the
+/// loop's, so no bundle rung runs to its cap for a target the loop does not
+/// watch. The sample says what decided.
+[[nodiscard]] inline madness::convergence::RungSample
+bundle_rung_sample(bool engine_check_passed, bool stalled, int iterations,
+                   int cap, int forced_iterations) {
+  return {madness::convergence::Decider::engine_check,
+          engine_check_passed,
+          /*criteria_met=*/false,
+          stalled,
+          iterations,
+          cap,
+          forced_iterations};
+}
+
 /// The FD explosion guard, relative to the leg: ||dx|| > guard * max(1, ||x||).
 /// For a leg of norm <= 1 it is the absolute guard as before.
 inline bool fd_exploded(double bsh, double x_norm, double guard) {

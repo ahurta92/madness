@@ -390,14 +390,24 @@ method or root count is not used: the bundle starts fresh, and the record's
 excitation energy change per root (DESIGN D8: a written value only; the
 engine's default `econv` is not a request): the eigenvalue change of each
 root across its last step, judged on the worst root with `<=`, in hartree.
-It is reported, never enforced: an excited-state solve takes the engine
-check, whose own gate on the same quantity is `5 x max(dconv, thresh)`,
-strict, per root (the `dconv` engine row of the settings table). The
-settings table shows it as the requested row "excitation energy change per
-root" (keyword `econv`, metric `omega_residual`), and a stage that wrote it
-starts with the warning "econv 1.0e-06 is reported, not enforced: the engine
-check compares each root's eigenvalue change against 5.0e-04 (5 x max(dconv,
-thresh)), strictly". The bundle's state record carries the worst root's
+It is never the loop's target: the bundle's solve stops on the engine
+check in both modes (D-092), whose own gate on the same quantity is `5 x
+max(dconv, thresh)`, strict, per root (the `dconv` engine row of the settings
+table), so no bundle rung runs to its cap for a target the loop does not
+watch. With `convergence.use_default_criteria true` (the default) the written
+`econv` is reported; with `false` it is enforced as the stage verdict (an
+unmet `econv` leaves the stage unconverged), by the shared judge, not by the
+loop. The settings table shows it as the requested row "excitation energy
+change per root" (keyword `econv`, metric `omega_residual`), and a stage that
+wrote it in engine mode starts with the warning "econv 1.0e-06 is reported,
+not enforced: the engine check stops the bundle when each root's eigenvalue
+change is below 5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a
+written econv is judged by the stage verdict (D-092)". In criteria mode the
+deck check requires a target for every loop that would otherwise have none:
+a stage that requests only `excited_states` needs `econv`; one that requests
+a driven-response property needs one of `dconv`, `accuracy.bsh_residual`,
+`accuracy.kinetic_trace_change` for its legs' loop, and may add `econv`. The
+bundle's state record carries the worst root's
 `omega_residual` (the engine row the shared verdict reads, with its units,
 as the saved measurement it judges the target on) (one judge, B1: `requested_accuracy` under the stage's
 convergence report holds the status and, in engine mode, the "unmet, not
@@ -681,7 +691,10 @@ One per-stage switch says which group stops the run:
 
 There is no AND mode. Divergence and invalid states stop the run in both
 modes. The engine records its own restart claim (`converged_for_dconv`) only
-when its check passed.
+when its check passed. One exception to "the written targets stop the run":
+an excited-state bundle's solve stops on the engine check in both modes
+(D-092); its written target, `econv`, is enforced as the stage verdict (see
+"Excited states").
 
 At stage start the run prints the settings table (every metric: target, who
 set it, enforced or reported only, relation, effective limit with its formula,

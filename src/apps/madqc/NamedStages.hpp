@@ -629,26 +629,6 @@ inline std::vector<Stage> parse(madness::World &world,
         fail(line, "unsupported parameter " + k + " in " + b.kind);
     }
 
-    if (b.kind == "molresponse") {
-      // Validate both controls before executing any stage, including reuse.
-      // B8 (Q3, Q5): as for moldft, letting the written targets decide needs
-      // at least one, and progress.* needs the targets to decide.
-      const bool targets_decide
-          = !rp.get<bool>(madness::convergence::use_default_criteria_key);
-      if (targets_decide
-          && molresponse_v3::fd_requested_accuracy_targets(rp).empty())
-        throw std::runtime_error(
-            b.name + ": " + madness::convergence::use_default_criteria_key
-            + " false needs at least one written target (dconv, "
-              "accuracy.bsh_residual, accuracy.kinetic_trace_change)");
-      if (!targets_decide && rp.is_user_defined("progress.window"))
-        throw std::runtime_error(
-            b.name
-            + ": progress.* stall rules act on your written targets; set "
-            + madness::convergence::use_default_criteria_key + " false");
-      molresponse_v3::fd_requested_progress(rp);
-    }
-
     // A3: a stage publishes inside a solve only where it has a save boundary
     // there; molresponse publishes at solve ends only (DESIGN §1.4).
     // checkpoint.keep_all is every application's (D-070).
@@ -774,6 +754,41 @@ inline std::vector<Stage> parse(madness::World &world,
                 "energy change target (D8)");
         stage.excited_states.omega_target = cp.econv();
       }
+      // Validate both controls before executing any stage, including reuse.
+      // B8 (Q3, Q5), D-092: as for moldft, letting the written targets decide
+      // needs a target for every loop it would otherwise leave without one.
+      // A driven-response property needs one of the three FD targets (its
+      // legs' loop stops on them); a stage that requests only excited_states
+      // needs econv (the bundle's loop stops on the engine check in both
+      // modes, D-092, and the written econv is the stage verdict's target);
+      // a stage with both needs the FD target and may add econv. progress.*
+      // needs the targets to decide.
+      const bool targets_decide
+          = !rp.get<bool>(madness::convergence::use_default_criteria_key);
+      if (targets_decide) {
+        const bool driven
+            = std::any_of(stage.properties.begin(), stage.properties.end(),
+                          [](const std::string& property) {
+                            return property != "excited_states";
+                          });
+        if (driven && molresponse_v3::fd_requested_accuracy_targets(rp).empty())
+          throw std::runtime_error(
+              b.name + ": " + madness::convergence::use_default_criteria_key
+              + " false needs at least one written target for the "
+                "driven-response legs (dconv, accuracy.bsh_residual, "
+                "accuracy.kinetic_trace_change)");
+        if (!driven && !stage.excited_states.omega_target)
+          throw std::runtime_error(
+              b.name + ": " + madness::convergence::use_default_criteria_key
+              + " false on a stage that requests only excited_states needs "
+                "econv, the excitation energy change target (D-092)");
+      }
+      if (!targets_decide && rp.is_user_defined("progress.window"))
+        throw std::runtime_error(
+            b.name
+            + ": progress.* stall rules act on your written targets; set "
+            + madness::convergence::use_default_criteria_key + " false");
+      molresponse_v3::fd_requested_progress(rp);
       // Defaults must come from this stage, not the upstream SCF maxiter.
       rp.set_user_defined_value("maxiter", rp.get<std::size_t>("maxiter"));
       valid_protocol(own_protocol);
