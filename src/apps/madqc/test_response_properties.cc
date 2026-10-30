@@ -498,6 +498,43 @@ int main(int argc, char** argv) {
                 " polarizability.frequency_units au\n"
                 " polarizability.components [zz]\n econv 1e-6\nend\n",
           "econv is not applicable: a driven response has no local energy");
+  // D-092: criteria mode on an excited-state stage. A stage that requests
+  // only excited_states needs econv; a driven-response property needs one
+  // of the FD targets; a stage with both needs the FD target, econv optional.
+  {
+    auto only = es_deck;
+    only.insert(only.rfind("end\n"),
+                " econv 1e-6\n convergence.use_default_criteria false\n");
+    try {
+      const auto st = named_stages::parse(world, geometry + gs + only);
+      check(st[1].excited_states.omega_target == 1e-6,
+            "parse: criteria mode on an excited-state-only stage with econv");
+    } catch (const std::exception& e) {
+      check(false, std::string("parse: criteria mode with econv: ") + e.what());
+    }
+    auto bare = es_deck;
+    bare.insert(bare.rfind("end\n"),
+                " convergence.use_default_criteria false\n");
+    rejects(geometry + gs + bare, "requests only excited_states needs econv");
+    const std::string mixed
+        = "molresponse excited\n reference gs\n protocol [1e-4]\n"
+          " requested_properties [excited_states, polarizability]\n"
+          " excited_states.roots 1\n excited_states.method tda\n"
+          " polarizability.frequencies [0.0]\n"
+          " polarizability.frequency_units au\n"
+          " polarizability.components [zz]\n"
+          " convergence.use_default_criteria false\n";
+    rejects(geometry + gs + mixed + " econv 1e-6\nend\n",
+            "written target for the driven-response legs");
+    try {
+      const auto st = named_stages::parse(world, geometry + gs + mixed
+                                                     + " dconv 1e-4\nend\n");
+      check(!st[1].excited_states.omega_target && st[1].properties.size() == 2,
+            "parse: criteria mode on a mixed stage with dconv alone");
+    } catch (const std::exception& e) {
+      check(false, std::string("parse: criteria mode, mixed: ") + e.what());
+    }
+  }
   {
     auto zero = es_deck;
     zero.insert(zero.rfind("end\n"), " econv 0\n");
@@ -909,8 +946,9 @@ int main(int argc, char** argv) {
     stage.excited_states.roots = 2;
     stage.excited_states.method = "tda";
     const std::string instead
-        = "compares each root's eigenvalue change against 5.0e-04 (5 x "
-          "max(dconv, thresh)), strictly";
+        = "stops the bundle when each root's eigenvalue change is below "
+          "5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a "
+          "written econv is judged by the stage verdict (D-092)";
     const auto unset
         = named_stages::excited_state_omega_target_row(stage, 5e-4);
     check(unset.group == cv::Group::requested_criteria

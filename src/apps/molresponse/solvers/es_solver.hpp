@@ -1216,16 +1216,16 @@ public:
 
   /// DESIGN B5: how this rung ends after `iterations` iterations of this
   /// attempt, by the shared rung_exit; this solver only supplies its
-  /// verdicts. Excited states have no written targets yet (they are not on
-  /// the named path), so the requested-criteria verdict is false and the
-  /// executor refuses that decider. iterate<> checks divergence before asking.
+  /// verdicts. The bundle's rung exits on the engine check whatever the
+  /// stage's decider (D-092 (a), bundle_rung_sample): a written econv is the
+  /// shared verdict's to judge, outside the loop. iterate<> checks
+  /// divergence before asking.
   [[nodiscard]] madness::convergence::StopReason
   stop_reason(const State& state, int iterations, int cap,
               int forced_iterations) const {
     return madness::convergence::rung_exit(
-        {policy_.decider, engine_check_passed(state),
-         /*criteria_met=*/false, state.stalled, iterations, cap,
-         forced_iterations});
+        bundle_rung_sample(engine_check_passed(state), state.stalled,
+                           iterations, cap, forced_iterations));
   }
 
   void save(const State &s, const std::string &path_prefix) const {

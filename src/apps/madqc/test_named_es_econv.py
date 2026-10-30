@@ -39,7 +39,8 @@ def run(label, root, text, expect=0):
         r = subprocess.run(launch + [binary, str(inp), '--prefix=' + str(root)],
                            cwd=work, env=env, stdout=out, stderr=subprocess.STDOUT,
                            timeout=900)
-    assert (r.returncode == 0) == (expect == 0), log.read_text()[-6000:]
+    if expect is not None:
+        assert (r.returncode == 0) == (expect == 0), log.read_text()[-6000:]
     print(label, 'exit', r.returncode, flush=True)
     return log.read_text()
 
@@ -86,6 +87,26 @@ assert pointer['state_key'] in accuracy, (pointer, sorted(accuracy))
 plain_block = es_without['requested_omega_target']
 assert plain_block['target'] is None and plain_block['set_by'] == 'not_set', plain_block
 assert all('omega_residual_within_requested' not in r for r in es_without['roots'])
+
+# D-092: the same deck in criteria mode. The bundle's solve stops on the
+# engine check in both modes, so it ends at the same iteration with the same
+# omega; the written econv is the stage verdict's. Until A's D-082 commit the
+# bundle's verdict entry is unavailable on the dconv criterion and enforced in
+# this mode, so the stage may end unconverged (exit 1): the exit code is not
+# asserted yet (after that commit: exit 0 and the entry satisfied).
+criteria_deck = with_econv.replace(' econv 1e-6\n', ' econv 1e-6\n convergence.use_default_criteria false\n')
+assert criteria_deck != with_econv
+crit = work / 'CriteriaEconv'
+run('criteria-econv', crit, criteria_deck, expect=None)
+stage_crit = excited(crit)
+assert stage_crit['convergence_report']['decided_by'] == 'requested_criteria', stage_crit['convergence_report']['decided_by']
+es_crit = stage_crit['properties']['excited_states']
+assert es_crit['iterations_at_rung'] == es_with['iterations_at_rung'], (es_crit['iterations_at_rung'], es_with['iterations_at_rung'])
+assert es_crit['stop_reason'] == 'converged' and es_crit['decided_by'] == 'engine_check', (es_crit['stop_reason'], es_crit['decided_by'])
+for root_crit, root_with in zip(es_crit['roots'], es_with['roots']):
+    assert root_crit['root_id'] == root_with['root_id']
+    assert abs(root_crit['omega'] - root_with['omega']) < 1e-10, (root_crit, root_with)
+assert es_crit['requested_omega_target']['target'] == 1e-6, es_crit['requested_omega_target']
 
 # A driven response has no local energy: econv without excited_states is
 # refused at the deck check, before any stage runs.
