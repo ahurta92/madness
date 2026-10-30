@@ -736,6 +736,17 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
   return record.at("saved_measurements");
 }
 
+// B6, D-091: whether a loaded generation is published again with the
+// planner's verdict: only when the load met today's request (the plan's
+// `unmet` empty) and the generation did not already stop converged. An R2
+// load (a stalled final rung, the request unmet) publishes nothing: the
+// stalled generation stays latest and the shared verdict judges its record.
+[[nodiscard]] inline bool
+republish_on_load(const std::string& stop_reason,
+                  const std::vector<std::string>& unmet) {
+  return stop_reason != "converged" && unmet.empty();
+}
+
 class MoldftCheckpoint {
   madness::World &world_;
   const Stage &stage_;
@@ -1157,10 +1168,10 @@ public:
   // in the report; the stage's verdict is the skeleton's (D-077).
   void finish(madness::SCF& scf, bool engine_converged) {
     if (work == "loaded" && iterations == 0) {
-      // A loaded state met today's request (B6). If its generation stopped
-      // as anything but converged, record the new verdict on disk, so a
-      // consumer reading the generation agrees with this run (A1).
-      if (latest_.stop_reason != "converged")
+      // A loaded state (B6): when it met today's request and its generation
+      // stopped as anything but converged, record the new verdict on disk,
+      // so a consumer reading the generation agrees with this run (A1).
+      if (republish_on_load(latest_.stop_reason, plan_.unmet))
         publish_reuse_verdict();
       return;
     }

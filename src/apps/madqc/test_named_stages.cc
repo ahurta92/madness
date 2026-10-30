@@ -1326,6 +1326,36 @@ int main(int argc, char** argv) {
         diverged["diverged"] = true;
         check(!verdict(json::array({diverged}), settings).at("converged"),
               "shared verdict: a diverged state");
+        // D-085, R3: a finished state finer than the final rung counts, its
+        // record keeping its true rung; a diverged one does not.
+        auto finer = record("converged", "engine_check");
+        finer["rung"]["thresh"] = 1e-7;
+        const auto beyond = verdict(json::array({finer}), settings);
+        check(beyond.at("converged")
+                  && !beyond.at("states")[0].at("at_rung").get<bool>()
+                  && beyond.at("states")[0].at("beyond_rung").get<bool>(),
+              "shared verdict (D-085): a converged state finer than the final "
+              "rung, beyond_rung");
+        auto finer_diverged = finer;
+        finer_diverged["diverged"] = true;
+        check(!verdict(json::array({finer_diverged}), settings).at("converged"),
+              "shared verdict (D-085): a diverged state finer than the final "
+              "rung");
+        // D-091: an R2 load leaves the stalled generation's own record.
+        const auto stalled = verdict(
+            json::array({record("stalled", "engine_check")}), settings);
+        check(!stalled.at("converged")
+                  && stalled.at("states")[0].contains("requested_accuracy"),
+              "shared verdict (D-091): a stalled final rung judged by the "
+              "engine check is not converged, its requested_accuracy "
+              "reported");
+        check(named_stages::republish_on_load("iteration_limit", {})
+                  && !named_stages::republish_on_load("converged", {})
+                  && !named_stages::republish_on_load(
+                      "stalled", {"stalled at rung 1 with the request unmet"}),
+              "republish_on_load (D-091): only a met load of a generation "
+              "that did not stop converged is published again; an R2 load is "
+              "not");
         const auto missing = verdict(json::array(), settings);
         check(!missing.at("converged")
                   && !missing.at("states")[0].at("found").get<bool>(),
@@ -1406,7 +1436,12 @@ int main(int argc, char** argv) {
         };
         const std::string criteria
             = " convergence.use_default_criteria false\n";
-        const auto es_dconv = es_deck("excited_states", criteria);
+        // D-092: criteria mode on an excited-states-only stage needs econv,
+        // so the stage whose dconv no needed state measures is in engine mode
+        // and the bundle judged on its stop has dipole legs beside it.
+        const auto es_dconv = es_deck("excited_states", "");
+        const auto mixed_dconv
+            = es_deck("polarizability, excited_states", criteria);
         const auto needed = molresponse.requested_states(es_dconv, 2);
         check(needed.size() == 1
                   && needed[0].at("measurements")
@@ -1419,9 +1454,27 @@ int main(int argc, char** argv) {
                          == "not_requested"
                   && alone.at("unmeasured_targets")
                          == json::array({"charge_density_change"}),
-              "shared verdict (D-082): a bundle under written targets none of "
-              "its kind's is judged on its stop; dconv, which no needed state "
-              "measures, listed once");
+              "shared verdict (D-082): dconv, which no needed state measures, "
+              "listed once, not a failed state");
+        const auto mixed_needed_dconv
+            = molresponse.requested_states(mixed_dconv, 2);
+        const json planner_leg = {{"key", mixed_needed_dconv[0].at("key")},
+                                  {"kind", "fd"},
+                                  {"rung", mixed_needed_dconv[0].at("rung")},
+                                  {"stop", "iteration_limit"},
+                                  {"diverged", false},
+                                  {"decided_by", "planner"},
+                                  {"saved_measurements", json::object()}};
+        const auto on_stop = judge(
+            mixed_dconv,
+            json::array({planner_leg, bundle_record(mixed_dconv, 1e-5)}));
+        check(
+            on_stop.at("converged")
+                && on_stop.at("states")[1].at("requested_accuracy").at("status")
+                       == "not_requested"
+                && on_stop.at("unmeasured_targets").empty(),
+            "shared verdict (D-082): a bundle under written targets none of "
+            "its kind's is judged on its stop");
         const auto es_econv
             = es_deck("excited_states", criteria + " econv 1e-6\n");
         const auto met
@@ -1543,7 +1596,7 @@ int main(int argc, char** argv) {
                      stage, named_stages::response_request(stage), 2, "g-ref",
                      es_records)
               .continuation.at("states")
-              .at(0);
+              .back();
         };
         const auto engine_plan = bundle_plan(es_engine);
         const auto criteria_plan = bundle_plan(es_econv);
@@ -1553,7 +1606,7 @@ int main(int argc, char** argv) {
                   && criteria_plan.at("action") != "loaded",
               "planner (D-061, D-082): a saved bundle missing econv, loaded "
               "and reported in engine mode, not loaded under written targets");
-        check(bundle_plan(es_dconv).at("action") == "loaded",
+        check(bundle_plan(mixed_dconv).at("action") == "loaded",
               "planner (D-082): a bundle under written targets none of its "
               "kind's (dconv only) is loaded on its stop");
       }

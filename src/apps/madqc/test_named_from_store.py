@@ -20,7 +20,11 @@ Cases (each copies a stored run into a scratch directory first):
 4. a 1-rank run continued on 2 ranks and the reverse (FD states load across
    rank counts);
 5. a frequency removed from the request (R5): nothing solved, the removed
-   frequency's state kept.
+   frequency's state kept;
+6. the ground state asked at a coarser final rung than it was saved at (R3,
+   D-085): loaded and judged converged at its finer rung, no generation
+   published again. Ground state alone: the deck check refuses a response
+   protocol tighter than its reference stage's written protocol.
 """
 import argparse
 import json
@@ -170,5 +174,18 @@ name, manifest = latest(root, 'resp')
 assert any('f0.05000' in s['key'] for s in manifest['numerical']['states']), \
     [s['key'] for s in manifest['numerical']['states']]
 assert len(generations(root, 'resp')) == 1, generations(root, 'resp')
+
+# 6. R3 (D-085): the ground state saved at 1e-4, asked at 1e-3. The planner
+# loads the finer state; the shared verdict counts it, so the stage completes.
+root = copy('h2-r1', 'finer')
+gs_part = deck('h2-r1').split('molresponse optical')[0]
+assert '  protocol [1e-4]\n' in gs_part
+run('finer', root, gs_part.replace('  protocol [1e-4]\n', '  protocol [1e-3]\n'))
+record = result(root, 'gs')
+assert record['work'] == 'loaded' and record['iterations_this_run'] == 0, record['work']
+assert record['status'] == 'completed', record['status']
+assert latest(root, 'gs')[0] == latest(stored / 'h2-r1', 'gs')[0], 'the ground state was published again'
+assert generations(root, 'gs') == generations(stored / 'h2-r1', 'gs')
+no_shards(root, 'gs', run_id(root))
 
 print('from-store tests passed', flush=True)

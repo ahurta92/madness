@@ -728,10 +728,14 @@ saved orbitals no longer meet them.
 One verdict for every stage (D-046, D-077): a stage is converged when every
 state its request needs (moldft: the ground state; molresponse: each
 perturbation and frequency the properties need, and the excited-state bundle)
-has a record at the request's final rung that is not diverged and either was
+has a record at the request's final rung (or finer, when a finished state
+was loaded under R3, D-085) that is not diverged and either was
 loaded under a met request (`decided_by: planner`) or stopped `converged`
 and, with the written targets deciding, its saved measurements meet them. The
-records are the generation's `numerical.states`. The written targets are
+records are the generation's `numerical.states`. A moldft state loaded
+after its final rung stalled (R2) is not published again: the stalled
+generation stays latest, the stage is unconverged and the next stage does
+not run (D-091). The written targets are
 judged once per state; a molresponse stage records the result at
 `convergence_report.requested_accuracy` too, one entry per state key, in the
 same form as moldft's.

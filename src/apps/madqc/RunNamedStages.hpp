@@ -282,16 +282,16 @@ struct AppSpec {
 // verdict (skeleton spec 3.3 step 7), from a generation's state records
 // (AppSpec::state_records, which also rebuilds those of a generation written
 // before S4a): converged when every state the request needs
-// (AppSpec::requested_states) has a record at its rung, not diverged, and was
-// either loaded under a met request (decided_by planner, D-016) or stopped
-// converged and, when the written targets decide (B8), its saved measurements
-// meet them. Each state is judged on the written targets its kind has rows
-// for (D-082; requested_states' `measurements`), by one call of
-// evaluate_explicit_criteria per state (B1); its result is the state's
-// requested_accuracy, the unmet targets B8 lists separately. A state none of
-// whose kind's rows is a written target is judged on its stop alone (its
-// requested_accuracy not_requested), as the planner judges it. A written
-// target no needed state has rows for is listed once, in
+// (AppSpec::requested_states) has a record at its rung (or finer, R3,
+// D-085), not diverged, and was either loaded under a met request
+// (decided_by planner, D-016) or stopped converged and, when the written
+// targets decide (B8), its saved measurements meet them. Each state is judged
+// on the written targets its kind has rows for (D-082; requested_states'
+// `measurements`), by one call of evaluate_explicit_criteria per state (B1);
+// its result is the state's requested_accuracy, the unmet targets B8 lists
+// separately. A state none of whose kind's rows is a written target is judged
+// on its stop alone (its requested_accuracy not_requested), as the planner
+// judges it. A written target no needed state has rows for is listed once, in
 // `unmeasured_targets`. Returns {converged, states: [...],
 // unmeasured_targets: [...]}.
 inline json
@@ -339,12 +339,18 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
                                || accuracy.at("status") == "not_requested";
       state["found"] = true;
       state["at_rung"] = madness::scf_continuation::same_rung(at, rung);
+      // D-085, R3: a finished state finer than the final rung counts, as the
+      // planner loads it (LadderPlanner's at_or_beyond_final); the record
+      // keeps its true rung.
+      state["beyond_rung"]
+          = !state.at("at_rung").get<bool>() && at.thresh < rung.thresh;
       state["stop"] = record->at("stop");
       state["diverged"] = record->at("diverged");
       state["decided_by"] = record->at("decided_by");
       state["requested_accuracy"] = accuracy;
       state["enforced"] = enforced;
-      met = state.at("at_rung").get<bool>()
+      met = (state.at("at_rung").get<bool>()
+             || state.at("beyond_rung").get<bool>())
             && !record->at("diverged").get<bool>()
             && (loaded || (stopped && targets_met));
     }
