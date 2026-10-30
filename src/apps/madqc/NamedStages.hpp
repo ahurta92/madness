@@ -174,6 +174,15 @@ struct Controls : madness::QCCalculationParametersBase {
     initialize<bool>("checkpoint.keep_all", false,
                      "keep every generation (debugging); default: delete "
                      "older mid-rung generations");
+    // S5, DESIGN B3: a molresponse stage's Dalton seed (a starting guess for
+    // states with no saved state); no defaults.
+    initialize<std::string>("seed.dalton_dir", "",
+                            "a Dalton linear-response output directory "
+                            "(molden.inp and RSPVEC) seeding the stage's "
+                            "excited states and driven legs");
+    initialize<double>("seed.freq_tol", 0.0,
+                       "the largest frequency distance (au) at which a "
+                       "driven leg takes a Dalton RSPVEC record as its seed");
   }
   [[nodiscard]] std::string get_tag() const override { return "stage"; }
   [[nodiscard]] std::set<std::string> case_sensitive_keys() const override {
@@ -215,6 +224,10 @@ struct Stage {
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
   int checkpoint_every_iterations = 0;
   bool checkpoint_keep_all = false;
+  // S5, B3: the Dalton seed directory (absolute; empty: unseeded) and the
+  // driven legs' frequency tolerance (0 when the stage has no driven legs).
+  std::string seed_dalton_dir;
+  double seed_freq_tol = 0.0;
   // The keywords this stage's deck wrote, so "who set it" (B9) does not
   // depend on values the parser fills in for the engine.
   std::set<std::string> written;
@@ -524,6 +537,7 @@ inline std::vector<Stage> parse(madness::World &world,
   // driven response has no local energy, so no energy target.
   const std::map<std::string, std::string> replaced_response_keys
       = {{"accuracy.density_change", "dconv (the density-change target)"},
+         {"dalton.dir", "now seed.dalton_dir (the Dalton seed, S5)"},
          {"accuracy.energy_change",
           "not applicable: a driven response has no local energy (see the "
           "reference stage's energy change)"}};
@@ -634,6 +648,51 @@ inline std::vector<Stage> parse(madness::World &world,
           b.name
           + ": checkpoint.every_iterations is not available for molresponse, "
             "which publishes at solve ends only");
+    // S5, B3: the Dalton seed is a molresponse stage's; seed.freq_tol is
+    // required when the stage requests driven-response states (the legs it
+    // seeds) and refused otherwise: a key that does nothing is refused.
+    for (const auto* k : {"seed.dalton_dir", "seed.freq_tol"})
+      if (seen.contains(k) && b.kind != "molresponse")
+        throw std::runtime_error(b.name + ": " + k
+                                 + " is a molresponse stage's (the Dalton "
+                                   "seed)");
+    if (b.kind == "molresponse") {
+      const auto requested
+          = controls.get<std::vector<std::string>>("requested_properties");
+      const bool driven = std::any_of(
+          requested.begin(), requested.end(), [](const std::string& p) {
+            return p == "polarizability" || p == "hyperpolarizability"
+                   || p == "raman";
+          });
+      const bool seeded = seen.contains("seed.dalton_dir");
+      if (seen.contains("seed.freq_tol") && !(seeded && driven))
+        throw std::runtime_error(
+            b.name
+            + ": seed.freq_tol does nothing here (it needs "
+              "seed.dalton_dir and a driven-response property)");
+      if (seeded && driven && !seen.contains("seed.freq_tol"))
+        throw std::runtime_error(
+            b.name
+            + ": seed.freq_tol is required with seed.dalton_dir and a "
+              "driven-response property (no default tolerance, B3)");
+      if (seen.contains("seed.freq_tol")
+          && !(controls.get<double>("seed.freq_tol") > 0.0))
+        throw std::runtime_error(b.name + ": seed.freq_tol must be positive");
+      if (seeded) {
+        const auto dir = controls.get<std::string>("seed.dalton_dir");
+        // Relative to where madqc was launched, as the unnamed path resolves
+        // dalton.dir; every stage runs from its own directory.
+        stage.seed_dalton_dir
+            = std::filesystem::absolute(dir).lexically_normal().string();
+        stage.seed_freq_tol = controls.get<double>("seed.freq_tol");
+        // The engine's spellings, which its seed import reads (S5: no
+        // engine change).
+        rp.set_user_defined_value<std::string>("dalton.dir",
+                                               stage.seed_dalton_dir);
+        if (driven)
+          rp.set_user_defined_value("seed.freq_tol", stage.seed_freq_tol);
+      }
+    }
     stage.checkpoint_every_iterations
         = controls.get<int>("checkpoint.every_iterations");
     stage.checkpoint_keep_all = controls.get<bool>("checkpoint.keep_all");

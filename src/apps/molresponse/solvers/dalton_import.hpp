@@ -1061,6 +1061,25 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
 }
 
 // ---------------------------------------------------------------------------
+// The record dalton_fd_guess seeds a dipole leg from: of the `label` records
+// (e.g. ZDIPLEN), the one nearest in frequency to `freq` within `tol`
+// (|d omega| <= tol; of equally near records, the last). nullptr when none is
+// within tol. `distance`, when given, receives its |d omega|. Pure.
+inline const RspVecEntry *
+nearest_dalton_record(const std::vector<RspVecEntry> &entries,
+                      const std::string &label, double freq, double tol,
+                      double *distance = nullptr) {
+  const RspVecEntry *best = nullptr;
+  double best_d = tol;
+  for (const auto &e : entries) {
+    if (std::string(e.lab1) != label) continue;
+    const double d = std::abs(e.freq1 - freq);
+    if (d <= best_d) { best_d = d; best = &e; }
+  }
+  if (best && distance) *distance = best_d;
+  return best;
+}
+
 // NEAREST-FREQUENCY FD GUESS (2026-09-09, deck `seed.freq_tol`). For a dipole
 // FD leg whose frequency is not in the RSPVEC (the derived two-photon legs at
 // MADNESS's omega_f/2), return the DALTON N(omega) record closest in frequency
@@ -1107,13 +1126,9 @@ dalton_fd_guess(madness::World &world, GroundState &gs,
   auto rsp = read_rspvec(m.rspvec_path);
   const auto &info    = rsp.first;
   const auto &entries = rsp.second;
-  const RspVecEntry *best = nullptr;
   double best_d = tol;
-  for (const auto &e : entries) {
-    if (std::string(e.lab1) != dalton_dipole_label(axis)) continue;
-    const double d = std::abs(e.freq1 - freq);
-    if (d <= best_d) { best_d = d; best = &e; }
-  }
+  const RspVecEntry *best = nearest_dalton_record(
+      entries, dalton_dipole_label(axis), freq, tol, &best_d);
   if (!best) {
     if (world.rank() == 0)
       print("[DALTON-SEED] no", dalton_dipole_label(axis), "record within", tol,

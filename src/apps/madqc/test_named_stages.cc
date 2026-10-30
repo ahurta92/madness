@@ -1358,6 +1358,145 @@ int main(int argc, char** argv) {
               "spec requested_states (response): one FD state per requested "
               "frequency at the final protocol");
       }
+      // S5: the Dalton seed's member kind.
+      {
+        namespace fs = std::filesystem;
+        check(named_stages::sha256_hex("")
+                      == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4959"
+                         "91b7852b855"
+                  && named_stages::sha256_hex("abc")
+                         == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb4"
+                            "10ff61f20015ad"
+                  && named_stages::sha256_hex(std::string(1000000, 'a'))
+                         == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e04"
+                            "6d39ccc7112cd0",
+              "sha256: the FIPS 180-4 test vectors");
+        const auto dalton
+            = fs::path(__FILE__).parent_path().parent_path().parent_path()
+              / "examples/qc/response_h2o_tpa_seeded/dalton";
+        const auto block = named_stages::dalton_seed_block(dalton.string());
+        std::map<std::string, std::string> sums;
+        for (const auto& f : block.at("files"))
+          sums[f.at("path").get<std::string>()]
+              = f.at("sha256").get<std::string>();
+        check(sums.size() == 2
+                  && sums.at("seed/molden.inp")
+                         == "86cbac809c3cbe67e79443980fa118f3475aea493afd692264"
+                            "863a78655ae3d3"
+                  && sums.at("seed/RSPVEC")
+                         == "a521dc7815608bea58b991a47ccdbdd34ee071a28873737556"
+                            "59e87e03cd2091",
+              "dalton_seed_block: the files the reader reads (molden.inp, "
+              "RSPVEC; no .out here), by size and SHA-256");
+        const auto generation
+            = fs::temp_directory_path()
+              / ("test_named_stages_seed_" + std::to_string(::getpid()));
+        fs::remove_all(generation);
+        fs::create_directories(generation / "seed");
+        for (const auto& f : block.at("files"))
+          fs::copy_file(f.at("source").get<std::string>(),
+                        generation / f.at("path").get<std::string>());
+        check(named_stages::check_seed_files(generation, block).empty(),
+              "check_seed_files: intact copies");
+        std::ofstream(generation / "seed/RSPVEC", std::ios::app) << "x";
+        check(named_stages::check_seed_files(generation, block)
+                      .find("seed/RSPVEC altered")
+                  != std::string::npos,
+              "check_seed_files: an altered copy");
+        fs::remove(generation / "seed/molden.inp");
+        check(named_stages::check_seed_files(generation, block)
+                      .find("seed/molden.inp missing")
+                  != std::string::npos,
+              "check_seed_files: a missing copy");
+        fs::remove_all(generation);
+        // The record a driven leg is seeded from (dalton_fd_guess's choice,
+        // nearest_dalton_record), on the qctest's RSPVEC: its ZDIPLEN
+        // records are at 0.1609303480 and 0.1916703618 au; the qctest's
+        // 2PA legs sit at 0.16125 and 0.19169.
+        {
+          const auto rsp = read_rspvec((dalton / "RSPVEC").string());
+          double d = -1;
+          const auto* near = molresponse_v3::nearest_dalton_record(
+              rsp.second, "ZDIPLEN", 0.16125, 0.01, &d);
+          check(
+              near != nullptr && std::abs(near->freq1 - 0.1609303480) < 1e-9
+                  && std::abs(d - (0.16125 - 0.1609303480)) < 1e-9,
+              "nearest_dalton_record: the ZDIPLEN record within seed.freq_tol "
+              "of the leg's frequency");
+          const auto* far = molresponse_v3::nearest_dalton_record(
+              rsp.second, "ZDIPLEN", 0.19169, 0.01);
+          check(far != nullptr && std::abs(far->freq1 - 0.1916703618) < 1e-9,
+                "nearest_dalton_record: the nearer of two records");
+          check(molresponse_v3::nearest_dalton_record(rsp.second, "ZDIPLEN",
+                                                      0.05, 0.01)
+                        == nullptr
+                    && molresponse_v3::nearest_dalton_record(
+                           rsp.second, "ZDIPLEN", 0.16125, 1e-4)
+                           == nullptr,
+                "nearest_dalton_record: none outside seed.freq_tol (the leg "
+                "starts unseeded)");
+          check(molresponse_v3::nearest_dalton_record(rsp.second, "ZDIPLEN",
+                                                      0.3218606960, 0.01)
+                    == nullptr,
+                "nearest_dalton_record: an excitation record (EXCITLAB) at the "
+                "frequency is not a dipole record");
+        }
+        // The deck keys (B3, DESIGN v3.27).
+        const std::string seeded_es
+            = "molresponse es\n reference GS\n protocol [1e-4]\n dconv 1e-4\n"
+              " requested_properties [excited_states]\n excited_states.roots "
+              "1\n"
+              " excited_states.method tda\n seed.dalton_dir "
+              + dalton.string()
+              + "\n"
+                "end\n";
+        try {
+          const auto stages
+              = named_stages::parse(world, geometry + gs + seeded_es);
+          check(stages[1].seed_dalton_dir == dalton.lexically_normal().string()
+                    && stages[1].seed_freq_tol == 0.0
+                    && stages[1]
+                               .params.get<ResponseParameters>()
+                               .get<std::string>("dalton.dir")
+                           == stages[1].seed_dalton_dir,
+                "seed.dalton_dir: a molresponse stage's, handed to the engine");
+          const auto settings = molresponse.settings(stages[1], 2);
+          check(
+              settings.seed.find("Dalton directory") != std::string::npos
+                  && madness::convergence::render_settings_table(settings).find(
+                         "  Seed: ")
+                         != std::string::npos
+                  && madness::convergence::to_json(settings).contains("seed"),
+              "settings (S5): the seed shown and recorded");
+          check(!madness::convergence::to_json(molresponse.settings(optical, 2))
+                     .contains("seed"),
+                "settings (S5): an unseeded stage's record is unchanged");
+        } catch (const std::exception& e) {
+          check(false, std::string("seeded stage: ") + e.what());
+        }
+        auto with = [&](std::string block_text, const std::string& lines) {
+          block_text.replace(block_text.find("end\n"), 0, lines);
+          return block_text;
+        };
+        rejects(geometry + gs + with(seeded_es, " seed.freq_tol 0.01\n"),
+                "seed.freq_tol does nothing here");
+        rejects(
+            geometry + gs
+                + with(response, " seed.dalton_dir " + dalton.string() + "\n"),
+            "seed.freq_tol is required");
+        rejects(geometry + gs
+                    + with(response, " seed.dalton_dir " + dalton.string()
+                                         + "\n seed.freq_tol -1\n"),
+                "seed.freq_tol must be positive");
+        rejects(geometry
+                    + with(gs, " seed.dalton_dir " + dalton.string() + "\n"),
+                "is a molresponse stage's");
+        rejects(geometry + gs
+                    + with(response, " dalton.dir " + dalton.string() + "\n"),
+                "now seed.dalton_dir");
+        rejects(geometry + gs + with(response, " seed.es_warmup true\n"),
+                "unsupported parameter seed.es_warmup");
+      }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;
       outcome.converged = true;

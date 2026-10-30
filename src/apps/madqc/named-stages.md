@@ -39,7 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`, `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`), and per property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -416,6 +416,36 @@ tighter targets, unpublished-generation isolation, publication failure, missing
 or corrupt payloads, incomplete inventory and incompatible geometry in serial
 and two MPI ranks. It compares final H2 energy and dipole and preserves the
 original generation hashes across continuation.
+
+## Dalton seed
+
+A `molresponse` stage can take its starting guesses from a Dalton
+linear-response output directory (S5, DESIGN B3):
+
+```
+  seed.dalton_dir dalton/
+  seed.freq_tol 0.01
+```
+
+- `seed.dalton_dir` names the directory, relative to where madqc runs. It must hold
+  `molden.inp` and `RSPVEC` loose (or a unique `*.molden.inp`/`*.molden` and
+  `*.RSPVEC`), and may hold the Dalton `.out`; a directory with only a `.tar.gz` is
+  refused on the named path. A `.out` naming another method than HF is refused.
+- The excited-state bundle starts from the `RSPVEC` eigenvectors (the seed guard's
+  overlaps are recorded); a driven leg starts from the `RSPVEC` record within
+  `seed.freq_tol` au of its frequency. `seed.freq_tol` is required when the stage
+  requests a driven-response property and refused otherwise; there is no default.
+- A seed is a starting guess only: a state with a saved state starts from it
+  instead (`--continue`), and a fresh state's plan says so in its `why`. The
+  geometry in `molden.inp` must match the reference molecule; the engine refuses
+  the stage before the response solve otherwise.
+- Every generation the stage publishes holds a copy of the seed files under
+  `seed/`, listed in the manifest's `seed` block by size and SHA-256 with what the
+  engine recorded seeding from. A generation whose copies are missing or altered is
+  not published, and is refused when read.
+- The engine spellings `dalton.dir`, `io.dalton.dir` and `seed.es_warmup` are refused
+  in a named stage. The ground state's seed from `molden.inp` is not available on the
+  named path yet.
 
 ## Convergence evidence (milestone 2d reporting slice)
 

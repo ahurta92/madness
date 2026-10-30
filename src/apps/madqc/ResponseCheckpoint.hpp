@@ -3,6 +3,8 @@
 #include "../molresponse/solvers/function_kinetics.hpp"
 
 #include "NamedStages.hpp"
+#include "Sha256.hpp"
+#include <apps/molresponse/solvers/dalton_import.hpp>
 #include <apps/molresponse/solvers/es_save_load.hpp>
 #include <apps/molresponse/solvers/fd_save_load.hpp>
 #include <apps/molresponse/solvers/vbc_save_load.hpp>
@@ -134,6 +136,16 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
   settings.checkpoints.keep_all_set_by
       = stage.written.contains("checkpoint.keep_all") ? SetBy::user
                                                       : SetBy::engine_default;
+  // S5: the Dalton seed, as written (a starting guess for states with no
+  // saved state).
+  if (!stage.seed_dalton_dir.empty()) {
+    std::ostringstream seed;
+    seed << "Dalton directory " << stage.seed_dalton_dir << " (user)";
+    if (stage.seed_freq_tol > 0.0)
+      seed << "; driven legs within " << stage.seed_freq_tol
+           << " au of an RSPVEC frequency (seed.freq_tol, user)";
+    settings.seed = seed.str();
+  }
   settings.warnings = cv::unenforced_target_warnings(settings);
   for (auto& warning : cv::incomplete_request_warnings(
            settings, {"charge_density_change", "bsh_residual"}))
@@ -445,6 +457,63 @@ response_engine_plans(const StagePlans& plans);
   return item;
 }
 
+// S5, skeleton spec 3.5: the Dalton seed's member kind, held by the
+// application (C5: the storage core does not know it). A seeded stage's
+// generations each hold a copy of the files the engine's Dalton reader reads,
+// under seed/, listed in the manifest's seed block by name, size and SHA-256.
+
+// The seed block of a stage seeded from `dir`: each file the engine's reader
+// locates there (molden.inp, RSPVEC, a Dalton .out when present), with its
+// source, size and SHA-256. The reader is the first validator: it refuses an
+// ambiguous directory; loose files only (no tarball extraction on the named
+// path); a .out naming another method than HF is refused here. Rank 0.
+[[nodiscard]] inline json dalton_seed_block(const std::string& dir) {
+  const auto found
+      = molresponse_v3::locate_dalton_dir(dir, "", {}, {}, {}, false);
+  if (found.method != "unknown" && found.method != "HF")
+    throw std::runtime_error("Dalton seed: method " + found.method
+                             + " (only HF seeds are validated)");
+  json files = json::array();
+  for (const auto& path :
+       {found.molden_path, found.rspvec_path, found.out_path})
+    if (!path.empty())
+      files.push_back(
+          {{"path", "seed/" + std::filesystem::path(path).filename().string()},
+           {"source", path},
+           {"bytes", std::filesystem::file_size(path)},
+           {"sha256", named_stages::sha256_file(path)}});
+  return {{"dalton_dir", dir}, {"files", std::move(files)}};
+}
+
+// The copies a generation holds against its seed block: present, size and
+// SHA-256 as listed; then the reader on the copies. Returns what is wrong
+// (empty when nothing is). Rank 0.
+[[nodiscard]] inline std::string
+check_seed_files(const std::filesystem::path& generation, const json& seed) {
+  namespace fs = std::filesystem;
+  std::string problems;
+  const auto note = [&](const std::string& what) {
+    problems += (problems.empty() ? "" : "; ") + what;
+  };
+  for (const auto& f : seed.at("files")) {
+    const auto copy = generation / f.at("path").get<std::string>();
+    if (!fs::is_regular_file(fs::symlink_status(copy)))
+      note(f.at("path").get<std::string>() + " missing");
+    else if (fs::file_size(copy) != f.at("bytes").get<std::uintmax_t>()
+             || named_stages::sha256_file(copy.string())
+                    != f.at("sha256").get<std::string>())
+      note(f.at("path").get<std::string>() + " altered");
+  }
+  if (problems.empty()) {
+    try {
+      (void)dalton_seed_block((generation / "seed").string());
+    } catch (const std::exception& e) {
+      note(e.what());
+    }
+  }
+  return problems.empty() ? std::string{} : "Dalton seed files: " + problems;
+}
+
 // Scientific policy for the named response frontend. The engine still owns
 // state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -455,6 +524,8 @@ class ResponseCheckpoint {
   json reference_, request_;
   int natom_;
   Manifest latest_;
+  // S5: the seed block of a seeded stage (null when unseeded).
+  json seed_ = nullptr;
   bool restored_ = false, loaded_ = false;
   // B6: this attempt's iteration totals and plans (S3b: the functions that
   // read them take them as arguments).
@@ -820,6 +891,16 @@ public:
                           metadata, reference.value("generation", ""), totals)},
            {"plans", sample.at("plans")}};
     m.targets = {{"dconv", request.at("dconv")}};
+    // S5: a seeded stage's seed block: the files its generations hold, and
+    // what the engine recorded seeding from.
+    if (sample.contains("seed")) {
+      m.seed = sample.at("seed");
+      for (auto& f : m.seed.at("files"))
+        f.erase("source");
+      m.seed["source_files"] = sample.at("seed").at("files");
+      if (metadata.contains("seeded_from"))
+        m.seed["seeded_from"] = metadata.at("seeded_from");
+    }
     m.position = sample.at("position");
     if (!sample.at("previous_generation").is_null())
       m.position["previous_generation"] = sample.at("previous_generation");
@@ -887,6 +968,19 @@ public:
       const auto attempt = m.numerical.value("attempt_directory", "");
       require(origins.contains(attempt) && origins.at(attempt) == m.numerical.at("request"),
               "invalid response state: missing or inconsistent originating request registry");
+    }
+    // S5: a seed block lists the copied seed files by path under seed/,
+    // size and SHA-256 (the files themselves are checked where the
+    // generation's directory is read: at publish and before a load).
+    if (m.seed.is_object()) {
+      require(m.seed.contains("files") && m.seed.at("files").is_array()
+                  && !m.seed.at("files").empty(),
+              "Dalton seed block without files");
+      for (const auto& f : m.seed.at("files"))
+        require(f.at("path").get<std::string>().starts_with("seed/")
+                    && f.at("bytes").is_number_unsigned()
+                    && f.at("sha256").get<std::string>().size() == 64,
+                "Dalton seed block: malformed file entry");
     }
     auto expected = members(m.numerical.at("engine_metadata"));
     std::vector<std::string> actual;
@@ -1117,6 +1211,10 @@ public:
         attempt_(attempt), reference_(std::move(reference)), natom_(natom),
         publish_(std::move(publish)) {
     request_ = response_request(stage);
+    if (!stage.seed_dalton_dir.empty())
+      seed_ = json::parse(madness::checkpoint::detail::on_root(world_, [&] {
+        return dalton_seed_block(stage.seed_dalton_dir).dump();
+      }));
   }
 
   [[nodiscard]] bool targets_decide() const {
@@ -1129,6 +1227,13 @@ public:
   // complete (the stage loads as published).
   bool accept(const Manifest& latest) {
     latest_ = latest;
+    // S5: a generation's seed copies are checked before it is used.
+    if (latest_.seed.is_object()) {
+      const auto problem = madness::checkpoint::detail::on_root(world_, [&] {
+        return check_seed_files(store_ / latest_.generation, latest_.seed);
+      });
+      require(problem.empty(), problem);
+    }
     reference_changed = latest_.reference != reference_;
     if (reference_changed) return false; // no old descendants enter this attempt
     restored_ = true;
@@ -1323,6 +1428,8 @@ private:
         {"plans", plans_.records},
         {"bundle_verdicts",
          {{"loaded", loaded_}, {"planner_key", planner_bundle_key()}}}};
+    if (!seed_.is_null())
+      write.publish_sample["seed"] = seed_;
     write.iterations_this_run = iterations;
     write.final = final;
     write.check_before_write = [&](const Manifest& m) {
@@ -1367,6 +1474,17 @@ private:
         m.numerical["bundle_indices"] = std::move(indices);
         if (!analyses.empty())
           m.numerical["transition_analysis"] = std::move(analyses);
+        // S5: every generation of a seeded stage holds its seed files; the
+        // copies are checked here, so a generation without them stays
+        // unpublished (D-052).
+        if (!seed_.is_null()) {
+          std::filesystem::create_directories(directory / "seed");
+          for (const auto& f : seed_.at("files"))
+            std::filesystem::copy_file(f.at("source").get<std::string>(),
+                                       directory
+                                           / f.at("path").get<std::string>());
+          return check_seed_files(directory, m.seed);
+        }
         return std::string{};
       });
     };
@@ -1544,6 +1662,15 @@ inline StagePlans plan_response_states(const Stage& stage,
   std::map<std::string, double> requested_rungs;
   auto request = ResponseCheckpoint::ladder_request(stage, reference_generation,
                                                     requested_rungs);
+  // S5 (R4's wording): a state that starts fresh in a seeded stage takes its
+  // starting guess from the Dalton seed; the plan says so.
+  const auto seeded = [&](madness::planning::LadderPlan plan) {
+    if (!stage.seed_dalton_dir.empty()
+        && plan.action == madness::planning::Action::fresh)
+      plan.why += "; its starting guess from the Dalton seed (seed_source: "
+                  "dalton)";
+    return plan;
+  };
   for (const auto& [perturbation, frequency] :
        response_needs(stage_request, natom).legs) {
     std::ostringstream identity;
@@ -1560,8 +1687,8 @@ inline StagePlans plan_response_states(const Stage& stage,
     const auto channel = perturbation.description();
     const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
     ResponseCheckpoint::adopt(
-        plans, madness::planning::plan_ladder(own, seed, request), own, seed,
-        request, molresponse_v3::fd_node_id(perturbation, frequency),
+        plans, seeded(madness::planning::plan_ladder(own, seed, request)), own,
+        seed, request, molresponse_v3::fd_node_id(perturbation, frequency),
         {{"perturbation", channel}, {"frequency", frequency}},
         [&](const std::string& protocol) {
           return ResponseCheckpoint::state_key(channel, protocol, fkey);
@@ -1581,7 +1708,8 @@ inline StagePlans plan_response_states(const Stage& stage,
         metric.target.reset();
     const auto own = ResponseCheckpoint::own_state(
         records, bundle->id, requested_rungs, request.ladder.back());
-    auto plan = madness::planning::plan_ladder(own, std::nullopt, request);
+    auto plan
+        = seeded(madness::planning::plan_ladder(own, std::nullopt, request));
     if (!own)
       for (const auto& record : records)
         if (record.value("kind", "") == "excited_states") {

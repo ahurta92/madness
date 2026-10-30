@@ -95,6 +95,9 @@ struct ConvergenceSettings {
   std::vector<MetricSetting> metrics;
   IterationCaps iteration_caps;
   CheckpointCadence checkpoints;
+  /// A stage's starting-guess source, as written (e.g. a Dalton seed, S5);
+  /// empty: none. Shown and recorded only when present.
+  std::string seed;
   std::vector<std::string> warnings;
 };
 
@@ -449,19 +452,23 @@ to_json(const ConvergenceSettings& settings) {
          {"keyword", metric.keyword},
          {"note", metric.note}});
   }
-  return {{"schema", "madqc.convergence_settings.v1"},
-          {"stage", settings.stage},
-          {"application", settings.application},
-          {"decided_by", to_string(settings.decider)},
-          {"decided_by_set_by",
-           settings.decider_set_by_user ? "user" : "engine_default"},
-          {"metrics", metrics},
-          {"maxiter",
-           {{"per_rung", settings.iteration_caps.per_rung},
-            {"set_by", to_string(settings.iteration_caps.set_by)},
-            {"counts", "iterations at a rung in this run (D-007)"}}},
-          {"checkpoints", checkpoints_to_json(settings.checkpoints)},
-          {"warnings", settings.warnings}};
+  nlohmann::json json
+      = {{"schema", "madqc.convergence_settings.v1"},
+         {"stage", settings.stage},
+         {"application", settings.application},
+         {"decided_by", to_string(settings.decider)},
+         {"decided_by_set_by",
+          settings.decider_set_by_user ? "user" : "engine_default"},
+         {"metrics", metrics},
+         {"maxiter",
+          {{"per_rung", settings.iteration_caps.per_rung},
+           {"set_by", to_string(settings.iteration_caps.set_by)},
+           {"counts", "iterations at a rung in this run (D-007)"}}},
+         {"checkpoints", checkpoints_to_json(settings.checkpoints)},
+         {"warnings", settings.warnings}};
+  if (!settings.seed.empty())
+    json["seed"] = settings.seed;
+  return json;
 }
 
 /// The "Effective limit" cell of a settings row: the value compared, how it
@@ -528,6 +535,8 @@ render_settings_table(const ConvergenceSettings& settings) {
              + detail::words(to_string(settings.iteration_caps.set_by))
              + "), per run; a restart starts the count again\n";
   table += "  Checkpoints: " + checkpoints_text(settings.checkpoints) + "\n";
+  if (!settings.seed.empty())
+    table += "  Seed: " + settings.seed + "\n";
   for (const auto& warning : settings.warnings)
     table += "  WARNING: " + warning + "\n";
   return table;
