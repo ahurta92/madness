@@ -76,6 +76,25 @@ inline bool effective_hdf5(const Params &params) {
 // The projection happens at the deck's box; SCF re-sets its own
 // FunctionDefaults afterwards, and load_mos re-projects k/thresh as needed.
 // ---------------------------------------------------------------------------
+
+/// D-096: the deck's print_level is moldft's scale (0 none, 1 final energy,
+/// 2 iterations, 3 timings, the default, 10 debug); the engine's levels are
+/// Silent, Normal, Verbose, Debug. Mapped as Drivers.hpp maps the scale for
+/// the optimizer (3 -> 1): an unwritten named print_level runs the engine at
+/// Normal, one row per iteration; the unnamed decks writing 1 are unchanged;
+/// 4 to 9 add the channel detail (Verbose); 10 and above are Debug. Before
+/// this the value was cast onto the enum, so the default ran at Debug.
+/// Nothing but printing reads the level.
+[[nodiscard]] inline PrintLevel engine_print_level(int deck_print_level) {
+  if (deck_print_level <= 0)
+    return PrintLevel::Silent;
+  if (deck_print_level <= 3)
+    return PrintLevel::Normal;
+  if (deck_print_level <= 9)
+    return PrintLevel::Verbose;
+  return PrintLevel::Debug;
+}
+
 inline void seed_gs_from_dalton_dir(World &world, const Params &params,
                                     const std::filesystem::path &workdir,
                                     const std::string &dalton_dir) {
@@ -522,8 +541,7 @@ struct molresponse_v3_lib {
     // Plateau detector (deck defaults equal the policy defaults: window 6, ratio 0.1).
     if (rp.is_user_defined("stall.window")) in.settings.policy.stall_window = rp.stall_window();
     if (rp.is_user_defined("stall.ratio"))  in.settings.policy.stall_ratio  = rp.stall_ratio();
-    in.settings.print_level =
-        static_cast<PrintLevel>(std::max(0, std::min(3, rp.print_level())));
+    in.settings.print_level = engine_print_level(rp.print_level());
     // ES initial-guess knobs (deck: response { excited.guess virtual_ao,
     // excited.guess_basis aug-cc-pvtz }). Deck default (solid_harmonics /
     // aug-cc-pvdz) maps to the ExecutorSettings default — existing decks are

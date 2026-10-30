@@ -95,7 +95,10 @@ void save_es_roots(madness::World &world,
                    const std::string &dir,
                    bool converged,
                    double wall_s = 0.0,            // R1b: bundle-solve wall time
-                   bool register_aggregate = true) {
+                   bool register_aggregate = true,
+                   PrintLevel print_level = PrintLevel::Normal) {
+  // D-096: the [SAVE] and MEMORY_HWM lines print at Verbose only; the
+  // executor's identified bundle line is the one line at Normal.
   const int n_roots = static_cast<int>(state.roots.size());
   MADNESS_CHECK(n_roots > 0);
   auto kinetic_history = state.kinetic_history;
@@ -317,16 +320,18 @@ void save_es_roots(madness::World &world,
       meta.set_es_bundle(key, bundle_entry);
       meta.save();
 
-      madness::print("[SAVE] es_bundle: protocol_key=", key,
-                     "  bundle_dir=", bundle_path.filename().string(),
-                     "  n_roots=", n_roots,
-                     "  aggregate=", aggregate_path);
-      // R1b: uniform memory high-water mark (see fd_save_load).
-      madness::print("MEMORY_HWM  kind=es  protocol=", key,
-                     "  rss_gb_max=", bundle_metrics.rss_gb,
-                     "  coeffs=", bundle_metrics.coeffs, "  wall_s=", wall_s,
-                     "  id=", detail_save_load::type_tag<Type>(), "_n", n_roots);
-    } else {
+      if (print_level >= PrintLevel::Verbose) {
+        madness::print("[SAVE] es_bundle: protocol_key=", key,
+                       "  bundle_dir=", bundle_path.filename().string(),
+                       "  n_roots=", n_roots, "  aggregate=", aggregate_path);
+        // R1b: uniform memory high-water mark (see fd_save_load).
+        madness::print("MEMORY_HWM  kind=es  protocol=", key,
+                       "  rss_gb_max=", bundle_metrics.rss_gb,
+                       "  coeffs=", bundle_metrics.coeffs, "  wall_s=", wall_s,
+                       "  id=", detail_save_load::type_tag<Type>(), "_n",
+                       n_roots);
+      }
+    } else if (print_level >= PrintLevel::Verbose) {
       madness::print("[SAVE] es side-bundle (no aggregate): dir=", dir,
                      "  n_roots=", n_roots);
     }

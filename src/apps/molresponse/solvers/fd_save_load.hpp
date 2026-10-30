@@ -149,10 +149,14 @@ void save_fd_state(
     int checkpoint_diagnostic_iterations = 0,
     const nlohmann::json* checkpoint_progress = nullptr,
     madness::convergence::Decider checkpoint_decider
-    = madness::convergence::Decider::engine_check) { // F2d
+    = madness::convergence::Decider::engine_check,
+    PrintLevel print_level = PrintLevel::Normal) { // F2d; D-096: the
+  // [SAVE] and MEMORY_HWM lines print at Verbose only (the executor's
+  // identified solve-end line is the one line at Normal).
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
   // per-group shard (response_metadata.group<tag>.json) so concurrent node-
-  // subworlds never race the canonical file; rank 0 merges them after the fence.
+  // subworlds never race the canonical file; rank 0 merges them after the
+  // fence.
   // "" = write the canonical file (single-World path). Per-state ARCHIVES are
   // distinct files keyed by pert/freq and always land in the shared dir.
   MADNESS_CHECK(state.responses.size() == 1);
@@ -421,9 +425,13 @@ void save_fd_state(
     meta.save();
 
     // F2d: prepend the per-subworld tag (empty ⇒ unchanged, G=0 byte-identical).
-    auto save_line = [&](auto &&...a) {
-      if (log_prefix.empty()) madness::print(a...);
-      else                    madness::print(log_prefix, a...);
+    auto save_line = [&](auto&&... a) {
+      if (print_level < PrintLevel::Verbose)
+        return;
+      if (log_prefix.empty())
+        madness::print(a...);
+      else
+        madness::print(log_prefix, a...);
     };
     save_line("[SAVE] fd_state: pert=", pdesc,
               "  protocol_key=", key,
@@ -441,7 +449,8 @@ void save_fd_state(
     // parsers attribute the line to its subworld instead of treating G copies as one.
     // Two-branch (not trailing optional args) so G=0 stays byte-identical — a
     // trailing empty print() arg would emit a stray separator space.
-    if (log_group >= 0)
+    if (print_level < PrintLevel::Verbose) {
+    } else if (log_group >= 0)
       madness::print("MEMORY_HWM  kind=fd  protocol=", key,
                      "  rss_gb_max=", metrics.rss_gb, "  coeffs=", metrics.coeffs,
                      "  wall_s=", wall_s, "  id=", pdesc, "@", fkey,
