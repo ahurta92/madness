@@ -1,0 +1,31 @@
+# Named linear response of helium: the named form of the qctest
+# src/examples/qc/response_he_alpha (one rung, protocol 1e-4, k 6; alpha_zz at
+# omega 0 and 0.05). The from-store tier's He runs (make_test_store.py).
+# Run: madqc named_he_alpha.in --prefix=He-alpha
+molecule He
+  units atomic
+  eprec 1e-6
+  He 0.0 0.0 0.0
+end
+
+moldft gs
+  molecule He
+  xc hf
+  econv 1e-4
+  dconv 1e-4
+  k 6
+  protocol [1e-4]
+  maxiter 20
+  requested_properties [energy, dipole]
+end
+
+molresponse resp
+  reference gs
+  protocol [1e-4]
+  dconv 1e-4
+  maxiter 30
+  requested_properties [polarizability]
+  polarizability.frequencies [0.0, 0.05]
+  polarizability.frequency_units au
+  polarizability.components [zz]
+end
