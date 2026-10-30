@@ -67,6 +67,26 @@ for root_with, root_without in zip(es_with['roots'], es_without['roots']):
     assert abs(root_with['omega_residual'] - root_without['omega_residual']) < 1e-10, (root_with, root_without)
     assert root_with['omega_residual'] <= 1e-6, root_with  # H2 TDA ends far inside econv 1e-6
 
+# The record describes the request beside the engine's gate and points at
+# the shared verdict; it carries no status of its own (D-061).
+block = es_with['requested_omega_target']
+assert block['target'] == 1e-6 and block['set_by'] == 'user', block
+assert block['units'] == 'hartree' and block['relation'] == 'less_than_or_equal', block
+assert block['worst']['value'] == max(r['omega_residual'] for r in es_with['roots']), block
+assert block['worst']['root_id'] in {r['root_id'] for r in es_with['roots']}, block
+assert all(r['omega_residual_within_requested'] is True for r in es_with['roots']), es_with['roots']
+assert not {'status', 'enforced', 'outcome'} & set(block), block
+pointer = block['verdict_in']
+assert pointer['path'] == 'convergence_report.requested_accuracy', pointer
+assert pointer['criterion'] == 'omega_residual', pointer
+# S4d2: one requested_accuracy entry per state key on a response stage; the
+# pointer names the bundle's entry (its status is the shared verdict's).
+accuracy = excited(fresh)['convergence_report']['requested_accuracy']
+assert pointer['state_key'] in accuracy, (pointer, sorted(accuracy))
+plain_block = es_without['requested_omega_target']
+assert plain_block['target'] is None and plain_block['set_by'] == 'not_set', plain_block
+assert all('omega_residual_within_requested' not in r for r in es_without['roots'])
+
 # A driven response has no local energy: econv without excited_states is
 # refused at the deck check, before any stage runs.
 optical = without_econv.replace('[excited_states, polarizability]', '[polarizability]')

@@ -392,7 +392,14 @@ thresh)), strictly". The bundle's state record carries the worst root's
 `omega_residual` with its units as the saved measurement the shared verdict
 judges the target on (one judge, B1: `requested_accuracy` under the stage's
 convergence report holds the status and, in engine mode, the "unmet, not
-enforceable in engine mode" outcome). On `--continue` a saved bundle that
+enforceable in engine mode" outcome). The record, `properties.excited_states`,
+describes the request beside the engine's gate: `requested_omega_target` with
+the `target` (null when the deck wrote none), `set_by`, `units`, `relation`,
+the `worst` root (`value` and `root_id`; null when a root has no eigenvalue
+step yet) and `verdict_in`, the bundle's state key under
+`convergence_report.requested_accuracy` where the status lives; with a
+written target each root carries `omega_residual_within_requested`. The
+record holds no status of its own. On `--continue` a saved bundle that
 passes the engine check but not `econv` is loaded and reported unmet (B8).
 On a `molresponse` stage without `excited_states`, `econv` is rejected: a
 driven response has no local energy.

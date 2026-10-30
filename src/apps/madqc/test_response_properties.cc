@@ -785,6 +785,67 @@ int main(int argc, char** argv) {
               && !es.at("engine_evidence").contains("kinetic_history")
               && es.at("engine_evidence").at("bundle_dir") == "es__" + pkey,
           "the bundle entry travels as evidence without the roots");
+    // D-061: the written econv beside the engine's gate, in the record: the
+    // request and the evidence, never a status (that is the shared verdict's,
+    // convergence_report.requested_accuracy under the bundle's state key).
+    const auto& none = es.at("requested_omega_target");
+    check(none.at("target").is_null() && none.at("set_by") == "not_set"
+              && none.at("units") == "hartree"
+              && none.at("relation") == "less_than_or_equal"
+              && none.at("worst").at("value") == 3e-7
+              && none.at("worst").at("root_id") == "es_root_0001"
+              && none.at("verdict_in").at("path")
+                     == "convergence_report.requested_accuracy"
+              && none.at("verdict_in").at("state_key") == "es:tda_n2|" + pkey
+              && none.at("verdict_in").at("criterion") == "omega_residual"
+              && !none.contains("status") && !none.contains("enforced")
+              && !none.contains("outcome")
+              && !first.contains("omega_residual_within_requested"),
+          "no econv: target null, not_set, the worst root still named, no "
+          "per-root field, no status of its own");
+    stage.excited_states.omega_target = 1e-6;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("requested_omega_target").at("target") == 1e-6
+              && es.at("requested_omega_target").at("set_by") == "user"
+              && es.at("roots")[0].at("omega_residual_within_requested") == true
+              && es.at("roots")[1].at("omega_residual_within_requested") == true
+              && es.at("requested_omega_target").at("worst").at("value")
+                     == 3e-7,
+          "econv 1e-6 over 3e-7 on both roots: within on both");
+    stage.excited_states.omega_target = 1e-7;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(
+        es.at("requested_omega_target").at("target") == 1e-7
+            && es.at("roots")[0].at("omega_residual_within_requested") == false
+            && es.at("roots")[1].at("omega_residual_within_requested") == false
+            && es.at("requested_omega_target").at("worst").at("root_id")
+                   == "es_root_0001"
+            && es.at("converged") == true,
+        "econv 1e-7 under 3e-7: not within on either root; the bundle's "
+        "converged is the engine's and stays true");
+    metadata["excited_states"][pkey]["roots"][1]["omega_residual"] = nullptr;
+    es = named_stages::selected_excited_states(stage, metadata, transition);
+    check(es.at("requested_omega_target").at("worst").is_null()
+              && es.at("roots")[0].at("omega_residual_within_requested")
+                     == false
+              && es.at("roots")[1]
+                     .at("omega_residual_within_requested")
+                     .is_null(),
+          "a root without an eigenvalue step: worst null, that root null");
+    const auto absent
+        = named_stages::selected_excited_states(stage, json::object(), json());
+    check(absent.at("requested_omega_target").at("target") == 1e-7
+              && absent.at("requested_omega_target").at("worst").is_null()
+              && absent.at("requested_omega_target")
+                         .at("verdict_in")
+                         .at("state_key")
+                     == "es:tda_n2|" + pkey,
+          "no bundle at the final rung: the request is still described, "
+          "worst null");
+    stage.excited_states.omega_target.reset();
+    metadata["excited_states"][pkey]["roots"][1]
+        = root(1, 0, 0.47, true, false, false);
+    es = named_stages::selected_excited_states(stage, metadata, transition);
     auto selected = named_stages::select_response_properties(
         stage, json::object(), metadata, json(), json(), 2, transition);
     check(selected.contains("excited_states") && every_row_converged(selected),
