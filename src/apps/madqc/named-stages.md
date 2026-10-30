@@ -39,13 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-  | `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`,
-  `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`,
-  `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`,
-  `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see
-  "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`,
-  `excited_states.guess`, `excited_states.guess_basis` and `econv`, the excitation energy change target (see "Excited
-  states") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis` and `econv`, the excitation energy change target (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -404,8 +398,8 @@ root" (keyword `econv`, metric `omega_residual`), and a stage that wrote it
 starts with the warning "econv 1.0e-06 is reported, not enforced: the engine
 check compares each root's eigenvalue change against 5.0e-04 (5 x max(dconv,
 thresh)), strictly". The bundle's state record carries the worst root's
-`omega_residual` with its units as the saved measurement the shared verdict
-judges the target on (one judge, B1: `requested_accuracy` under the stage's
+`omega_residual` (the engine row the shared verdict reads, with its units,
+as the saved measurement it judges the target on) (one judge, B1: `requested_accuracy` under the stage's
 convergence report holds the status and, in engine mode, the "unmet, not
 enforceable in engine mode" outcome). The record, `properties.excited_states`,
 describes the request beside the engine's gate: `requested_omega_target` with
@@ -727,8 +721,19 @@ and, with the written targets deciding, its saved measurements meet them. The
 records are the generation's `numerical.states`. The written targets are
 judged once per state; a molresponse stage records the result at
 `convergence_report.requested_accuracy` too, one entry per state key, in the
-same form as moldft's. An excited-state bundle records no saved-state
-measurements, so with the written targets deciding it is not converged.
+same form as moldft's.
+
+Each state is judged on the written targets its kind has rows for (D-082),
+the same set the planner reads on `--continue`: a perturbation-and-frequency
+state on `dconv`, `accuracy.bsh_residual` and `accuracy.kinetic_trace_change`;
+the excited-state bundle on `econv` alone; the moldft ground state on every
+moldft target. A row of its kind that a record lacks is `unavailable` and
+fails as before. A state none of whose kind's rows was written is judged on
+its stop alone, and its `requested_accuracy` says `not_requested`. A written
+target that no state the stage needs has a row for (`dconv` on a stage that
+requests only `excited_states`) judges nothing: it is listed once at
+`convergence_report.unmeasured_targets` and in `checkpoint_warnings`, not as
+a failed state.
 
 Nemo explicit accuracy policies are not supplied by this interface yet. A
 forced-iteration diagnostic does not override invalid-state checks or certify

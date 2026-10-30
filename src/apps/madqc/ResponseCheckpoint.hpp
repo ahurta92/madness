@@ -3,6 +3,7 @@
 #include "../molresponse/solvers/function_kinetics.hpp"
 
 #include "NamedStages.hpp"
+#include "ResponseProperties.hpp"
 #include "Sha256.hpp"
 #include <apps/molresponse/solvers/dalton_import.hpp>
 #include <apps/molresponse/solvers/es_save_load.hpp>
@@ -117,13 +118,21 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
          written ? SetBy::user : SetBy::not_set, Relation::less_than_or_equal,
          std::nullopt, "", "", row.engine_instead});
   }
-  settings.metrics.push_back({Group::requested_criteria, "energy change", "",
-                              "energy_change", "", "hartree", std::nullopt,
-                              SetBy::not_set, Relation::less_than_or_equal,
-                              std::nullopt, "",
-                              "not applicable: a driven response has no local "
-                              "energy; see the reference stage",
-                              ""});
+  // D-061: on an excited-state stage the written econv is the bundle's
+  // omega target, in place of the energy change a driven response lacks.
+  if (std::find(stage.properties.begin(), stage.properties.end(),
+                "excited_states")
+      != stage.properties.end())
+    settings.metrics.push_back(
+        excited_state_omega_target_row(stage, limits.omega_residual));
+  else
+    settings.metrics.push_back(
+        {Group::requested_criteria, "energy change", "", "energy_change", "",
+         "hartree", std::nullopt, SetBy::not_set, Relation::less_than_or_equal,
+         std::nullopt, "",
+         "not applicable: a driven response has no local energy; see the "
+         "reference stage",
+         ""});
   settings.iteration_caps = {
       {static_cast<int>(rp.maxiter())},
       stage.written.contains("maxiter") ? SetBy::user : SetBy::engine_default};
@@ -325,6 +334,43 @@ requested_bundle(const json& request) {
   const bool tda = r.at("method").get<std::string>() == "tda";
   const int roots = r.at("roots").get<int>();
   return BundleNeed{molresponse_v3::es_node_id(tda, roots), tda, roots};
+}
+
+// D-082: the written targets a response state's kind has rows for, by the
+// state record's kind. The verdict (requested_states) and the planner
+// (plan_response_states) judge each state on these only; a row of its kind
+// the record lacks stays unavailable.
+[[nodiscard]] inline json kind_measurements(const std::string& kind) {
+  if (kind == "excited_states")
+    return json::array({"omega_residual"});
+  return json::array(
+      {"charge_density_change", "bsh_residual", "delta_kinetic_energy"});
+}
+
+// D-082: a state record's saved-state measurements under the names of the
+// written targets, by its kind: an FD state's through fd_accuracy_measurements,
+// a bundle's computed from its engine row (bundle_saved_measurements; a
+// record without engine_measurements gives none).
+[[nodiscard]] inline json record_measurements(const json& record) {
+  if (record.value("kind", "fd") == "excited_states")
+    return bundle_saved_measurements(
+        record.value("engine_measurements", json::object()));
+  return molresponse_v3::fd_accuracy_measurements(
+      record.value("saved_measurements", json::object()));
+}
+
+// D-082: the request's settings with only the written targets in
+// `measurements` kept (the others not set), for the planner.
+[[nodiscard]] inline madness::convergence::ConvergenceSettings
+targets_of_kind(madness::convergence::ConvergenceSettings settings,
+                const json& measurements) {
+  for (auto& metric : settings.metrics)
+    if (metric.group == madness::convergence::Group::requested_criteria
+        && std::find(measurements.begin(), measurements.end(),
+                     metric.measurement)
+               == measurements.end())
+      metric.target.reset();
+  return settings;
 }
 
 // The engine's name for each named response property's rows.
@@ -818,6 +864,17 @@ private:
       if (!loaded.contains(bundle_key(bundle->id, key))
           && (!e.value("converged", false) || e.value("stalled", false)))
         return false;
+      // Its written omega target blocks completion only when targets decide
+      // (B8, D-061).
+      if (!loaded.contains(bundle_key(bundle->id, key))
+          && request.value("decided_by", "") == "requested_criteria"
+          && request.contains("excited_state_targets")
+          && madness::evaluate_explicit_criteria(
+                 bundle_saved_measurements(bundle_measurements(e)),
+                 request.at("excited_state_targets"))
+                     .at("status")
+                 != "satisfied")
+        return false;
     }
     return true;
   }
@@ -923,7 +980,8 @@ public:
 
   // B8 (S4d1), the response AppSpec's requested_states: the FD states the
   // request needs (response_needs) and its excited-state bundle, at the
-  // request's final protocol, as request_complete lists them.
+  // request's final protocol, as request_complete lists them; each with the
+  // written targets its kind has rows for (kind_measurements, D-082).
   static json requested_states(const Stage& stage, int natom) {
     const auto request = response_request(stage);
     const double threshold = request.at("protocol").back();
@@ -937,21 +995,20 @@ public:
           {{"key",
             state_key(perturbation.description(), key,
                       molresponse_v3::ResponseMetadata::freq_key(frequency))},
-           {"rung", rung}});
+           {"rung", rung},
+           {"measurements", kind_measurements("fd")}});
     if (const auto bundle = requested_bundle(request))
-      states.push_back({{"key", bundle_key(bundle->id, key)}, {"rung", rung}});
+      states.push_back({{"key", bundle_key(bundle->id, key)},
+                        {"rung", rung},
+                        {"measurements", kind_measurements("excited_states")}});
     return states;
   }
 
-  // B1, B8 (S4d1), the response AppSpec's saved_measurements: an FD state's
-  // saved-state measurements under the names of the written targets
-  // (fd_accuracy_measurements, as request_complete reads them); a bundle
-  // records none.
+  // B1, B8 (S4d1), the response AppSpec's saved_measurements: a state's
+  // saved-state measurements under the names of the written targets, by its
+  // kind (record_measurements, as the planner reads them; D-082).
   static json saved_measurements(const Stage&, int, const json& record) {
-    if (record.at("kind") != "fd")
-      return json::object();
-    return molresponse_v3::fd_accuracy_measurements(
-        record.at("saved_measurements"));
+    return record_measurements(record);
   }
 
   // A2: the science checks on a complete generation of stage `stage`, whose
@@ -1064,8 +1121,8 @@ private:
     for (const auto& record : records) {
       if (record.at("perturbation") != perturbation)
         continue;
-      auto saved = saved_state_from_record(
-          record, molresponse_v3::fd_accuracy_measurements);
+      auto saved = saved_state_from_record(record);
+      saved.saved_measurements = record_measurements(record);
       const auto rung = requested_rungs.find(
           molresponse_v3::protocol_key(saved.rung.thresh, saved.rung.k));
       const bool aliased
@@ -1121,8 +1178,8 @@ private:
     for (const auto& record : records) {
       if (record.at("identity") != identity)
         continue;
-      auto saved = saved_state_from_record(
-          record, molresponse_v3::fd_accuracy_measurements);
+      auto saved = saved_state_from_record(record);
+      saved.saved_measurements = record_measurements(record);
       const auto rung = requested_rungs.find(
           molresponse_v3::protocol_key(saved.rung.thresh, saved.rung.k));
       const bool aliased
@@ -1529,6 +1586,12 @@ inline json response_request(const Stage& stage) {
       stage.params.get<ResponseParameters>());
   if (!targets.empty())
     request["accuracy_targets"] = targets;
+  // D-061: the bundle's written omega target, beside the legs' (each leg is
+  // judged on every accuracy_targets entry, request_complete). Only when
+  // written, so a request without econv is the one stored before.
+  if (const auto& omega = stage.excited_states.omega_target)
+    request["excited_state_targets"]
+        = {{"omega_residual", {{"value", *omega}, {"units", "hartree"}}}};
   // Who decides convergence (B8); reuse and property eligibility follow it.
   request["decided_by"] = stage.params.get<ResponseParameters>().get<bool>(
                               madness::convergence::use_default_criteria_key)
@@ -1662,6 +1725,10 @@ inline StagePlans plan_response_states(const Stage& stage,
   std::map<std::string, double> requested_rungs;
   auto request = ResponseCheckpoint::ladder_request(stage, reference_generation,
                                                     requested_rungs);
+  // D-082: each state is planned on the written targets its kind has rows
+  // for, the set the shared verdict judges (requested_states).
+  const auto stage_settings = request.settings;
+  request.settings = targets_of_kind(stage_settings, kind_measurements("fd"));
   // S5 (R4's wording): a state that starts fresh in a seeded stage takes its
   // starting guess from the Dalton seed; the plan says so.
   const auto seeded = [&](madness::planning::LadderPlan plan) {
@@ -1701,11 +1768,9 @@ inline StagePlans plan_response_states(const Stage& stage,
     request.identity = bundle->id;
     request.engine_limits
         = bundle_engine_limits(stage, request.ladder.back().thresh);
-    // The written targets are the dipole legs' (B3: excited states have
-    // none yet; the engine check decides a bundle).
-    for (auto& metric : request.settings.metrics)
-      if (metric.group == madness::convergence::Group::requested_criteria)
-        metric.target.reset();
+    // The bundle's written target is its omega row (econv, D-061).
+    request.settings
+        = targets_of_kind(stage_settings, kind_measurements("excited_states"));
     const auto own = ResponseCheckpoint::own_state(
         records, bundle->id, requested_rungs, request.ladder.back());
     auto plan

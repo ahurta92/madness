@@ -254,7 +254,9 @@ struct AppSpec {
       manifest;
   // B8, D-046 (S4d1): the states the stage's request needs, each with the
   // rung it must reach (the request's final rung): [{key, rung: {thresh,
-  // k}}], keyed as the state records are.
+  // k}, measurements}], keyed as the state records are. `measurements`
+  // (D-082) names the written targets the state's kind has rows for; absent,
+  // every written target.
   std::function<json(const Stage&, int natom)> requested_states;
   // B1, B8 (S4d1): one state record's saved-state measurements, keyed as the
   // written targets are (convergence::requested_targets), for the skeleton's
@@ -283,12 +285,15 @@ struct AppSpec {
 // (AppSpec::requested_states) has a record at its rung, not diverged, and was
 // either loaded under a met request (decided_by planner, D-016) or stopped
 // converged and, when the written targets decide (B8), its saved measurements
-// meet them. The targets are judged by one call of evaluate_explicit_criteria
-// per state (B1); its result is the state's requested_accuracy, the unmet
-// targets B8 lists separately. Returns {converged, states: [...]}. An
-// excited-state bundle records no saved-state measurements, so under written
-// targets it is not converged (no test reaches the case; B's D-061 row fills
-// and tests it).
+// meet them. Each state is judged on the written targets its kind has rows
+// for (D-082; requested_states' `measurements`), by one call of
+// evaluate_explicit_criteria per state (B1); its result is the state's
+// requested_accuracy, the unmet targets B8 lists separately. A state none of
+// whose kind's rows is a written target is judged on its stop alone (its
+// requested_accuracy not_requested), as the planner judges it. A written
+// target no needed state has rows for is listed once, in
+// `unmeasured_targets`. Returns {converged, states: [...],
+// unmeasured_targets: [...]}.
 inline json
 shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
                const madness::convergence::ConvergenceSettings& settings,
@@ -300,8 +305,18 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
       = settings.decider == convergence::Decider::requested_criteria;
   bool converged = true;
   json states = json::array();
+  std::set<std::string> measured;
   for (const auto& needed : spec.requested_states(stage, natom)) {
     const auto& key = needed.at("key");
+    json judged = json::object();
+    for (const auto& [name, target] : targets.items())
+      if (!needed.contains("measurements")
+          || std::find(needed.at("measurements").begin(),
+                       needed.at("measurements").end(), name)
+                 != needed.at("measurements").end()) {
+        judged[name] = target;
+        measured.insert(name);
+      }
     const madness::scf_continuation::Rung rung{
         needed.at("rung").at("thresh").get<double>(),
         needed.at("rung").at("k").get<int>()};
@@ -317,11 +332,11 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
           record->at("rung").at("thresh").get<double>(),
           record->at("rung").at("k").get<int>()};
       const auto accuracy = madness::evaluate_explicit_criteria(
-          spec.saved_measurements(stage, natom, *record), targets);
+          spec.saved_measurements(stage, natom, *record), judged);
       const bool loaded = record->at("decided_by") == "planner";
       const bool stopped = record->at("stop") == "converged";
-      const bool targets_met
-          = !enforced || accuracy.at("status") == "satisfied";
+      const bool targets_met = !enforced || accuracy.at("status") == "satisfied"
+                               || accuracy.at("status") == "not_requested";
       state["found"] = true;
       state["at_rung"] = madness::scf_continuation::same_rung(at, rung);
       state["stop"] = record->at("stop");
@@ -337,7 +352,13 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
     converged = converged && met;
     states.push_back(std::move(state));
   }
-  return {{"converged", converged}, {"states", std::move(states)}};
+  json unmeasured = json::array();
+  for (const auto& [name, target] : targets.items())
+    if (!measured.contains(name))
+      unmeasured.push_back(name);
+  return {{"converged", converged},
+          {"states", std::move(states)},
+          {"unmeasured_targets", std::move(unmeasured)}};
 }
 
 // A1: the generations of stage `stage` that another stage's manifest under
@@ -612,6 +633,9 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   }
   // 9. The outcome table and the record.
   steps.report(result, converged, verdict.at("states"));
+  // D-082: a written target no needed state has rows for, reported once.
+  result["convergence_report"]["unmeasured_targets"]
+      = verdict.at("unmeasured_targets");
   const auto outcomes = steps.outcomes();
   result["convergence_report"]["convergence_outcome"]
       = madness::convergence::outcome_to_json(settings, outcomes);
@@ -630,6 +654,10 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
       = delete_attempt_copies(world, ctx.attempt_directory, saved);
       !warning.empty())
     warnings.push_back("attempt copies: " + warning);
+  for (const auto& name : verdict.at("unmeasured_targets"))
+    warnings.push_back("written target " + name.get<std::string>()
+                       + ": no state this stage needs has a row for it, so "
+                         "it judged nothing (D-082)");
   result["checkpoint_warnings"] = warnings;
   // 10. What the stage hands on (A8).
   StageOutcome outcome;

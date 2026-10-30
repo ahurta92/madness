@@ -37,7 +37,7 @@ from pathlib import Path
 
 # What shared_verdict reads of a state record.
 STATE_KEYS = ("schema", "key", "kind", "identity", "rung", "stop", "diverged",
-              "decided_by", "saved_measurements")
+              "decided_by", "saved_measurements", "engine_measurements")
 
 
 def capture(root, deck, out, label, since=0.0, args=None):

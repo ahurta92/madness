@@ -1358,6 +1358,205 @@ int main(int argc, char** argv) {
               "spec requested_states (response): one FD state per requested "
               "frequency at the final protocol");
       }
+      // D-082, D-061: each state judged on the written targets its kind has
+      // rows for; the bundle on econv (its engine omega row).
+      {
+        namespace cv = madness::convergence;
+        const auto es_deck = [&](const std::string& properties,
+                                 const std::string& extra) {
+          return named_stages::parse(
+              world,
+              geometry + gs
+                  + "molresponse es\n reference GS\n protocol [1e-4]\n"
+                    " dconv 1e-4\n requested_properties ["
+                  + properties + "]\n"
+                  + (properties.find("polarizability") == std::string::npos
+                         ? ""
+                         : " polarizability.frequencies [0.0]\n"
+                           " polarizability.frequency_units au\n"
+                           " polarizability.components [zz]\n")
+                  + " excited_states.roots 1\n excited_states.method tda\n"
+                  + extra + "end\n")[1];
+        };
+        const auto bundle_record = [&](const named_stages::Stage& stage,
+                                       double omega, bool engine_rows = true) {
+          const auto needed = molresponse.requested_states(stage, 2).back();
+          json record = {{"key", needed.at("key")},
+                         {"kind", "excited_states"},
+                         {"rung", needed.at("rung")},
+                         {"stop", "converged"},
+                         {"diverged", false},
+                         {"decided_by", "engine_check"},
+                         {"saved_measurements", json::object()}};
+          if (engine_rows)
+            record["engine_measurements"]
+                = {{"omega_residual",
+                    {{"value", omega},
+                     {"availability", "measured"},
+                     {"root_id", "r0"},
+                     {"phase", "solver_step_output"}}}};
+          return record;
+        };
+        const auto judge = [&](const named_stages::Stage& stage,
+                               const json& records) {
+          Manifest published;
+          published.numerical["states"] = records;
+          return named_stages::shared_verdict(
+              molresponse, stage, 2, molresponse.settings(stage, 2), published);
+        };
+        const std::string criteria
+            = " convergence.use_default_criteria false\n";
+        const auto es_dconv = es_deck("excited_states", criteria);
+        const auto needed = molresponse.requested_states(es_dconv, 2);
+        check(needed.size() == 1
+                  && needed[0].at("measurements")
+                         == json::array({"omega_residual"}),
+              "requested_states (D-082): the bundle's rows are omega_residual");
+        const auto alone
+            = judge(es_dconv, json::array({bundle_record(es_dconv, 1e-5)}));
+        check(alone.at("converged")
+                  && alone.at("states")[0].at("requested_accuracy").at("status")
+                         == "not_requested"
+                  && alone.at("unmeasured_targets")
+                         == json::array({"charge_density_change"}),
+              "shared verdict (D-082): a bundle under written targets none of "
+              "its kind's is judged on its stop; dconv, which no needed state "
+              "measures, listed once");
+        const auto es_econv
+            = es_deck("excited_states", criteria + " econv 1e-6\n");
+        const auto met
+            = judge(es_econv, json::array({bundle_record(es_econv, 1e-7)}));
+        const auto missed
+            = judge(es_econv, json::array({bundle_record(es_econv, 1e-5)}));
+        check(
+            met.at("converged")
+                && met.at("states")[0].at("requested_accuracy").at("status")
+                       == "satisfied"
+                && !missed.at("converged")
+                && missed.at("states")[0].at("requested_accuracy").at("status")
+                       == "unmet",
+            "shared verdict (D-061, D-082): the bundle judged on econv, met "
+            "and unmet");
+        check(
+            !judge(es_econv, json::array({bundle_record(es_econv, 0.0, false)}))
+                 .at("converged"),
+            "shared verdict (D-082): a bundle record without engine rows (a "
+            "replay capture) is unavailable on econv, not an error");
+        const auto es_engine = es_deck("excited_states", " econv 1e-6\n");
+        const auto reported
+            = judge(es_engine, json::array({bundle_record(es_engine, 1e-5)}));
+        check(reported.at("converged")
+                  && reported.at("states")[0]
+                             .at("requested_accuracy")
+                             .at("status")
+                         == "unmet",
+              "shared verdict (D-061): in engine mode an unmet econv is "
+              "reported, the bundle converged");
+        // A stage with legs and a bundle: each kind on its own rows.
+        const auto mixed = es_deck("polarizability, excited_states",
+                                   criteria + " econv 1e-6\n");
+        const auto mixed_needed = molresponse.requested_states(mixed, 2);
+        json leg = {{"key", mixed_needed[0].at("key")},
+                    {"kind", "fd"},
+                    {"rung", mixed_needed[0].at("rung")},
+                    {"stop", "iteration_limit"},
+                    {"diverged", false},
+                    {"decided_by", "planner"},
+                    {"saved_measurements", json::object()}};
+        const auto both
+            = judge(mixed, json::array({leg, bundle_record(mixed, 1e-7)}));
+        check(both.at("converged") && both.at("unmeasured_targets").empty()
+                  && !both.at("states")[0]
+                          .at("requested_accuracy")
+                          .at("criteria")
+                          .contains("omega_residual")
+                  && both.at("states")[0]
+                         .at("requested_accuracy")
+                         .at("criteria")
+                         .contains("charge_density_change")
+                  && both.at("states")[1]
+                             .at("requested_accuracy")
+                             .at("criteria")
+                             .size()
+                         == 1,
+              "shared verdict (D-082): the leg judged on dconv, the bundle on "
+              "econv alone, nothing unmeasured");
+        // The settings row and the planner's per-kind sets.
+        const auto settings = molresponse.settings(mixed, 2);
+        const auto row = std::find_if(
+            settings.metrics.begin(), settings.metrics.end(),
+            [](const auto& m) { return m.measurement == "omega_residual"; });
+        check(row != settings.metrics.end() && row->target == 1e-6
+                  && std::none_of(settings.metrics.begin(),
+                                  settings.metrics.end(),
+                                  [](const auto& m) {
+                                    return m.measurement == "energy_change";
+                                  }),
+              "settings (D-061): on an excited-state stage the econv row "
+              "replaces the energy change row");
+        const auto targets_of = [&](const char* kind) {
+          return cv::requested_targets(named_stages::targets_of_kind(
+              settings, named_stages::kind_measurements(kind)));
+        };
+        check(targets_of("fd").contains("charge_density_change")
+                  && !targets_of("fd").contains("omega_residual")
+                  && targets_of("excited_states")
+                         == json{{"omega_residual",
+                                  {{"value", 1e-6}, {"units", "hartree"}}}},
+              "planner (D-082): the legs plan on their rows, the bundle on "
+              "econv (the reset keeps the econv row)");
+        check(named_stages::response_request(mixed).at("excited_state_targets")
+                      == json{{"omega_residual",
+                               {{"value", 1e-6}, {"units", "hartree"}}}}
+                  && !named_stages::response_request(es_dconv).contains(
+                      "excited_state_targets"),
+              "response_request (D-061): econv beside accuracy_targets, only "
+              "when written");
+        // On --continue: a saved bundle that passes the engine check but not
+        // econv is loaded and reported in engine mode (B8's reuse exception)
+        // and resumed under the written targets.
+        const auto es_key = molresponse_v3::protocol_key(
+            1e-4, named_stages::protocol_k(1e-4));
+        const json es_meta
+            = {{"fd_states", json::object()},
+               {"vbc_states", json::object()},
+               {"protocols",
+                {{es_key,
+                  {{"thresh", 1e-4}, {"k", named_stages::protocol_k(1e-4)}}}}},
+               {"excited_states",
+                {{es_key,
+                  {{"type", "tda"},
+                   {"n_roots", 1},
+                   {"iter", 6},
+                   {"converged", true},
+                   {"stop_reason", "converged"},
+                   {"roots",
+                    {{{"slot", 0},
+                      {"root_id", "r0"},
+                      {"omega", 0.5},
+                      {"density_residual", 1e-6},
+                      {"omega_residual", 1e-5}}}}}}}}};
+        const auto es_records
+            = named_stages::response_state_records(es_meta, "g-ref", {});
+        const auto bundle_plan = [&](const named_stages::Stage& stage) {
+          return named_stages::plan_response_states(
+                     stage, named_stages::response_request(stage), 2, "g-ref",
+                     es_records)
+              .continuation.at("states")
+              .at(0);
+        };
+        const auto engine_plan = bundle_plan(es_engine);
+        const auto criteria_plan = bundle_plan(es_econv);
+        check(engine_plan.at("action") == "loaded"
+                  && engine_plan.at("unmet_not_enforceable")
+                         == json::array({"omega_residual"})
+                  && criteria_plan.at("action") != "loaded",
+              "planner (D-061, D-082): a saved bundle missing econv, loaded "
+              "and reported in engine mode, not loaded under written targets");
+        check(bundle_plan(es_dconv).at("action") == "loaded",
+              "planner (D-082): a bundle under written targets none of its "
+              "kind's (dconv only) is loaded on its stop");
+      }
       // S5: the Dalton seed's member kind.
       {
         namespace fs = std::filesystem;
