@@ -2092,9 +2092,22 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
       const Perturbation pA = Perturbation::dipole(a);
       auto xA = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, pA, ws);
       if (!xA) {
-        if (world.rank() == 0)
+        // D-104: an axis the deck never asked for (no dipole leg of this
+        // axis at omega_sigma in the plan) is channel detail; a requested
+        // leg that is missing stays a warning at every print level.
+        const bool requested
+            = std::any_of(plan.fd.begin(), plan.fd.end(), [&](const auto& leg) {
+                return leg.pert.kind == Perturbation::Kind::Dipole
+                       && leg.pert.axis == a
+                       && ResponseMetadata::freq_key(leg.freq)
+                              == ResponseMetadata::freq_key(ws);
+              });
+        if (world.rank() == 0
+            && (requested || ctx.print_level >= PrintLevel::Verbose))
           madness::print("[BETA] skip A=", beta_axis_name(a), "— missing FD",
-                         pA.description(), "@", ws);
+                         pA.description(), "@", ws,
+                         requested ? "(a requested leg is unavailable)"
+                                   : "(not requested)");
         continue;
       }
       auto VA_op = dipole_operator(world, a);

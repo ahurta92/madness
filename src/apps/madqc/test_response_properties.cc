@@ -705,6 +705,8 @@ int main(int argc, char** argv) {
               && raman.at("values")[0].at("atom") == 1
               && raman.at("values")[0].at("axis") == "z"
               && raman.at("values")[0].at("components").at("zz") == 0.7
+              && raman.at("values")[0].at("units")
+                     == "a.u. (e^2 bohr^2 / Eh per bohr)"
               && raman.at("coordinates") == "written"
               && raman.at("normal_mode_analysis") == false
               && raman.contains("normal_mode_analysis_unavailable"),
@@ -832,6 +834,7 @@ int main(int argc, char** argv) {
     json transition
         = {{"analysis", "tda"},
            {"protocol_key", pkey},
+           {"units", {{"transition_dipole", "a.u. (e a0)"}}},
            {"roots", json::array({{{"slot", 1},
                                    {"root_id", "es_root_0000"},
                                    {"oscillator_strength", 0.3}},
@@ -847,8 +850,11 @@ int main(int argc, char** argv) {
               && es.at("stop_reason") == "converged"
               && es.at("iterations_at_rung") == 7
               && es.at("decided_by") == "engine_check"
-              && es.at("converged") == true && es.at("roots").size() == 2,
-          "a converged bundle: the request, the exit, converged");
+              && es.at("converged") == true && es.at("roots").size() == 2
+              && es.at("transition_units").at("transition_dipole")
+                     == "a.u. (e a0)",
+          "a converged bundle: the request, the exit, converged, the "
+          "engine's transition units once (D-104)");
     const auto& first = es.at("roots")[0];
     check(first.at("root_id") == "es_root_0001" && first.at("slot") == 0
               && first.at("omega") == 0.42 && first.at("locked") == true
@@ -941,7 +947,7 @@ int main(int argc, char** argv) {
     metadata["excited_states"][pkey]["converged"] = false;
     metadata["excited_states"][pkey]["stop_reason"] = "iteration_limit";
     es = named_stages::selected_excited_states(stage, metadata, json());
-    check(es.at("converged") == false
+    check(es.at("converged") == false && !es.contains("transition_units")
               && es.at("stop_reason") == "iteration_limit"
               && es.at("roots")[0]
                          .at("transition_unavailable")
@@ -990,7 +996,7 @@ int main(int argc, char** argv) {
     const std::string instead
         = "stops the bundle when each root's eigenvalue change is below "
           "5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a "
-          "written econv is judged by the stage verdict (D-092)";
+          "written econv is judged by the stage verdict";
     const auto unset
         = named_stages::excited_state_omega_target_row(stage, 5e-4);
     check(unset.group == cv::Group::requested_criteria

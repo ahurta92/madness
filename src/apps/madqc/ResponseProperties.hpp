@@ -219,7 +219,8 @@ inline std::vector<std::pair<int, char>> raman_coordinates(const Stage& stage,
 
 // The polarizability gradient: for each optical frequency w and nuclear
 // coordinate Q, the engine's rows d(alpha_AB)/dQ(w) for the requested pairs
-// AB, in atomic units (a0^2 per bohr of displacement). With the full set the
+// AB, in the engine's units, a.u. (e^2 bohr^2 / Eh per bohr of displacement).
+// With the full set the
 // engine's normal-mode analysis is passed through unchanged, and the stage is
 // converged only if its completeness block says every row was.
 inline json selected_raman(const Stage& stage, const json& properties,
@@ -248,7 +249,7 @@ inline json selected_raman(const Stage& stage, const json& properties,
                      {"coordinate", coordinate},
                      {"atom", atom},
                      {"axis", std::string(1, axis)},
-                     {"units", "a0^2 per bohr"},
+                     {"units", "a.u. (e^2 bohr^2 / Eh per bohr)"},
                      {"components", elements.values},
                      {"converged", elements.converged},
                      {"engine_evidence", elements.evidence}};
@@ -447,6 +448,9 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
     roots.push_back(std::move(entry));
   }
   record["roots"] = std::move(roots);
+  // D-104: the engine's units of the per-root transition blocks, once.
+  if (transition.is_object() && transition.contains("units"))
+    record["transition_units"] = transition.at("units");
   record["requested_omega_target"]
       = requested_omega_target(stage, record["roots"], state_key);
   record["converged"] = bundle_converged && every_root;
@@ -487,7 +491,7 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
       = "stops the bundle when each root's eigenvalue change is below "
         + cv::detail::scientific(engine_omega_limit)
         + " (5 x max(dconv, thresh)), strictly, in both modes; a written "
-          "econv is judged by the stage verdict (D-092)";
+          "econv is judged by the stage verdict";
   return row;
 }
 
