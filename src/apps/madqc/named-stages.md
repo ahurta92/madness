@@ -65,19 +65,19 @@ their workflow interface.
 Outputs go to `<prefix>/<stage>/`, without changing the process working
 directory. Without `--prefix` the output root is `./<deck>/` in the current
 directory, `<deck>` the input file's name without its extension
-(`named_h2.in` writes `./named_h2/`).
-
-Four lines "Authorization required, but no authorization protocol specified"
-at startup on a host that runs an X server come from the MPI runtime, not
-from madqc: Open MPI's topology discovery in `MPI_Init` loads hwloc's GL
-component, which probes the X display. They are harmless;
-`export HWLOC_COMPONENTS=-gl` silences them. Each invocation writes engine files into a unique `attempt-...`
+(`named_h2.in` writes `./named_h2/`). Each invocation writes engine files into a unique `attempt-...`
 subdirectory; the stage-level `results.json` describes the latest attempt. `<prefix>/results.json` indexes the stage results; each stage also
 has `results.json`. SCF's resolved input and engine files are under its stage,
 and response metadata/state files are under the response stage. Results carry
 method, units, effective reference cell, requested targets, and the existing
 engine's convergence evidence. An unconverged stage is recorded and causes a
 nonzero exit before descendants run.
+
+Four lines "Authorization required, but no authorization protocol specified"
+at startup on a host that runs an X server come from the MPI runtime, not
+from madqc: Open MPI's topology discovery in `MPI_Init` loads hwloc's GL
+component, which probes the X display. They are harmless;
+`export HWLOC_COMPONENTS=-gl` silences them.
 
 Energy is in hartree, dipole in `e*a0`, polarizability in `a0^3`, the
 hyperpolarizability in `e^3 a0^3 Eh^-2` and the polarizability gradient in
@@ -103,6 +103,14 @@ Tighter protocol/density targets resume from saved orbitals. An unchanged
 completed request loads without SCF iterations. Iteration limits and requested
 energy/dipole properties can change. Results report `work` (`solved`, `loaded`,
 `resumed`), `iterations_this_run`, and acceleration-history reset.
+Before the work, a continued stage prints its plan, one line per state with
+the reason it was planned that way (`stage <s> plan: <state> - <action> at
+rung <i> (thresh, k): <why>`); after it, one line counts the states loaded,
+resumed, seeded and started fresh, with the iterations this run. The same is
+recorded under `continuation`. A response stage whose whole request is met by
+its saved generation (request equal, stopped converged, properties present)
+is loaded whole: its `continuation` is `{planner: request_complete,
+generation, why, summary}`. A fresh run prints and records neither.
 
 What a moldft stage does on `--continue` is decided by one planner
 (`plan_ladder`, `src/madness/chem/LadderPlanner.h`) from the saved generation

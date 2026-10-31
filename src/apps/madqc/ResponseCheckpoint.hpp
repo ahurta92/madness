@@ -574,6 +574,7 @@ class ResponseCheckpoint {
   int natom_;
   Manifest latest_;
   std::vector<std::string> attempt_copies_;
+  json whole_load_;
   // S5: the seed block of a seeded stage (null when unseeded).
   json seed_ = nullptr;
   bool restored_ = false, loaded_ = false;
@@ -1301,8 +1302,17 @@ public:
     loaded_ = stage_.params.get<ResponseParameters>().get<int>("diagnostic.iterations_per_rung") == 0 &&
               latest_.stop_reason == "converged" &&
               latest_.numerical.at("request") == request_ && !latest_.properties.empty();
-    if (loaded_)
+    if (loaded_) {
       work = "loaded";
+      // D-094: what --continue does with a met request, and why.
+      whole_load_
+          = {{"planner", "request_complete"},
+             {"action", "loaded"},
+             {"generation", latest_.generation},
+             {"why", "it holds today's request: the request is equal, it "
+                     "stopped converged and its properties are present"},
+             {"summary", "loaded whole from " + latest_.generation}};
+    }
     return !loaded_;
   }
 
@@ -1379,6 +1389,8 @@ public:
   }
 
   const Manifest& latest() const { return latest_; }
+  // D-094: the record of a stage loaded whole (null otherwise).
+  [[nodiscard]] const json& whole_load() const { return whole_load_; }
   // D-090: the archive shards the load copied into the attempt.
   [[nodiscard]] const std::vector<std::string>& attempt_copies() const {
     return attempt_copies_;

@@ -132,6 +132,12 @@ for name, stages, ranks in (('h2-r1', ('gs', 'optical'), 1), ('he-r1', ('gs', 'r
     run(f'same-{name}', root, deck(name), ranks)
     assert result(root, 'gs')['work'] == 'loaded'
     loaded_as_stored(root, name, stages)
+    # D-094: the plan before the work, one continuation line after; the
+    # response stage loaded whole records why.
+    log = (work / f'same-{name}.log').read_text()
+    assert 'stage gs plan: ground state - loaded at rung' in log, log[-3000:]
+    assert 'stage gs continuation: ' in log
+    assert result(root, stages[1])['continuation']['planner'] == 'request_complete'
 
 # 2. A response-only deck: the reference read from the stored ground state.
 root = copy('h2-r1', 'response-only')

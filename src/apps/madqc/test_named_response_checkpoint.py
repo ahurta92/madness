@@ -105,6 +105,9 @@ assert abs(value - 6.4495330229835455) < 2e-5
 (fresh / 'optical/results.json').unlink()
 run('reuse', fresh, resume=True)
 assert result(fresh)['work'] == 'loaded'
+# D-094: a request met whole says so, with the generation it loaded.
+assert result(fresh)['continuation']['planner'] == 'request_complete', result(fresh).get('continuation')
+assert result(fresh)['continuation']['generation'] == generation.name
 assert result(fresh)['iterations_this_run'] == 0
 assert published(fresh)[0] == generation and hashes(generation) == original
 assert alpha(fresh) == value

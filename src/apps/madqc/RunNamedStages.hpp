@@ -179,6 +179,10 @@ struct LadderSteps {
   // A3: the deletions retention could not make in this stage's publishes
   // (extra files only), the same on every rank.
   std::function<std::vector<std::string>()> checkpoint_warnings;
+  // D-094: the record of a stage loaded whole, with no per-state plans (the
+  // response's met request: request equal, converged, properties present);
+  // null otherwise. Unset when the application has no such load.
+  std::function<json()> whole_load;
   // A3, D-090: the archive shards the application copied into the attempt
   // (a load's copies), by attempt-relative path, deleted at the end with the
   // latest generation's; unset or empty when it copies none beyond those.
@@ -604,6 +608,58 @@ inline const AppSpec& response_spec();
 // application's part is a LadderSteps closure. finish() decides the verdict
 // before the properties are written; the continuation prints before the
 // outcome table.
+// D-094: the plan lines printed before a --continue stage's work, one per
+// planned state (moldft's one record has no `state`: the ground state), or
+// the whole load's one line.
+[[nodiscard]] inline std::vector<std::string>
+continuation_plan_lines(const std::string& stage, const json& continuation) {
+  const auto line = [&](const std::string& state, const json& plan) {
+    if (!plan.contains("rung"))
+      return "stage " + stage + " plan: " + state + " - "
+             + plan.at("summary").get<std::string>() + ": "
+             + plan.at("why").get<std::string>();
+    const auto& rung = plan.at("rung");
+    return "stage " + stage + " plan: " + state + " - "
+           + plan.at("action").get<std::string>() + " at rung "
+           + std::to_string(rung.at("index").get<int>()) + " (thresh "
+           + madness::convergence::detail::scientific(
+               rung.at("thresh").get<double>())
+           + ", k " + std::to_string(rung.at("k").get<int>())
+           + "): " + plan.at("why").get<std::string>();
+  };
+  std::vector<std::string> lines;
+  if (continuation.contains("states"))
+    for (const auto& state : continuation.at("states"))
+      lines.push_back(line(state.at("state").get<std::string>(), state));
+  else
+    lines.push_back(
+        line(continuation.contains("rung") ? "ground state" : "the stage",
+             continuation));
+  return lines;
+}
+
+// D-094: the one line after a --continue stage's work: how many states were
+// loaded, resumed, seeded and started fresh (moldft's one state: its
+// summary), and the iterations this run.
+[[nodiscard]] inline std::string
+continuation_after_line(const std::string& stage, const json& continuation,
+                        std::size_t iterations) {
+  std::string what;
+  if (continuation.contains("states")) {
+    std::map<std::string, int> counts;
+    for (const auto& state : continuation.at("states"))
+      ++counts[state.at("action").get<std::string>()];
+    for (const char* action : {"loaded", "resumed", "seeded", "fresh"})
+      if (counts[action] > 0)
+        what += (what.empty() ? "" : ", ") + std::to_string(counts[action])
+                + " " + action;
+  } else {
+    what = continuation.at("summary").get<std::string>();
+  }
+  return "stage " + stage + " continuation: " + what + "; "
+         + std::to_string(iterations) + " iterations this run";
+}
+
 inline StageOutcome run_ladder_stage(const StageContext& ctx,
                                      const AppSpec& spec,
                                      const LadderSteps& steps) {
@@ -635,6 +691,16 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
     }
     steps.load(latest, records, plans);
   }
+  // D-094: what --continue will do, with the recorded reasons, before the
+  // work; a stage loaded whole has one record instead of per-state plans.
+  json continuation;
+  if (plans && !plans->states.empty())
+    continuation = plans->continuation;
+  else if (steps.whole_load)
+    continuation = steps.whole_load();
+  if (world.rank() == 0 && !continuation.is_null())
+    for (const auto& line : continuation_plan_lines(stage.name, continuation))
+      std::cout << line << '\n' << std::flush;
   // 5-7. Run, publish, judge.
   steps.run_engine();
   steps.finish();
@@ -654,21 +720,14 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   result["iterations_this_run"] = steps.iterations();
   steps.generation_record(result);
   result["acceleration_history"] = ctx.continuing ? "reset" : "fresh";
-  if (plans && !plans->states.empty()) {
-    // B6: what --continue did and why.
-    const auto& continuation = plans->continuation;
+  if (!continuation.is_null()) {
+    // B6, D-094: what --continue did and why; one line for the stage.
     result["continuation"] = continuation;
-    // One summary for the stage, or one per state.
-    if (world.rank() == 0) {
-      if (continuation.contains("states"))
-        for (const auto& state : continuation.at("states"))
-          madness::print("stage", stage.name,
-                         "continuation:", state.at("state").get<std::string>(),
-                         "-", state.at("summary").get<std::string>());
-      else
-        madness::print("stage", stage.name, "continuation:",
-                       continuation.at("summary").get<std::string>());
-    }
+    if (world.rank() == 0)
+      std::cout << continuation_after_line(stage.name, continuation,
+                                           steps.iterations())
+                << '\n'
+                << std::flush;
   }
   // 9. The outcome table and the record.
   steps.report(result, converged, verdict.at("states"));
@@ -878,6 +937,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   std::vector<std::string> warnings;
   steps.checkpoint_warnings = [&] { return warnings; };
   steps.attempt_copies = [&] { return checkpoint->attempt_copies(); };
+  steps.whole_load = [&] { return checkpoint->whole_load(); };
   steps.prepare = [&] {
     checkpoint.emplace(
         world, stage, ctx.stage_directory, directory,
