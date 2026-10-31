@@ -1019,8 +1019,7 @@ int main(int argc, char** argv) {
               && warnings.front()
                      == "econv 1.0e-06 is reported, not enforced: the engine "
                         "check "
-                            + instead + ". Set " + cv::use_default_criteria_key
-                            + " false to enforce your targets.",
+                            + instead,
           "econv row: the engine-mode warning at stage start");
     const auto targets = cv::requested_targets(settings);
     check(targets.size() == 1

@@ -87,9 +87,7 @@ int main() {
   check(!warnings.empty()
             && warnings.front()
                    == "dconv 1.0e-04 is reported, not enforced: the engine "
-                      "check compares spin-density change against 5.0e-04. "
-                      "Set convergence.use_default_criteria false to enforce "
-                      "your targets.",
+                      "check compares spin-density change against 5.0e-04",
         "warning text names the keyword, its value and what the engine does");
   engine.warnings = warnings; // the stage's settings builder stores them
   const auto targets = requested_targets(engine);

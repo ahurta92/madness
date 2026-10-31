@@ -278,11 +278,11 @@ unenforced_target_warnings(const ConvergenceSettings& settings) {
       continue;
     std::ostringstream target;
     target << std::setprecision(1) << std::scientific << *metric.target;
+    // D-097: one warning per target; the instruction to let the targets
+    // decide is the table's one line above them.
     warnings.push_back(metric.keyword + " " + target.str()
                        + " is reported, not enforced: the engine check "
-                       + metric.engine_check_instead + ". Set "
-                       + use_default_criteria_key
-                       + " false to enforce your targets.");
+                       + metric.engine_check_instead);
   }
   return warnings;
 }

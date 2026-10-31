@@ -6,6 +6,7 @@
 #include <madness/chem/Results.h>
 #include <madness/chem/molopt.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1107,7 +1108,17 @@ struct moldft_lib {
       print("\n");
       scf->molecule.print();
       print("\n");
-      scf->param.print(CalculationParameters::tag);
+      // D-097: the full parameter list (retired keys and unset sentinels
+      // included) only in verbose output; otherwise it goes to a file beside
+      // the run's other files, and one line names it.
+      if (scf->param.print_level() >= 4) {
+        scf->param.print(CalculationParameters::tag);
+      } else {
+        const std::string file = scf->param.prefix() + ".parameters.txt";
+        std::ofstream(file) << scf->param.print_to_string();
+        print(" calculation parameters written to", file,
+              "(print_level 4 or more prints them here)\n");
+      }
     }
     // Come up with an initial OK data map
     if (world.size() > 1) {

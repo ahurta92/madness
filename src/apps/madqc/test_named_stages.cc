@@ -56,10 +56,10 @@ int main(int argc, char** argv) {
       auto tight = response;
       tight.replace(tight.find("protocol [1e-4]"), 15, "protocol [1e-8]");
       rejects(geometry + gs + tight,
-              "response stage optical: protocol final step thresh 1e-08");
+              "response stage optical: protocol final step thresh 1.0e-08");
       rejects(geometry + gs + tight,
               "is tighter than reference GS, written at final step thresh "
-              "1e-06");
+              "1.0e-06");
       rejects(geometry + gs + tight, "write the protocol you mean");
     }
     // D-100 (G-003): a missing end is named as such.

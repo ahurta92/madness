@@ -519,7 +519,9 @@ inline std::string saved_reference_rung(madness::World& world,
                 .get<std::string>());
       std::ostringstream text;
       text << "; " << reference << "'s saved generation " << m.generation
-           << " is at thresh " << m.numerical.at("threshold").get<double>()
+           << " is at thresh "
+           << madness::convergence::detail::scientific(
+                  m.numerical.at("threshold").get<double>())
            << ", k " << m.numerical.at("k").get<int>();
       return text.str();
     } catch (const std::exception&) {
@@ -869,12 +871,14 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
             || protocol_k(own_protocol.back()) > source_k) {
           // D-102: the deck is the contract; say what each side wrote.
           std::ostringstream text;
+          namespace cv = madness::convergence;
           text << "response stage " << b.name << ": protocol final step thresh "
-               << own_protocol.back() << " (k "
+               << cv::detail::scientific(own_protocol.back()) << " (k "
                << protocol_k(own_protocol.back())
                << ") is tighter than reference " << stage.reference
                << ", written at final step thresh "
-               << reference_cp.protocol().back() << " (k " << source_k << ")"
+               << cv::detail::scientific(reference_cp.protocol().back())
+               << " (k " << source_k << ")"
                << saved_reference_rung(world, output_root, stage.reference)
                << "; write the protocol you mean";
           throw std::runtime_error(text.str());
