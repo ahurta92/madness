@@ -570,6 +570,7 @@ class ResponseCheckpoint {
   json reference_, request_;
   int natom_;
   Manifest latest_;
+  std::vector<std::string> attempt_copies_;
   // S5: the seed block of a seeded stage (null when unseeded).
   json seed_ = nullptr;
   bool restored_ = false, loaded_ = false;
@@ -1348,6 +1349,11 @@ public:
           && analyses.contains(plan->second.loaded_key))
         keep.push_back(plan->second.loaded_key);
     }
+    // D-090: every shard copied in is deleted at the end of the stage, a
+    // root or state the request no longer names included.
+    for (const auto& a : latest_.archives)
+      for (const auto& shard : a.shards)
+        attempt_copies_.push_back(shard.path);
     checkpoint::detail::on_root(world_, [&] {
       for (const auto& a : latest_.archives)
         for (const auto& shard : a.shards) {
@@ -1370,6 +1376,10 @@ public:
   }
 
   const Manifest& latest() const { return latest_; }
+  // D-090: the archive shards the load copied into the attempt.
+  [[nodiscard]] const std::vector<std::string>& attempt_copies() const {
+    return attempt_copies_;
+  }
   [[nodiscard]] const molresponse_v3::StatePlans& state_plans() const {
     return plans_.engine;
   }

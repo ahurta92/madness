@@ -183,6 +183,10 @@ struct LadderSteps {
   // A3: the deletions retention could not make in this stage's publishes
   // (extra files only), the same on every rank.
   std::function<std::vector<std::string>()> checkpoint_warnings;
+  // A3, D-090: the archive shards the application copied into the attempt
+  // (a load's copies), by attempt-relative path, deleted at the end with the
+  // latest generation's; unset or empty when it copies none beyond those.
+  std::function<std::vector<std::string>()> attempt_copies;
   // 9. The convergence report on the skeleton's verdict (B8), with each
   // needed state's evaluation of the written targets (`states`, the shared
   // verdict's), the saved-state outcomes of the table, and the label the
@@ -466,22 +470,28 @@ inline std::string retain_generations(madness::World& world,
 // working files and the copies a load makes), so the generation is the only
 // copy at rest. The published inventory names the shards by the same paths
 // the attempt uses, for every application; the attempt keeps its text output
-// and JSON records. Collective (rank 0 deletes); returns the deletions it
-// could not make, the same on every rank, empty on success.
+// and JSON records. D-090 (a): `copied` adds the shards a load copied in that
+// the latest generation does not list (a root or state dropped from the
+// request). Collective (rank 0 deletes); returns the deletions it could not
+// make, the same on every rank, empty on success.
 inline std::string
 delete_attempt_copies(madness::World& world, const fs::path& attempt,
-                      const madness::checkpoint::Manifest& latest) {
+                      const madness::checkpoint::Manifest& latest,
+                      const std::vector<std::string>& copied = {}) {
+  std::set<std::string> paths(copied.begin(), copied.end());
+  for (const auto& archive : latest.archives)
+    for (const auto& shard : archive.shards)
+      paths.insert(shard.path);
   return madness::checkpoint::detail::on_root(world, [&] {
     std::string warning;
-    for (const auto& archive : latest.archives)
-      for (const auto& shard : archive.shards) {
-        const auto copy = attempt / shard.path;
-        std::error_code error;
-        if (fs::is_regular_file(fs::symlink_status(copy, error))
-            && !fs::remove(copy, error) && error)
-          warning += (warning.empty() ? "" : "; ") + copy.string() + ": "
-                     + error.message();
-      }
+    for (const auto& path : paths) {
+      const auto copy = attempt / path;
+      std::error_code error;
+      if (fs::is_regular_file(fs::symlink_status(copy, error))
+          && !fs::remove(copy, error) && error)
+        warning += (warning.empty() ? "" : "; ") + copy.string() + ": "
+                   + error.message();
+    }
     return warning;
   });
 }
@@ -683,8 +693,10 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   // published in this run or used as published; the attempt's copies of its
   // shards go, and so do retention's leftovers' warnings into the record.
   auto warnings = steps.checkpoint_warnings();
-  if (const auto warning
-      = delete_attempt_copies(world, ctx.attempt_directory, saved);
+  if (const auto warning = delete_attempt_copies(
+          world, ctx.attempt_directory, saved,
+          steps.attempt_copies ? steps.attempt_copies()
+                               : std::vector<std::string>{});
       !warning.empty())
     warnings.push_back("attempt copies: " + warning);
   for (const auto& name : verdict.at("unmeasured_targets"))
@@ -869,6 +881,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   GenerationSequence names{stage.name, ctx.run_id};
   std::vector<std::string> warnings;
   steps.checkpoint_warnings = [&] { return warnings; };
+  steps.attempt_copies = [&] { return checkpoint->attempt_copies(); };
   steps.prepare = [&] {
     checkpoint.emplace(
         world, stage, ctx.stage_directory, directory,

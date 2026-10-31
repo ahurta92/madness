@@ -880,6 +880,17 @@ int main(int argc, char** argv) {
           check(named_stages::delete_attempt_copies(world, attempt, latest)
                     .empty(),
                 "delete_attempt_copies: nothing left to delete is no warning");
+          // D-090: a shard a load copied in that the latest generation no
+          // longer lists (a dropped root) goes too.
+          fs::create_directories(attempt / "es_bundle");
+          std::ofstream(attempt / "es_bundle/root_1.00000") << "x";
+          check(named_stages::delete_attempt_copies(world, attempt, latest,
+                                                    {"es_bundle/root_1.00000"})
+                        .empty()
+                    && !fs::exists(attempt / "es_bundle/root_1.00000")
+                    && fs::exists(attempt / "es_bundle/roots.json"),
+                "delete_attempt_copies (D-090): a copied shard the latest "
+                "generation does not list is deleted, the records stay");
         }
         fs::remove_all(store.parent_path());
       }
