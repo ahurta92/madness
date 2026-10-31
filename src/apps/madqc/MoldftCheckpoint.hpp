@@ -341,24 +341,9 @@ moldft_ladder_request(const Stage& stage, int natom,
   state.plan = planning::plan_ladder(saved, std::nullopt, request);
   state.start = request.ladder.at(state.plan.start_rung);
   state.own_rung = saved.rung;
-  const std::map<planning::Action, const char*> words
-      = {{planning::Action::load, "loaded"},
-         {planning::Action::resume, "resumed"},
-         {planning::Action::seed, "seeded"},
-         {planning::Action::fresh, "fresh"}};
-  const auto& plan = state.plan;
   StagePlans plans;
-  plans.continuation = {{"action", words.at(plan.action)},
-                        {"rung",
-                         {{"index", plan.start_rung + 1},
-                          {"thresh", state.start.thresh},
-                          {"k", state.start.k}}},
-                        {"iterations_done_at_rung", plan.iterations_done},
-                        {"why", plan.why},
-                        {"unmet", plan.unmet},
-                        {"unmet_not_enforceable", plan.unmet_not_enforceable},
-                        {"planner", "plan_ladder"},
-                        {"summary", planning::describe(plan, request.ladder)}};
+  plans.continuation = continuation_record(state, request.ladder);
+  plans.continuation["planner"] = "plan_ladder";
   plans.states.push_back(std::move(state));
   return plans;
 }

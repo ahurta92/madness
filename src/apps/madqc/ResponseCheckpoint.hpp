@@ -1276,11 +1276,6 @@ private:
         const std::string& node_id, const json& fields,
         const std::function<std::string(const std::string&)>& key_at) {
     namespace planning = madness::planning;
-    const std::map<planning::Action, const char*> words
-        = {{planning::Action::load, "loaded"},
-           {planning::Action::resume, "resumed"},
-           {planning::Action::fresh, "fresh"},
-           {planning::Action::seed, "seeded"}};
     PlannedState state;
     state.identity = request.identity;
     state.plan = plan;
@@ -1292,18 +1287,8 @@ private:
     state.fields = {{"node", node_id},
                     {"key_at_start", key_at(molresponse_v3::protocol_key(
                                          state.start.thresh, state.start.k))}};
-    const auto& start = state.start;
-    json record = {{"state", request.identity},
-                   {"action", words.at(plan.action)},
-                   {"rung",
-                    {{"index", plan.start_rung + 1},
-                     {"thresh", start.thresh},
-                     {"k", start.k}}},
-                   {"iterations_done_at_rung", plan.iterations_done},
-                   {"why", plan.why},
-                   {"unmet", plan.unmet},
-                   {"unmet_not_enforceable", plan.unmet_not_enforceable},
-                   {"summary", planning::describe(plan, request.ladder)}};
+    json record = continuation_record(state, request.ladder);
+    record["state"] = request.identity;
     record.update(fields);
     // R2 loads a stalled final rung with the request unmet: not met.
     if (plan.action == planning::Action::load && plan.unmet.empty())

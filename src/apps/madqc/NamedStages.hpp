@@ -1122,6 +1122,33 @@ struct PlannedState {
   nlohmann::json fields = nlohmann::json::object();
 };
 
+// B6 (D-107): the part of a state's continuation record both applications
+// write: the planner's action in words, the protocol step it starts at, the
+// iterations already done there, the reason, the unmet targets, and the
+// summary. Each application adds its own fields (moldft: planner; response:
+// state and its node fields).
+[[nodiscard]] inline nlohmann::json
+continuation_record(const PlannedState& state,
+                    const std::vector<madness::planning::Rung>& ladder) {
+  namespace planning = madness::planning;
+  static const std::map<planning::Action, const char*> words
+      = {{planning::Action::load, "loaded"},
+         {planning::Action::resume, "resumed"},
+         {planning::Action::seed, "seeded"},
+         {planning::Action::fresh, "fresh"}};
+  const auto& plan = state.plan;
+  return {{"action", words.at(plan.action)},
+          {"rung",
+           {{"index", plan.start_rung + 1},
+            {"thresh", state.start.thresh},
+            {"k", state.start.k}}},
+          {"iterations_done_at_rung", plan.iterations_done},
+          {"why", plan.why},
+          {"unmet", plan.unmet},
+          {"unmet_not_enforceable", plan.unmet_not_enforceable},
+          {"summary", planning::describe(plan, ladder)}};
+}
+
 // The plans of a stage's states, in request order, and what --continue did
 // and why (B6), the results.json record in the application's form.
 struct StagePlans {
