@@ -921,6 +921,11 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     result["convergence_report"]["requested_accuracy"]
         = requested_criteria_report(states.at(0).at("requested_accuracy"),
                                     *settings);
+    // D-105 (D-098 step 2 trimmed): the generation's report is in its
+    // manifest and in convergence_report above; the stage record does not
+    // copy it a second and third time.
+    result["checkpoint_metrics"].erase("convergence_report");
+    result.erase("convergence_settings");
   };
   steps.outcomes = [&] { return saved_outcomes(saved_measurements()); };
   steps.outcome_label = [&](bool) { return checkpoint->latest().stop_reason; };

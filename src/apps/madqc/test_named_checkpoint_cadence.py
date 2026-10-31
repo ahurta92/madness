@@ -115,7 +115,7 @@ samples = [(row['kinetic_trace']['sample']['threshold'], row['kinetic_trace']['s
 assert samples == [(1e-4, i) for i in range(lengths[1])] + [(1e-6, i) for i in range(lengths[2])], samples
 assert 'earlier_runs_iteration_history' not in latest(fresh)['metrics']['convergence_report']
 # The settings table shows the cadence, and the record says the same.
-settings = result(fresh)['convergence_settings']['checkpoints']
+settings = result(fresh)['convergence_report']['convergence_settings']['checkpoints']
 assert settings['every_iterations'] is None and not settings['keep_all'], settings
 assert settings['every_iterations_set_by'] == 'engine_default', settings
 assert 'Checkpoints: at every rung end and stop' in log
@@ -135,7 +135,7 @@ ends = [m for m in published if m['position']['phase'] == 'after_final_rotation'
 assert [rung(m)['index'] for m in ends] == [1, 2], [rung(m) for m in ends]
 assert [rung(m)['stop'] for m in ends] == ['converged', 'converged'], [rung(m) for m in ends]
 assert [rung(m)['iterations_at_rung'] for m in ends] == [lengths[1], lengths[2]], [rung(m) for m in ends]
-settings = result(every3)['convergence_settings']['checkpoints']
+settings = result(every3)['convergence_report']['convergence_settings']['checkpoints']
 assert settings['every_iterations'] == 3 and settings['keep_all'], settings
 assert settings['every_iterations_set_by'] == 'user' and settings['keep_all_set_by'] == 'user'
 assert 'Checkpoints: every 3 iterations within a rung (user)' in log

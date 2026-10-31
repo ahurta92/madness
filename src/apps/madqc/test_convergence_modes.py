@@ -78,7 +78,7 @@ def table_rows(log):
 def check_table_matches_record(log, stage):
     """B9 one source: every record row appears in the printed table as recorded."""
     rows = table_rows(log)
-    settings = stage['convergence_settings']
+    settings = stage['convergence_report']['convergence_settings']
     assert ('Decided by: engine check' in log) == (settings['decided_by'] == 'engine_check')
     for metric in settings['metrics']:
         target = '-' if metric['target'] is None else '%.1e' % metric['target']
@@ -88,17 +88,17 @@ def check_table_matches_record(log, stage):
 
 # Row 1: both pass. The default deck (engine mode) completes as before.
 root, stage, log = run('engine-default', deck())
-assert stage['status'] == 'completed' and stage['convergence_settings']['decided_by'] == 'engine_check'
+assert stage['status'] == 'completed' and stage['convergence_report']['convergence_settings']['decided_by'] == 'engine_check'
 check_table_matches_record(log, stage)
 assert 'WARNING: dconv 1.0e-05 is reported, not enforced' in log
 assert 'WARNING: econv 1.0e-06 is reported, not enforced' in log
-assert stage['convergence_settings']['warnings'] == [l.split('WARNING: ', 1)[1] for l in log.splitlines()
+assert stage['convergence_report']['convergence_settings']['warnings'] == [l.split('WARNING: ', 1)[1] for l in log.splitlines()
                                                      if l.startswith('  WARNING: ')]
 engine_default = root
 
 # A deck with no written targets at all shows only engine defaults.
 _, plain, plain_log = run('engine-no-targets', deck(dconv=None, econv=None))
-assert not [m for m in plain['convergence_settings']['metrics']
+assert not [m for m in plain['convergence_report']['convergence_settings']['metrics']
             if m['group'] == 'requested_criteria' and m['target'] is not None]
 assert 'engine default econv 1.0e-05 is not a target (D8)' in plain_log
 check_table_matches_record(plain_log, plain)
@@ -106,7 +106,7 @@ check_table_matches_record(plain_log, plain)
 # Row 1 in criteria mode: loose written targets, met.
 _, stage, log = run('criteria-loose', deck(criteria=True, dconv='1e-3', econv='1e-3'))
 assert stage['status'] == 'completed'
-assert stage['convergence_settings']['decided_by'] == 'requested_criteria'
+assert stage['convergence_report']['convergence_settings']['decided_by'] == 'requested_criteria'
 check_table_matches_record(log, stage)
 assert 'set no bsh_residual target' in log  # incomplete request warned (B8)
 

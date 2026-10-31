@@ -74,7 +74,11 @@ engine's convergence evidence. An unconverged stage is recorded and causes a
 nonzero exit before descendants run. The root `results.json` names the binary
 that wrote it in `build` (`commit`, `description` as `git describe --dirty`
 gave it when the build was configured, and `built`); the startup banner prints
-the same commit and description.
+the same commit and description. Each generation's manifest keeps the
+stage's scientific report in `metrics.convergence_report` (moldft's, and a
+response stage's: its settings, decider, and for the analysed generation the
+outcome rows and each needed state's judged targets); a moldft stage's
+`results.json` gives it once, under `convergence_report`.
 
 Four lines "Authorization required, but no authorization protocol specified"
 at startup on a host that runs an X server come from the MPI runtime, not
