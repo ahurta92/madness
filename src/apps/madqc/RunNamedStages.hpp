@@ -736,7 +736,7 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
       = verdict.at("unmeasured_targets");
   const auto outcomes = steps.outcomes();
   result["convergence_report"]["convergence_outcome"]
-      = madness::convergence::outcome_to_json(settings, outcomes);
+      = madness::convergence::outcome_record(settings, outcomes);
   if (world.rank() == 0)
     std::cout << madness::convergence::render_outcome_table(
         settings, outcomes, steps.outcome_label(converged))

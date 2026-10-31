@@ -99,6 +99,11 @@ struct ConvergenceSettings {
   /// empty: none. Shown and recorded only when present.
   std::string seed;
   std::vector<std::string> warnings;
+  /// D-095: which protocol step the limits are, e.g. "limits of the final
+  /// protocol step (thresh 1e-06, k 8); the run starts at step 1 (thresh
+  /// 1e-04)". Shown under both tables and in the outcome record; not in
+  /// to_json, so the settings record and the manifests are unchanged.
+  std::string scope;
 };
 
 /// A final measurement of one metric, for the end-of-stage table (B9).
@@ -107,6 +112,14 @@ struct MetricOutcome {
   std::optional<double> value;
   std::string availability
       = "unavailable"; ///< measured | unavailable | invalid
+  /// D-095: the limit this value was judged against when it is its own (a
+  /// per-leg effective limit); absent: the row's.
+  std::optional<double> limit;
+  std::string units; ///< the measurement's units; empty: the row's
+  std::string phase; ///< when in the solve the value was taken
+  /// What the value is about when a row has one per leg or root (e.g.
+  /// "dipole_z f0.02000"); empty for a stage-wide value.
+  std::string subject;
 };
 
 [[nodiscard]] inline bool enforced(const ConvergenceSettings& settings,
@@ -499,6 +512,8 @@ render_settings_table(const ConvergenceSettings& settings) {
   using detail::scientific;
   std::string table = "Convergence settings: stage " + settings.stage + " ("
                       + settings.application + ")\n";
+  if (!settings.scope.empty())
+    table += "  Scope: " + settings.scope + "\n";
   table += settings.decider == Decider::engine_check
                ? "  Decided by: engine check"
                : "  Decided by: your requested criteria";
@@ -542,13 +557,30 @@ render_settings_table(const ConvergenceSettings& settings) {
   return table;
 }
 
-/// One row's verdict at the end of a stage: met, unmet, unavailable, or
-/// reported (no single number to compare with).
+/// D-095: the scope line of a stage's tables: which protocol step the
+/// limits belong to, and where the run starts.
+[[nodiscard]] inline std::string
+protocol_scope(const std::vector<double>& protocol, int final_k) {
+  if (protocol.empty())
+    return {};
+  const auto step = "(thresh " + detail::scientific(protocol.back()) + ", k "
+                    + std::to_string(final_k) + ")";
+  if (protocol.size() == 1)
+    return "limits of the one protocol step " + step;
+  return "limits of the final protocol step " + step
+         + "; the run starts at step 1 (thresh "
+         + detail::scientific(protocol.front()) + ")";
+}
+
+/// One row's verdict at the end of a stage: met, unmet, unavailable, not
+/// applicable, or reported (no single number to compare with). An outcome
+/// that carries its own limit (D-095, a per-leg limit) is judged against it.
 [[nodiscard]] inline std::string verdict(const MetricSetting& metric,
                                          const MetricOutcome& outcome) {
-  const auto limit = comparison_limit(metric);
+  const auto limit = outcome.limit ? outcome.limit : comparison_limit(metric);
   if (!limit)
-    return "reported";
+    return metric.note.starts_with("not applicable") ? "not applicable"
+                                                       : "reported";
   if (outcome.availability != "measured" || !outcome.value)
     return outcome.availability == "invalid" ? "invalid" : "unavailable";
   const bool met = metric.relation == Relation::less_than
@@ -574,7 +606,37 @@ inline MetricOutcome outcome_for(const std::vector<MetricOutcome>& outcomes,
              ? *found
              : MetricOutcome{measurement, std::nullopt, "unavailable"};
 }
+/// D-095: a row's per-leg (or per-root) outcomes, in the order given; empty
+/// when the row has one stage-wide outcome or none.
+inline std::vector<MetricOutcome>
+leg_outcomes(const std::vector<MetricOutcome>& outcomes,
+             const std::string& measurement) {
+  std::vector<MetricOutcome> legs;
+  for (const auto& outcome : outcomes)
+    if (outcome.measurement == measurement && !outcome.subject.empty())
+      legs.push_back(outcome);
+  return legs;
+}
 } // namespace detail
+
+/// D-095: a row's verdict over its legs when it has them (unmet when any
+/// leg is, else the first leg that is not met, else met), else verdict().
+[[nodiscard]] inline std::string
+row_verdict(const MetricSetting& metric,
+            const std::vector<MetricOutcome>& outcomes) {
+  const auto legs = detail::leg_outcomes(outcomes, metric.measurement);
+  if (legs.empty())
+    return verdict(metric, detail::outcome_for(outcomes, metric.measurement));
+  std::string result = "met";
+  for (const auto& leg : legs) {
+    const auto v = verdict(metric, leg);
+    if (v == "unmet")
+      return v;
+    if (v != "met" && result == "met")
+      result = v;
+  }
+  return result;
+}
 
 /// The enforced row furthest from its limit (largest value / limit); none when
 /// nothing enforced was measured.
@@ -585,15 +647,21 @@ limiting_metric(const ConvergenceSettings& settings,
   double worst = -1.0;
   for (std::size_t i = 0; i < settings.metrics.size(); ++i) {
     const auto& metric = settings.metrics[i];
-    const auto limit = comparison_limit(metric);
-    const auto outcome = detail::outcome_for(outcomes, metric.measurement);
-    if (!enforced(settings, metric) || !limit || *limit <= 0.0
-        || !outcome.value)
+    if (!enforced(settings, metric))
       continue;
-    const double ratio = *outcome.value / *limit;
-    if (ratio > worst) {
-      worst = ratio;
-      limiting = i;
+    auto candidates = detail::leg_outcomes(outcomes, metric.measurement);
+    if (candidates.empty())
+      candidates.push_back(detail::outcome_for(outcomes, metric.measurement));
+    for (const auto& outcome : candidates) {
+      const auto limit
+          = outcome.limit ? outcome.limit : comparison_limit(metric);
+      if (!limit || *limit <= 0.0 || !outcome.value)
+        continue;
+      const double ratio = *outcome.value / *limit;
+      if (ratio > worst) {
+        worst = ratio;
+        limiting = i;
+      }
     }
   }
   return limiting;
@@ -623,7 +691,56 @@ outcome_to_json(const ConvergenceSettings& settings,
                     : nlohmann::json(nullptr)}};
 }
 
-/// The table printed at the end of a stage (B9), from the same struct.
+/// D-095: the end-of-stage record in results.json: outcome_to_json's rows,
+/// each with its limit, units and phase, and the legs (or roots) of a row
+/// judged per leg; the scope of the limits. The manifests keep
+/// outcome_to_json.
+[[nodiscard]] inline nlohmann::json
+outcome_record(const ConvergenceSettings& settings,
+               const std::vector<MetricOutcome>& outcomes) {
+  auto record = outcome_to_json(settings, outcomes);
+  auto& rows = record["metrics"];
+  for (std::size_t i = 0; i < settings.metrics.size(); ++i) {
+    const auto& metric = settings.metrics[i];
+    auto& row = rows[i];
+    const auto outcome = detail::outcome_for(outcomes, metric.measurement);
+    const auto limit = comparison_limit(metric);
+    row["limit"] = limit ? nlohmann::json(*limit) : nlohmann::json(nullptr);
+    row["units"] = outcome.units.empty() ? metric.units : outcome.units;
+    row["phase"] = outcome.phase.empty() ? nlohmann::json(nullptr)
+                                         : nlohmann::json(outcome.phase);
+    row["verdict"] = row_verdict(metric, outcomes);
+    const auto legs = detail::leg_outcomes(outcomes, metric.measurement);
+    if (legs.empty())
+      continue;
+    nlohmann::json each = nlohmann::json::array();
+    std::optional<double> largest;
+    bool measured = true;
+    for (const auto& leg : legs) {
+      each.push_back({{"subject", leg.subject},
+                      {"value", leg.value ? nlohmann::json(*leg.value)
+                                          : nlohmann::json(nullptr)},
+                      {"limit", leg.limit ? nlohmann::json(*leg.limit)
+                                          : nlohmann::json(nullptr)},
+                      {"availability", leg.availability},
+                      {"verdict", verdict(metric, leg)},
+                      {"phase", leg.phase}});
+      measured = measured && leg.availability == "measured";
+      if (leg.value && (!largest || *leg.value > *largest))
+        largest = leg.value;
+    }
+    row["legs"] = std::move(each);
+    row["value"] = largest ? nlohmann::json(*largest) : nlohmann::json(nullptr);
+    row["availability"] = measured ? "measured" : "unavailable";
+    row["phase"] = legs.front().phase;
+  }
+  record["scope"] = settings.scope;
+  return record;
+}
+
+/// The table printed at the end of a stage (B9), from the same struct: the
+/// engine-check rows, then the requested ones, each group with the phase of
+/// its values; a row judged per leg is followed by one line per leg (D-095).
 [[nodiscard]] inline std::string
 render_outcome_table(const ConvergenceSettings& settings,
                      const std::vector<MetricOutcome>& outcomes,
@@ -633,23 +750,53 @@ render_outcome_table(const ConvergenceSettings& settings,
   std::string table = "Convergence outcome: stage " + settings.stage + " ("
                       + settings.application + "), stop reason " + stop_reason
                       + "\n";
+  if (!settings.scope.empty())
+    table += "  Scope: " + settings.scope + "\n";
   table += "  " + padded("Metric", detail::header_name_width)
            + padded("Value", detail::number_width)
            + padded("Limit", detail::number_width)
            + padded("Enforced", detail::number_width) + "Verdict\n";
-  for (const auto& metric : settings.metrics) {
-    const auto outcome = detail::outcome_for(outcomes, metric.measurement);
-    table
-        += "    " + padded(metric.name, detail::name_width)
-           + padded(scientific(outcome.value), detail::number_width)
-           + padded(scientific(comparison_limit(metric)), detail::number_width)
-           + padded(enforced(settings, metric) ? "yes" : "no",
-                    detail::number_width)
-           + verdict(metric, outcome)
-           + (enforced(settings, metric) || !comparison_limit(metric)
-                  ? ""
-                  : " (reported only)")
-           + "\n";
+  for (const auto group : {Group::engine_check, Group::requested_criteria}) {
+    std::string rows;
+    std::string phase;
+    for (const auto& metric : settings.metrics) {
+      if (metric.group != group)
+        continue;
+      const auto outcome = detail::outcome_for(outcomes, metric.measurement);
+      const auto legs = detail::leg_outcomes(outcomes, metric.measurement);
+      if (phase.empty())
+        phase = outcome.phase;
+      const auto units = outcome.units.empty() ? metric.units : outcome.units;
+      const auto row = row_verdict(metric, outcomes);
+      rows += "    " + padded(metric.name, detail::name_width)
+              + padded(legs.empty() ? scientific(outcome.value) : "per leg",
+                       detail::number_width)
+              + padded(legs.empty() ? scientific(comparison_limit(metric))
+                                    : "per leg",
+                       detail::number_width)
+              + padded(enforced(settings, metric) ? "yes" : "no",
+                       detail::number_width)
+              + row
+              + (enforced(settings, metric) || row == "reported"
+                         || row == "not applicable"
+                     ? ""
+                     : " (reported only)")
+              + (units.empty() || row == "not applicable" ? ""
+                                                          : "  [" + units + "]")
+              + "\n";
+      for (const auto& leg : legs)
+        rows += "      " + padded(leg.subject, detail::name_width)
+                + padded(scientific(leg.value), detail::number_width)
+                + padded(scientific(leg.limit), detail::number_width)
+                + padded("", detail::number_width) + verdict(metric, leg)
+                + "\n";
+    }
+    if (rows.empty())
+      continue;
+    table += std::string(group == Group::engine_check ? "  Engine check"
+                                                      : "  Requested targets")
+             + (phase.empty() ? "" : " (values: " + detail::words(phase) + ")")
+             + "\n" + rows;
   }
   const auto limiting = limiting_metric(settings, outcomes);
   table += "  Limiting metric: "

@@ -136,6 +136,9 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
          "not applicable: a driven response has no local energy; see the "
          "reference stage",
          ""});
+  settings.scope
+      = cv::protocol_scope(stage.params.get<CalculationParameters>().protocol(),
+                           protocol_k(final_thresh));
   settings.iteration_caps = {
       {static_cast<int>(rp.maxiter())},
       stage.written.contains("maxiter") ? SetBy::user : SetBy::engine_default};
@@ -187,6 +190,9 @@ response_saved_outcomes(const json& metadata,
         const auto& record = item.value();
         auto& outcome = largest[item.key()];
         outcome.measurement = item.key();
+        outcome.units = record.value("units", "");
+        if (record.value("phase", json()).is_string())
+          outcome.phase = record.at("phase").get<std::string>();
         if (record.value("availability", "") != "measured"
             || !record.at("value").is_number())
           continue;
@@ -201,6 +207,38 @@ response_saved_outcomes(const json& metadata,
   outcomes.reserve(largest.size());
   for (auto& item : largest)
     outcomes.push_back(std::move(item.second));
+  // D-095: the engine's per-leg checks, each leg judged on its own effective
+  // limit as the engine judged it, from its last solver step.
+  const std::map<std::string, std::string> engine_rows
+      = {{"engine_bsh_residual", "bsh_residual"},
+         {"engine_density_change", "density_change"}};
+  for (const auto& channel : states.items()) {
+    if (!channel.value().contains(final_protocol))
+      continue;
+    for (const auto& point : channel.value().at(final_protocol).items()) {
+      const auto checks
+          = point.value().value("convergence_measurements", json::object());
+      for (const auto& [row, name] : engine_rows) {
+        if (!checks.contains(name))
+          continue;
+        const auto& check = checks.at(name);
+        madness::convergence::MetricOutcome leg;
+        leg.measurement = row;
+        leg.subject = channel.key() + " " + point.key();
+        leg.units = check.value("units", "");
+        if (check.value("phase", json()).is_string())
+          leg.phase = check.at("phase").get<std::string>();
+        if (check.value("effective_limit", json()).is_number())
+          leg.limit = check.at("effective_limit").get<double>();
+        if (check.value("availability", "") == "measured"
+            && check.value("value", json()).is_number()) {
+          leg.value = check.at("value").get<double>();
+          leg.availability = "measured";
+        }
+        outcomes.push_back(std::move(leg));
+      }
+    }
+  }
   return outcomes;
 }
 

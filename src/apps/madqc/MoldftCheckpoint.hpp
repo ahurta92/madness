@@ -155,7 +155,13 @@ saved_outcomes(const json& saved_measurements) {
          availability == "measured" && record.at("value").is_number()
              ? std::optional<double>(record.at("value").get<double>())
              : std::nullopt,
-         availability});
+         availability,
+         std::nullopt,
+         record.value("units", ""),
+         record.value("phase", json()).is_string()
+             ? record.at("phase").get<std::string>()
+             : std::string{},
+         {}});
   }
   return outcomes;
 }
@@ -173,6 +179,9 @@ moldft_stage_settings(const Stage& stage, int natom) {
   settings.checkpoints = {
       stage.checkpoint_every_iterations, set_by("checkpoint.every_iterations"),
       stage.checkpoint_keep_all, set_by("checkpoint.keep_all"), ""};
+  const auto& cp = stage.params.get<CalculationParameters>();
+  settings.scope = convergence::protocol_scope(
+      cp.protocol(), cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k());
   return settings;
 }
 

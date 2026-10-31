@@ -176,6 +176,59 @@ int main() {
             != std::string::npos,
         "the outcome table names the limiting metric");
 
+  // D-095: a row judged per leg, each leg on its own limit; a row whose note
+  // says it does not apply; the record's limit, units, phase and legs.
+  {
+    ConvergenceSettings legs = engine;
+    MetricSetting per_leg;
+    per_leg.group = Group::engine_check;
+    per_leg.name = "BSH residual per leg";
+    per_leg.measurement = "engine_bsh_residual";
+    per_leg.units = "a.u.";
+    per_leg.limit_formula = "5e-4 + rtol x ||x||";
+    MetricSetting energy;
+    energy.name = "energy change";
+    energy.measurement = "energy_change";
+    energy.note = "not applicable: see the reference stage";
+    legs.metrics = {per_leg, energy};
+    legs.scope = "limits of the one protocol step (thresh 1.0e-04, k 6)";
+    MetricOutcome a{
+        "engine_bsh_residual", 1e-4, "measured", 1e-3, "a.u.", "solver_step",
+        "dipole_z f0.00000"};
+    MetricOutcome b{
+        "engine_bsh_residual", 2e-3, "measured", 1.5e-3, "a.u.", "solver_step",
+        "dipole_z f0.02000"};
+    check(row_verdict(per_leg, {a}) == "met"
+              && row_verdict(per_leg, {a, b}) == "unmet"
+              && verdict(per_leg,
+                         MetricOutcome{"engine_bsh_residual", 1e-4, "measured"})
+                     == "reported"
+              && verdict(energy, MetricOutcome{"energy_change"})
+                     == "not applicable",
+          "verdicts (D-095): per leg on each leg's limit; not applicable; "
+          "reported without a limit");
+    const auto record = outcome_record(legs, {a, b});
+    const auto& row = record.at("metrics").at(0);
+    check(row.at("legs").size() == 2 && row.at("value") == 2e-3
+              && row.at("verdict") == "unmet" && row.at("units") == "a.u."
+              && row.at("phase") == "solver_step"
+              && row.at("legs").at(1).at("verdict") == "unmet"
+              && record.at("scope") == legs.scope
+              && !to_json(legs).contains("scope"),
+          "outcome_record (D-095): the legs, units, phase and scope; the "
+          "settings record has no scope");
+    const auto table = render_outcome_table(legs, {a, b}, "converged");
+    check(table.find("Scope: limits of the one protocol step")
+                  != std::string::npos
+              && table.find("Engine check (values: solver step)")
+                     != std::string::npos
+              && table.find("dipole_z f0.02000") != std::string::npos
+              && table.find("not applicable") != std::string::npos
+              && table.find("Limiting metric: BSH residual per leg")
+                     != std::string::npos,
+          "outcome table (D-095): groups, phase, legs, scope, limiting leg");
+  }
+
   // B5: rung_exit orders the exits once. Each row: decider, engine check,
   // criteria met, stall, iterations this run, cap, forced, expected exit.
   constexpr auto E = Decider::engine_check;
