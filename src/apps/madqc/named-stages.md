@@ -71,7 +71,10 @@ has `results.json`. SCF's resolved input and engine files are under its stage,
 and response metadata/state files are under the response stage. Results carry
 method, units, effective reference cell, requested targets, and the existing
 engine's convergence evidence. An unconverged stage is recorded and causes a
-nonzero exit before descendants run.
+nonzero exit before descendants run. The root `results.json` names the binary
+that wrote it in `build` (`commit`, `description` as `git describe --dirty`
+gave it when the build was configured, and `built`); the startup banner prints
+the same commit and description.
 
 Four lines "Authorization required, but no authorization protocol specified"
 at startup on a host that runs an X server come from the MPI runtime, not

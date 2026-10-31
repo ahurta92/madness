@@ -138,6 +138,9 @@ for name, stages, ranks in (('h2-r1', ('gs', 'optical'), 1), ('he-r1', ('gs', 'r
     assert 'stage gs plan: ground state - loaded at rung' in log, log[-3000:]
     assert 'stage gs continuation: ' in log
     assert result(root, stages[1])['continuation']['planner'] == 'request_complete'
+    # D-093: the root record names the binary that wrote it.
+    build = json.loads((root / 'results.json').read_text())['build']
+    assert build['commit'] and build['description'] and build['built'], build
 
 # 2. A response-only deck: the reference read from the stored ground state.
 root = copy('h2-r1', 'response-only')

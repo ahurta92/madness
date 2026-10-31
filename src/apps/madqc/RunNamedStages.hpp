@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <madness/chem/Applications.hpp>
+#include <madness/misc/info.h>
 #include <optional>
 #include <unistd.h>
 
@@ -1321,6 +1322,12 @@ inline bool run_if_named(madness::World& world,
       = {{"moldft", moldft_spec()}, {"molresponse", response_spec()}};
   std::map<std::string, StageOutcome> outcomes;
   json index = {{"schema", "madqc.named-stages.v1"},
+                // D-093: the binary that wrote this record, as configured.
+                {"build",
+                 {{"commit", madness::info::git_commit()},
+                  {"description", madness::info::git_source_description()},
+                  {"built", std::string(madness::info::build_date()) + " "
+                                + madness::info::build_time()}}},
                 {"run_id", run_id},
                 {"mode", continuing ? "continue" : "fresh"},
                 {"mpi_ranks", world.size()},

@@ -202,8 +202,12 @@ int main(int argc, char **argv) {
     try {
       // Load info for MADNESS numerical routines
       startup(world, argc, argv, true);
-      if (world.rank() == 0)
+      if (world.rank() == 0) {
         print(info::print_revision_information());
+        // D-093: the commit beside the description, so a drop's banner can be
+        // checked against its tag.
+        print("    git source commit ...     ", info::git_commit());
+      }
 
       if (!named_stages::run_if_named(world, parser)) {
       // Create workflow
