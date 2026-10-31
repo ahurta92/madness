@@ -156,7 +156,10 @@ every older generation of the stage is deleted except `latest` and any
 generation another stage's manifest references. `checkpoint.keep_all true`
 keeps every generation, for any application. A deletion first renames the
 directory to `.deleting-<generation>`; one that fails leaves extra files only
-and is reported in the stage's `checkpoint_warnings`. When the stage ends, the
+and is reported in the stage's `checkpoint_warnings`. When another stage's
+manifest exists but cannot be read (a half-written file, permissions), what
+it references is unknown, so the stage deletes nothing that time and reports
+the unread manifest there instead (D-087). When the stage ends, the
 attempt directory's copies of its latest generation's archives (the engine's
 working files, and the copies a `--continue` load makes) are deleted too
 (D-072); the attempt keeps its text output and JSON records. The first

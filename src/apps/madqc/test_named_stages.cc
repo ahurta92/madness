@@ -693,6 +693,29 @@ int main(int argc, char** argv) {
             "provenance, the multiplicity from the electrons");
       check(!molresponse.consumer_context,
             "spec consumer_context (response): none");
+      // D-087: another stage's manifest that exists but cannot be read is
+      // reported; a generation directory with no manifest references nothing.
+      {
+        namespace fs = std::filesystem;
+        const auto root
+            = fs::temp_directory_path()
+              / ("test_named_stages_refs_" + std::to_string(::getpid()));
+        fs::remove_all(root);
+        const auto own = root / "gs" / "checkpoints";
+        const auto other = root / "optical" / "checkpoints";
+        fs::create_directories(own);
+        fs::create_directories(other / "g-optical-1-1");
+        fs::create_directories(other / "g-optical-1-2");
+        std::ofstream(other / "g-optical-1-1" / "manifest.json") << "{\"half";
+        const auto refs
+            = named_stages::referenced_generations(world, own, "gs");
+        check(refs.generations.empty() && refs.unreadable.size() == 1
+                  && refs.unreadable[0].find("g-optical-1-1")
+                         != std::string::npos,
+              "referenced_generations (D-087): an unreadable manifest is "
+              "reported, a directory without one is not");
+        fs::remove_all(root);
+      }
       // S3c2 (D-052, D-055): the skeleton's publish refuses a generation
       // before it is published; the refused one stays unpublished.
       {

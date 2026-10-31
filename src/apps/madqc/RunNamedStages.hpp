@@ -368,14 +368,23 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
 }
 
 // A1: the generations of stage `stage` that another stage's manifest under
-// the same run root names as its reference. Rank 0 reads the other stages'
-// manifests; every rank gets the same set. Collective.
-inline std::set<std::string> referenced_generations(madness::World& world,
-                                                    const fs::path& store,
-                                                    const std::string& stage) {
+// the same run root names as its reference, and (D-087) the other stages'
+// generations whose manifest exists but cannot be read, each with the error:
+// what such a manifest references is unknown. A generation directory with no
+// manifest is not a published generation and references nothing. Rank 0
+// reads the other stages' manifests; every rank gets the same answer.
+// Collective.
+struct References {
+  std::set<std::string> generations;
+  std::vector<std::string> unreadable;
+};
+inline References referenced_generations(madness::World& world,
+                                         const fs::path& store,
+                                         const std::string& stage) {
   namespace checkpoint = madness::checkpoint;
   const auto text = checkpoint::detail::on_root(world, [&] {
     json names = json::array();
+    json unreadable = json::array();
     const auto stage_directory = store.parent_path();
     for (const auto& other_stage :
          fs::directory_iterator(stage_directory.parent_path())) {
@@ -386,23 +395,27 @@ inline std::set<std::string> referenced_generations(madness::World& world,
         if (!checkpoint::detail::generation_name(
                 entry.path().filename().string()))
           continue;
+        if (!fs::exists(fs::symlink_status(entry.path() / "manifest.json")))
+          continue;
         try {
           const auto reference
               = checkpoint::read_manifest(entry.path()).reference;
           if (reference.is_object() && reference.value("stage", "") == stage)
             names.push_back(reference.value("generation", ""));
-        } catch (const std::exception&) {
-          // No readable manifest: not a published generation; it references
-          // nothing.
+        } catch (const std::exception& e) {
+          unreadable.push_back(entry.path().string() + " (" + e.what() + ")");
         }
       }
     }
-    return names.dump();
+    return json{{"names", names}, {"unreadable", unreadable}}.dump();
   });
-  std::set<std::string> referenced;
-  for (const auto& name : json::parse(text))
-    referenced.insert(name.get<std::string>());
-  return referenced;
+  const auto read = json::parse(text);
+  References references;
+  for (const auto& name : read.at("names"))
+    references.generations.insert(name.get<std::string>());
+  for (const auto& path : read.at("unreadable"))
+    references.unreadable.push_back(path.get<std::string>());
+  return references;
 }
 
 // A3, D-070 (a): one copy of each saved function. After a publish of
@@ -413,7 +426,10 @@ inline std::set<std::string> referenced_generations(madness::World& world,
 // of manifest reads, one generation per stage being left. A store written
 // before D-070 loses every older generation at its first publish, old-form
 // names included. Collective; returns the deletions it could not make (extra
-// files only), the same on every rank, empty on success.
+// files only), the same on every rank, empty on success. D-087 (a): when
+// another stage's manifest exists but cannot be read, what it references is
+// unknown, so nothing is deleted this time and the unread manifests are
+// returned instead.
 inline std::string retain_generations(madness::World& world,
                                       const fs::path& store,
                                       const std::string& stage,
@@ -426,10 +442,23 @@ inline std::string retain_generations(madness::World& world,
       generations.push_back(manifest.generation);
   if (checkpoint::generations_to_delete(generations, latest).empty())
     return {};
-  return checkpoint::remove_generations(
+  const auto references = referenced_generations(world, store, stage);
+  if (!references.unreadable.empty()) {
+    std::string unread;
+    for (const auto& path : references.unreadable)
+      unread += (unread.empty() ? "" : "; ") + path;
+    return "nothing deleted: another stage's manifest could not be read, so "
+           "what it references is unknown (D-087): "
+           + unread;
+  }
+  const auto failed = checkpoint::remove_generations(
       world, store,
-      checkpoint::generations_to_delete(
-          generations, latest, referenced_generations(world, store, stage)));
+      checkpoint::generations_to_delete(generations, latest,
+                                        references.generations));
+  return failed.empty() ? failed
+                        : "could not delete every older generation (extra "
+                          "files only): "
+                              + failed;
 }
 
 // A3, D-072 (a): after the stage ends, the attempt directory's copies of the
@@ -540,9 +569,7 @@ publish_generation(madness::World& world, const fs::path& store,
       warnings.push_back(warning);
       if (world.rank() == 0)
         std::cout << "stage " << stage.name
-                  << ": retention could not delete every older generation "
-                     "(extra files only): "
-                  << warning << '\n'
+                  << ": retention: " << warning << '\n'
                   << std::flush;
     }
   }

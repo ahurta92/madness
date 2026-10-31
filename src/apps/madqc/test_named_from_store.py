@@ -24,7 +24,10 @@ Cases (each copies a stored run into a scratch directory first):
 6. the ground state asked at a coarser final rung than it was saved at (R3,
    D-085): loaded and judged converged at its finer rung, no generation
    published again. Ground state alone: the deck check refuses a response
-   protocol tighter than its reference stage's written protocol.
+   protocol tighter than its reference stage's written protocol;
+7. the reuse republish of case 3 beside another stage's manifest that exists
+   but cannot be read (D-087): nothing deleted, the unread manifest reported
+   in checkpoint_warnings.
 """
 import argparse
 import json
@@ -187,5 +190,19 @@ assert record['status'] == 'completed', record['status']
 assert latest(root, 'gs')[0] == latest(stored / 'h2-r1', 'gs')[0], 'the ground state was published again'
 assert generations(root, 'gs') == generations(stored / 'h2-r1', 'gs')
 no_shards(root, 'gs', run_id(root))
+
+# 7. D-087: the reuse republish of case 3 with a half-written manifest in
+# another stage's store. What it references is unknown, so retention deletes
+# nothing and says so.
+root = copy('h2-capped-r1', 'unreadable')
+source, _ = latest(root, 'gs')
+junk = root / 'other' / 'checkpoints' / 'g-other-1-1'
+junk.mkdir(parents=True)
+(junk / 'manifest.json').write_text('{"half')
+run('unreadable', root, loose)
+name, _ = latest(root, 'gs')
+assert name != source and set(generations(root, 'gs')) == {source, name}, generations(root, 'gs')
+warnings = result(root, 'gs')['checkpoint_warnings']
+assert any('D-087' in w and 'g-other-1-1' in w for w in warnings), warnings
 
 print('from-store tests passed', flush=True)
