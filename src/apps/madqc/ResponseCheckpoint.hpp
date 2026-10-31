@@ -1007,6 +1007,29 @@ public:
     m.stop_reason = converged  ? "converged"
                     : analyzed ? "unfinished"
                                : "in_progress";
+    // D-098 step 1: the scientific report, in the form moldft's manifest
+    // keeps it (metrics.convergence_report): the settings, and for the
+    // analysed generation the outcome rows and each needed state's written
+    // targets judged (the shared verdict's, when the publish carried it).
+    namespace cv = madness::convergence;
+    const auto final_thresh = request.at("protocol").back().get<double>();
+    const auto settings = response_convergence_settings(stage, final_thresh);
+    json report = {{"schema", "madqc.convergence.v1"},
+                   {"decided_by", cv::to_string(settings.decider)},
+                   {"convergence_settings", cv::to_json(settings)}};
+    if (analyzed)
+      report["convergence_outcome"] = cv::outcome_to_json(
+          settings,
+          response_saved_outcomes(metadata, request_final_key(request)));
+    if (sample.contains("verdict")) {
+      json accuracy = json::object();
+      for (const auto& state : sample.at("verdict").at("states"))
+        if (state.contains("requested_accuracy"))
+          accuracy[state.at("key").get<std::string>()]
+              = state.at("requested_accuracy");
+      report["requested_accuracy"] = std::move(accuracy);
+    }
+    m.metrics["convergence_report"] = std::move(report);
     // Keep analyzed values as diagnostics in engine_metadata, but an unmet
     // explicit request cannot publish them as eligible stage properties.
     const bool targets_decide

@@ -565,10 +565,13 @@ publish_generation(madness::World& world, const fs::path& store,
     // D-077 (S4d2): the stage's verdict, from the state records of the
     // generation about to be published (they do not depend on the verdict);
     // the final publish takes it.
-    write.publish_sample["converged"]
+    // D-098: the whole verdict, so the manifest can carry each state's
+    // judged targets; `converged` as before.
+    const auto verdict
         = shared_verdict(spec, stage, natom, spec.settings(stage, natom),
-                         spec.manifest(stage, natom, write.publish_sample))
-              .at("converged");
+                         spec.manifest(stage, natom, write.publish_sample));
+    write.publish_sample["converged"] = verdict.at("converged");
+    write.publish_sample["verdict"] = verdict;
   }
   auto m = spec.manifest(stage, natom, write.publish_sample);
   set_shared_fields(m, stage.name, names.next(), write.iterations_this_run);
