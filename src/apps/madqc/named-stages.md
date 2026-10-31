@@ -39,7 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level`, `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis` and `econv`, the excitation energy change target (see "Excited states") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level` (moldft's scale: unwritten or 1 to 3, one row per solver iteration; 4 to 9, channel and save detail; 10, debug), `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis`, `econv`, the excitation energy change target, and `stall.window`, `stall.ratio`, the bundle's plateau detector (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -383,7 +383,27 @@ change below the same); the continuation record's entry for it has
 `kind: excited_states`, `method` and `roots`. A loaded bundle that meets
 the request is recorded `decided_by: planner`. A saved bundle of another
 method or root count is not used: the bundle starts fresh, and the record's
-`why` says so. A bundle written on another number of ranks is refused
+`why` says so. A converged bundle loaded without its transition analysis (a restart
+between the bundle's save and the analysis) gets the analysis computed
+from the saved states on the load, with no solver iterations (D-089).
+
+**The bundle's stall rule** (D-099, B3). A bundle stops as stalled when an
+unconverged root has improved neither its density change nor its eigenvalue
+change by `stall.ratio` over `stall.window` iterations while the other active
+roots are converged or likewise flat; the check is the engine's and applies in
+both modes (it is not a written target). A stalled bundle is done at its rung:
+`--continue` loads it and does not iterate it further. The keys are the
+engine's own: `stall.window <iterations>` and `stall.ratio <fraction>` on a
+stage that requests `excited_states`; unwritten, the engine's defaults 6 and
+0.1 apply, and the settings table shows them as engine rows ("bundle stall
+window", "bundle stall ratio"). `stall.window 0` disables the detector, so the
+bundle runs to `maxiter` and `--continue` resumes it. On a stage without
+`excited_states` the keys do nothing and are refused: the dipole legs' stall
+rules are `progress.window` and `progress.minimum_relative_improvement`,
+which act on the legs only and never on a bundle. A root that stalls at the
+edge of a cluster of states (the warmup lists them) is usually told apart by
+requesting more roots.
+A bundle written on another number of ranks is refused
 ("ES bundle in es__<key> was written with N process(es) but loaded with M").
 
 `econv` on a stage that requests `excited_states` is the target of the

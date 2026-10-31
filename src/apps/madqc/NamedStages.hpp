@@ -526,6 +526,9 @@ inline std::vector<Stage> parse(madness::World &world,
   const std::map<std::string, std::string> replaced_scf_keys
       = {{"accuracy.density_change", "dconv (the density-change target)"},
          {"accuracy.energy_change", "econv (the energy-change target)"}};
+  // stall.window and stall.ratio (D-099, B3): the engine's own keys for the
+  // excited-state bundle's plateau detector; refused below on a stage
+  // without excited_states.
   const std::set<std::string> response_keys
       = {"dconv",
          "maxiter",
@@ -536,7 +539,9 @@ inline std::vector<Stage> parse(madness::World &world,
          "accuracy.bsh_residual",
          "accuracy.kinetic_trace_change",
          madness::convergence::use_default_criteria_key,
-         "print_level"};
+         "print_level",
+         "stall.window",
+         "stall.ratio"};
   // B8: dconv is the induced-density-change target of a molresponse stage; a
   // driven response has no local energy, so no energy target.
   const std::map<std::string, std::string> replaced_response_keys
@@ -754,6 +759,21 @@ inline std::vector<Stage> parse(madness::World &world,
                 "energy change target (D8)");
         stage.excited_states.omega_target = cp.econv();
       }
+      // D-099 (B3): stall.window and stall.ratio drive the bundle's plateau
+      // detector (the engine's, in both modes); the dipole legs' detector
+      // takes progress.* instead, so on a stage without excited_states the
+      // keys would do nothing and are refused.
+      for (const char* key : {"stall.window", "stall.ratio"})
+        if (seen.contains(key)
+            && std::find(stage.properties.begin(), stage.properties.end(),
+                         "excited_states")
+                   == stage.properties.end())
+          throw std::runtime_error(
+              b.name + ": " + key
+              + " drives the excited-state bundle's plateau detector; on a "
+                "stage without excited_states it does nothing (the dipole "
+                "legs' stall rules are progress.window and "
+                "progress.minimum_relative_improvement)");
       // Validate both controls before executing any stage, including reuse.
       // B8 (Q3, Q5), D-092: as for moldft, letting the written targets decide
       // needs a target for every loop it would otherwise leave without one.

@@ -86,13 +86,14 @@ inline EsSeedReference make_es_seed_reference(madness::World &world,
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
-#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -601,14 +602,15 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   // Say which guess this leg starts from BEFORE it iterates. Printing it only
   // in the final line meant a leg that had silently lost its DALTON seed (B24)
   // looked like a slow solve for as long as it ran.
-  if (world.rank() == 0) {
+  // D-096: one identified start line and one end line per state and rung.
+  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
+    const std::string start = pert.description() + " "
+                              + ResponseMetadata::freq_key(freq) + " at "
+                              + protocol_key() + ": start, seed " + seed_kind;
     if (ctx.log_prefix.empty())
-      madness::print("[CALC] fd start: pert=", pert.description(), " freq=", freq,
-                     " thresh=", thresh, " seed=", seed_kind);
+      madness::print(start);
     else
-      madness::print(ctx.log_prefix,
-                     "[CALC] fd start: pert=", pert.description(), " freq=", freq,
-                     " thresh=", thresh, " seed=", seed_kind);
+      madness::print(ctx.log_prefix, start);
   }
 
   Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
@@ -711,7 +713,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         /*checkpoint_diagnostic_iterations=*/
         ctx.policy.diagnostic_iterations_per_rung,
         /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration,
-        /*checkpoint_decider=*/ctx.policy.decider);
+        /*checkpoint_decider=*/ctx.policy.decider,
+        /*print_level=*/ctx.print_level);
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
           {"frequency", freq}, {"protocol", protocol_key()},
@@ -736,23 +739,35 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   const bool accepted = accepted_now(sf, solver);
   r.converged = strict || accepted;
   r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
-  if (world.rank() == 0) {
-    const char *acc = !accepted ? ""
-                      : sf.stalled ? " (ACCEPTED best-effort @ stall — residual plateau; "
-                                     "strict target NOT met; see bsh_residual)"
-                                   : " (ACCEPTED best-effort @ maxiter — strict target "
-                                     "NOT met; see bsh_residual)";
-    const char *stl = (sf.stalled && !accepted) ? " stalled=1" : "";
-    // F2d: prepend the subworld tag (empty ⇒ unchanged, G=0 byte-identical).
-    if (ctx.log_prefix.empty())
-      madness::print("[CALC] fd solve: pert=", pert.description(), " freq=", freq,
-                     " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
-                     " converged=", r.converged, acc, stl);
+  // D-096: the one solve-end line at Normal: the state, the rung, the exit
+  // as the solver's print_final words it, the iterations, the seed and the
+  // last residuals; the solver's residual block and the [SAVE] line are
+  // detail at Verbose.
+  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
+    double max_bsh = 0.0, max_drho = 0.0;
+    for (double v : sf.last_bsh_residual)
+      max_bsh = std::max(max_bsh, v);
+    for (double v : sf.last_density_residual)
+      max_drho = std::max(max_drho, v);
+    std::ostringstream line;
+    line << pert.description() << " " << ResponseMetadata::freq_key(freq)
+         << " at " << protocol_key() << ": ";
+    if (sf.diverged)
+      line << "stopped at iteration " << sf.iter << " (diverged)";
+    else if (strict)
+      line << "converged in " << sf.iter << " iterations";
+    else if (sf.stalled)
+      line << "stopped at iteration " << sf.iter << " (stalled"
+           << (accepted ? ", accepted best-effort)" : ", not converged)");
     else
-      madness::print(ctx.log_prefix,
-                     "[CALC] fd solve: pert=", pert.description(), " freq=", freq,
-                     " thresh=", thresh, " seed=", seed_kind, " iters=", sf.iter,
-                     " converged=", r.converged, acc, stl);
+      line << "stopped at iteration " << sf.iter << " (max iterations"
+           << (accepted ? ", accepted best-effort)" : ", not converged)");
+    line << " (seed " << seed_kind << "; bsh " << max_bsh << ", dρ " << max_drho
+         << ")";
+    if (ctx.log_prefix.empty())
+      madness::print(line.str());
+    else
+      madness::print(ctx.log_prefix, line.str());
   }
   return r;
 }
@@ -760,6 +775,62 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
 // ---------------------------------------------------------------------------
 // Excited-state bundle solve (15b-i: TDA closed-shell only).
 // ---------------------------------------------------------------------------
+
+/// D-089 (a): the transition analysis is written after a solve, and a bundle
+/// the planner loads is not solved, so a restart between the bundle's
+/// save-boundary publish and its analysis left the transition properties
+/// missing for good. For an excited-state node the manager skips under a
+/// load plan: when the bundle saved at this rung's exact key is converged and
+/// calc_dir has no es_analysis__<key>.json, prepare the ground state at the
+/// rung as the solvers do and compute the analysis from the saved states
+/// (analyze_es_bundle_from_disk: load, reproject, report; no iterations).
+/// Returns whether an analysis was written. Collective: rank 0 decides from
+/// the metadata and broadcasts.
+template <typename Type, typename Shell>
+bool analyze_loaded_es_bundle(ExecutorContext& ctx, int n_roots,
+                              double thresh) {
+  using namespace madness;
+  World& world = ctx.world;
+  set_response_protocol(world, ctx.L, thresh);
+  const std::string key = protocol_key();
+  const std::string analysis = ctx.calc_dir + "/es_analysis__" + key + ".json";
+  int needed = 0;
+  if (world.rank() == 0) {
+    const std::string meta_path = ctx.calc_dir + "/response_metadata.json";
+    if (std::filesystem::exists(meta_path)
+        && !std::filesystem::exists(analysis)) {
+      auto meta = ResponseMetadata::load_or_create(meta_path);
+      const auto& j = meta.json();
+      if (j.contains("excited_states")
+          && j.at("excited_states").contains(key)) {
+        const auto& e = j.at("excited_states").at(key);
+        needed = e.value("converged", false) && !e.value("diverged", false)
+                 && e.value("type", std::string{})
+                        == detail_save_load::type_tag<Type>()
+                 && e.value("shell", std::string{})
+                        == detail_save_load::shell_tag<Shell>()
+                 && (n_roots <= 0 || e.value("n_roots", 0) == n_roots);
+      }
+    }
+  }
+  world.gop.broadcast_serializable(needed, 0);
+  if (!needed)
+    return false;
+  GroundState& gs = ctx.gs;
+  const double t0 = FunctionDefaults<3>::get_thresh();
+  {
+    auto coulop
+        = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
+    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
+  }
+  if (world.rank() == 0)
+    madness::print("[ANALYZE] D-089: bundle", key,
+                   "loaded converged without its transition analysis; "
+                   "computing it from the saved states (no iterations)");
+  return analyze_es_bundle_from_disk<Type, Shell>(world, gs, ctx.calc_dir,
+                                                  ctx.print_level)
+         == 0;
+}
 
 /// Solve a TDA closed-shell excited-state bundle of `n_roots` at one protocol
 /// step. Mirrors solve_fd_protocol: set protocol -> prepare GS -> build problem
@@ -883,7 +954,9 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
     const double wall_s = madness::wall_time() - step_w0;   // R1b
     save_es_roots<TDA, ClosedShell>(world, st, dir,
                                     /*converged=*/converged_now(st, solv),
-                                    /*wall_s=*/wall_s);
+                                    /*wall_s=*/wall_s,
+                                    /*register_aggregate=*/true,
+                                    /*print_level=*/ctx.print_level);
     // The named checkpoint publishes at the bundle's save boundary as at the
     // dipole legs' (DESIGN A3; the FD executor's call in solve_fd_protocol):
     // the bundle's node id as the perturbation, the rung, the iterations
@@ -909,6 +982,23 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
+  // D-096: the one bundle-end line at Normal (the solver's print_final block
+  // and the [SAVE] line are detail at Verbose).
+  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
+    std::ostringstream line;
+    line << es_node_id(std::is_same_v<Solver, ESSolver<TDA, ClosedShell>>,
+                       n_roots)
+         << " at " << protocol_key() << ": ";
+    if (sf.diverged)
+      line << "stopped at iteration " << sf.iter << " (diverged)";
+    else if (r.converged)
+      line << "converged in " << sf.iter << " iterations";
+    else
+      line << "stopped at iteration " << sf.iter << " ("
+           << madness::convergence::to_string(sf.stop) << ", not converged)";
+    line << ", " << n_roots << " root(s) (seed " << seed_kind << ")";
+    madness::print(line.str());
+  }
   // Root-identity guard (W5): visibility on what a SEEDED solve actually did
   // (seed overlap / ω shift per root, basin-escape + pure-tracking warnings)
   // Collective evaluate; rank-0 print + metadata write. Fresh (unseeded)
@@ -1055,7 +1145,8 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
       if (ctx.es_warmup_cache) {
         save_es_roots<Full, ClosedShell>(world, s0, warm_cache,
                                          /*converged=*/false, /*wall_s=*/0.0,
-                                         /*register_aggregate=*/false);
+                                         /*register_aggregate=*/false,
+                                         /*print_level=*/ctx.print_level);
         if (world.rank() == 0)
           madness::print("[CALC] solve_es_full: cached TDA warmup guess ->",
                          warm_cache);
@@ -1103,7 +1194,9 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
     const double wall_s = madness::wall_time() - step_w0;   // R1b
     save_es_roots<Full, ClosedShell>(world, st, dir,
                                      /*converged=*/converged_now(st, solv),
-                                     /*wall_s=*/wall_s);
+                                     /*wall_s=*/wall_s,
+                                     /*register_aggregate=*/true,
+                                     /*print_level=*/ctx.print_level);
     // The checkpoint observer's event for the bundle, as in the TDA path.
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(
@@ -1126,6 +1219,23 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   NodeResult r;
   r.converged = converged_now(sf, solver);
   r.reached_protocol_key = protocol_key();
+  // D-096: the one bundle-end line at Normal (the solver's print_final block
+  // and the [SAVE] line are detail at Verbose).
+  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
+    std::ostringstream line;
+    line << es_node_id(std::is_same_v<Solver, ESSolver<TDA, ClosedShell>>,
+                       n_roots)
+         << " at " << protocol_key() << ": ";
+    if (sf.diverged)
+      line << "stopped at iteration " << sf.iter << " (diverged)";
+    else if (r.converged)
+      line << "converged in " << sf.iter << " iterations";
+    else
+      line << "stopped at iteration " << sf.iter << " ("
+           << madness::convergence::to_string(sf.stop) << ", not converged)";
+    line << ", " << n_roots << " root(s) (seed " << seed_kind << ")";
+    madness::print(line.str());
+  }
   // Root-identity guard (W5) — same contract as the TDA path above.
   if (seed_ref) {
     auto guard = evaluate_es_seed_guard<Full, ClosedShell>(world, sf, r.converged, *seed_ref);
@@ -1230,7 +1340,7 @@ public:
     if (node.kind == CalcKind::ES) {
       const bool restricted = ctx_.gs.is_spin_restricted();
       if (restricted) {
-        if (ctx_.world.rank() == 0)
+        if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
           madness::print("[CALC] run_protocol: ES bundle", node.id,
                          " n_roots=", node.n_roots, " thresh=", item.thresh,
                          (node.tda ? " (TDA closed-shell)"
@@ -1252,7 +1362,7 @@ public:
     }
     if (node.kind == CalcKind::VBC) {
       if (ctx_.gs.is_spin_restricted()) {
-        if (ctx_.world.rank() == 0)
+        if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
           madness::print("[CALC] run_protocol: VBC", node.id,
                          " B=", node.pert.description(), "@", node.freq,
                          " C=", node.pert_c.description(), "@", node.freq_c,
@@ -1275,7 +1385,7 @@ public:
     const bool restricted = ctx_.gs.is_spin_restricted();
     const bool is_static   = detail_exec::is_static_freq(node.freq);
 
-    if (ctx_.world.rank() == 0) {
+    if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose) {
       madness::print("[CALC] run_protocol: node", node.id,
                      " pert=", node.pert.description(),
                      " freq=", node.freq, " thresh=", item.thresh,

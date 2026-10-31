@@ -352,6 +352,13 @@ private:
     plog("  policy: dconv_user =", policy_.dconv_user,
           " bsh_target =", targets_.bsh_residual,
           " density_target =", targets_.density_residual);
+    // D-096: the gate named once; each row then says how far each quantity
+    // is from it (its value over the gate).
+    plog("  gate: ||dx|| <= bsh_target + rtol ||x||;"
+         " ||dρ|| <= density_target + rtol ||ρ1||; rtol =",
+         targets_.rtol,
+         "; iteration 1 has no previous density, so its dρ is unavailable"
+         " (first sample)");
     plog("  responses:");
     for (int c = 0; c < target_.n_responses(); ++c) {
       plog("    [", c, "]  omega =", target_.responses[c].omega);
@@ -366,24 +373,42 @@ private:
     return "Unknown";
   }
 
+  // D-096: one row per iteration at Normal, each gated quantity with its
+  // distance from the gate (value over gate, the tracks of gate_history);
+  // iteration 1 has no previous density, so its dρ is "unavailable (first
+  // sample)", never zero (the record says the same). Channel detail at
+  // Verbose.
   void print_iter_banner(const State &out) const {
     if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
     double max_res  = 0.0;
     for (double r : out.last_bsh_residual) max_res = std::max(max_res, r);
     double max_drho = 0.0;
     for (double r : out.last_density_residual) max_drho = std::max(max_drho, r);
-    plog("iter", out.iter,
-          "  max_res =", max_res, "  max_dρ =", max_drho,
-          "  gate =", out.gate_history.empty() || out.gate_history[0].empty()
-                          ? 0.0 : out.gate_history[0].back());
+    const bool first_sample = out.iter <= 1;
+    auto track = [&](std::size_t t) {
+      return out.gate_history.size() > t && !out.gate_history[t].empty()
+                 ? out.gate_history[t].back()
+                 : 0.0;
+    };
+    if (first_sample)
+      plog("iter", out.iter, "  bsh =", max_res, " (", track(0),
+           "of gate)   dρ = unavailable (first sample)");
+    else
+      plog("iter", out.iter, "  bsh =", max_res, " (", track(0),
+           "of gate)   dρ =", max_drho, " (", track(1), "of gate)");
     if (print_level_ >= PrintLevel::Verbose) {
       for (size_t c = 0; c < out.last_bsh_residual.size(); ++c) {
         double dr = (c < out.last_density_residual.size())
                         ? out.last_density_residual[c] : 0.0;
         double pr = (c < out.last_property.size()) ? out.last_property[c] : 0.0;
-        plog("  ch", c, "  omega =", target_.responses[c].omega,
-              "  res =", out.last_bsh_residual[c],
-              "  dρ =", dr, "  <v|x> =", pr);
+        if (first_sample)
+          plog("  ch", c, "  omega =", target_.responses[c].omega,
+               "  res =", out.last_bsh_residual[c],
+               "  dρ = unavailable (first sample)  <v|x> =", pr);
+        else
+          plog("  ch", c, "  omega =", target_.responses[c].omega,
+               "  res =", out.last_bsh_residual[c], "  dρ =", dr,
+               "  <v|x> =", pr);
       }
     }
   }
@@ -567,8 +592,12 @@ private:
   }
 
 public:
+  // D-096: the solve's end is said once, by the executor's identified line
+  // (the state, the rung, the exit, the iterations); this block is detail,
+  // at Verbose.
   void print_final(const State &s, bool converged) const {
-    if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
+    if (print_level_ < PrintLevel::Verbose || world_.rank() != 0)
+      return;
     plog("");
     // Diverged-first: converged() returns true on diverged so iterate<>
     // would otherwise mislabel the exit as "Converged".

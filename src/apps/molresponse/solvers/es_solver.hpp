@@ -337,8 +337,11 @@ private:
 public:
   /// Called by iterate<> after the loop exits. Reports converged or
   /// max-iter-reached banner.
+  // D-096: the bundle's end is said once, by the executor's identified line;
+  // this block is detail, at Verbose.
   void print_final(const State &s, bool converged) const {
-    if (print_level_ < PrintLevel::Normal || world_.rank() != 0) return;
+    if (print_level_ < PrintLevel::Verbose || world_.rank() != 0)
+      return;
     print("");
     // iterate<> passes converged = (stop == converged), after checking
     // divergence itself; report diverged and stalled first all the same.

@@ -68,6 +68,18 @@ for root_with, root_without in zip(es_with['roots'], es_without['roots']):
     assert abs(root_with['omega_residual'] - root_without['omega_residual']) < 1e-10, (root_with, root_without)
     assert root_with['omega_residual'] <= 1e-6, root_with  # H2 TDA ends far inside econv 1e-6
 
+# D-096: the engine's screen at the default level (print_level unwritten,
+# Normal): the first iteration's density change is unavailable, not zero;
+# one identified start and end line per state and rung; the save, memory
+# and dispatch lines are detail at verbose.
+screen = (work / 'with-econv.log').read_text()
+assert 'dρ = unavailable (first sample)' in screen, 'the first sample must be marked unavailable'
+assert screen.count('dipole_z f0.00000 at 1e-04_k6: start, seed') == 1, screen.count('dipole_z f0.00000 at 1e-04_k6: start')
+assert screen.count('dipole_z f0.00000 at 1e-04_k6: converged in') == 1, screen.count('dipole_z f0.00000 at 1e-04_k6: converged in')
+assert screen.count('es:tda_n1 at 1e-04_k6: converged in') == 1, screen.count('es:tda_n1 at 1e-04_k6: converged in')
+for noise in ('[SAVE]', 'MEMORY_HWM', '[CALC] run_protocol', '[CALC] fd solve', '[KAIN]', 'Converged in'):
+    assert noise not in screen, noise + ' must be verbose-only'
+
 # The record describes the request beside the engine's gate and points at
 # the shared verdict; it carries no status of its own (D-061).
 block = es_with['requested_omega_target']

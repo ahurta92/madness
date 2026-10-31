@@ -53,12 +53,14 @@
 #include <madness/world/MADworld.h>
 
 #include <algorithm>
-#include <cstdlib>       // std::getenv (MADRESPONSE_STRICT_NP)
+#include <cmath>
+#include <cstdlib> // std::getenv (MADRESPONSE_STRICT_NP)
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace molresponse_v3 {
@@ -93,7 +95,10 @@ void save_es_roots(madness::World &world,
                    const std::string &dir,
                    bool converged,
                    double wall_s = 0.0,            // R1b: bundle-solve wall time
-                   bool register_aggregate = true) {
+                   bool register_aggregate = true,
+                   PrintLevel print_level = PrintLevel::Normal) {
+  // D-096: the [SAVE] and MEMORY_HWM lines print at Verbose only; the
+  // executor's identified bundle line is the one line at Normal.
   const int n_roots = static_cast<int>(state.roots.size());
   MADNESS_CHECK(n_roots > 0);
   auto kinetic_history = state.kinetic_history;
@@ -271,7 +276,27 @@ void save_es_roots(madness::World &world,
 
       auto meta = ResponseMetadata::load_or_create(aggregate_path);
       const std::string key = protocol_key(thresh, k_now);
-      if (!meta.json()["protocols"].contains(key)) {
+      // D-088: a key redefined (keys round the threshold: 1.2e-4 and 1e-4
+      // share "1e-04_k6"). The entries saved under the old definition cannot
+      // be told apart from this rung's, and the state record would describe
+      // this bundle with the old threshold (its rung is read from the
+      // protocol entry, while roots.json carries the new one): the request's
+      // rung then fails same_rung and the stage ends unconverged although the
+      // bundle converged. As the FD writer (fd_save_load.hpp): drop what
+      // depended on the old definition, then redefine the entry. The old
+      // bundle entry, seed guard included, is replaced whole below; the
+      // engine's analysis file of this key goes too, since it is rewritten
+      // only when this re-solve converges.
+      const auto& protocols = meta.json()["protocols"];
+      if (!protocols.contains(key)) {
+        meta.set_protocol(key, thresh, k_now, /*index=*/-1);
+      } else if (const double old_thresh
+                 = protocols.at(key).value("thresh", 0.0);
+                 std::abs(old_thresh - thresh)
+                 > 1e-12 * std::max(old_thresh, thresh)) {
+        meta.drop_fd_rung(key);
+        std::error_code ignored;
+        fs::remove(calc_dir / ("es_analysis__" + key + ".json"), ignored);
         meta.set_protocol(key, thresh, k_now, /*index=*/-1);
       }
 
@@ -295,16 +320,18 @@ void save_es_roots(madness::World &world,
       meta.set_es_bundle(key, bundle_entry);
       meta.save();
 
-      madness::print("[SAVE] es_bundle: protocol_key=", key,
-                     "  bundle_dir=", bundle_path.filename().string(),
-                     "  n_roots=", n_roots,
-                     "  aggregate=", aggregate_path);
-      // R1b: uniform memory high-water mark (see fd_save_load).
-      madness::print("MEMORY_HWM  kind=es  protocol=", key,
-                     "  rss_gb_max=", bundle_metrics.rss_gb,
-                     "  coeffs=", bundle_metrics.coeffs, "  wall_s=", wall_s,
-                     "  id=", detail_save_load::type_tag<Type>(), "_n", n_roots);
-    } else {
+      if (print_level >= PrintLevel::Verbose) {
+        madness::print("[SAVE] es_bundle: protocol_key=", key,
+                       "  bundle_dir=", bundle_path.filename().string(),
+                       "  n_roots=", n_roots, "  aggregate=", aggregate_path);
+        // R1b: uniform memory high-water mark (see fd_save_load).
+        madness::print("MEMORY_HWM  kind=es  protocol=", key,
+                       "  rss_gb_max=", bundle_metrics.rss_gb,
+                       "  coeffs=", bundle_metrics.coeffs, "  wall_s=", wall_s,
+                       "  id=", detail_save_load::type_tag<Type>(), "_n",
+                       n_roots);
+      }
+    } else if (print_level >= PrintLevel::Verbose) {
       madness::print("[SAVE] es side-bundle (no aggregate): dir=", dir,
                      "  n_roots=", n_roots);
     }
