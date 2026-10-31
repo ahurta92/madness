@@ -112,6 +112,11 @@ inline std::vector<Block> blocks(const std::string &text) {
     } else {
       if (key(line.text) == "end")
         fail(line, "unexpected text after end");
+      // A stage header inside a block: the block above was not closed.
+      if (const auto k = key(line.text); k == "moldft" || k == "molresponse")
+        fail(line, "a " + k + " block starts here, but "
+                       + result.back().kind + " " + result.back().name
+                       + " has no end line before it");
       result.back().lines.push_back(std::move(line));
       // to the last block, push_back to the lines of that block
     }
@@ -801,7 +806,7 @@ inline std::vector<Stage> parse(madness::World &world,
           throw std::runtime_error(
               b.name + ": " + madness::convergence::use_default_criteria_key
               + " false on a stage that requests only excited_states needs "
-                "econv, the excitation energy change target (D-092)");
+                "econv, the excitation energy change target");
       }
       if (!targets_decide && rp.is_user_defined("progress.window"))
         throw std::runtime_error(

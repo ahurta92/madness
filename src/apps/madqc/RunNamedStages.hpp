@@ -78,13 +78,9 @@ read_input(madness::World& world, const fs::path& root,
   const auto produced = outcomes.find(label);
   on_root(world, [&] {
     if (!fs::exists(store / "latest"))
-      throw std::runtime_error(
-          "reference " + label + " has no published generation in "
-          + store.string()
-          + (produced == outcomes.end()
-                 ? "; a reference outside the deck is read from this run's "
-                   "output directory, so continue that run (--continue)"
-                 : ""));
+      throw std::runtime_error("reference " + label
+                               + " has no published generation in "
+                               + store.string());
   });
   StageInput input{
       label, madness::checkpoint::read_published(world, store), {}, false};
@@ -452,7 +448,7 @@ inline std::string retain_generations(madness::World& world,
     for (const auto& path : references.unreadable)
       unread += (unread.empty() ? "" : "; ") + path;
     return "nothing deleted: another stage's manifest could not be read, so "
-           "what it references is unknown (D-087): "
+           "what it references is unknown: "
            + unread;
   }
   const auto failed = checkpoint::remove_generations(
@@ -702,7 +698,7 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   for (const auto& name : verdict.at("unmeasured_targets"))
     warnings.push_back("written target " + name.get<std::string>()
                        + ": no state this stage needs has a row for it, so "
-                         "it judged nothing (D-082)");
+                         "it judged nothing");
   result["checkpoint_warnings"] = warnings;
   // 10. What the stage hands on (A8).
   StageOutcome outcome;
@@ -1130,6 +1126,24 @@ inline bool run_if_named(madness::World& world,
                             ? fs::path(parser.value_raw("prefix"))
                             : fs::path(parser.value("input")).stem())
                .lexically_normal();
+    // A1: a reference outside the deck is read from a published generation
+    // under this output root; refuse one that has none before any stage runs
+    // (and before a fresh root is created).
+    std::string deck_stages;
+    for (const auto& stage : stages)
+      deck_stages += (deck_stages.empty() ? "" : ", ") + stage.name;
+    for (const auto& stage : stages)
+      if (!stage.reference.empty()
+          && std::none_of(stages.begin(), stages.end(),
+                          [&](const Stage& s) {
+                            return s.name == stage.reference;
+                          })
+          && !fs::exists(root / stage.reference / "checkpoints" / "latest"))
+        throw std::runtime_error(
+            "stage " + stage.name + ": reference " + stage.reference
+            + " names no stage of this deck (" + deck_stages
+            + ") and no published generation under " + root.string()
+            + "; check the name");
     fs::create_directories(root.parent_path());
     if (continuing ? !fs::is_directory(root) : !fs::create_directory(root))
       throw std::runtime_error(

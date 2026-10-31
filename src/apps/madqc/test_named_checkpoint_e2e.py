@@ -169,7 +169,7 @@ shutil.copytree(fresh, moved)
 before = hashes(moved / 'gs/checkpoints')
 run('geometry', moved, deck.replace('H 0 0 0.7', 'H 0 0 0.8'), resume=True)
 assert result(moved)['continuation']['action'] == 'fresh', result(moved)['continuation']
-assert 'problem changed (R1)' in result(moved)['continuation']['why']
+assert 'problem changed' in result(moved)['continuation']['why']
 assert result(moved)['iterations_this_run'] > 0
 after = hashes(moved / 'gs/checkpoints')
 assert all(after.get(path) == digest for path, digest in before.items()

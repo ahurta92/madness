@@ -120,9 +120,12 @@ def iterations(record):
 
 assert iterations(alone) == iterations(joint), (iterations(alone), iterations(joint))
 
-# A reference outside the deck is read only from a published generation.
+# A reference outside the deck is read only from a published generation; one
+# with none is refused before any stage runs and before a fresh root is
+# created (D-100).
 log = run('optical-fresh', work / 'NoReference', response, success=False)
-assert 'reference gs has no published generation' in log, log[-3000:]
+assert 'reference gs names no stage of this deck (optical) and no published generation' in log, log[-3000:]
+assert not (work / 'NoReference').exists()
 # Tightening is checked against the published generation, too.
 tight = response.replace('protocol [1e-4, 1e-6]', 'protocol [1e-4, 1e-8]')
 log = run('optical-tight', split, tight, resume=True, success=False)

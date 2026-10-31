@@ -63,7 +63,15 @@ named decks; put settings in their owning block. Existing unnamed decks retain
 their workflow interface.
 
 Outputs go to `<prefix>/<stage>/`, without changing the process working
-directory. Each invocation writes engine files into a unique `attempt-...`
+directory. Without `--prefix` the output root is `./<deck>/` in the current
+directory, `<deck>` the input file's name without its extension
+(`named_h2.in` writes `./named_h2/`).
+
+Four lines "Authorization required, but no authorization protocol specified"
+at startup on a host that runs an X server come from the MPI runtime, not
+from madqc: Open MPI's topology discovery in `MPI_Init` loads hwloc's GL
+component, which probes the X display. They are harmless;
+`export HWLOC_COMPONENTS=-gl` silences them. Each invocation writes engine files into a unique `attempt-...`
 subdirectory; the stage-level `results.json` describes the latest attempt. `<prefix>/results.json` indexes the stage results; each stage also
 has `results.json`. SCF's resolved input and engine files are under its stage,
 and response metadata/state files are under the response stage. Results carry
@@ -88,8 +96,9 @@ MAD_NUM_THREADS=2 madqc named_h2.in --prefix=H2-run --continue
 Without `--continue`, an existing root is refused. With it, each moldft stage
 must have a published checkpoint. The adapter validates its complete orbital
 inventory and checks the molecule, model, occupations implied by charge/spin,
-localization and cell before the engine loads anything. Changed physical inputs
-require a new output root; explicit seed conversion is not provided here.
+localization and cell before the engine loads anything. A changed geometry or
+other physical input is a different problem: the stage starts fresh in the same
+stage directory (below); explicit seed conversion is not provided here.
 Tighter protocol/density targets resume from saved orbitals. An unchanged
 completed request loads without SCF iterations. Iteration limits and requested
 energy/dipole properties can change. Results report `work` (`solved`, `loaded`,
@@ -106,9 +115,9 @@ current request and resumed otherwise, except that a final rung that stalled
 with the request unmet is loaded and reported unmet (resuming would stall
 again; tighten the protocol or loosen a target). A changed problem (geometry,
 model, charge, cell) starts fresh in the same stage directory, leaving the
-old generations untouched: the old problem's rung-end and stop generations
-stay on disk (retention deletes only mid-rung generations), and `latest` then
-names the new problem's. A generation with no recorded measurements (from
+old generations untouched until the new problem publishes: retention then
+deletes them unless another stage's manifest references them or the deck
+writes `checkpoint.keep_all true`, and `latest` names the new problem's. A generation with no recorded measurements (from
 before the convergence report) cannot be re-judged and is resumed.
 `maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
 number of iterations a rung may take in this run; a `--continue` run starts

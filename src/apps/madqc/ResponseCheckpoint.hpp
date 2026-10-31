@@ -84,6 +84,9 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
          "engine_es_omega_change", "", "hartree", rp.dconv(), dconv_by,
          Relation::less_than, limits.omega_residual, "5 x " + effective,
          "per root; verdicts in the bundle record", ""});
+    // D-099: the bundle's stall detector, B's rows.
+    for (auto& row : bundle_stall_rows(stage))
+      settings.metrics.push_back(std::move(row));
   }
 
   struct Requested {
@@ -1785,6 +1788,29 @@ inline StagePlans plan_response_states(const Stage& stage,
         records, bundle->id, requested_rungs, request.ladder.back());
     auto plan
         = seeded(madness::planning::plan_ladder(own, std::nullopt, request));
+    // D-099 (R-063): a bundle loaded stalled at its final rung (R2) is done at
+    // that rung for the engine; the protocol and dconv do not move it.
+    if (plan.action == madness::planning::Action::load && !plan.unmet.empty()) {
+      std::string stalled;
+      for (const auto& record : records)
+        if (record.value("identity", "") == bundle->id
+            && record.value("kind", "") == "excited_states"
+            && madness::scf_continuation::same_rung(
+                {record.at("rung").at("thresh").get<double>(),
+                 record.at("rung").at("k").get<int>()},
+                request.ladder.back()))
+          for (const auto& root : record.value("roots", json::array()))
+            if (root.value("stalled", false))
+              stalled += (stalled.empty() ? "" : ", ")
+                         + root.value("root_id", std::string("?"));
+      plan.why = "the bundle stalled on the engine check ("
+                 + (stalled.empty() ? std::string("a root") : "root " + stalled)
+                 + ": its density change and its eigenvalue change both flat "
+                   "over the stall detector's window); to go on, request more "
+                   "roots when the last root borders a cluster, or write "
+                   "stall.window 0 or a larger window, or raise maxiter; the "
+                   "protocol and dconv do not move a stalled bundle";
+    }
     if (!own)
       for (const auto& record : records)
         if (record.value("kind", "") == "excited_states") {

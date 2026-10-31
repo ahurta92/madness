@@ -203,6 +203,6 @@ run('unreadable', root, loose)
 name, _ = latest(root, 'gs')
 assert name != source and set(generations(root, 'gs')) == {source, name}, generations(root, 'gs')
 warnings = result(root, 'gs')['checkpoint_warnings']
-assert any('D-087' in w and 'g-other-1-1' in w for w in warnings), warnings
+assert any('could not be read' in w and 'g-other-1-1' in w for w in warnings), warnings
 
 print('from-store tests passed', flush=True)

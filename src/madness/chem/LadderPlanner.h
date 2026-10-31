@@ -208,9 +208,9 @@ plan_ladder(const std::optional<SavedState>& own,
   if (!own)
     return seeded(0, "no saved state");
   if (own->identity != request.identity)
-    return seeded(0, "the problem changed (R1)");
+    return seeded(0, "the problem changed, so the state starts fresh");
   if (own->reference_generation != request.reference_generation)
-    return seeded(0, "the reference changed (R1)");
+    return seeded(0, "the reference changed, so the state starts fresh");
 
   const std::size_t last = request.ladder.size() - 1;
   const auto& final_rung = request.ladder[last];
@@ -219,7 +219,8 @@ plan_ladder(const std::optional<SavedState>& own,
   if (own->diverged)
     return seeded(detail::start_on_ladder(request.ladder, own->rung, false),
                   "the saved state diverged at "
-                      + detail::rung_values(own->rung) + " (R6)");
+                      + detail::rung_values(own->rung)
+                      + "; that rung starts again from its seed");
 
   // B6, B8: the deciding check, judged today on the saved values.
   const auto engine = engine_check_today(*own, request.engine_limits);
@@ -255,7 +256,7 @@ plan_ladder(const std::optional<SavedState>& own,
       plan.unmet.push_back("stalled at " + detail::rung_text(last, final_rung)
                            + " with the request unmet");
       plan.why = "the final rung stalled; tighten the protocol or loosen a "
-                 "target (R2)";
+                 "target";
       return plan;
     }
     plan.action = Action::resume;

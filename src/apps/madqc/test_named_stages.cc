@@ -51,6 +51,13 @@ int main(int argc, char** argv) {
         catch (const std::exception& e) { check(std::string(e.what()).find(message) != std::string::npos, e.what()); }
     };
     rejects(geometry + gs + gs, "duplicate");
+    // D-100 (G-003): a missing end is named as such.
+    {
+      auto open_gs = gs;
+      open_gs.erase(open_gs.rfind("end\n"));
+      rejects(geometry + open_gs + response,
+              "a molresponse block starts here, but moldft GS has no end line");
+    }
     rejects(geometry + "nemo foo\nend\n", "unsupported stage");
     rejects(geometry + response + gs, "reference");
     rejects(geometry + gs + "molresponse bad\n reference GS\n maxsub 4\nend\n", "maxsub");
@@ -1640,6 +1647,31 @@ int main(int argc, char** argv) {
                   && criteria_plan.at("action") != "loaded",
               "planner (D-061, D-082): a saved bundle missing econv, loaded "
               "and reported in engine mode, not loaded under written targets");
+        // D-099 (R-063): a bundle stalled at its final rung names what moves
+        // it, and that the protocol and dconv do not.
+        auto stalled_meta = es_meta;
+        auto& stalled_bundle = stalled_meta["excited_states"][es_key];
+        stalled_bundle["converged"] = false;
+        stalled_bundle["stop_reason"] = "stalled";
+        stalled_bundle["roots"][0]["density_residual"] = 1e-2;
+        stalled_bundle["roots"][0]["omega_residual"] = 1e-2;
+        stalled_bundle["roots"][0]["stalled"] = true;
+        const auto stalled_plan
+            = named_stages::plan_response_states(
+                  es_engine, named_stages::response_request(es_engine), 2,
+                  "g-ref",
+                  named_stages::response_state_records(stalled_meta, "g-ref",
+                                                       {}))
+                  .continuation.at("states")
+                  .back();
+        const auto stalled_why = stalled_plan.at("why").get<std::string>();
+        check(stalled_plan.at("action") == "loaded"
+                  && stalled_why.find("root r0") != std::string::npos
+                  && stalled_why.find("stall.window") != std::string::npos
+                  && stalled_why.find("do not move a stalled bundle")
+                         != std::string::npos,
+              "planner (D-099): a stalled bundle's message names the stalled "
+              "root and what moves it");
         check(bundle_plan(mixed_dconv).at("action") == "loaded",
               "planner (D-082): a bundle under written targets none of its "
               "kind's (dconv only) is loaded on its stop");
