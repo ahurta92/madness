@@ -47,6 +47,10 @@ response = 'molresponse excited' + response
 assert '[excited_states, polarizability]' in response
 response = response.replace('[excited_states, polarizability]', '[excited_states]')
 response = '\n'.join(line for line in response.split('\n') if 'polarizability.' not in line)
+# Keep every generation: the D-089 case below reads the bundle's save-boundary
+# generation after the analysis publish, which retention (D-070) would delete.
+assert '  protocol [1e-4]\n' in response
+response = response.replace('  protocol [1e-4]\n', '  protocol [1e-4]\n  checkpoint.keep_all true\n')
 es_only = head + response
 assert 'polarizability' not in es_only.split('molresponse excited')[1]
 assert '  protocol [1e-4]\n' in response
