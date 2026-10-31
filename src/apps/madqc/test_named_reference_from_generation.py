@@ -129,7 +129,10 @@ assert not (work / 'NoReference').exists()
 # Tightening is checked against the published generation, too.
 tight = response.replace('protocol [1e-4, 1e-6]', 'protocol [1e-4, 1e-8]')
 log = run('optical-tight', split, tight, resume=True, success=False)
-assert 'response protocol is tighter than reference gs' in log, log[-3000:]
+# D-102: the refusal names both sides and asks for the protocol meant.
+assert "response stage optical: protocol final step thresh 1.0e-08" in log, log[-3000:]
+assert "is tighter than reference gs's saved generation g-gs-" in log, log[-3000:]
+assert 'write the protocol you mean' in log
 
 # A reused ground state is the same reference in and out of the deck (A1, B6).
 # Run 1: the written targets decide and cannot be met in 3 iterations per

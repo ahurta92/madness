@@ -252,8 +252,12 @@ per state: `state`, `perturbation`, `frequency`, `action` (`loaded`,
 `seed_from` and `seed_frequency`); the generation records the
 same list as `numerical.plans`. The stage's `work` is `analyzed` when only the
 analysis ran, else `resumed`. Adding frequencies preserves compatible saved
-states. `iterations_this_run` counts response iterations across channels and
-protocol steps; `work_items` records the individual solves and restart seeds.
+states. `iterations_this_run` counts solver iterations summed over every
+response state (each driven leg and each excited-state bundle) and protocol
+step, the excited-state warm-up steps excluded (a TDA stage's 12 is 7 for the
+dipole leg plus 5 for the bundle); `iterations_this_run_counts` says so in
+`results.json`, and moldft's says it counts SCF iterations over its protocol
+steps. `work_items` records the individual solves and restart seeds.
 A previous invocation's exhausted iteration budget does not exhaust the new one,
 and forced diagnostic iterations (`diagnostic.iterations_per_rung`) on
 `--continue` apply to the final rung only, since finished rungs are not redone.

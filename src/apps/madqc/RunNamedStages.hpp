@@ -55,7 +55,41 @@ struct StageOutcome {
   std::string state_id; // the published generation (A1 identity)
   bool converged = false;
   json result; // this stage's results.json record
+  // D-104: when not converged, what decided and why the stage stopped.
+  std::string stop;
 };
+
+// D-104: an expected stop (an unconverged stage), not an error: the run ends
+// with a nonzero exit and the stop said in words, without the main loop's
+// exception heading; later stages do not run.
+struct StageStopped : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+// D-104: why the first needed state of a shared verdict was not converged,
+// in words.
+[[nodiscard]] inline std::string stop_words(const json& verdict) {
+  for (const auto& state : verdict.at("states")) {
+    if (state.at("converged").get<bool>())
+      continue;
+    const auto key = state.at("key").get<std::string>();
+    if (!state.at("found").get<bool>())
+      return key + " has no saved state";
+    if (state.at("diverged").get<bool>())
+      return key + " diverged";
+    if (!state.at("at_rung").get<bool>() && !state.value("beyond_rung", false))
+      return key + " stopped before the final protocol step";
+    const auto stop = state.at("stop").get<std::string>();
+    if (stop == "converged")
+      return key + " stopped converged but did not meet its written targets";
+    if (stop == "iteration_limit")
+      return key + " stopped at its iteration limit";
+    if (stop == "stalled")
+      return key + " stopped at its stall detector";
+    return key + " stopped: " + stop;
+  }
+  return "a needed state was not converged";
+}
 
 // DESIGN A1: one declared input of a stage, read only from its producer's
 // published generation on disk; no engine object passes between stages.
@@ -174,6 +208,8 @@ struct LadderSteps {
   std::function<const madness::checkpoint::Manifest&()> latest;
   std::function<std::string()> work;
   std::function<std::size_t()> iterations;
+  // D-104: what iterations() counts, recorded beside it.
+  std::string iterations_counted;
   // The application's fields of the generation record.
   std::function<void(json&)> generation_record;
   // A3: the deletions retention could not make in this stage's publishes
@@ -572,6 +608,11 @@ publish_generation(madness::World& world, const fs::path& store,
   }
   checkpoint::publish(world, store, m, error);
   auto published = checkpoint::read_published(world, store);
+  // D-096: one line per publish.
+  if (world.rank() == 0)
+    std::cout << "stage " << stage.name << ": published "
+              << published.generation << '\n'
+              << std::flush;
   if (!stage.checkpoint_keep_all) {
     const auto warning
         = retain_generations(world, store, stage.name, published.generation);
@@ -718,6 +759,7 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   result["checkpoint_generation"] = saved.generation;
   result["work"] = steps.work();
   result["iterations_this_run"] = steps.iterations();
+  result["iterations_this_run_counts"] = steps.iterations_counted;
   steps.generation_record(result);
   result["acceleration_history"] = ctx.continuing ? "reset" : "fresh";
   if (!continuation.is_null()) {
@@ -740,6 +782,10 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   if (world.rank() == 0)
     std::cout << madness::convergence::render_outcome_table(
         settings, outcomes, steps.outcome_label(converged))
+              << "stage " << stage.name
+              << " result: " << (converged ? "converged" : "not converged")
+              << "; latest generation " << saved.generation << "; "
+              << steps.iterations() << " new iterations this run\n"
               << '\n'
               << std::flush;
   // 8. The properties.
@@ -763,6 +809,14 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   StageOutcome outcome;
   outcome.state_id = state_id;
   outcome.converged = converged;
+  if (!converged)
+    outcome.stop
+        = "decided by "
+          + std::string(settings.decider
+                                == madness::convergence::Decider::engine_check
+                            ? "the engine check"
+                            : "your written targets")
+          + "; " + stop_words(verdict);
   outcome.result = std::move(result);
   return outcome;
 }
@@ -843,6 +897,8 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   };
   steps.work = [&] { return checkpoint->work; };
   steps.iterations = [&] { return checkpoint->iterations; };
+  steps.iterations_counted
+      = "SCF iterations of this run, summed over its protocol steps";
   steps.generation_record = [](json&) {};
   const auto saved_measurements = [&] {
     return checkpoint->latest()
@@ -913,11 +969,35 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   // Reject downstream tightening instead of silently refining the source.
   if (cp.protocol().back() < context.at("thresh").get<double>()
       || protocol_k(cp.protocol().back()) > context.at("k").get<int>())
-    throw std::runtime_error("response protocol is tighter than reference "
-                             + stage.reference);
+    throw std::runtime_error(
+        "response stage " + stage.name + ": protocol final step thresh "
+        + madness::convergence::detail::scientific(cp.protocol().back())
+        + " (k " + std::to_string(protocol_k(cp.protocol().back()))
+        + ") is tighter than reference " + stage.reference
+        + "'s saved generation " + reference.saved.generation + " (thresh "
+        + madness::convergence::detail::scientific(
+            context.at("thresh").get<double>())
+        + ", k " + std::to_string(context.at("k").get<int>())
+        + "); write the protocol you mean");
   madness::Molecule molecule;
   molecule.from_json(context.at("molecule"));
   cp.set_user_defined_value("l", context.at("L").get<double>());
+  // D-096: what the handoff does to the reference; the engine's core warning
+  // about a k mismatch while reading the archive is this projection.
+  if (world.rank() == 0) {
+    const int reference_k = context.at("k").get<int>();
+    const int first_k = protocol_k(cp.protocol().front());
+    std::cout << "stage " << stage.name << ": using reference "
+              << stage.reference << " generation " << reference.saved.generation
+              << " at k " << reference_k
+              << (reference_k == first_k
+                      ? ", the k of protocol step 1"
+                      : "; protocol step 1 works on a copy projected to k "
+                            + std::to_string(first_k)
+                            + "; the saved generation is unchanged")
+              << '\n'
+              << std::flush;
+  }
   std::optional<madness::convergence::ConvergenceSettings> settings;
   std::optional<ResponseCheckpoint> checkpoint;
   molresponse_v3_lib::Results response;
@@ -1007,6 +1087,10 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
   };
   steps.work = [&] { return checkpoint->work; };
   steps.iterations = [&] { return checkpoint->iterations; };
+  steps.iterations_counted
+      = "solver iterations of this run, summed over every response state "
+        "(each driven leg and each excited-state bundle) and protocol step; "
+        "the excited-state warm-up steps are not counted";
   steps.generation_record = [&](json& result) {
     result["work_items"] = checkpoint->work_items;
     result["reference_changed"] = checkpoint->reference_changed;
@@ -1172,8 +1256,17 @@ inline bool run_if_named(madness::World& world,
                                "unsupported option --"
                                + option.first);
   }
-  auto stages = parse(
-      world, text); // validate the complete deck before creating outputs
+  // The output root, named before the deck check so that a refusal can cite
+  // a reference's saved generation (D-102); nothing is created yet.
+  const auto planned_root
+      = fs::absolute(parser.key_exists("user_defined_prefix")
+                         ? fs::path(parser.value_raw("prefix"))
+                         : fs::path(parser.value("input")).stem())
+            .lexically_normal();
+  auto stages = parse(world, text,
+                      parser.key_exists("continue")
+                          ? planned_root
+                          : fs::path{}); // validate before creating outputs
 
   const bool continuing = parser.key_exists("continue");
 
@@ -1261,9 +1354,9 @@ inline bool run_if_named(madness::World& world,
     index["stages"].push_back(result);
     write_result(world, root / "results.json", index);
     if (!application.release(outcome))
-      throw std::runtime_error("stage " + stage.name
-                               + " did not satisfy its requested convergence "
-                                 "criteria; see results.json");
+      throw StageStopped("stage " + stage.name + " stopped unconverged: "
+                         + outcome.stop + "; later stages do not run; see "
+                         + (stage_directory / "results.json").string());
     outcomes.emplace(stage.name, std::move(outcome));
   }
   if (world.rank() == 0)

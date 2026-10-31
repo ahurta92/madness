@@ -498,10 +498,42 @@ inline void translate_response_properties(const std::string& stage_name,
   }
 }
 
+// D-102: what a refusal says about a reference's saved generation under
+// `root`: " ; <ref>'s saved generation <g> is at thresh <t>, k <k>", or empty
+// when there is none (or no root). Collective: rank 0 reads, every rank gets
+// the same text.
+inline std::string saved_reference_rung(madness::World& world,
+                                        const std::filesystem::path& root,
+                                        const std::string& reference) {
+  if (root.empty())
+    return {};
+  return madness::checkpoint::detail::on_root(world, [&]() -> std::string {
+    try {
+      const auto store = root / reference / "checkpoints";
+      if (!std::filesystem::exists(store / "latest"))
+        return {};
+      const auto m = madness::checkpoint::read_manifest(
+          store
+          / madness::checkpoint::detail::read_json(store / "latest")
+                .at("generation")
+                .get<std::string>());
+      std::ostringstream text;
+      text << "; " << reference << "'s saved generation " << m.generation
+           << " is at thresh " << m.numerical.at("threshold").get<double>()
+           << ", k " << m.numerical.at("k").get<int>();
+      return text.str();
+    } catch (const std::exception&) {
+      return {};
+    }
+  });
+}
+
 // Build and validate the whole sequence before any calculation starts.
 // Names enter these lookup tables in file order, so references must point back.
-inline std::vector<Stage> parse(madness::World &world,
-                                const std::string &text) {
+// `output_root` (D-102): where a refusal looks for a reference's saved
+// generation to name its rung; empty: nowhere.
+inline std::vector<Stage> parse(madness::World& world, const std::string& text,
+                                const std::filesystem::path& output_root = {}) {
   std::map<std::string, madness::Molecule> molecules;
   std::map<std::string, std::size_t> indices;
   std::vector<Stage> stages;
@@ -834,9 +866,19 @@ inline std::vector<Stage> parse(madness::World &world,
                                  ? protocol_k(reference_cp.protocol().back())
                                  : reference_cp.k();
         if (own_protocol.back() < reference_cp.protocol().back()
-            || protocol_k(own_protocol.back()) > source_k)
-          throw std::runtime_error(
-              "response protocol is tighter than reference " + stage.reference);
+            || protocol_k(own_protocol.back()) > source_k) {
+          // D-102: the deck is the contract; say what each side wrote.
+          std::ostringstream text;
+          text << "response stage " << b.name << ": protocol final step thresh "
+               << own_protocol.back() << " (k "
+               << protocol_k(own_protocol.back())
+               << ") is tighter than reference " << stage.reference
+               << ", written at final step thresh "
+               << reference_cp.protocol().back() << " (k " << source_k << ")"
+               << saved_reference_rung(world, output_root, stage.reference)
+               << "; write the protocol you mean";
+          throw std::runtime_error(text.str());
+        }
       }
     }
 

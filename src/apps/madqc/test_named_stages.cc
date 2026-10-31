@@ -51,6 +51,17 @@ int main(int argc, char** argv) {
         catch (const std::exception& e) { check(std::string(e.what()).find(message) != std::string::npos, e.what()); }
     };
     rejects(geometry + gs + gs, "duplicate");
+    // D-102: an in-deck reference written coarser than the response asks.
+    {
+      auto tight = response;
+      tight.replace(tight.find("protocol [1e-4]"), 15, "protocol [1e-8]");
+      rejects(geometry + gs + tight,
+              "response stage optical: protocol final step thresh 1e-08");
+      rejects(geometry + gs + tight,
+              "is tighter than reference GS, written at final step thresh "
+              "1e-06");
+      rejects(geometry + gs + tight, "write the protocol you mean");
+    }
     // D-100 (G-003): a missing end is named as such.
     {
       auto open_gs = gs;

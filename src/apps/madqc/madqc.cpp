@@ -384,6 +384,13 @@ int main(int argc, char **argv) {
       }
     }
 
+    catch (const named_stages::StageStopped &e) {
+      // An expected stop (D-104): the stage was not converged.
+      rc = 1;
+      if (world.rank() == 0)
+        print(e.what());
+    }
+
     catch (std::exception &e) {
       rc = 1;
       if (world.rank() == 0) {
