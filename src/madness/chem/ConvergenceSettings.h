@@ -64,6 +64,36 @@ struct MetricSetting {
   std::string engine_check_instead;
 };
 
+/// B9 (D-107): an application's definition of one written-target row; the
+/// rule that turns it into a settings row is requested_metric's.
+struct RequestedMetric {
+  const char *name, *keyword, *measurement, *quantity, *units;
+  std::string engine_instead;
+  std::string unset_note; ///< shown when no target was written; may be empty
+};
+
+/// B9 (D-107): a written-target row: the target when the deck wrote one (set
+/// by the user), else none and the row's unset note; compared with <=.
+[[nodiscard]] inline MetricSetting
+requested_metric(const RequestedMetric& row, const nlohmann::json& targets) {
+  const bool written = targets.contains(row.measurement);
+  return {Group::requested_criteria,
+          row.name,
+          row.keyword,
+          row.measurement,
+          row.quantity,
+          row.units,
+          written ? std::optional<double>(
+                        targets.at(row.measurement).at("value").get<double>())
+                  : std::nullopt,
+          written ? SetBy::user : SetBy::not_set,
+          Relation::less_than_or_equal,
+          std::nullopt,
+          "",
+          written ? std::string() : row.unset_note,
+          row.engine_instead};
+}
+
 /// The iteration cap per protocol rung (B5): maxiter, one number or one per
 /// rung, per run: a restart starts the count again (D-007).
 struct IterationCaps {

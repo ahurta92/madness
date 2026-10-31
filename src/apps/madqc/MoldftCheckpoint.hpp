@@ -76,11 +76,7 @@ moldft_convergence_settings(const std::string& stage,
                                 "not checked: conv_only_dens", ""});
 
   // Written targets (B8): one row each, reported or enforced by the switch.
-  struct Requested {
-    const char *name, *keyword, *measurement, *quantity, *units;
-    std::string engine_instead, unset_note;
-  };
-  const std::vector<Requested> requested = {
+  const std::vector<convergence::RequestedMetric> requested = {
       {"charge density change", "dconv", "charge_density_change", "",
        "a0^(-3/2)",
        "compares spin-density change against " + text(limits.density), ""},
@@ -96,18 +92,8 @@ moldft_convergence_settings(const std::string& stage,
        "delta_kinetic_energy", "absolute_kinetic_trace_change", "hartree",
        "has no kinetic term", ""}};
   const auto targets = madness::SCF::requested_targets(cp);
-  for (const auto& row : requested) {
-    const bool written = targets.contains(row.measurement);
-    settings.metrics.push_back(
-        {Group::requested_criteria, row.name, row.keyword, row.measurement,
-         row.quantity, row.units,
-         written ? std::optional<double>(
-                       targets.at(row.measurement).at("value").get<double>())
-                 : std::nullopt,
-         written ? SetBy::user : SetBy::not_set, Relation::less_than_or_equal,
-         std::nullopt, "", written ? std::string() : row.unset_note,
-         row.engine_instead});
-  }
+  for (const auto& row : requested)
+    settings.metrics.push_back(convergence::requested_metric(row, targets));
 
   const auto per_rung = cp.get<std::vector<int>>("maxiter_per_rung");
   settings.iteration_caps

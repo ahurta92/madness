@@ -89,11 +89,7 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
       settings.metrics.push_back(std::move(row));
   }
 
-  struct Requested {
-    const char *name, *keyword, *measurement, *quantity, *units;
-    std::string engine_instead;
-  };
-  const std::vector<Requested> requested = {
+  const std::vector<cv::RequestedMetric> requested = {
       {"induced density change", "dconv", "charge_density_change",
        "kernel_induced_charge_density_change_L2",
        "kernel_induced_density_L2_atomic_units",
@@ -110,17 +106,8 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
        "hartree_times_response_amplitude_scale_squared",
        "has no kinetic term"}};
   const auto targets = molresponse_v3::fd_requested_accuracy_targets(rp);
-  for (const auto& row : requested) {
-    const bool written = targets.contains(row.measurement);
-    settings.metrics.push_back(
-        {Group::requested_criteria, row.name, row.keyword, row.measurement,
-         row.quantity, row.units,
-         written ? std::optional<double>(
-                       targets.at(row.measurement).at("value").get<double>())
-                 : std::nullopt,
-         written ? SetBy::user : SetBy::not_set, Relation::less_than_or_equal,
-         std::nullopt, "", "", row.engine_instead});
-  }
+  for (const auto& row : requested)
+    settings.metrics.push_back(cv::requested_metric(row, targets));
   // D-061: on an excited-state stage the written econv is the bundle's
   // omega target, in place of the energy change a driven response lacks.
   if (std::find(stage.properties.begin(), stage.properties.end(),
