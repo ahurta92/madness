@@ -865,6 +865,14 @@ struct NodeResult {
 /// -> save (+metrics). The only World-bound surface of the calc manager.
 struct ICalcExecutor {
   virtual NodeResult run_protocol(const WorkItem &item) = 0;
+  /// D-089: an excited-state bundle the planner loads is not solved, so its
+  /// transition analysis is computed from the saved states when the run has
+  /// none: `n_roots` the saved bundle's, `thresh` the loaded rung's. Returns
+  /// whether an analysis was written. Collective; a no-op by default.
+  virtual bool analyze_loaded_bundle(const CalcNode & /*node*/,
+                                     int /*n_roots*/, double /*thresh*/) {
+    return false;
+  }
   virtual ~ICalcExecutor() = default;
 };
 

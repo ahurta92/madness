@@ -1334,6 +1334,16 @@ class FdResponseExecutor : public ICalcExecutor {
 public:
   explicit FdResponseExecutor(ExecutorContext ctx) : ctx_(ctx) {}
 
+  // D-089: closed shell only, as the solvers.
+  bool analyze_loaded_bundle(const CalcNode &n, int n_roots,
+                             double thresh) override {
+    if (!ctx_.gs.is_spin_restricted())
+      return false;
+    if (n.tda)
+      return analyze_loaded_es_bundle<TDA, ClosedShell>(ctx_, n_roots, thresh);
+    return analyze_loaded_es_bundle<Full, ClosedShell>(ctx_, n_roots, thresh);
+  }
+
   NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
 
@@ -1507,6 +1517,31 @@ public:
     nlohmann::json diag;                       // R1c scheduler trace
     diag["schedule"] = nlohmann::json::array();
     int pass = 0;
+
+    // D-089: each excited-state bundle the planner loads is not solved, so
+    // its transition analysis is computed from the saved bundle when the run
+    // has none (a restart between the bundle's publish and its analysis).
+    // Every rank, the DAG's order; a no-op when the analysis exists.
+    {
+      const nlohmann::json meta0
+          = detail_exec::load_metadata_rank0(world, meta_path);
+      for (const auto &n : dag_) {
+        if (n.kind != CalcKind::ES) continue;
+        const auto plan = policy_.state_plans.find(n.id);
+        if (plan == policy_.state_plans.end()
+            || plan->second.kind != StatePlan::Kind::load)
+          continue;
+        const auto &key = plan->second.loaded_key;
+        if (!meta0.contains("excited_states")
+            || !meta0.at("excited_states").contains(key)
+            || !meta0.contains("protocols")
+            || !meta0.at("protocols").contains(key))
+          continue;
+        exec.analyze_loaded_bundle(
+            n, meta0.at("excited_states").at(key).value("n_roots", 0),
+            meta0.at("protocols").at(key).at("thresh").get<double>());
+      }
+    }
 
     std::string last_sig;
     std::string last_progress;           // fingerprint of the saved solve state
