@@ -21,10 +21,10 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
-import tempfile
 sys.dont_write_bytecode = True  # nothing written into the source tree
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import named_records  # noqa: E402  (D-105: records by path)
+import named_workdir  # noqa: E402  (D-108: removed when the test passes)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -33,7 +33,7 @@ p.add_argument('--ranks', type=int, default=1)
 p.add_argument('--mpiexec', default='mpiexec')
 a = p.parse_args()
 binary = str(Path(a.binary).resolve())
-work = Path(tempfile.mkdtemp(prefix='named-cadence-', dir=Path.cwd()))
+work = named_workdir.work_directory('named-cadence-')
 print('artifacts:', work, flush=True)
 env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')

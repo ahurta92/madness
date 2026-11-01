@@ -35,7 +35,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -54,6 +53,7 @@ import make_test_store as store  # noqa: E402
 sys.dont_write_bytecode = True  # nothing written into the source tree
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import named_records  # noqa: E402  (D-105: records by path)
+import named_workdir  # noqa: E402  (D-108: removed when the test passes)
 
 data = store.listing()
 ancestor = subprocess.run(['git', '-C', a.source, 'merge-base', '--is-ancestor',
@@ -68,7 +68,7 @@ stored = store.store_dir(data)
 env = dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
            OMPI_MCA_hwloc_base_binding_policy='none')
 env.setdefault('MAD_NUM_THREADS', '10')
-work = Path(tempfile.mkdtemp(prefix='from-store-', dir=Path.cwd()))
+work = named_workdir.work_directory('from-store-')
 print('artifacts:', work, flush=True)
 
 

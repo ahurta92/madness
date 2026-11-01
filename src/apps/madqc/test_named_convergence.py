@@ -11,10 +11,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 sys.dont_write_bytecode = True  # nothing written into the source tree
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import named_records  # noqa: E402  (D-105: records by path)
+import named_workdir  # noqa: E402  (D-108: removed when the test passes)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -22,7 +22,7 @@ p.add_argument('--source', required=True)
 p.add_argument('--ranks', type=int, default=1)
 p.add_argument('--mpiexec', default='mpiexec')
 a = p.parse_args()
-work = Path(tempfile.mkdtemp(prefix='named-convergence-', dir=Path.cwd()))
+work = named_workdir.work_directory('named-convergence-')
 print('artifacts:', work, flush=True)
 binary = str(Path(a.binary).resolve())
 deck = (Path(a.source) / 'named_h2.in').read_text()
