@@ -237,6 +237,31 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
       check(false, std::string("molresponse keep_all: ") + e.what());
     }
+    // D-107: the Raman coordinates in their written order, every atom and
+    // x, y, z when omitted.
+    {
+        using C = std::vector<std::pair<int, char>>;
+        check(named_stages::raman_coordinates({1, 0}, "zx", 2)
+                      == C{{1, 'z'}, {1, 'x'}, {0, 'z'}, {0, 'x'}}
+                  && named_stages::raman_coordinates({}, "", 2)
+                         == C{{0, 'x'}, {0, 'y'}, {0, 'z'},
+                              {1, 'x'}, {1, 'y'}, {1, 'z'}}
+                  && named_stages::raman_coordinates({0}, "", 3)
+                         == C{{0, 'x'}, {0, 'y'}, {0, 'z'}},
+              "raman_coordinates: written order kept; omitted lists expand");
+        const json request = {{"protocol", {1e-4}}, {"properties", {
+            {"raman", {{"frequencies", {0.05, 0.02}}, {"components", {"xz"}},
+                       {"atoms", {1, 0}}, {"directions", "zx"},
+                       {"full_set", false}}}}}};
+        std::vector<std::string> nuclear;
+        for (const auto& [p, f] : named_stages::response_needs(request, 2).legs)
+            if (p.description().starts_with("nuc"))
+                nuclear.push_back(p.description());
+        check(nuclear == std::vector<std::string>{"nuc_1_z", "nuc_1_x",
+                                                  "nuc_0_z", "nuc_0_x"},
+              "response_needs: Raman nuclear legs in the written atom and "
+              "direction order");
+    }
     // The states a response request's values are built from (D-019): each leg
     // and source once, nuclear legs at 0, "every atom" from the reference.
     {

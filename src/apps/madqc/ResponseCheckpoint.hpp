@@ -323,25 +323,20 @@ struct ResponseNeeds {
   }
   if (properties.contains("raman")) {
     const auto& r = properties.at("raman");
-    auto atoms = r.at("atoms").get<std::vector<int>>();
-    if (atoms.empty())
-      for (int atom = 0; atom < natom; ++atom)
-        atoms.push_back(atom);
-    auto directions = r.at("directions").get<std::string>();
-    if (directions.empty())
-      directions = "xyz";
+    const auto coordinates
+        = raman_coordinates(r.at("atoms").get<std::vector<int>>(),
+                            r.at("directions").get<std::string>(), natom);
     for (double frequency : r.at("frequencies"))
-      for (int atom : atoms)
-        for (char axis : directions) {
-          const auto nuclear = Perturbation::nuclear(atom, axis - 'x');
-          for (const auto& component : r.at("components")) {
-            const auto ab = component.get<std::string>();
-            leg(dipole(ab[0]), frequency);
-            leg(dipole(ab[1]), frequency);
-            leg(nuclear, 0.0);
-            source(dipole(ab[1]), nuclear, frequency, 0.0);
-          }
+      for (const auto& [atom, axis] : coordinates) {
+        const auto nuclear = Perturbation::nuclear(atom, axis - 'x');
+        for (const auto& component : r.at("components")) {
+          const auto ab = component.get<std::string>();
+          leg(dipole(ab[0]), frequency);
+          leg(dipole(ab[1]), frequency);
+          leg(nuclear, 0.0);
+          source(dipole(ab[1]), nuclear, frequency, 0.0);
         }
+      }
   }
   return needs;
 }

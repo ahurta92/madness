@@ -199,22 +199,12 @@ inline json selected_beta(const Stage& stage, const json& properties,
 // the written directions or x, y, z.
 inline std::vector<std::pair<int, char>> raman_coordinates(const Stage& stage,
                                                            int natom) {
-  std::vector<int> atoms = stage.raman_atoms;
-  if (atoms.empty())
-    for (int atom = 0; atom < natom; ++atom)
-      atoms.push_back(atom);
-  for (int atom : atoms)
+  for (int atom : stage.raman_atoms)
     if (atom >= natom)
       throw std::runtime_error("raman.atoms names atom " + std::to_string(atom)
                                + " but the reference has "
                                + std::to_string(natom) + " atom(s)");
-  const std::string directions
-      = stage.raman_directions.empty() ? "xyz" : stage.raman_directions;
-  std::vector<std::pair<int, char>> coordinates;
-  for (int atom : atoms)
-    for (char axis : directions)
-      coordinates.emplace_back(atom, axis);
-  return coordinates;
+  return raman_coordinates(stage.raman_atoms, stage.raman_directions, natom);
 }
 
 // The polarizability gradient: for each optical frequency w and nuclear

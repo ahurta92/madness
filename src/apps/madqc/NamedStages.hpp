@@ -270,6 +270,23 @@ inline int protocol_k(double t) {
   return molresponse_v3::default_k_for_thresh(t);
 }
 
+// D-107: the nuclear coordinates a Raman request covers, in its written
+// order: the written atoms or every atom of the reference, each with the
+// written directions or x, y, z. Callers validate the atoms.
+[[nodiscard]] inline std::vector<std::pair<int, char>>
+raman_coordinates(std::vector<int> atoms, std::string directions, int natom) {
+  if (atoms.empty())
+    for (int atom = 0; atom < natom; ++atom)
+      atoms.push_back(atom);
+  if (directions.empty())
+    directions = "xyz";
+  std::vector<std::pair<int, char>> coordinates;
+  for (int atom : atoms)
+    for (char axis : directions)
+      coordinates.emplace_back(atom, axis);
+  return coordinates;
+}
+
 // The named property language of a molresponse stage (D-017). Each optical
 // property in requested_properties has its own block: <property>.frequencies
 // and <property>.frequency_units are required (B3: a number is never
