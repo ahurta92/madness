@@ -832,10 +832,15 @@ int main(int argc, char** argv) {
         check(given == json{{"row", "refused early"}},
               "publish_generation (S4c3): the manifest field reads the "
               "application's publish sample");
-        check(seen.generation == name(1) && seen.stage == ground.name
-                  && seen.position.at("iterations_this_run") == 7
-                  && seen.properties.at(0).at("generation") == name(1)
-                  && seen.working_orbitals.at("state_id") == name(1),
+        // Rank 0 runs the check before writing and writes the store; the
+        // store's path names the process, so each rank sees its own and only
+        // rank 0's holds what publish_generation wrote.
+        const bool writer = world.rank() == 0;
+        check(!writer
+                  || (seen.generation == name(1) && seen.stage == ground.name
+                      && seen.position.at("iterations_this_run") == 7
+                      && seen.properties.at(0).at("generation") == name(1)
+                      && seen.working_orbitals.at("state_id") == name(1)),
               "publish_generation (S4c1): the shared fields are filled before "
               "the check before writing, the skeleton's name replacing the "
               "application's");
@@ -851,9 +856,10 @@ int main(int argc, char** argv) {
                      "unsupported representation",
                      "publish_generation (D-052): a generation that fails "
                      "validate_generation");
-        check(fs::is_directory(store / name(3))
-                  && !fs::exists(store / name(3) / "manifest.json")
-                  && !fs::exists(store / "latest"),
+        check(!writer
+                  || (fs::is_directory(store / name(3))
+                      && !fs::exists(store / name(3) / "manifest.json")
+                      && !fs::exists(store / "latest")),
               "publish_generation: the refused generation stays unpublished");
         auto unrecorded = generation();
         unrecorded.numerical.erase("states");
@@ -912,12 +918,14 @@ int main(int argc, char** argv) {
                               {{"es_bundle/root_0.00000", 1, ""}}}};
           const auto warning
               = named_stages::delete_attempt_copies(world, attempt, latest);
+          // Rank 0 deletes, in its own (per-process) directory.
           check(warning.empty()
-                    && !fs::exists(attempt / "state.restartdata.00000")
-                    && !fs::exists(attempt / "state.restartdata.00001")
-                    && !fs::exists(attempt / "es_bundle/root_0.00000")
-                    && fs::exists(attempt / "resolved.in")
-                    && fs::exists(attempt / "es_bundle/roots.json"),
+                    && (!writer
+                        || (!fs::exists(attempt / "state.restartdata.00000")
+                            && !fs::exists(attempt / "state.restartdata.00001")
+                            && !fs::exists(attempt / "es_bundle/root_0.00000")
+                            && fs::exists(attempt / "resolved.in")
+                            && fs::exists(attempt / "es_bundle/roots.json"))),
                 "delete_attempt_copies (D-072): the shards go, the records "
                 "stay");
           check(named_stages::delete_attempt_copies(world, attempt, latest)
@@ -930,8 +938,9 @@ int main(int argc, char** argv) {
           check(named_stages::delete_attempt_copies(world, attempt, latest,
                                                     {"es_bundle/root_1.00000"})
                         .empty()
-                    && !fs::exists(attempt / "es_bundle/root_1.00000")
-                    && fs::exists(attempt / "es_bundle/roots.json"),
+                    && (!writer
+                        || (!fs::exists(attempt / "es_bundle/root_1.00000")
+                            && fs::exists(attempt / "es_bundle/roots.json"))),
                 "delete_attempt_copies (D-090): a copied shard the latest "
                 "generation does not list is deleted, the records stay");
         }
