@@ -4,6 +4,8 @@
 #include <madness/chem/ConvergenceSettings.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
+
 // Select what a molresponse stage requested out of the engine's property rows.
 // The response calculation has already run; nothing here computes a number.
 // One function per property (D-017): the engine writes one row per tensor
@@ -209,7 +211,8 @@ inline std::vector<std::pair<int, char>> raman_coordinates(const Stage& stage,
 
 // The polarizability gradient: for each optical frequency w and nuclear
 // coordinate Q, the engine's rows d(alpha_AB)/dQ(w) for the requested pairs
-// AB, in atomic units (a0^2 per bohr of displacement). With the full set the
+// AB, in the engine's units, a.u. (e^2 bohr^2 / Eh per bohr of displacement).
+// With the full set the
 // engine's normal-mode analysis is passed through unchanged, and the stage is
 // converged only if its completeness block says every row was.
 inline json selected_raman(const Stage& stage, const json& properties,
@@ -238,7 +241,7 @@ inline json selected_raman(const Stage& stage, const json& properties,
                      {"coordinate", coordinate},
                      {"atom", atom},
                      {"axis", std::string(1, axis)},
-                     {"units", "a0^2 per bohr"},
+                     {"units", "a.u. (e^2 bohr^2 / Eh per bohr)"},
                      {"components", elements.values},
                      {"converged", elements.converged},
                      {"engine_evidence", elements.evidence}};
@@ -437,6 +440,9 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
     roots.push_back(std::move(entry));
   }
   record["roots"] = std::move(roots);
+  // D-104: the engine's units of the per-root transition blocks, once.
+  if (transition.is_object() && transition.contains("units"))
+    record["transition_units"] = transition.at("units");
   record["requested_omega_target"]
       = requested_omega_target(stage, record["roots"], state_key);
   record["converged"] = bundle_converged && every_root;
@@ -472,12 +478,13 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
   row.relation = cv::Relation::less_than_or_equal;
   if (!target)
     row.note = "not set; the bundle stops on the engine's omega gate in both "
-               "modes (the dconv row above, D-025, D-092), not a target (D8)";
+               "modes (the dconv row above); the engine's default is never a "
+               "target";
   row.engine_check_instead
       = "stops the bundle when each root's eigenvalue change is below "
         + cv::detail::scientific(engine_omega_limit)
         + " (5 x max(dconv, thresh)), strictly, in both modes; a written "
-          "econv is judged by the stage verdict (D-092)";
+          "econv is judged by the stage verdict";
   return row;
 }
 
@@ -542,6 +549,49 @@ bundle_saved_measurements(const json& engine_measurements) {
   row["units"] = "hartree";
   saved["omega_residual"] = std::move(row);
   return saved;
+}
+
+// D-095: the bundle's engine checks as per-root outcomes under the two
+// engine rows (ResponseCheckpoint.hpp: "density change per root",
+// "excitation energy change per root"), each root judged on its own
+// recorded target, so the table and the record show the evidence the engine
+// judged on (ConvergenceSettings.h: leg_outcomes, row_verdict). The phases
+// are the engine's, as bundle_measurements names them: the density change
+// between a step's input densities, the eigenvalue change across the step.
+// A root without a value (no eigenvalue step yet) is unavailable; the
+// subject is the root id, the record's key.
+[[nodiscard]] inline std::vector<madness::convergence::MetricOutcome>
+bundle_root_outcomes(const json& bundle) {
+  struct Row {
+    const char* measurement;
+    const char* value;
+    const char* limit;
+    const char* units;
+    const char* phase;
+  };
+  static const std::array<Row, 2> rows
+      = {{{"engine_es_density_change", "density_residual", "density_target",
+           "kernel_induced_density_L2_atomic_units",
+           "solver_step_input_before_acceleration"},
+          {"engine_es_omega_change", "omega_residual", "omega_target",
+           "hartree", "solver_step_output"}}};
+  std::vector<madness::convergence::MetricOutcome> outcomes;
+  for (const auto& row : rows)
+    for (const auto& root : bundle.value("roots", json::array())) {
+      madness::convergence::MetricOutcome leg;
+      leg.measurement = row.measurement;
+      leg.subject = root.value("root_id", std::string());
+      leg.units = row.units;
+      leg.phase = row.phase;
+      if (root.value(row.limit, json()).is_number())
+        leg.limit = root.at(row.limit).get<double>();
+      if (root.value(row.value, json()).is_number()) {
+        leg.value = root.at(row.value).get<double>();
+        leg.availability = "measured";
+      }
+      outcomes.push_back(std::move(leg));
+    }
+  return outcomes;
 }
 
 // Every property the stage requested, keyed by its name, each with its values

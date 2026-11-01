@@ -145,11 +145,12 @@ public:
   /// Preferred ctor — caller supplies a problem and a policy.
   ESSolver(madness::World &world, ESProblem<Type, Shell> problem,
            ConvergencePolicy policy,
-           PrintLevel print_level = PrintLevel::Normal)
+           PrintLevel print_level = PrintLevel::Normal,
+           std::string phase = "excited-state solve")
       : world_(world), gs_(std::move(problem.gs)),
         n_roots_(problem.n_roots),
         policy_(policy), kain_(world, policy),
-        print_level_(print_level) {
+        print_level_(print_level), phase_(std::move(phase)) {
     refresh_convergence_targets();
     print_header();
   }
@@ -243,7 +244,7 @@ private:
     // "TDA, ClosedShell" for every instantiation, which misread Full solves).
     const char *type_name  = std::is_same_v<Type, TDA> ? "TDA" : "Full";
     const char *shell_name = std::is_same_v<Shell, ClosedShell> ? "ClosedShell" : "OpenShell";
-    print(std::string("ESSolver<") + type_name + ", " + shell_name + ">  num_roots =", n_roots_,
+    print(phase_ + ": ESSolver<" + type_name + ", " + shell_name + ">  num_roots =", n_roots_,
           " thresh =", madness::FunctionDefaults<3>::get_thresh(),
           " c_xc =", gs_.c_xc);
     print("  policy: dconv_user =", policy_.dconv_user,
@@ -345,15 +346,15 @@ public:
     print("");
     // iterate<> passes converged = (stop == converged), after checking
     // divergence itself; report diverged and stalled first all the same.
-    if (s.diverged)       print("Stopped at iter", s.iter,
+    if (s.diverged)       print(phase_ + ": stopped at iter", s.iter,
                                 "(diverged — residual exceeded "
                                 "explosion guard).");
-    else if (s.stalled)   print("Stopped at iter", s.iter,
+    else if (s.stalled)   print(phase_ + ": stopped at iter", s.iter,
                                 "(stalled — density/omega plateau above the "
                                 "targets for", policy_.stall_window,
                                 "iters; not converged).");
-    else if (converged)   print("Converged in", s.iter, "iters.");
-    else                  print("Stopped at iter", s.iter,
+    else if (converged)   print(phase_ + ": converged in", s.iter, "iters.");
+    else                  print(phase_ + ": stopped at iter", s.iter,
                                 "(max iters reached, not converged).");
     print("  omega_final =", s.omega);
     print("  omega_final(eV) =", s.omega * kHartreeToEV);
@@ -1370,6 +1371,8 @@ private:
   std::vector<int>           lock_pass_;
   ResponseSubspaceKain<Storage>   kain_;
   PrintLevel                 print_level_ = PrintLevel::Normal;
+  std::string                phase_; // the moment this solver serves,
+                                     // named on screen (D-104)
   std::string                log_path_;
   bool                       log_header_written_ = false;
   // Stage-1 bundle batching toggle (see set_batched). Closed-shell TDA only.

@@ -196,13 +196,14 @@ print_es_analysis(madness::World &world,
            a.omega * 27.2114);
     print("\n   --------------------------------------------");
 
-    print("\n   Transition Dipole Moments");
+    print("\n   Transition Dipole Moments (a.u., e a0)");
     printf("   X: %7.8f   Y: %7.8f   Z: %7.8f\n", a.dipole[0], a.dipole[1],
            a.dipole[2]);
 
     printf("\n   Dipole Oscillator Strength: %7.8f\n", a.oscillator);
 
-    print("\n   Transition Quadrupole Moments");
+    print("\n   Transition Quadrupole Moments (a.u., e a0^2; Cartesian r_a r_b, "
+          "not traceless)");
     printf("   %16s %16s %16s\n", "X", "Y", "Z");
     printf("   X %16.8f %16.8f %16.8f\n", a.quadrupole[0][0], a.quadrupole[0][1],
            a.quadrupole[0][2]);
@@ -326,8 +327,9 @@ es_analysis_to_json(const std::vector<ESRootAnalysis> &an, bool tda,
   j["n_roots"]       = static_cast<int>(an.size());
   j["protocol_key"]  = protocol_key();
   j["units"]         = {{"omega", "hartree"}, {"omega_ev", "eV"},
-                        {"transition_dipole", "a.u."},
-                        {"transition_quadrupole", "a.u."}};
+                        {"transition_dipole", "a.u. (e a0)"},
+                        {"transition_quadrupole",
+                         "a.u. (e a0^2); Cartesian r_a r_b, not traceless"}};
   j["roots"]         = roots;
   return j;
 }

@@ -88,7 +88,7 @@ component, which probes the X display. They are harmless;
 
 Energy is in hartree, dipole in `e*a0`, polarizability in `a0^3`, the
 hyperpolarizability in `e^3 a0^3 Eh^-2` and the polarizability gradient in
-`a0^2` per bohr of displacement, all atomic units; response
+the engine's units, `a.u. (e^2 bohr^2 / Eh per bohr)` of displacement; response
 frequency is in atomic angular-frequency units. Property records identify their
 state and, for response, the source ground state. A moldft state is identified
 by its immutable checkpoint generation. Response states also identify immutable checkpoint generations and their exact
@@ -453,7 +453,7 @@ change per root" (keyword `econv`, metric `omega_residual`), and a stage that
 wrote it in engine mode starts with the warning "econv 1.0e-06 is reported,
 not enforced: the engine check stops the bundle when each root's eigenvalue
 change is below 5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a
-written econv is judged by the stage verdict (D-092)". In criteria mode the
+written econv is judged by the stage verdict". In criteria mode the
 deck check requires a target for every loop that would otherwise have none:
 a stage that requests only `excited_states` needs `econv`; one that requests
 a driven-response property needs one of `dconv`, `accuracy.bsh_residual`,

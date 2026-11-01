@@ -464,13 +464,15 @@ run_oversampled_tda_warmup(madness::World &world, GroundState &gs,
 
   if (world.rank() == 0 && print_level >= PrintLevel::Normal) {
     if (guess_mode == ESGuessMode::VirtualAO)
-      print("\n=== TDA warmup ===  n_roots_warmup =", n_roots_warmup,
+      print("\n=== TDA warmup (warmup steps, not counted in the stage's "
+            "iterations) ===  n_roots_warmup =", n_roots_warmup,
             "  n_roots_final =", n_roots_final,
             "  warmup_iters =", warmup_iters,
             "  guess =", to_string(guess_mode),
             "  basis =", virtual_ao_basis);
     else
-      print("\n=== TDA warmup ===  n_roots_warmup =", n_roots_warmup,
+      print("\n=== TDA warmup (warmup steps, not counted in the stage's "
+            "iterations) ===  n_roots_warmup =", n_roots_warmup,
             "  n_roots_final =", n_roots_final,
             "  warmup_iters =", warmup_iters,
             "  guess =", to_string(guess_mode));
@@ -481,7 +483,8 @@ run_oversampled_tda_warmup(madness::World &world, GroundState &gs,
   auto problem = build_es_problem_tda<Shell>(world, gs, n_roots_warmup,
                                               c_xc, lo);
   ESSolver<TDA, Shell> warmup_solver(world, std::move(problem),
-                                      warmup_policy, print_level);
+                                      warmup_policy, print_level,
+                                      "TDA warmup");
 
   typename ESSolver<TDA, Shell>::State state;
   if constexpr (std::is_same_v<Shell, ClosedShell>)

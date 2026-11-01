@@ -102,16 +102,19 @@ assert all('omega_residual_within_requested' not in r for r in es_without['roots
 
 # D-092: the same deck in criteria mode. The bundle's solve stops on the
 # engine check in both modes, so it ends at the same iteration with the same
-# omega; the written econv is the stage verdict's. Until A's D-082 commit the
-# bundle's verdict entry is unavailable on the dconv criterion and enforced in
-# this mode, so the stage may end unconverged (exit 1): the exit code is not
-# asserted yet (after that commit: exit 0 and the entry satisfied).
+# omega; the written econv is the stage verdict's, judged on the bundle's
+# recorded eigenvalue change (D-082): the stage converges and the pointer's
+# entry under requested_accuracy is satisfied.
 criteria_deck = with_econv.replace(' econv 1e-6\n', ' econv 1e-6\n convergence.use_default_criteria false\n')
 assert criteria_deck != with_econv
 crit = work / 'CriteriaEconv'
-run('criteria-econv', crit, criteria_deck, expect=None)
+run('criteria-econv', crit, criteria_deck)
 stage_crit = excited(crit)
 assert stage_crit['convergence_report']['decided_by'] == 'requested_criteria', stage_crit['convergence_report']['decided_by']
+assert stage_crit['status'] == 'completed', (stage_crit['status'], stage_crit['convergence_report'])
+pointer_crit = stage_crit['properties']['excited_states']['requested_omega_target']['verdict_in']
+entry_crit = stage_crit['convergence_report']['requested_accuracy'][pointer_crit['state_key']]
+assert entry_crit['status'] == 'satisfied', entry_crit
 es_crit = stage_crit['properties']['excited_states']
 assert es_crit['iterations_at_rung'] == es_with['iterations_at_rung'], (es_crit['iterations_at_rung'], es_with['iterations_at_rung'])
 assert es_crit['stop_reason'] == 'converged' and es_crit['decided_by'] == 'engine_check', (es_crit['stop_reason'], es_crit['decided_by'])

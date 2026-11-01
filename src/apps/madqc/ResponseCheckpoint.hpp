@@ -226,6 +226,12 @@ response_saved_outcomes(const json& metadata,
       }
     }
   }
+  // D-095: the excited-state bundle's checks, per root (B's rows).
+  if (metadata.contains("excited_states")
+      && metadata.at("excited_states").contains(final_protocol))
+    for (auto& leg :
+         bundle_root_outcomes(metadata.at("excited_states").at(final_protocol)))
+      outcomes.push_back(std::move(leg));
   return outcomes;
 }
 

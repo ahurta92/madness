@@ -705,6 +705,8 @@ int main(int argc, char** argv) {
               && raman.at("values")[0].at("atom") == 1
               && raman.at("values")[0].at("axis") == "z"
               && raman.at("values")[0].at("components").at("zz") == 0.7
+              && raman.at("values")[0].at("units")
+                     == "a.u. (e^2 bohr^2 / Eh per bohr)"
               && raman.at("coordinates") == "written"
               && raman.at("normal_mode_analysis") == false
               && raman.contains("normal_mode_analysis_unavailable"),
@@ -832,6 +834,7 @@ int main(int argc, char** argv) {
     json transition
         = {{"analysis", "tda"},
            {"protocol_key", pkey},
+           {"units", {{"transition_dipole", "a.u. (e a0)"}}},
            {"roots", json::array({{{"slot", 1},
                                    {"root_id", "es_root_0000"},
                                    {"oscillator_strength", 0.3}},
@@ -847,8 +850,11 @@ int main(int argc, char** argv) {
               && es.at("stop_reason") == "converged"
               && es.at("iterations_at_rung") == 7
               && es.at("decided_by") == "engine_check"
-              && es.at("converged") == true && es.at("roots").size() == 2,
-          "a converged bundle: the request, the exit, converged");
+              && es.at("converged") == true && es.at("roots").size() == 2
+              && es.at("transition_units").at("transition_dipole")
+                     == "a.u. (e a0)",
+          "a converged bundle: the request, the exit, converged, the "
+          "engine's transition units once (D-104)");
     const auto& first = es.at("roots")[0];
     check(first.at("root_id") == "es_root_0001" && first.at("slot") == 0
               && first.at("omega") == 0.42 && first.at("locked") == true
@@ -941,7 +947,7 @@ int main(int argc, char** argv) {
     metadata["excited_states"][pkey]["converged"] = false;
     metadata["excited_states"][pkey]["stop_reason"] = "iteration_limit";
     es = named_stages::selected_excited_states(stage, metadata, json());
-    check(es.at("converged") == false
+    check(es.at("converged") == false && !es.contains("transition_units")
               && es.at("stop_reason") == "iteration_limit"
               && es.at("roots")[0]
                          .at("transition_unavailable")
@@ -990,7 +996,7 @@ int main(int argc, char** argv) {
     const std::string instead
         = "stops the bundle when each root's eigenvalue change is below "
           "5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a "
-          "written econv is judged by the stage verdict (D-092)";
+          "written econv is judged by the stage verdict";
     const auto unset
         = named_stages::excited_state_omega_target_row(stage, 5e-4);
     check(unset.group == cv::Group::requested_criteria
@@ -1001,7 +1007,8 @@ int main(int argc, char** argv) {
               && unset.set_by == cv::SetBy::not_set
               && unset.relation == cv::Relation::less_than_or_equal
               && !unset.effective_limit && unset.limit_formula.empty()
-              && unset.note.find("not a target (D8)") != std::string::npos
+              && unset.note.find("the engine's default is never a target")
+                     != std::string::npos
               && unset.engine_check_instead == instead,
           "econv row: unset, the engine's gate named as what is enforced "
           "instead");
@@ -1082,6 +1089,90 @@ int main(int argc, char** argv) {
           "no engine rows: no judged row");
   } catch (const std::exception& e) {
     check(false, std::string("econv row: ") + e.what());
+  }
+
+  // D-095: the bundle's engine checks as per-root outcomes under the two
+  // engine rows, so the outcome table shows the evidence it judged on.
+  try {
+    namespace cv = madness::convergence;
+    using cv::Group;
+    using cv::Relation;
+    const json bundle = {
+        {"roots",
+         json::array({{{"root_id", "es_root_0000"},
+                       {"density_residual", 2e-4},
+                       {"omega_residual", 3e-7},
+                       {"density_target", 5e-4},
+                       {"omega_target", 5e-4}},
+                      {{"root_id", "es_root_0001"},
+                       {"density_residual", 6e-4},
+                       {"omega_residual", nullptr},
+                       {"omega_residual_unavailable", "no eigenvalue step yet"},
+                       {"density_target", nullptr},
+                       {"omega_target", nullptr},
+                       {"targets_unavailable", "no convergence check yet"}}})}};
+    const auto legs = named_stages::bundle_root_outcomes(bundle);
+    check(legs.size() == 4 && legs[0].measurement == "engine_es_density_change"
+              && legs[0].subject == "es_root_0000" && legs[0].value == 2e-4
+              && legs[0].limit == 5e-4
+              && legs[0].units == "kernel_induced_density_L2_atomic_units"
+              && legs[0].phase == "solver_step_input_before_acceleration"
+              && legs[0].availability == "measured"
+              && legs[1].subject == "es_root_0001" && legs[1].value == 6e-4
+              && !legs[1].limit
+              && legs[2].measurement == "engine_es_omega_change"
+              && legs[2].subject == "es_root_0000" && legs[2].value == 3e-7
+              && legs[2].limit == 5e-4 && legs[2].units == "hartree"
+              && legs[2].phase == "solver_step_output"
+              && legs[3].subject == "es_root_0001" && !legs[3].value
+              && !legs[3].limit && legs[3].availability == "unavailable",
+          "per-root outcomes: two rows times two roots, each root's own "
+          "value and recorded target, the engine's phases and units");
+    check(named_stages::bundle_root_outcomes(json::object()).empty(),
+          "no roots: no per-root outcomes");
+    // The shared record and verdict over those legs: the two engine rows as
+    // the response settings table writes them (ResponseCheckpoint.hpp).
+    cv::ConvergenceSettings settings;
+    settings.decider = cv::Decider::engine_check;
+    settings.metrics.push_back({Group::engine_check, "density change per root",
+                                "dconv", "engine_es_density_change", "",
+                                "kernel_induced_density_L2_atomic_units", 1e-4,
+                                cv::SetBy::user, Relation::less_than, 5e-4,
+                                "5 x max(dconv, thresh)",
+                                "per root; verdicts in the bundle record", ""});
+    settings.metrics.push_back(
+        {Group::engine_check, "excitation energy change per root", "dconv",
+         "engine_es_omega_change", "", "hartree", 1e-4, cv::SetBy::user,
+         Relation::less_than, 5e-4, "5 x max(dconv, thresh)",
+         "per root; verdicts in the bundle record", ""});
+    const auto record = cv::outcome_record(settings, legs);
+    const auto& density = record.at("metrics")[0];
+    const auto& omega = record.at("metrics")[1];
+    check(density.at("legs").size() == 2
+              && density.at("legs")[0].at("subject") == "es_root_0000"
+              && density.at("legs")[0].at("value") == 2e-4
+              && density.at("legs")[0].at("limit") == 5e-4
+              && density.at("legs")[0].at("verdict") == "met"
+              && density.at("legs")[1].at("subject") == "es_root_0001"
+              && density.at("legs")[1].at("value") == 6e-4
+              && density.at("legs")[1].at("limit").is_null()
+              && density.at("legs")[1].at("verdict") == "unmet"
+              && density.at("value") == 6e-4 && density.at("verdict") == "unmet"
+              && density.at("phase") == "solver_step_input_before_acceleration",
+          "the record's density row: one leg per root, the second root "
+          "judged on the row's limit and unmet, the row unmet");
+    check(omega.at("legs").size() == 2
+              && omega.at("legs")[0].at("verdict") == "met"
+              && omega.at("legs")[1].at("value").is_null()
+              && omega.at("legs")[1].at("availability") == "unavailable"
+              && omega.at("legs")[1].at("verdict") == "unavailable"
+              && omega.at("value") == 3e-7
+              && omega.at("availability") == "unavailable"
+              && omega.at("verdict") != "met",
+          "the record's omega row: a root without an eigenvalue step is "
+          "unavailable, so the row is not met");
+  } catch (const std::exception& e) {
+    check(false, std::string("per-root outcomes: ") + e.what());
   }
 
   world.gop.sum(failures);
