@@ -1090,6 +1090,90 @@ int main(int argc, char** argv) {
     check(false, std::string("econv row: ") + e.what());
   }
 
+  // D-095: the bundle's engine checks as per-root outcomes under the two
+  // engine rows, so the outcome table shows the evidence it judged on.
+  try {
+    namespace cv = madness::convergence;
+    using cv::Group;
+    using cv::Relation;
+    const json bundle = {
+        {"roots",
+         json::array({{{"root_id", "es_root_0000"},
+                       {"density_residual", 2e-4},
+                       {"omega_residual", 3e-7},
+                       {"density_target", 5e-4},
+                       {"omega_target", 5e-4}},
+                      {{"root_id", "es_root_0001"},
+                       {"density_residual", 6e-4},
+                       {"omega_residual", nullptr},
+                       {"omega_residual_unavailable", "no eigenvalue step yet"},
+                       {"density_target", nullptr},
+                       {"omega_target", nullptr},
+                       {"targets_unavailable", "no convergence check yet"}}})}};
+    const auto legs = named_stages::bundle_root_outcomes(bundle);
+    check(legs.size() == 4 && legs[0].measurement == "engine_es_density_change"
+              && legs[0].subject == "es_root_0000" && legs[0].value == 2e-4
+              && legs[0].limit == 5e-4
+              && legs[0].units == "kernel_induced_density_L2_atomic_units"
+              && legs[0].phase == "solver_step_input_before_acceleration"
+              && legs[0].availability == "measured"
+              && legs[1].subject == "es_root_0001" && legs[1].value == 6e-4
+              && !legs[1].limit
+              && legs[2].measurement == "engine_es_omega_change"
+              && legs[2].subject == "es_root_0000" && legs[2].value == 3e-7
+              && legs[2].limit == 5e-4 && legs[2].units == "hartree"
+              && legs[2].phase == "solver_step_output"
+              && legs[3].subject == "es_root_0001" && !legs[3].value
+              && !legs[3].limit && legs[3].availability == "unavailable",
+          "per-root outcomes: two rows times two roots, each root's own "
+          "value and recorded target, the engine's phases and units");
+    check(named_stages::bundle_root_outcomes(json::object()).empty(),
+          "no roots: no per-root outcomes");
+    // The shared record and verdict over those legs: the two engine rows as
+    // the response settings table writes them (ResponseCheckpoint.hpp).
+    cv::ConvergenceSettings settings;
+    settings.decider = cv::Decider::engine_check;
+    settings.metrics.push_back({Group::engine_check, "density change per root",
+                                "dconv", "engine_es_density_change", "",
+                                "kernel_induced_density_L2_atomic_units", 1e-4,
+                                cv::SetBy::user, Relation::less_than, 5e-4,
+                                "5 x max(dconv, thresh)",
+                                "per root; verdicts in the bundle record", ""});
+    settings.metrics.push_back(
+        {Group::engine_check, "excitation energy change per root", "dconv",
+         "engine_es_omega_change", "", "hartree", 1e-4, cv::SetBy::user,
+         Relation::less_than, 5e-4, "5 x max(dconv, thresh)",
+         "per root; verdicts in the bundle record", ""});
+    const auto record = cv::outcome_record(settings, legs);
+    const auto& density = record.at("metrics")[0];
+    const auto& omega = record.at("metrics")[1];
+    check(density.at("legs").size() == 2
+              && density.at("legs")[0].at("subject") == "es_root_0000"
+              && density.at("legs")[0].at("value") == 2e-4
+              && density.at("legs")[0].at("limit") == 5e-4
+              && density.at("legs")[0].at("verdict") == "met"
+              && density.at("legs")[1].at("subject") == "es_root_0001"
+              && density.at("legs")[1].at("value") == 6e-4
+              && density.at("legs")[1].at("limit").is_null()
+              && density.at("legs")[1].at("verdict") == "unmet"
+              && density.at("value") == 6e-4 && density.at("verdict") == "unmet"
+              && density.at("phase") == "solver_step_input_before_acceleration",
+          "the record's density row: one leg per root, the second root "
+          "judged on the row's limit and unmet, the row unmet");
+    check(omega.at("legs").size() == 2
+              && omega.at("legs")[0].at("verdict") == "met"
+              && omega.at("legs")[1].at("value").is_null()
+              && omega.at("legs")[1].at("availability") == "unavailable"
+              && omega.at("legs")[1].at("verdict") == "unavailable"
+              && omega.at("value") == 3e-7
+              && omega.at("availability") == "unavailable"
+              && omega.at("verdict") != "met",
+          "the record's omega row: a root without an eigenvalue step is "
+          "unavailable, so the row is not met");
+  } catch (const std::exception& e) {
+    check(false, std::string("per-root outcomes: ") + e.what());
+  }
+
   world.gop.sum(failures);
   if (world.rank() == 0)
     std::cout << "response-property failures: " << failures << '\n';

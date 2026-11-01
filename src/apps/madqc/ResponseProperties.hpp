@@ -4,6 +4,8 @@
 #include <madness/chem/ConvergenceSettings.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
+
 // Select what a molresponse stage requested out of the engine's property rows.
 // The response calculation has already run; nothing here computes a number.
 // One function per property (D-017): the engine writes one row per tensor
@@ -556,6 +558,49 @@ bundle_saved_measurements(const json& engine_measurements) {
   row["units"] = "hartree";
   saved["omega_residual"] = std::move(row);
   return saved;
+}
+
+// D-095: the bundle's engine checks as per-root outcomes under the two
+// engine rows (ResponseCheckpoint.hpp: "density change per root",
+// "excitation energy change per root"), each root judged on its own
+// recorded target, so the table and the record show the evidence the engine
+// judged on (ConvergenceSettings.h: leg_outcomes, row_verdict). The phases
+// are the engine's, as bundle_measurements names them: the density change
+// between a step's input densities, the eigenvalue change across the step.
+// A root without a value (no eigenvalue step yet) is unavailable; the
+// subject is the root id, the record's key.
+[[nodiscard]] inline std::vector<madness::convergence::MetricOutcome>
+bundle_root_outcomes(const json& bundle) {
+  struct Row {
+    const char* measurement;
+    const char* value;
+    const char* limit;
+    const char* units;
+    const char* phase;
+  };
+  static const std::array<Row, 2> rows
+      = {{{"engine_es_density_change", "density_residual", "density_target",
+           "kernel_induced_density_L2_atomic_units",
+           "solver_step_input_before_acceleration"},
+          {"engine_es_omega_change", "omega_residual", "omega_target",
+           "hartree", "solver_step_output"}}};
+  std::vector<madness::convergence::MetricOutcome> outcomes;
+  for (const auto& row : rows)
+    for (const auto& root : bundle.value("roots", json::array())) {
+      madness::convergence::MetricOutcome leg;
+      leg.measurement = row.measurement;
+      leg.subject = root.value("root_id", std::string());
+      leg.units = row.units;
+      leg.phase = row.phase;
+      if (root.value(row.limit, json()).is_number())
+        leg.limit = root.at(row.limit).get<double>();
+      if (root.value(row.value, json()).is_number()) {
+        leg.value = root.at(row.value).get<double>();
+        leg.availability = "measured";
+      }
+      outcomes.push_back(std::move(leg));
+    }
+  return outcomes;
 }
 
 // Every property the stage requested, keyed by its name, each with its values
