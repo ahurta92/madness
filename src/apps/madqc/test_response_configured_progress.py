@@ -2,11 +2,15 @@
 """FD configured stall decisions use only supplied rungs and explicit targets."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -56,7 +60,7 @@ def entries(manifest):
 
 root = work / 'Stalled'
 run('stalled', root, deck)
-result = json.loads((root / 'results.json').read_text())['stages'][-1]
+result = named_records.stages(root)[-1]
 assert result['status'] == 'unconverged' and result['iterations_this_run'] == 6
 _, _, _, manifest = latest(root)
 assert manifest['archives'] and not manifest['properties']
@@ -98,7 +102,7 @@ for corruption in ('decision', 'fractional-window', 'missing-rung', 'inserted-ru
 continued = work / 'Continued'
 shutil.copytree(root, continued)
 run('continued', continued, deck, resume=True)
-result = json.loads((continued / 'results.json').read_text())['stages'][-1]
+result = named_records.stages(continued)[-1]
 assert result['status'] == 'unconverged' and result['iterations_this_run'] == 0
 states = result['continuation']['states']
 assert [s['action'] for s in states] == ['loaded'] and states[0]['unmet']
@@ -109,7 +113,7 @@ assert not manifest['properties']
 forced = work / 'Forced'
 forced_deck = deck.replace('molresponse optical\n', 'molresponse optical\n  diagnostic.iterations_per_rung 5\n')
 run('forced', forced, forced_deck)
-result = json.loads((forced / 'results.json').read_text())['stages'][-1]
+result = named_records.stages(forced)[-1]
 assert result['status'] == 'unconverged' and result['iterations_this_run'] == 10
 _, _, _, manifest = latest(forced)
 assert not manifest['properties']

@@ -78,9 +78,10 @@ struct StageStopped : std::runtime_error {
       return key + " has no saved state";
     if (state.at("diverged").get<bool>())
       return key + " diverged";
-    if (!state.at("at_rung").get<bool>() && !state.value("beyond_rung", false))
+    if (!state.at("at_protocol_step").get<bool>()
+        && !state.value("beyond_protocol_step", false))
       return key + " stopped before the final protocol step";
-    const auto stop = state.at("stop").get<std::string>();
+    const auto stop = state.at("stop_reason").get<std::string>();
     if (stop == "converged")
       return key + " stopped converged but did not meet its written targets";
     if (stop == "iteration_limit")
@@ -143,7 +144,7 @@ read_input(madness::World& world, const fs::path& root,
       input.saved.metrics, input.saved.generation, input.accepted);
   json evidence = {{"stage", input.label},
                    {"state_id", input.saved.generation},
-                   {"engine_converged", input.accepted},
+                   {"converged", input.accepted},
                    {"energy_change", report["measurements"]["energy_change"]}};
   if (report.contains("saved_state_validation"))
     evidence["saved_state_validation"] = report["saved_state_validation"];
@@ -359,9 +360,9 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
         measured.insert(name);
       }
     const madness::scf_continuation::Rung rung{
-        needed.at("rung").at("thresh").get<double>(),
-        needed.at("rung").at("k").get<int>()};
-    json state = {{"key", key}, {"rung", needed.at("rung")}};
+        needed.at("protocol_step").at("thresh").get<double>(),
+        needed.at("protocol_step").at("k").get<int>()};
+    json state = {{"key", key}, {"protocol_step", needed.at("protocol_step")}};
     const auto record
         = std::find_if(records.begin(), records.end(),
                        [&](const json& r) { return r.at("key") == key; });
@@ -370,28 +371,29 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
       state["found"] = false;
     } else {
       const madness::scf_continuation::Rung at{
-          record->at("rung").at("thresh").get<double>(),
-          record->at("rung").at("k").get<int>()};
+          record->at("protocol_step").at("thresh").get<double>(),
+          record->at("protocol_step").at("k").get<int>()};
       const auto accuracy = madness::evaluate_explicit_criteria(
           spec.saved_measurements(stage, natom, *record), judged);
       const bool loaded = record->at("decided_by") == "planner";
-      const bool stopped = record->at("stop") == "converged";
+      const bool stopped = record->at("stop_reason") == "converged";
       const bool targets_met = !enforced || accuracy.at("status") == "satisfied"
                                || accuracy.at("status") == "not_requested";
       state["found"] = true;
-      state["at_rung"] = madness::scf_continuation::same_rung(at, rung);
+      state["at_protocol_step"]
+          = madness::scf_continuation::same_rung(at, rung);
       // D-085, R3: a finished state finer than the final rung counts, as the
       // planner loads it (LadderPlanner's at_or_beyond_final); the record
       // keeps its true rung.
-      state["beyond_rung"]
-          = !state.at("at_rung").get<bool>() && at.thresh < rung.thresh;
-      state["stop"] = record->at("stop");
+      state["beyond_protocol_step"] = !state.at("at_protocol_step").get<bool>()
+                                      && at.thresh < rung.thresh;
+      state["stop_reason"] = record->at("stop_reason");
       state["diverged"] = record->at("diverged");
       state["decided_by"] = record->at("decided_by");
       state["requested_accuracy"] = accuracy;
       state["enforced"] = enforced;
-      met = (state.at("at_rung").get<bool>()
-             || state.at("beyond_rung").get<bool>())
+      met = (state.at("at_protocol_step").get<bool>()
+             || state.at("beyond_protocol_step").get<bool>())
             && !record->at("diverged").get<bool>()
             && (loaded || (stopped && targets_met));
     }
@@ -659,11 +661,11 @@ inline const AppSpec& response_spec();
 [[nodiscard]] inline std::vector<std::string>
 continuation_plan_lines(const std::string& stage, const json& continuation) {
   const auto line = [&](const std::string& state, const json& plan) {
-    if (!plan.contains("rung"))
+    if (!plan.contains("protocol_step"))
       return "stage " + stage + " plan: " + state + " - "
              + plan.at("summary").get<std::string>() + ": "
              + plan.at("why").get<std::string>();
-    const auto& rung = plan.at("rung");
+    const auto& rung = plan.at("protocol_step");
     return "stage " + stage + " plan: " + state + " - "
            + plan.at("action").get<std::string>() + " at rung "
            + std::to_string(rung.at("index").get<int>()) + " (thresh "
@@ -677,9 +679,9 @@ continuation_plan_lines(const std::string& stage, const json& continuation) {
     for (const auto& state : continuation.at("states"))
       lines.push_back(line(state.at("state").get<std::string>(), state));
   else
-    lines.push_back(
-        line(continuation.contains("rung") ? "ground state" : "the stage",
-             continuation));
+    lines.push_back(line(continuation.contains("protocol_step") ? "ground state"
+                                                                : "the stage",
+                         continuation));
   return lines;
 }
 
@@ -719,7 +721,6 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
     std::cout << '\n'
               << madness::convergence::render_settings_table(settings) << '\n'
               << std::flush;
-  result["convergence_settings"] = madness::convergence::to_json(settings);
   // 3-4. Read the latest generation, validate it (A2), plan its states from
   // their records (B6), load what the plans use.
   steps.prepare();
@@ -781,8 +782,25 @@ inline StageOutcome run_ladder_stage(const StageContext& ctx,
   result["convergence_report"]["unmeasured_targets"]
       = verdict.at("unmeasured_targets");
   const auto outcomes = steps.outcomes();
-  result["convergence_report"]["convergence_outcome"]
-      = madness::convergence::outcome_record(settings, outcomes);
+  // D-105 (D-098): the scientific report is the published generation's
+  // (metrics.convergence_report); the stage record names where it is and
+  // keeps only this run's judgement: who decided, each needed state's
+  // written targets judged, and the targets no state measured. A generation
+  // written before its application published the report (a response
+  // generation before D-098) holds none: the record keeps the report it
+  // assembled, still the one copy.
+  if (saved.metrics.contains("convergence_report")) {
+    const auto& report = result.at("convergence_report");
+    result["convergence_report"]
+        = {{"published_in",
+            {{"generation", saved.generation},
+             {"manifest", "checkpoints/" + saved.generation + "/manifest.json"},
+             {"pointer", "/metrics/convergence_report"}}},
+           {"decided_by", madness::convergence::to_string(settings.decider)},
+           {"requested_accuracy",
+            report.value("requested_accuracy", json::object())},
+           {"unmeasured_targets", report.at("unmeasured_targets")}};
+  }
   if (world.rank() == 0)
     std::cout << madness::convergence::render_outcome_table(
         settings, outcomes, steps.outcome_label(converged))
@@ -921,11 +939,9 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     result["convergence_report"]["requested_accuracy"]
         = requested_criteria_report(states.at(0).at("requested_accuracy"),
                                     *settings);
-    // D-105 (D-098 step 2 trimmed): the generation's report is in its
-    // manifest and in convergence_report above; the stage record does not
-    // copy it a second and third time.
+    // D-105: the generation's report is in its manifest (the skeleton
+    // records where); checkpoint_metrics keeps the other metrics.
     result["checkpoint_metrics"].erase("convergence_report");
-    result.erase("convergence_settings");
   };
   steps.outcomes = [&] { return saved_outcomes(saved_measurements()); };
   steps.outcome_label = [&](bool) { return checkpoint->latest().stop_reason; };
@@ -1037,6 +1053,7 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
                                     response_spec(), stage, natom, names,
                                     warnings, std::move(write));
         });
+    checkpoint->set_reference_evidence(reference_evidence(reference));
   };
   steps.plan_context = [&](const madness::checkpoint::Manifest& m) {
     if (!checkpoint->accept(m))
@@ -1105,6 +1122,8 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
     result["reference_changed"] = checkpoint->reference_changed;
   };
   steps.report = [&](json& result, bool, const json& states) {
+    // The assembled report: kept in the record only when the published
+    // generation holds none (D-105); otherwise the skeleton points at it.
     result["convergence_report"] = response_convergence_report(
         checkpoint->metadata(), checkpoint->latest().generation,
         reference_evidence(reference));
@@ -1366,7 +1385,11 @@ inline bool run_if_named(madness::World& world,
     auto& result = outcome.result;
     result["status"] = outcome.converged ? "completed" : "unconverged";
     write_result(world, stage_directory / "results.json", result);
-    index["stages"].push_back(result);
+    // D-105: the root lists each stage and where its record is.
+    index["stages"].push_back({{"stage", stage.name},
+                               {"status", result.at("status")},
+                               {"work", result.value("work", json())},
+                               {"path", stage.name + "/results.json"}});
     write_result(world, root / "results.json", index);
     if (!application.release(outcome))
       throw StageStopped("stage " + stage.name + " stopped unconverged: "

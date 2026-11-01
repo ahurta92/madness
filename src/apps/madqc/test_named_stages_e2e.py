@@ -2,11 +2,15 @@
 """Fresh named-stage/legacy numerical parity and output/identity isolation."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import time
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -52,7 +56,7 @@ end
 '''
 named = run('named', named_deck + second, ['--prefix=CaseRun'])
 assert sorted(p.name for p in named.iterdir()) == ['CaseRun', 'deck.in', 'run.log'], 'stage output escaped its root'
-results = json.loads((named / 'CaseRun/results.json').read_text())
+results = {'stages': named_records.stages(named / 'CaseRun')}
 gs, response, second_response = results['stages']
 assert [s['stage'] for s in results['stages']] == ['gs', 'optical', 'static_check']
 assert all(s['status'] == 'completed' for s in results['stages'])
@@ -110,7 +114,7 @@ with (named / 'repeat.log').open('w') as log:
                             env=env, stdout=log, stderr=subprocess.STDOUT, timeout=60)
 assert repeat.returncode != 0
 assert 'new output directory' in (named / 'repeat.log').read_text()
-assert json.loads((named / 'CaseRun/results.json').read_text()) == results
+assert {'stages': named_records.stages(named / 'CaseRun')} == results
 bad = run('duplicate', named_deck + second.replace('static_check', 'gs'), ['--prefix=bad'], False)
 assert 'duplicate name' in (bad / 'run.log').read_text()
 assert not (bad / 'bad').exists(), 'invalid deck began a calculation'
@@ -121,7 +125,7 @@ shifted_deck = shifted_deck.replace('H 0 0 -0.7', 'H 0 0 9.3').replace('H 0 0 0.
 shifted_deck = shifted_deck.replace('[1e-4, 1e-6]', '[1e-4]').replace('dconv 1e-5', 'dconv 1e-3')
 shifted_deck = shifted_deck.replace('dconv 1e-4', 'dconv 1e-3').replace('[0.0, 0.02]', '[0.0]')
 shifted = run('shifted', shifted_deck, ['--prefix=Shifted'])
-shifted_results = json.loads((shifted / 'Shifted/results.json').read_text())['stages']
+shifted_results = named_records.stages(shifted / 'Shifted')
 assert abs(shifted_results[0]['representation']['L'] - 50.7) < 1e-8
 assert shifted_results[1]['reference_representation']['L'] == shifted_results[0]['representation']['L']
 protocol_lines = [line for line in (shifted / 'run.log').read_text().splitlines() if line.startswith('PROTOCOL_SET')]

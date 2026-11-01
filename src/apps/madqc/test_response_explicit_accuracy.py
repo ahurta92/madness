@@ -2,11 +2,15 @@
 """Named FD criteria must certify saved outputs before property eligibility."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -52,7 +56,7 @@ def run(label, root, text, resume=False, success=True):
                               stdout=output, stderr=subprocess.STDOUT, timeout=600)
     assert (proc.returncode == 0) == success, log.read_text()[-5000:]
     print(label, 'exit', proc.returncode, flush=True)
-    return json.loads((root / 'results.json').read_text())['stages']
+    return named_records.stages(root)
 
 def latest(root):
     store = root / 'optical/checkpoints'

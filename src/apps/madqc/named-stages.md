@@ -137,13 +137,13 @@ before the convergence report) cannot be re-judged and is resumed.
 `maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
 number of iterations a rung may take in this run; a `--continue` run starts
 the count again, so a resumed rung gets `maxiter` more iterations. Each
-generation records the rung (`position.rung`): its index, `thresh`, `k`, the
+generation records the rung (`position.protocol_step`): its index, `thresh`, `k`, the
 iterations in this run (`iterations_this_run`), the total across runs
-(`iterations_at_rung`, recorded, never compared with `maxiter`), and how it
+(`iterations_at_protocol_step`, recorded, never compared with `maxiter`), and how it
 ended (`converged`, `stalled`, `iteration_limit`, or `in_progress`). The
 stage's `results.json` `continuation` block says what happened and why:
-`action` (`loaded`, `resumed`, `fresh`), the start `rung`,
-`iterations_done_at_rung`, `why`, `unmet` (e.g. a stalled final rung),
+`action` (`loaded`, `resumed`, `fresh`), the start `protocol_step`,
+`iterations_done_at_protocol_step`, `why`, `unmet` (e.g. a stalled final rung),
 `unmet_not_enforceable` (engine mode) and a `summary`, e.g. "resumed at rung 2
 (thresh 1e-06, k 8), iteration 3 of that rung".
 
@@ -254,7 +254,7 @@ key equals a requested rung's but whose threshold differs (keys round it, e.g.
 every requested rung (the analysis reads only states at or coarser than the
 final rung). The stage's `results.json` `continuation` block has one record
 per state: `state`, `perturbation`, `frequency`, `action` (`loaded`,
-`resumed`, `seeded`, `fresh`), the start `rung`, `iterations_done_at_rung`,
+`resumed`, `seeded`, `fresh`), the start `protocol_step`, `iterations_done_at_protocol_step`,
 `why`, `unmet`, `unmet_not_enforceable` and a `summary` (a seeded state also
 `seed_from` and `seed_frequency`); the generation records the
 same list as `numerical.plans`. The stage's `work` is `analyzed` when only the
@@ -386,13 +386,13 @@ with its own verdict (a stalled root is never relabelled converged), and
 the bundle is the unit the checkpoint saves and the planner judges on
 `--continue` (on the worst root). `properties.excited_states` is one record:
 `method`, `roots_requested`, `guess` and `guess_basis` (as the engine used
-them, `guess_written` says whether the deck wrote them), `protocol_key` of
-the final rung, `stop_reason`, `iterations_at_rung`, `decided_by` (the
+them, `guess_written` says whether the deck wrote them), `protocol_step_key` of
+the final rung, `stop_reason`, `iterations_at_protocol_step`, `decided_by` (the
 engine's check, or the planner for a met load), `converged` (the bundle
 ended through `converged` and every root is converged and not stalled), and
 `roots[]`: per root the engine's stable `root_id` (the `slot` and
 `display_name` can change between rungs and are kept beside it), `omega`
-(`omega_units au`), `converged`, `locked`, `stalled`, `omega_residual`,
+(`omega_units au`), `converged`, `locked`, `stalled`, `excitation_energy_change`,
 `density_residual`, `bsh_residual`, the targets, the `unavailable` reasons
 the engine writes, and the transition analysis (`transition`: oscillator
 strength, transition dipole and quadrupole) or `transition_unavailable` with
@@ -449,7 +449,7 @@ watch. With `convergence.use_default_criteria true` (the default) the written
 `econv` is reported; with `false` it is enforced as the stage verdict (an
 unmet `econv` leaves the stage unconverged), by the shared judge, not by the
 loop. The settings table shows it as the requested row "excitation energy
-change per root" (keyword `econv`, metric `omega_residual`), and a stage that
+change per root" (keyword `econv`, metric `excitation_energy_change`), and a stage that
 wrote it in engine mode starts with the warning "econv 1.0e-06 is reported,
 not enforced: the engine check stops the bundle when each root's eigenvalue
 change is below 5.0e-04 (5 x max(dconv, thresh)), strictly, in both modes; a
@@ -459,7 +459,7 @@ a stage that requests only `excited_states` needs `econv`; one that requests
 a driven-response property needs one of `dconv`, `accuracy.bsh_residual`,
 `accuracy.kinetic_trace_change` for its legs' loop, and may add `econv`. The
 bundle's state record carries the worst root's
-`omega_residual` (the engine row the shared verdict reads, with its units,
+`excitation_energy_change` (the engine row the shared verdict reads, with its units,
 as the saved measurement it judges the target on) (one judge, B1: `requested_accuracy` under the stage's
 convergence report holds the status and, in engine mode, the "unmet, not
 enforceable in engine mode" outcome). The record, `properties.excited_states`,
@@ -468,7 +468,7 @@ the `target` (null when the deck wrote none), `set_by`, `units`, `relation`,
 the `worst` root (`value` and `root_id`; null when a root has no eigenvalue
 step yet) and `verdict_in`, the bundle's state key under
 `convergence_report.requested_accuracy` where the status lives; with a
-written target each root carries `omega_residual_within_requested`. The
+written target each root carries `excitation_energy_change_within_requested`. The
 record holds no status of its own. On `--continue` a saved bundle that
 passes the engine check but not `econv` is loaded and reported unmet (B8).
 On a `molresponse` stage without `excited_states`, `econv` is rejected: a
@@ -534,6 +534,100 @@ linear-response output directory (S5, DESIGN B3):
 - The engine spellings `dalton.dir`, `io.dalton.dir` and `seed.es_warmup` are refused
   in a named stage. The ground state's seed from `molden.inp` is not available on the
   named path yet.
+
+## Record names
+
+The records name what they hold (D-106). Generations are written in
+`madqc.state.v2`; a generation written before, in `madqc.state.v1` or the
+response's earlier `madqc.response.state.v1`, is still read, as the current
+keys, and is never rewritten. The engine's own metadata
+(`response_metadata.json`, the bundle and leg records the engine writes)
+keeps its spellings: it is raw evidence, and the records above it name it.
+
+| Old key (v1) | Current key | Where |
+|---|---|---|
+| `omega_residual` | `excitation_energy_change` | the excited-state bundle's measurement and root rows, `properties.excited_states.roots[]`, the requested-accuracy criterion |
+| `omega_residual_within_requested` | `excitation_energy_change_within_requested` | each root under a written `econv` |
+| `delta_kinetic_energy` | `absolute_kinetic_trace_change` | measurement and target name in both applications (the deck key `accuracy.kinetic_trace_change` is unchanged) |
+| `kind: fd` | `kind: frequency_dependent_response` | a driven response state's record |
+| `engine_converged` | `converged` | a response stage's evidence about its reference (the reference stage's verdict, not the engine check) |
+| `rung`, `iterations_at_rung`, `iterations_done_at_rung` | `protocol_step`, `iterations_at_protocol_step`, `iterations_done_at_protocol_step` | state records, moldft's `position`, the continuation record |
+| `at_rung`, `beyond_rung` | `at_protocol_step`, `beyond_protocol_step` | the verdict's per-state entries |
+| `protocol_key` | `protocol_step_key` | `properties.excited_states` |
+| `channels[].protocol` | `channels[].protocol_step` | the response report's leg entries (the stage's sequence stays `protocol`) |
+| `stop` | `stop_reason` | state records and the verdict's entries; values unchanged |
+
+Unchanged on purpose: `requested_omega_target` (it names the omega target;
+only its contents rename), `stop_reason` of the manifest, and every deck
+keyword. A driven state's `identity` prints its frequency as the shortest
+decimal that reads back to the same number (`dipole_z|0.04`, not
+`dipole_z|0.040000000000000001`); an older generation's identity is read in
+this form, so its states still match today's request.
+
+Where the report is: a stage's `results.json` keeps this run's judgement
+(`convergence_report`: `published_in`, `decided_by`, `requested_accuracy`,
+`unmeasured_targets`); the scientific report is the published generation's
+`metrics.convergence_report`, which `published_in` names (the manifest path and
+the JSON pointer). A stage loaded from a generation that holds no report
+keeps the report it assembled. The root `results.json` lists each stage with
+its `status`, `work` and `path`.
+
+What some names mean:
+
+- `protocol`: the deck's sequence of thresholds; a `protocol_step` is one
+  threshold and its polynomial order `k`.
+- `thresh`, `k`: the representation threshold and the polynomial order of a
+  protocol step. `maxiter` is the iteration cap per protocol step, per run.
+- `dconv`: on a moldft stage, the total charge-density change target; on a
+  response stage, the induced-density change target. Both are written
+  targets only when the deck writes them, and they are not the engine's
+  density gates, which derive from them.
+- `econv`: the energy-change target of a ground state; on an excited-state
+  stage, the excitation energy change target. A driven response has no
+  energy target.
+- `bsh_residual`: the bound-state Helmholtz fixed-point residual; the
+  written target is its maximum over functions, which differs from the
+  engine's aggregate per leg.
+- `energy_change`: the absolute change of the total energy; a response stage
+  records it as `not_applicable`.
+- `density_residual`: the excited-state engine's per-root density change
+  check, distinct from `charge_density_change`.
+- `omega`: a root's excitation energy; the optical properties'
+  `frequencies` are driving angular frequencies. Both are in atomic units.
+- `reference`: the ground-state stage a response stage reads, not a
+  starting guess; `seed` is a starting guess.
+- `key`: a state record's lookup key (a ground state's fixed label; a
+  response state's channel, protocol step and frequency). `identity`: the
+  problem a state solves (a ground state's physical description; a driven
+  state's perturbation and frequency; a bundle's method and root count).
+- `kind`: `ground_state`, `frequency_dependent_response`, or
+  `excited_states` (a saved bundle of roots).
+- `decided_by`: in a state record, `engine_check` or `planner` (loaded under
+  a met request); in a report, which rule decided the stage (`engine_check`
+  or `requested_criteria`).
+- `engine_measurements`, `saved_measurements`: the engine's deciding sample
+  and the values measured on the saved state; their phases can differ.
+- `phase`: when in the solve a value was taken.
+- `availability`: `measured`, `unavailable` (no sample), `invalid`, or
+  `not_applicable` (no such quantity here); never a pass or fail.
+- `stop_reason`: `converged`, `iteration_limit`, `stalled` or
+  `in_progress` for a state; a stage's own `stop_reason` also has
+  `unfinished` and `unmet_requested_accuracy`.
+- `requested_accuracy`: the written targets judged, with statuses
+  `not_requested`, `satisfied`, `unmet`, `unavailable`, `invalid`; not an
+  uncertainty of a property.
+- `position`: where in the run a generation was written (phase, protocol
+  step), not molecular coordinates; `numerical`: settings and
+  implementation records; `metrics`: measurements and the report;
+  `properties`: the requested results with units.
+- `state_id`, `checkpoint_generation`, `generation`: after a publish, the
+  same checkpoint name; `reference_generation`: the reference's.
+- `latest`: the stage's published generation, not necessarily a converged
+  one. `g-<stage>-<run>-<n>` names are opaque.
+- `consumer_context`: what a dependent stage needs to rebuild the
+  reference's problem.
+- `root_id`, `slot`: a root's label and its place in the bundle, not a
+  physical state identity.
 
 ## Convergence evidence (milestone 2d reporting slice)
 
@@ -719,7 +813,7 @@ its own metric (DESIGN B8):
 | `dconv` | `charge_density_change` | L2 change of the total charge density rho_alpha+rho_beta, `a0^(-3/2)` |
 | `econv` | `energy_change` | absolute change of the total energy, hartree |
 | `accuracy.bsh_residual` | `bsh_residual` | largest raw orbital BSH residual, dimensionless |
-| `accuracy.kinetic_trace_change` | `delta_kinetic_energy` | absolute change of the unweighted kinetic trace (restricted alpha counted once), hartree |
+| `accuracy.kinetic_trace_change` | `absolute_kinetic_trace_change` | absolute change of the unweighted kinetic trace (restricted alpha counted once), hartree |
 
 Only a value the deck writes is a target; engine defaults are not (B3, D8).
 Requested targets compare with `<=` and have no protocol floor or hidden
@@ -817,7 +911,7 @@ written values are targets on their own metrics, and
 |---|---|---|
 | `dconv` | `charge_density_change` | L2 change of the kernel's induced charge density (`kernel_induced_density_L2_atomic_units`), absolute |
 | `accuracy.bsh_residual` | `bsh_residual` | largest raw residual over all stored functions and X/Y blocks (`response_amplitude_L2_atomic_units`) |
-| `accuracy.kinetic_trace_change` | `delta_kinetic_energy` | absolute change of the unweighted positive trace over those blocks (`hartree_times_response_amplitude_scale_squared`) |
+| `accuracy.kinetic_trace_change` | `absolute_kinetic_trace_change` | absolute change of the unweighted positive trace over those blocks (`hartree_times_response_amplitude_scale_squared`) |
 
 These response quantities include the perturbation amplitude scale and must not
 be read as a ground-state energy or density. A driven response has no local

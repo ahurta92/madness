@@ -6,11 +6,15 @@ deck holding only the response stage on that output directory, gives the same
 results as running both stages in one deck."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -50,7 +54,7 @@ def run(label, root, text, resume=False, success=True):
 
 
 def result(root, stage):
-    return json.loads((root / stage / 'results.json').read_text())
+    return named_records.stage_record(root / stage)
 
 
 def manifest(root, stage):
@@ -102,8 +106,8 @@ def energy_evidence(record):
     return evidence.pop('value'), evidence
 
 
-assert alone['convergence_report']['reference']['engine_converged'] is True
-assert joint['convergence_report']['reference']['engine_converged'] is True
+assert alone['convergence_report']['reference']['converged'] is True
+assert joint['convergence_report']['reference']['converged'] is True
 (value, evidence), (joint_value, joint_evidence) = energy_evidence(alone), energy_evidence(joint)
 assert evidence == joint_evidence, (evidence, joint_evidence)
 assert abs(value - joint_value) < 1e-12, (value, joint_value)  # gs ran twice: roundoff
@@ -114,7 +118,7 @@ for x, y in zip(alone['properties']['polarizability']['values'],
 
 
 def iterations(record):
-    return [(c['channel'], c['frequency'], c['protocol']['thresh'], c['iterations_at_save'])
+    return [(c['channel'], c['frequency'], c['protocol_step']['thresh'], c['iterations_at_save'])
             for c in record['convergence_report']['channels']]
 
 
@@ -159,7 +163,7 @@ verdict = after['metrics']['convergence_report']['reuse_verdict']
 assert verdict['stop_reason_before'] == 'iteration_limit' and verdict['decided_by'] == 'requested_criteria', verdict
 assert [s['checksum'] for s in after['archives'][0]['shards']] == \
        [s['checksum'] for s in before['archives'][0]['shards']]
-assert after['position']['rung'] == before['position']['rung']  # how the rung ended stays recorded
+assert after['position']['protocol_step'] == before['position']['protocol_step']  # how the rung ended stays recorded
 # Run 3: a response stage outside gs's deck now accepts that generation, as an
 # in-deck reference does.
 run('optical-on-reused', reused, response, resume=True, success=None)

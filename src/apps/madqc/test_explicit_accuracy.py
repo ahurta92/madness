@@ -2,12 +2,16 @@
 """Explicit SCF criteria, saved-state reuse, unmet continuation and corruption."""
 import argparse
 import json
+import sys
 import os
 import re
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -40,7 +44,7 @@ def run(label, root, text=deck, resume=False, success=True):
                                 stdout=output, stderr=subprocess.STDOUT, timeout=600)
     assert (result.returncode == 0) == success, (work / (label + '.log')).read_text()[-5000:]
     print(label, 'exit', result.returncode, flush=True)
-    return json.loads((root / 'results.json').read_text())['stages'][0]
+    return named_records.stages(root)[0]
 
 def latest(root):
     store = root / 'gs/checkpoints'
@@ -111,7 +115,7 @@ for location in ('input_phase', 'history_phase', 'saved_phase', 'accuracy_flag',
         else:
             entry['measurements']['bsh_residual']['per_function']['blocks']['alpha'][0]['availability'] = 'invalid'
     else:
-        report['saved_state_validation']['explicit_accuracy']['criteria']['delta_kinetic_energy']['status'] = 'unmet'
+        report['saved_state_validation']['explicit_accuracy']['criteria']['absolute_kinetic_trace_change']['status'] = 'unmet'
     manifest_file.write_text(json.dumps(manifest))
     run('invalid-' + location, root, resume=True, success=False)
     assert 'invalid ground-state measurement' in (work / ('invalid-' + location + '.log')).read_text()

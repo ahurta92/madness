@@ -319,7 +319,7 @@ inline json requested_omega_target(const Stage& stage, json& roots,
   const auto& target = stage.excited_states.omega_target;
   json worst;
   for (const auto& root : roots) {
-    const auto value = root.value("omega_residual", json());
+    const auto value = root.value("excitation_energy_change", json());
     if (!value.is_number()) {
       worst = nullptr;
       break;
@@ -330,8 +330,8 @@ inline json requested_omega_target(const Stage& stage, json& roots,
   }
   if (target)
     for (auto& root : roots) {
-      const auto value = root.value("omega_residual", json());
-      root["omega_residual_within_requested"]
+      const auto value = root.value("excitation_energy_change", json());
+      root["excitation_energy_change_within_requested"]
           = value.is_number() ? json(value.get<double>() <= *target)
                               : json(nullptr);
     }
@@ -344,7 +344,7 @@ inline json requested_omega_target(const Stage& stage, json& roots,
       {"verdict_in",
        {{"path", "convergence_report.requested_accuracy"},
         {"state_key", state_key},
-        {"criterion", "omega_residual"}}}};
+        {"criterion", "excitation_energy_change"}}}};
 }
 
 // The excited-state bundle the stage requested (D-025). The engine saves one
@@ -378,7 +378,7 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
                  {"guess", rp.excited_guess()},
                  {"guess_basis", rp.excited_guess_basis()},
                  {"guess_written", !request.guess.empty()},
-                 {"protocol_key", pkey},
+                 {"protocol_step_key", pkey},
                  {"omega_units", "au"},
                  {"converged", false},
                  {"roots", json::array()}};
@@ -410,7 +410,7 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
                                 && !bundle->value("diverged", false)
                                 && !bundle->value("stalled", false);
   record["stop_reason"] = stop;
-  record["iterations_at_rung"] = bundle->value("iter", 0);
+  record["iterations_at_protocol_step"] = bundle->value("iter", 0);
   record["diverged"] = bundle->value("diverged", false);
   record["stalled"] = bundle->value("stalled", false);
   // Who decided the bundle's verdict: the engine's check, or the planner
@@ -425,6 +425,11 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
     // Archive bookkeeping, not the record.
     for (const auto* key : {"file", "coeffs", "bytes"})
       entry.erase(key);
+    // D-106: the record's name for the engine's omega_residual.
+    if (entry.contains("omega_residual")) {
+      entry["excitation_energy_change"] = entry.at("omega_residual");
+      entry.erase("omega_residual");
+    }
     entry["omega_units"] = "au";
     entry["decided_by"] = root.value("decided_by", decided_by);
     every_root = every_root && root.value("converged", false)
@@ -471,7 +476,7 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
   row.group = cv::Group::requested_criteria;
   row.name = "excitation energy change per root";
   row.keyword = "econv";
-  row.measurement = "omega_residual";
+  row.measurement = "excitation_energy_change";
   row.units = "hartree";
   row.target = target;
   row.set_by = target ? cv::SetBy::user : cv::SetBy::not_set;
@@ -543,11 +548,11 @@ bundle_stall_rows(const Stage& stage) {
 [[nodiscard]] inline json
 bundle_saved_measurements(const json& engine_measurements) {
   json saved = json::object();
-  if (!engine_measurements.contains("omega_residual"))
+  if (!engine_measurements.contains("excitation_energy_change"))
     return saved;
-  json row = engine_measurements.at("omega_residual");
+  json row = engine_measurements.at("excitation_energy_change");
   row["units"] = "hartree";
-  saved["omega_residual"] = std::move(row);
+  saved["excitation_energy_change"] = std::move(row);
   return saved;
 }
 

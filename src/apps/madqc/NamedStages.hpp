@@ -7,6 +7,8 @@
 #include <apps/molresponse/ResponseProtocol.hpp>
 #include <apps/molresponse/solvers/fd_explicit_accuracy.hpp>
 #include <apps/molresponse/solvers/response_metadata.hpp>
+#include <array>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -1027,10 +1029,102 @@ using GenerationPublisher
     = std::function<madness::checkpoint::Manifest(GenerationWrite)>;
 
 // S4a (D-056): the per-state record every ladder application writes in
-// numerical.states, one per state (B6, skeleton spec 3.4). Response's records
-// written before S4a carry its former name and are still read.
-inline constexpr const char* state_schema = "madqc.state.v1";
+// numerical.states, one per state (B6, skeleton spec 3.4). D-106: v2 names
+// the record's keys after the science (protocol_step, stop_reason, the
+// frequency-dependent kind, the excitation energy and kinetic trace
+// changes). v1 records, and response's records written before S4a under
+// its former name, are still read, through upgrade_state_record.
+inline constexpr const char* state_schema = "madqc.state.v2";
+inline constexpr const char* state_schema_v1 = "madqc.state.v1";
 inline constexpr const char* response_state_schema = "madqc.response.state.v1";
+
+// D-101, D-106: a frequency as a state identity prints it: the shortest
+// decimal that reads back to the same double (a written 0.04 is "0.04"), so
+// the identity a generation saved and the one a request asks for are the
+// same string exactly when the doubles are equal.
+[[nodiscard]] inline std::string frequency_text(double frequency) {
+  std::array<char, 32> buffer{};
+  const auto [end, error]
+      = std::to_chars(buffer.data(), buffer.data() + buffer.size(), frequency);
+  if (error != std::errc())
+    throw std::runtime_error("frequency_text: cannot print the frequency");
+  return {buffer.data(), end};
+}
+
+// D-101: a frequency-dependent response state's identity, the one form the
+// saved records, the request and upgrade_state_record use.
+[[nodiscard]] inline std::string
+frequency_dependent_identity(const std::string& perturbation,
+                             double frequency) {
+  return perturbation + "|" + frequency_text(frequency);
+}
+
+// D-106: a state record in the current schema's keys. A v1 (or pre-S4a
+// response) record gets the renamed keys: rung -> protocol_step,
+// iterations_at_rung -> iterations_at_protocol_step, stop -> stop_reason,
+// kind fd -> frequency_dependent_response, the bundle's omega_residual ->
+// excitation_energy_change (measurement and root rows), the ground state's
+// delta_kinetic_energy -> absolute_kinetic_trace_change; and a
+// frequency-dependent state's identity in the canonical frequency form. A
+// current record is returned as it is. The generation on disk is never
+// rewritten (D-008): this is how it is read.
+[[nodiscard]] inline nlohmann::json
+upgrade_state_record(const nlohmann::json& record) {
+  const auto schema = record.value("schema", "");
+  if (schema == state_schema)
+    return record;
+  if (schema != state_schema_v1 && schema != response_state_schema)
+    return record; // validate_state_records names an unknown schema
+  auto upgraded = record;
+  const auto rename
+      = [](nlohmann::json& object, const char* from, const char* to) {
+          if (object.is_object() && object.contains(from)) {
+            object[to] = object.at(from);
+            object.erase(from);
+          }
+        };
+  rename(upgraded, "rung", "protocol_step");
+  rename(upgraded, "iterations_at_rung", "iterations_at_protocol_step");
+  rename(upgraded, "stop", "stop_reason");
+  if (upgraded.value("kind", "") == "fd")
+    upgraded["kind"] = "frequency_dependent_response";
+  // Rows madqc names itself rename; a frequency-dependent state's rows are
+  // the engine's own (convergence and saved-state measurements, raw
+  // evidence) and keep its spelling.
+  if (upgraded.value("kind", "") == "excited_states"
+      && upgraded.contains("engine_measurements"))
+    rename(upgraded["engine_measurements"], "omega_residual",
+           "excitation_energy_change");
+  if (upgraded.value("kind", "") == "ground_state")
+    for (const char* part : {"engine_measurements", "saved_measurements"})
+      if (upgraded.contains(part))
+        rename(upgraded[part], "delta_kinetic_energy",
+               "absolute_kinetic_trace_change");
+  if (upgraded.contains("roots"))
+    for (auto& root : upgraded["roots"])
+      rename(root, "omega_residual", "excitation_energy_change");
+  // A pre-S4a response record has no kind; its driven states carry a
+  // perturbation and a numeric frequency (a bundle's frequency is null).
+  const bool driven
+      = upgraded.value("kind", "") == "frequency_dependent_response"
+        || (!upgraded.contains("kind")
+            && !upgraded.value("perturbation", "").empty());
+  if (driven && upgraded.value("frequency", nlohmann::json()).is_number())
+    upgraded["identity"] = frequency_dependent_identity(
+        upgraded.at("perturbation").get<std::string>(),
+        upgraded.at("frequency").get<double>());
+  upgraded["schema"] = state_schema;
+  return upgraded;
+}
+
+// D-106: every record of a generation in the current schema's keys.
+[[nodiscard]] inline nlohmann::json
+upgrade_state_records(const nlohmann::json& records) {
+  auto upgraded = nlohmann::json::array();
+  for (const auto& record : records)
+    upgraded.push_back(upgrade_state_record(record));
+  return upgraded;
+}
 
 // A2, D-052: the checks on a generation's state records, the same on the
 // write side and the read side. A record of the current schema has a kind
@@ -1042,29 +1136,34 @@ inline void validate_state_records(const nlohmann::json& records) {
       throw std::runtime_error("state record: " + why);
   };
   require(records.is_array(), "numerical.states is not a list");
-  for (const auto& record : records) {
-    require(record.is_object(), "not an object");
-    const auto schema = record.value("schema", "");
-    const bool current = schema == state_schema;
-    require(current || schema == response_state_schema,
+  for (const auto& written : records) {
+    require(written.is_object(), "not an object");
+    const auto schema = written.value("schema", "");
+    require(schema == state_schema || schema == state_schema_v1
+                || schema == response_state_schema,
             "unknown schema '" + schema + "'");
+    // A record written before S4a may lack a kind and phases (D-059).
+    const bool current = schema != response_state_schema;
+    const auto record = upgrade_state_record(written);
     require(record.contains("key") && record.at("key").is_string()
                 && record.contains("identity")
                 && record.at("identity").is_string(),
             "missing key or identity");
     const auto where = record.at("key").get<std::string>();
-    require(record.contains("rung") && record.at("rung").contains("thresh")
-                && record.at("rung").contains("k"),
-            where + ": no rung");
-    require(record.contains("iterations_at_rung")
-                && record.at("iterations_at_rung").is_number_integer(),
-            where + ": no iterations_at_rung");
-    require(record.contains("stop") && record.at("stop").is_string()
+    require(record.contains("protocol_step")
+                && record.at("protocol_step").contains("thresh")
+                && record.at("protocol_step").contains("k"),
+            where + ": no protocol_step");
+    require(record.contains("iterations_at_protocol_step")
+                && record.at("iterations_at_protocol_step").is_number_integer(),
+            where + ": no iterations_at_protocol_step");
+    require(record.contains("stop_reason")
+                && record.at("stop_reason").is_string()
                 && madness::convergence::to_string(
                        madness::convergence::stop_reason_from_string(
-                           record.at("stop").get<std::string>()))
-                       == record.at("stop").get<std::string>(),
-            where + ": unknown stop");
+                           record.at("stop_reason").get<std::string>()))
+                       == record.at("stop_reason").get<std::string>(),
+            where + ": unknown stop_reason");
     require(record.contains("diverged") && record.at("diverged").is_boolean()
                 && record.contains("decided_by")
                 && record.at("decided_by").is_string(),
@@ -1088,13 +1187,15 @@ inline void validate_state_records(const nlohmann::json& records) {
 // renames the saved state's measurements to the names the written targets
 // use (response: fd_accuracy_measurements), and is the identity when empty.
 [[nodiscard]] inline madness::planning::SavedState saved_state_from_record(
-    const nlohmann::json& record,
+    const nlohmann::json& written,
     const std::function<nlohmann::json(const nlohmann::json&)>&
         saved_measurements
     = {}) {
-  const auto schema = record.value("schema", "");
-  if (schema != state_schema && schema != response_state_schema)
+  const auto schema = written.value("schema", "");
+  if (schema != state_schema && schema != state_schema_v1
+      && schema != response_state_schema)
     throw std::runtime_error("state record: unknown schema '" + schema + "'");
+  const auto record = upgrade_state_record(written);
   madness::planning::SavedState state;
   state.identity = record.at("identity").get<std::string>();
   state.reference_generation = record.value("reference_generation", "");
@@ -1104,11 +1205,12 @@ inline void validate_state_records(const nlohmann::json& records) {
       = record.contains("frequency") && record.at("frequency").is_number()
             ? record.at("frequency").get<double>()
             : 0.0;
-  state.rung = {record.at("rung").at("thresh").get<double>(),
-                record.at("rung").at("k").get<int>()};
-  state.iterations_at_rung = record.at("iterations_at_rung").get<int>();
+  state.rung = {record.at("protocol_step").at("thresh").get<double>(),
+                record.at("protocol_step").at("k").get<int>()};
+  state.iterations_at_rung
+      = record.at("iterations_at_protocol_step").get<int>();
   state.stop = madness::convergence::stop_reason_from_string(
-      record.at("stop").get<std::string>());
+      record.at("stop_reason").get<std::string>());
   state.diverged = record.at("diverged").get<bool>();
   state.engine_measurements = record.at("engine_measurements");
   state.saved_measurements
@@ -1155,11 +1257,11 @@ continuation_record(const PlannedState& state,
          {planning::Action::fresh, "fresh"}};
   const auto& plan = state.plan;
   return {{"action", words.at(plan.action)},
-          {"rung",
+          {"protocol_step",
            {{"index", plan.start_rung + 1},
             {"thresh", state.start.thresh},
             {"k", state.start.k}}},
-          {"iterations_done_at_rung", plan.iterations_done},
+          {"iterations_done_at_protocol_step", plan.iterations_done},
           {"why", plan.why},
           {"unmet", plan.unmet},
           {"unmet_not_enforceable", plan.unmet_not_enforceable},

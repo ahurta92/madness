@@ -3,11 +3,15 @@
 import argparse
 import hashlib
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -50,7 +54,7 @@ def published(root):
     return store / generation, manifest
 
 def result(root):
-    return json.loads((root / 'gs/results.json').read_text())
+    return named_records.stage_record(root / 'gs')
 
 def hashes(directory):
     return {str(f.relative_to(directory)): hashlib.sha256(f.read_bytes()).hexdigest()
@@ -81,7 +85,7 @@ run('added-stage', added, deck + deck[deck.index('moldft gs'):].replace('moldft 
     resume=True)
 assert result(added)['work'] == 'loaded' and result(added)['iterations_this_run'] == 0
 assert published(added)[0].name == generation.name and hashes(published(added)[0]) == original
-second = json.loads((added / 'gs2/results.json').read_text())
+second = named_records.stage_record(added / 'gs2')
 assert second['work'] == 'solved' and 'continuation' not in second, second.get('continuation')
 assert second['iterations_this_run'] > 0
 assert (added / 'gs2/checkpoints/latest').exists()

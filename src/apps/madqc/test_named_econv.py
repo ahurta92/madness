@@ -3,11 +3,15 @@
 judged on saved energy-change evidence (B6) and, in engine mode, reported only."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -40,7 +44,7 @@ def run(label, root, text, resume=False):
 
 
 def result(root):
-    return json.loads((root / 'gs/results.json').read_text())
+    return named_records.stage_record(root / 'gs')
 
 
 def manifest(root):

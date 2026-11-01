@@ -2,12 +2,16 @@
 """Report charge/spin changes without inventing new convergence thresholds."""
 import argparse
 import json
+import sys
 import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -37,7 +41,7 @@ def run(label, root, text=deck, resume=False, success=True):
     result = (root / 'results.json').read_text()
     (work / (label + '-results.json')).write_text(result)
     print(label, 'exit', r.returncode, flush=True)
-    return json.loads(result)['stages'][0]
+    return named_records.stages(root)[0]
 
 def check(measurements):
     charge = measurements['charge_density_change']

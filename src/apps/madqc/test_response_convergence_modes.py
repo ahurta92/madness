@@ -5,12 +5,16 @@ warnings, a criteria request without targets, reuse across modes, and the
 printed table against the record."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -52,7 +56,7 @@ def run(label, text, success=True, resume_from=None):
                            stdout=out, stderr=subprocess.STDOUT, timeout=900)
     assert (r.returncode == 0) == success, log.read_text()[-6000:]
     print(label, 'exit', r.returncode, flush=True)
-    stages = json.loads((root / 'results.json').read_text())['stages']
+    stages = named_records.stages(root)
     return root, stages[-1], log.read_text()
 
 
@@ -68,7 +72,7 @@ def entries(root):
 def check_table_matches_record(log, stage):
     """B9 one source: each recorded row is printed with its target, setter and enforcement."""
     section = log.split('Convergence settings: stage optical', 1)[1].split('Iteration cap', 1)[0]
-    settings = stage['convergence_settings']
+    settings = stage['convergence_report']['convergence_settings']
     assert ('Decided by: engine check' in section) == (settings['decided_by'] == 'engine_check')
     for metric in settings['metrics']:
         target = '-' if metric['target'] is None else '%.1e' % metric['target']
@@ -81,7 +85,7 @@ def check_table_matches_record(log, stage):
 # Engine decides (default): as before; the written dconv is reported.
 engine_root, stage, log = run('engine-default', deck())
 assert stage['status'] == 'completed'
-assert stage['convergence_settings']['decided_by'] == 'engine_check'
+assert stage['convergence_report']['convergence_settings']['decided_by'] == 'engine_check'
 assert stage['convergence_report']['decided_by'] == 'engine_check'
 check_table_matches_record(log, stage)
 assert 'WARNING: dconv 1.0e-04 is reported, not enforced' in log
@@ -100,7 +104,7 @@ assert all(e.get('checkpoint_decided_by') == 'engine_check' for e in entries(sta
 _, stage, log = run('criteria-loose', deck(criteria=True, dconv='1e-2',
                                            extra='  accuracy.bsh_residual 1e-1\n'))
 assert stage['status'] == 'completed'
-assert stage['convergence_settings']['decided_by'] == 'requested_criteria'
+assert stage['convergence_report']['convergence_settings']['decided_by'] == 'requested_criteria'
 check_table_matches_record(log, stage)
 assert all(e.get('checkpoint_decided_by') == 'requested_criteria' for e in entries(work / 'criteria-loose'))
 

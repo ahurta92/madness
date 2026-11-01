@@ -512,7 +512,7 @@ int main(int argc, char** argv) {
       const auto iterations = [&](const named_stages::IterationTotals& totals) {
         return named_stages::response_state_records(fd, "g-ref", totals)
             .at(0)
-            .at("iterations_at_rung")
+            .at("iterations_at_protocol_step")
             .get<int>();
       };
       const auto records
@@ -520,10 +520,10 @@ int main(int argc, char** argv) {
       check(records.size() == 1 && records[0].at("key") == state
                 && records[0].at("identity") == channel + "|0"
                 && records[0].at("reference_generation") == "g-ref"
-                && records[0].at("rung")
+                && records[0].at("protocol_step")
                        == json{{"thresh", 1e-4},
                                {"k", named_stages::protocol_k(1e-4)}}
-                && records[0].at("stop") == "in_progress"
+                && records[0].at("stop_reason") == "in_progress"
                 && records[0].at("diverged") == false,
             "response_state_records: one FD state, unfinished");
       struct TotalsRow {
@@ -571,7 +571,8 @@ int main(int argc, char** argv) {
                                              records));
       check(resumed.engine.at(node0).kind == Kind::resume
                 && resumed.records[0].at("action") == "resumed"
-                && resumed.records[0].at("iterations_done_at_rung") == 3
+                && resumed.records[0].at("iterations_done_at_protocol_step")
+                       == 3
                 && resumed.resumed == std::set<std::string>{state},
             "plan_response_states: an unfinished rung resumes, and its key "
             "is resumed");
@@ -676,7 +677,7 @@ int main(int argc, char** argv) {
                 && evidence.at("energy_change").at("satisfied") == true,
             "spec observe (moldft): a written econv is reported against, <=");
       check(
-          evidence.at("delta_kinetic_energy").at("value") == 0.25
+          evidence.at("absolute_kinetic_trace_change").at("value") == 0.25
               && second.at("convergence_report").at("iteration_history").size()
                      == 2
               && second.at("convergence_report")
@@ -877,9 +878,10 @@ int main(int argc, char** argv) {
         for (const bool at_final_rung : {true, false}) {
           auto last = generation();
           json state = named_stages::moldft_state_record(last, "engine_check");
-          state["stop"] = "converged";
+          state["stop_reason"] = "converged";
           if (at_final_rung)
-            state["rung"] = moldft.requested_states(ground, 2)[0].at("rung");
+            state["protocol_step"]
+                = moldft.requested_states(ground, 2)[0].at("protocol_step");
           last.numerical["states"] = json::array({state});
           auto write = writing("final");
           write.final = true;
@@ -957,11 +959,11 @@ int main(int argc, char** argv) {
         before.numerical = {{"threshold", 1e-6}, {"k", 8}};
         const auto saved_at = [&](double thresh, int k, const char* stop) {
           auto m = before;
-          m.position = {{"rung",
+          m.position = {{"protocol_step",
                          {{"thresh", thresh},
                           {"k", k},
-                          {"iterations_at_rung", 5},
-                          {"stop", stop}}}};
+                          {"iterations_at_protocol_step", 5},
+                          {"stop_reason", stop}}}};
           m.metrics
               = {{"convergence_report",
                   {{"measurements",
@@ -1039,10 +1041,10 @@ int main(int argc, char** argv) {
         moldft.validate_generation(ground, 2, gs);
         check(gs.numerical.at("states").at(0).at("kind") == "ground_state"
                   && gs.numerical.at("states").at(0).at("schema")
-                         == "madqc.state.v1",
+                         == "madqc.state.v2",
               "spec validate_generation (moldft): its state record");
         auto wrong = gs;
-        wrong.numerical["states"][0]["rung"]["k"] = 7;
+        wrong.numerical["states"][0]["protocol_step"]["k"] = 7;
         rejects_with([&] { moldft.validate_generation(ground, 2, wrong); },
                      "state record disagrees with its generation",
                      "spec validate_generation (moldft): a record with "
@@ -1067,15 +1069,56 @@ int main(int argc, char** argv) {
                  {"sample", {{"iteration", 2}}}}},
                {"energy_change",
                 {{"value", nullptr}, {"availability", "not_applicable"}}}};
+        // D-101, D-106: one identity printer for the saved state and the
+        // request, the shortest decimal that reads back to the same double;
+        // a v1 record's 17-digit identity upgrades to the same string.
+        for (const double f : {0.04, 0.1, 1.0 / 3.0, 0.0}) {
+          json one = sampled;
+          auto& channel = one["fd_states"].begin().value();
+          auto& rung_entries = channel.begin().value();
+          auto entry = rung_entries.begin().value();
+          entry["freq"] = f;
+          rung_entries = json::object();
+          rung_entries[molresponse_v3::ResponseMetadata::freq_key(f)] = entry;
+          const auto saved
+              = named_stages::response_state_records(one, "g-ref", {}).at(0);
+          const auto requested = named_stages::frequency_dependent_identity(
+              saved.at("perturbation").get<std::string>(), f);
+          std::ostringstream old_identity;
+          old_identity << saved.at("perturbation").get<std::string>() << '|'
+                       << std::setprecision(17) << f;
+          auto v1 = saved;
+          v1["schema"] = "madqc.state.v1";
+          v1["kind"] = "fd";
+          v1["identity"] = old_identity.str();
+          v1["rung"] = v1.at("protocol_step");
+          v1.erase("protocol_step");
+          v1["iterations_at_rung"] = v1.at("iterations_at_protocol_step");
+          v1.erase("iterations_at_protocol_step");
+          v1["stop"] = v1.at("stop_reason");
+          v1.erase("stop_reason");
+          check(saved.at("identity") == requested
+                    && named_stages::upgrade_state_record(v1) == saved,
+                "identity (D-101): saved and requested agree at f = "
+                    + std::to_string(f)
+                    + ", and the v1 record upgrades to the same record");
+        }
+        check(named_stages::frequency_text(0.04) == "0.04"
+                  && named_stages::frequency_text(1.0 / 3.0)
+                         == "0.3333333333333333"
+                  && named_stages::frequency_text(0.0) == "0",
+              "frequency_text (D-101): the shortest decimal that reads back");
         const auto fd_records
             = named_stages::response_state_records(sampled, "g-ref", {});
         const auto& rows = fd_records.at(0).at("engine_measurements");
-        check(fd_records.at(0).at("schema") == "madqc.state.v1"
-                  && fd_records.at(0).at("kind") == "fd"
+        check(fd_records.at(0).at("schema") == "madqc.state.v2"
+                  && fd_records.at(0).at("kind")
+                         == "frequency_dependent_response"
                   && rows.at("bsh_residual").at("phase")
                          == "solver_step_input_before_acceleration"
                   && rows.at("energy_change").at("phase").is_null(),
-              "response_state_records (S4a): kind fd; a sampled row keeps "
+              "response_state_records (S4a): kind frequency-dependent; a "
+              "sampled row keeps "
               "its phase, a row with no sample has phase null");
         auto measured = metadata;
         measured["excited_states"][key]["roots"][0]["density_residual"] = 1e-5;
@@ -1086,7 +1129,7 @@ int main(int argc, char** argv) {
                   .at("engine_measurements");
         check(bundle_rows.at("density_residual").at("phase")
                       == "solver_step_input_before_acceleration"
-                  && bundle_rows.at("omega_residual").at("phase")
+                  && bundle_rows.at("excitation_energy_change").at("phase")
                          == "solver_step_output"
                   && bundles.at(0)
                          .at("engine_measurements")
@@ -1181,7 +1224,7 @@ int main(int argc, char** argv) {
                   && ground_plans.states[0].own_rung->thresh == 1e-4
                   && ground_plans.continuation.at("planner") == "plan_ladder"
                   && ground_plans.continuation.at("why") == direct_plan.why
-                  && ground_plans.continuation.at("rung").at("index")
+                  && ground_plans.continuation.at("protocol_step").at("index")
                          == direct_plan.start_rung + 1,
               "spec plan (moldft): the planner's plan for the ground state, "
               "and its continuation record");
@@ -1266,9 +1309,9 @@ int main(int argc, char** argv) {
                          == json{{"index", 2},
                                  {"thresh", ladder.at(1).thresh},
                                  {"k", ladder.at(1).k},
-                                 {"iterations_at_rung", 4},
+                                 {"iterations_at_protocol_step", 4},
                                  {"iterations_this_run", 4},
-                                 {"stop", "converged"}},
+                                 {"stop_reason", "converged"}},
               "spec publish_now (moldft): a rung stop publishes; the rung "
               "record by value, index from 1");
         check(!at(ground, sample(0, 0, "in_progress"), none).publish
@@ -1280,13 +1323,15 @@ int main(int argc, char** argv) {
         const json resumed
             = {{"resumed_rung", {{"start_rung", 0}, {"iterations_done", 2}}}};
         decision = at(ground, sample(0, 0, "in_progress"), resumed);
-        check(decision.publish && decision.rung.at("iterations_at_rung") == 3
+        check(decision.publish
+                  && decision.rung.at("iterations_at_protocol_step") == 3
                   && decision.rung.at("iterations_this_run") == 1,
               "spec publish_now (moldft): a resumed rung counts the "
               "planner's iterations_done toward K (A3: the cadence holds "
               "over a restart)");
         decision = at(ground, sample(1, 0, "in_progress"), resumed);
-        check(!decision.publish && decision.rung.at("iterations_at_rung") == 1,
+        check(!decision.publish
+                  && decision.rung.at("iterations_at_protocol_step") == 1,
               "spec publish_now (moldft): only the resumed rung carries the "
               "earlier iterations");
         auto capped = ground;
@@ -1363,16 +1408,16 @@ int main(int argc, char** argv) {
       {
         const auto needed = moldft.requested_states(ground, 2);
         check(needed.size() == 1 && needed[0].at("key") == "ground_state"
-                  && needed[0].at("rung").at("thresh") == 1e-6,
+                  && needed[0].at("protocol_step").at("thresh") == 1e-6,
               "spec requested_states (moldft): the ground state at the final "
-              "rung");
-        const auto final_rung = needed[0].at("rung");
+              "protocol_step");
+        const auto final_rung = needed[0].at("protocol_step");
         const json measured = {
             {"availability", "measured"}, {"units", "a.u."}, {"value", 1e-7}};
         const auto record = [&](const char* stop, const char* decided_by) {
           return json{{"key", "ground_state"},
-                      {"rung", final_rung},
-                      {"stop", stop},
+                      {"protocol_step", final_rung},
+                      {"stop_reason", stop},
                       {"diverged", false},
                       {"decided_by", decided_by},
                       {"saved_measurements",
@@ -1405,7 +1450,7 @@ int main(int argc, char** argv) {
                   .at("converged"),
               "shared verdict (D-016): a state loaded under a met request");
         auto coarse = record("converged", "engine_check");
-        coarse["rung"]["thresh"] = 1e-4;
+        coarse["protocol_step"]["thresh"] = 1e-4;
         check(!verdict(json::array({coarse}), settings).at("converged"),
               "shared verdict: a state converged at another rung");
         auto diverged = record("converged", "engine_check");
@@ -1415,18 +1460,20 @@ int main(int argc, char** argv) {
         // D-085, R3: a finished state finer than the final rung counts, its
         // record keeping its true rung; a diverged one does not.
         auto finer = record("converged", "engine_check");
-        finer["rung"]["thresh"] = 1e-7;
+        finer["protocol_step"]["thresh"] = 1e-7;
         const auto beyond = verdict(json::array({finer}), settings);
         check(beyond.at("converged")
-                  && !beyond.at("states")[0].at("at_rung").get<bool>()
-                  && beyond.at("states")[0].at("beyond_rung").get<bool>(),
+                  && !beyond.at("states")[0].at("at_protocol_step").get<bool>()
+                  && beyond.at("states")[0]
+                         .at("beyond_protocol_step")
+                         .get<bool>(),
               "shared verdict (D-085): a converged state finer than the final "
               "rung, beyond_rung");
         auto finer_diverged = finer;
         finer_diverged["diverged"] = true;
         check(!verdict(json::array({finer_diverged}), settings).at("converged"),
               "shared verdict (D-085): a diverged state finer than the final "
-              "rung");
+              "protocol_step");
         // D-091: an R2 load leaves the stalled generation's own record.
         const auto stalled = verdict(
             json::array({record("stalled", "engine_check")}), settings);
@@ -1499,14 +1546,14 @@ int main(int argc, char** argv) {
           const auto needed = molresponse.requested_states(stage, 2).back();
           json record = {{"key", needed.at("key")},
                          {"kind", "excited_states"},
-                         {"rung", needed.at("rung")},
-                         {"stop", "converged"},
+                         {"protocol_step", needed.at("protocol_step")},
+                         {"stop_reason", "converged"},
                          {"diverged", false},
                          {"decided_by", "engine_check"},
                          {"saved_measurements", json::object()}};
           if (engine_rows)
             record["engine_measurements"]
-                = {{"omega_residual",
+                = {{"excitation_energy_change",
                     {{"value", omega},
                      {"availability", "measured"},
                      {"root_id", "r0"},
@@ -1531,7 +1578,7 @@ int main(int argc, char** argv) {
         const auto needed = molresponse.requested_states(es_dconv, 2);
         check(needed.size() == 1
                   && needed[0].at("measurements")
-                         == json::array({"omega_residual"}),
+                         == json::array({"excitation_energy_change"}),
               "requested_states (D-082): the bundle's rows are omega_residual");
         const auto alone
             = judge(es_dconv, json::array({bundle_record(es_dconv, 1e-5)}));
@@ -1544,13 +1591,14 @@ int main(int argc, char** argv) {
               "listed once, not a failed state");
         const auto mixed_needed_dconv
             = molresponse.requested_states(mixed_dconv, 2);
-        const json planner_leg = {{"key", mixed_needed_dconv[0].at("key")},
-                                  {"kind", "fd"},
-                                  {"rung", mixed_needed_dconv[0].at("rung")},
-                                  {"stop", "iteration_limit"},
-                                  {"diverged", false},
-                                  {"decided_by", "planner"},
-                                  {"saved_measurements", json::object()}};
+        const json planner_leg
+            = {{"key", mixed_needed_dconv[0].at("key")},
+               {"kind", "frequency_dependent_response"},
+               {"protocol_step", mixed_needed_dconv[0].at("protocol_step")},
+               {"stop_reason", "iteration_limit"},
+               {"diverged", false},
+               {"decided_by", "planner"},
+               {"saved_measurements", json::object()}};
         const auto on_stop = judge(
             mixed_dconv,
             json::array({planner_leg, bundle_record(mixed_dconv, 1e-5)}));
@@ -1596,9 +1644,9 @@ int main(int argc, char** argv) {
                                    criteria + " econv 1e-6\n");
         const auto mixed_needed = molresponse.requested_states(mixed, 2);
         json leg = {{"key", mixed_needed[0].at("key")},
-                    {"kind", "fd"},
-                    {"rung", mixed_needed[0].at("rung")},
-                    {"stop", "iteration_limit"},
+                    {"kind", "frequency_dependent_response"},
+                    {"protocol_step", mixed_needed[0].at("protocol_step")},
+                    {"stop_reason", "iteration_limit"},
                     {"diverged", false},
                     {"decided_by", "planner"},
                     {"saved_measurements", json::object()}};
@@ -1608,7 +1656,7 @@ int main(int argc, char** argv) {
                   && !both.at("states")[0]
                           .at("requested_accuracy")
                           .at("criteria")
-                          .contains("omega_residual")
+                          .contains("excitation_energy_change")
                   && both.at("states")[0]
                          .at("requested_accuracy")
                          .at("criteria")
@@ -1622,9 +1670,11 @@ int main(int argc, char** argv) {
               "econv alone, nothing unmeasured");
         // The settings row and the planner's per-kind sets.
         const auto settings = molresponse.settings(mixed, 2);
-        const auto row = std::find_if(
-            settings.metrics.begin(), settings.metrics.end(),
-            [](const auto& m) { return m.measurement == "omega_residual"; });
+        const auto row
+            = std::find_if(settings.metrics.begin(), settings.metrics.end(),
+                           [](const auto& m) {
+                             return m.measurement == "excitation_energy_change";
+                           });
         check(row != settings.metrics.end() && row->target == 1e-6
                   && std::none_of(settings.metrics.begin(),
                                   settings.metrics.end(),
@@ -1637,15 +1687,17 @@ int main(int argc, char** argv) {
           return cv::requested_targets(named_stages::targets_of_kind(
               settings, named_stages::kind_measurements(kind)));
         };
-        check(targets_of("fd").contains("charge_density_change")
-                  && !targets_of("fd").contains("omega_residual")
+        check(targets_of("frequency_dependent_response")
+                      .contains("charge_density_change")
+                  && !targets_of("frequency_dependent_response")
+                          .contains("excitation_energy_change")
                   && targets_of("excited_states")
-                         == json{{"omega_residual",
+                         == json{{"excitation_energy_change",
                                   {{"value", 1e-6}, {"units", "hartree"}}}},
               "planner (D-082): the legs plan on their rows, the bundle on "
               "econv (the reset keeps the econv row)");
         check(named_stages::response_request(mixed).at("excited_state_targets")
-                      == json{{"omega_residual",
+                      == json{{"excitation_energy_change",
                                {{"value", 1e-6}, {"units", "hartree"}}}}
                   && !named_stages::response_request(es_dconv).contains(
                       "excited_state_targets"),
@@ -1688,7 +1740,7 @@ int main(int argc, char** argv) {
         const auto criteria_plan = bundle_plan(es_econv);
         check(engine_plan.at("action") == "loaded"
                   && engine_plan.at("unmet_not_enforceable")
-                         == json::array({"omega_residual"})
+                         == json::array({"excitation_energy_change"})
                   && criteria_plan.at("action") != "loaded",
               "planner (D-061, D-082): a saved bundle missing econv, loaded "
               "and reported in engine mode, not loaded under written targets");

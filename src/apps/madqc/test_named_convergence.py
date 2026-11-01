@@ -5,12 +5,16 @@ points are published, so per-iteration evidence is read from the history the
 stop manifest carries."""
 import argparse
 import json
+import sys
 import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -37,7 +41,7 @@ def run(label, root, text=deck, resume=False, success=True):
                            stdout=out, stderr=subprocess.STDOUT, timeout=360)
     assert (r.returncode == 0) == success, log.read_text()[-5000:]
     print(label, 'exit', r.returncode, flush=True)
-    return json.loads((root / 'results.json').read_text())['stages']
+    return named_records.stages(root)
 
 def strip_written_targets(entry):
     """Make a response entry look as one from before step 2c: the response
@@ -126,11 +130,11 @@ stages = run('fresh', fresh)
 gs, response = stages
 assert 'convergence_report' in gs, 'ground convergence measurement report missing'
 g = gs['convergence_report']
-assert set(g['measurements']) == {'density_change', 'charge_density_change', 'spin_density_change', 'bsh_residual', 'energy_change', 'delta_kinetic_energy'}
+assert set(g['measurements']) == {'density_change', 'charge_density_change', 'spin_density_change', 'bsh_residual', 'energy_change', 'absolute_kinetic_trace_change'}
 check_function_bsh(g['measurements']['bsh_residual'], 'max')
 validation = g['saved_state_validation']
 check_function_bsh(validation['measurements']['bsh_residual'], 'max')
-assert validation['state_id'] == gs['state_id']
+assert gs['convergence_report']['published_in']['generation'] == gs['state_id']
 assert validation['affects_stopping'] is False
 for name, m in validation['measurements'].items():
     assert m['availability'] == 'measured', (name, m)
@@ -138,7 +142,7 @@ for name, m in validation['measurements'].items():
     assert m['value'] >= 0
 assert validation['comparison']['iteration'] < g['measurements']['energy_change']['sample']['iteration']
 assert g['decided_by'] == 'engine_check'
-assert g['state_id'] == gs['state_id']
+assert 'state_id' not in g or g['state_id'] == gs['state_id']
 for name, m in g['measurements'].items():
     assert m['availability'] == 'measured', (name, m)
     assert m['value'] >= 0 and m['phase']
@@ -146,14 +150,17 @@ for name, m in g['measurements'].items():
     assert m['valid_for_saved_state'] is False
 assert g['measurements']['energy_change']['active_gate'] is False
 assert g['measurements']['energy_change']['target'] == 1e-6
-assert g['measurements']['delta_kinetic_energy']['active_gate'] is False
+assert g['measurements']['absolute_kinetic_trace_change']['active_gate'] is False
 r = response['convergence_report']
 assert r['reference']['state_id'] == gs['state_id']
 assert r['reference']['energy_change'] == g['measurements']['energy_change']
-assert r['reference']['saved_state_validation'] == g['saved_state_validation']
+# The evidence names the reference generation it came from; the manifest's
+# report is that generation's own (D-105).
+assert {k: v for k, v in r['reference']['saved_state_validation'].items() if k != 'state_id'} == \
+    {k: v for k, v in g['saved_state_validation'].items() if k != 'state_id'}
 assert len(r['channels']) == 4  # static + dynamic, two supplied rungs
 for c in r['channels']:
-    assert c['state_id'] == response['state_id'] and c['archive']
+    assert 'state_id' not in c and c['archive']  # the generation names itself (D-105)
     m = c['measurements']
     assert m['density_change']['availability'] == 'measured'
     assert m['bsh_residual']['availability'] == 'measured'
@@ -195,7 +202,7 @@ for c in r['channels']:
         assert abs(final['blocks'][block][0]['value'] - kinetics[-1]['blocks'][block][0]['value']) < 1e-10
     assert c['outcome'] == 'converged'
     validation = c['saved_state_validation']
-    assert validation['state_id'] == response['state_id']
+    assert 'state_id' not in validation
     assert validation['affects_stopping'] is False
     for name in ('density_change', 'bsh_residual'):
         v = validation['measurements'][name]
@@ -209,7 +216,7 @@ for row in first:
     evidence = row['measurements']
     assert evidence['bsh_residual']['availability'] == 'unavailable'
     assert 'per_function' not in evidence['bsh_residual']
-    for name in ('energy_change', 'density_change', 'charge_density_change', 'spin_density_change', 'delta_kinetic_energy'):
+    for name in ('energy_change', 'density_change', 'charge_density_change', 'spin_density_change', 'absolute_kinetic_trace_change'):
         assert evidence[name]['availability'] == 'unavailable' and evidence[name]['value'] is None
 # Reported changes must agree with independently differenced recorded samples.
 by_rung = {}
@@ -224,7 +231,7 @@ for samples in by_rung.values():
         delta = abs(after['energy']['value'] - before['energy']['value'])
         assert abs(values['energy_change']['value'] - delta) < 1e-14
         delta_t = abs(after['kinetic_trace']['value'] - before['kinetic_trace']['value'])
-        assert abs(values['delta_kinetic_energy']['value'] - delta_t) < 1e-14
+        assert abs(values['absolute_kinetic_trace_change']['value'] - delta_t) < 1e-14
 # Final energy and kinetic differences must use the recorded prior iteration,
 # never the almost-identical state just before final diagonalization.
 v = g['saved_state_validation']
@@ -237,7 +244,7 @@ assert comparison['energy'] == previous['energy']['value']
 assert comparison['kinetic_energy'] == previous['occupation_weighted_physical_kinetic_energy']['value']
 for metric, key in [('energy_change', 'energy')]:
     assert abs(v['measurements'][metric]['value'] - abs(v[key] - comparison[key])) < 1e-14
-assert abs(v['measurements']['delta_kinetic_energy']['value'] -
+assert abs(v['measurements']['absolute_kinetic_trace_change']['value'] -
            abs(v['kinetic_trace']['value'] - comparison['kinetic_trace']['value'])) < 1e-14
 for sample in g['iteration_history']:
     trace = sample['kinetic_trace']
@@ -325,7 +332,7 @@ for x, y in zip(one['bsh_residual']['per_function']['blocks']['alpha'],
     assert abs(x['value'] - y['value']) < 1e-9
 step2 = next(row for row in gs_history(work / 'GroundSteps3')
              if row['kinetic_trace']['sample']['iteration'] == 1)
-for metric in ('density_change', 'charge_density_change', 'spin_density_change', 'energy_change', 'delta_kinetic_energy'):
+for metric in ('density_change', 'charge_density_change', 'spin_density_change', 'energy_change', 'absolute_kinetic_trace_change'):
     expected = step2['measurements'][metric]['value']
     assert abs(one[metric]['value'] - expected) < 1e-9, (metric, one[metric]['value'], expected)
 # A corrupt scientific verdict must not trigger an implicit new solve.
@@ -379,7 +386,7 @@ for location in ('raw_trace', 'trace_change', 'history_trace', 'input_phase', 'h
     elif location == 'history_trace':
         report['iteration_history'][0]['kinetic_trace']['value'] = 99.0
     else:
-        report['saved_state_validation']['measurements']['delta_kinetic_energy']['value'] = 99.0
+        report['saved_state_validation']['measurements']['absolute_kinetic_trace_change']['value'] = 99.0
     mfile.write_text(json.dumps(m))
     run('invalid-trace-' + location, root, resume=True, success=False)
     assert 'invalid ground-state measurement' in (work / ('invalid-trace-' + location + '.log')).read_text()
@@ -519,6 +526,8 @@ for stage in ('gs', 'optical'):
                     entry['saved_state_validation']['measurements']['bsh_residual'].pop('per_function')
                     entry['saved_state_validation']['measurements']['bsh_residual'].pop('maximum_comparison', None)
                     entry.pop('function_bsh_history')
+        # A response generation from then has no published report (D-105).
+        manifest['metrics'].pop('convergence_report', None)
     mfile.write_text(json.dumps(manifest))
 legacy_results = run('legacy-aggregates', legacy, resume=True)
 assert all(s['iterations_this_run'] == 0 for s in legacy_results)
@@ -553,6 +562,8 @@ for channel in manifest['numerical']['engine_metadata']['fd_states'].values():
                 for key in ('maximum_comparison', 'absolute_limit', 'relative_factor', 'normalization_scale',
                             'normalization_phase', 'effective_limit', 'satisfied'):
                     sample.pop(key)
+# A response generation from then has no published report (D-105).
+manifest['metrics'].pop('convergence_report', None)
 mfile.write_text(json.dumps(manifest))
 legacy_results = run('legacy-comparisons', legacy, resume=True)
 assert all(stage['iterations_this_run'] == 0 for stage in legacy_results)
@@ -581,6 +592,8 @@ for stage in ('gs', 'optical'):
                     e.pop('saved_state_validation', None)
                     e.pop('function_kinetic_history', None)
                     e.pop('function_bsh_history', None)
+        # Nor did it publish a report (D-105).
+        m['metrics'].pop('convergence_report', None)
     mfile.write_text(json.dumps(m))
 # Optional legacy reports remain optional only when no explicit policy needs them.
 for control in ('accuracy', 'progress', 'progress-only'):

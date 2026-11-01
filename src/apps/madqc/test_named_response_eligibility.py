@@ -2,11 +2,15 @@
 """A residual within tolerance cannot certify an unmeasured density change."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -40,7 +44,7 @@ def run(label, root, text, success, resume=True):
     print(label, 'exit', proc.returncode, flush=True)
     results = (root / 'results.json').read_text()
     (work / (label + '-results.json')).write_text(results)
-    return json.loads(results)['stages']
+    return named_records.stages(root)
 
 def response_deck(count):
     return ground + 'molresponse optical' + response.replace('maxiter 30', 'maxiter ' + str(count))

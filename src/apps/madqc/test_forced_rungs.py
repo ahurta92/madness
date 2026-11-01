@@ -2,10 +2,14 @@
 """Explicit diagnostic counts must not stop early at ordinary convergence."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -30,7 +34,7 @@ with (work / 'run.log').open('w') as out:
     result = subprocess.run(launch + [binary, str(input_file), '--prefix=' + str(root)],
                             cwd=work, env=env, stdout=out, stderr=subprocess.STDOUT, timeout=600)
 assert result.returncode == 0, (work / 'run.log').read_text()[-5000:]
-stages = json.loads((root / 'results.json').read_text())['stages']
+stages = named_records.stages(root)
 assert stages[0]['iterations_this_run'] == 10, stages[0]['iterations_this_run']
 assert stages[1]['iterations_this_run'] == 32, stages[1]['iterations_this_run']
 for channel in stages[1]['convergence_report']['channels']:

@@ -4,12 +4,16 @@ moldft stage: the criteria-modes case table in both modes, the warnings, reuse
 across modes, and that the printed table matches the record."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -50,7 +54,7 @@ def run(label, text, success=True, resume_from=None):
                            stdout=out, stderr=subprocess.STDOUT, timeout=600)
     assert (r.returncode == 0) == success, log.read_text()[-6000:]
     print(label, 'exit', r.returncode, flush=True)
-    stage = json.loads((root / 'results.json').read_text())['stages'][0]
+    stage = named_records.stages(root)[0]
     return root, stage, log.read_text()
 
 
@@ -151,7 +155,7 @@ loose_energy = '%.1e' % max(1e-3, 10 * saved['energy_change']['value'])
 _, stage, _ = run('criteria-reuse-met', deck(criteria=True, dconv=None, econv=loose_energy),
                   resume_from=engine_default)
 assert stage['work'] == 'loaded' and stage['iterations_this_run'] == 0, stage['continuation']
-spent = manifest(engine_default)['position']['rung']['iterations_at_rung']
+spent = manifest(engine_default)['position']['protocol_step']['iterations_at_protocol_step']
 _, stage, _ = run('criteria-reuse-unmet',
                   deck(criteria=True, dconv=None, econv='1e-14', maxiter=str(spent + 2)),
                   resume_from=engine_default, success=False)

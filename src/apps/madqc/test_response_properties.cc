@@ -846,9 +846,9 @@ int main(int argc, char** argv) {
     check(es.at("method") == "tda" && es.at("roots_requested") == 2
               && es.at("guess") == "solid_harmonics"
               && es.at("guess_written") == false
-              && es.at("protocol_key") == pkey
+              && es.at("protocol_step_key") == pkey
               && es.at("stop_reason") == "converged"
-              && es.at("iterations_at_rung") == 7
+              && es.at("iterations_at_protocol_step") == 7
               && es.at("decided_by") == "engine_check"
               && es.at("converged") == true && es.at("roots").size() == 2
               && es.at("transition_units").at("transition_dipole")
@@ -882,27 +882,32 @@ int main(int argc, char** argv) {
               && none.at("verdict_in").at("path")
                      == "convergence_report.requested_accuracy"
               && none.at("verdict_in").at("state_key") == "es:tda_n2|" + pkey
-              && none.at("verdict_in").at("criterion") == "omega_residual"
+              && none.at("verdict_in").at("criterion")
+                     == "excitation_energy_change"
               && !none.contains("status") && !none.contains("enforced")
               && !none.contains("outcome")
-              && !first.contains("omega_residual_within_requested"),
+              && !first.contains("excitation_energy_change_within_requested"),
           "no econv: target null, not_set, the worst root still named, no "
           "per-root field, no status of its own");
     stage.excited_states.omega_target = 1e-6;
     es = named_stages::selected_excited_states(stage, metadata, transition);
-    check(es.at("requested_omega_target").at("target") == 1e-6
-              && es.at("requested_omega_target").at("set_by") == "user"
-              && es.at("roots")[0].at("omega_residual_within_requested") == true
-              && es.at("roots")[1].at("omega_residual_within_requested") == true
-              && es.at("requested_omega_target").at("worst").at("value")
-                     == 3e-7,
-          "econv 1e-6 over 3e-7 on both roots: within on both");
+    check(
+        es.at("requested_omega_target").at("target") == 1e-6
+            && es.at("requested_omega_target").at("set_by") == "user"
+            && es.at("roots")[0].at("excitation_energy_change_within_requested")
+                   == true
+            && es.at("roots")[1].at("excitation_energy_change_within_requested")
+                   == true
+            && es.at("requested_omega_target").at("worst").at("value") == 3e-7,
+        "econv 1e-6 over 3e-7 on both roots: within on both");
     stage.excited_states.omega_target = 1e-7;
     es = named_stages::selected_excited_states(stage, metadata, transition);
     check(
         es.at("requested_omega_target").at("target") == 1e-7
-            && es.at("roots")[0].at("omega_residual_within_requested") == false
-            && es.at("roots")[1].at("omega_residual_within_requested") == false
+            && es.at("roots")[0].at("excitation_energy_change_within_requested")
+                   == false
+            && es.at("roots")[1].at("excitation_energy_change_within_requested")
+                   == false
             && es.at("requested_omega_target").at("worst").at("root_id")
                    == "es_root_0001"
             && es.at("converged") == true,
@@ -910,13 +915,14 @@ int main(int argc, char** argv) {
         "converged is the engine's and stays true");
     metadata["excited_states"][pkey]["roots"][1]["omega_residual"] = nullptr;
     es = named_stages::selected_excited_states(stage, metadata, transition);
-    check(es.at("requested_omega_target").at("worst").is_null()
-              && es.at("roots")[0].at("omega_residual_within_requested")
-                     == false
-              && es.at("roots")[1]
-                     .at("omega_residual_within_requested")
-                     .is_null(),
-          "a root without an eigenvalue step: worst null, that root null");
+    check(
+        es.at("requested_omega_target").at("worst").is_null()
+            && es.at("roots")[0].at("excitation_energy_change_within_requested")
+                   == false
+            && es.at("roots")[1]
+                   .at("excitation_energy_change_within_requested")
+                   .is_null(),
+        "a root without an eigenvalue step: worst null, that root null");
     const auto absent
         = named_stages::selected_excited_states(stage, json::object(), json());
     check(absent.at("requested_omega_target").at("target") == 1e-7
@@ -1002,9 +1008,9 @@ int main(int argc, char** argv) {
     check(unset.group == cv::Group::requested_criteria
               && unset.name == "excitation energy change per root"
               && unset.keyword == "econv"
-              && unset.measurement == "omega_residual" && unset.quantity.empty()
-              && unset.units == "hartree" && !unset.target
-              && unset.set_by == cv::SetBy::not_set
+              && unset.measurement == "excitation_energy_change"
+              && unset.quantity.empty() && unset.units == "hartree"
+              && !unset.target && unset.set_by == cv::SetBy::not_set
               && unset.relation == cv::Relation::less_than_or_equal
               && !unset.effective_limit && unset.limit_formula.empty()
               && unset.note.find("the engine's default is never a target")
@@ -1030,9 +1036,9 @@ int main(int argc, char** argv) {
           "econv row: the engine-mode warning at stage start");
     const auto targets = cv::requested_targets(settings);
     check(targets.size() == 1
-              && targets.at("omega_residual").at("value") == 1e-6
-              && targets.at("omega_residual").at("units") == "hartree"
-              && !targets.at("omega_residual").contains("quantity"),
+              && targets.at("excitation_energy_change").at("value") == 1e-6
+              && targets.at("excitation_energy_change").at("units") == "hartree"
+              && !targets.at("excitation_energy_change").contains("quantity"),
           "econv row: the requested target the shared judge takes");
     // The bundle's engine rows as the state record carries them
     // (bundle_measurements): the worst root per measurement.
@@ -1041,22 +1047,27 @@ int main(int argc, char** argv) {
                            {"availability", "measured"},
                            {"root_id", "es_root_0001"},
                            {"phase", "solver_step_input_before_acceleration"}}},
-                         {"omega_residual",
+                         {"excitation_energy_change",
                           {{"value", 3e-7},
                            {"availability", "measured"},
                            {"root_id", "es_root_0001"},
                            {"phase", "solver_step_output"}}}};
     const auto saved = named_stages::bundle_saved_measurements(engine);
-    check(saved.size() == 1 && saved.at("omega_residual").at("value") == 3e-7
-              && saved.at("omega_residual").at("units") == "hartree"
-              && saved.at("omega_residual").at("availability") == "measured"
-              && saved.at("omega_residual").at("root_id") == "es_root_0001"
-              && saved.at("omega_residual").at("phase") == "solver_step_output",
+    check(saved.size() == 1
+              && saved.at("excitation_energy_change").at("value") == 3e-7
+              && saved.at("excitation_energy_change").at("units") == "hartree"
+              && saved.at("excitation_energy_change").at("availability")
+                     == "measured"
+              && saved.at("excitation_energy_change").at("root_id")
+                     == "es_root_0001"
+              && saved.at("excitation_energy_change").at("phase")
+                     == "solver_step_output",
           "the bundle's judged row: the worst root's eigenvalue change with "
           "its units");
     const auto met = madness::evaluate_explicit_criteria(saved, targets);
     check(met.at("status") == "satisfied"
-              && met.at("criteria").at("omega_residual").at("value") == 3e-7,
+              && met.at("criteria").at("excitation_energy_change").at("value")
+                     == 3e-7,
           "the shared judge: 3e-7 meets econv 1e-6");
     stage.excited_states.omega_target = 1e-7;
     settings.metrics
@@ -1067,9 +1078,9 @@ int main(int argc, char** argv) {
               == "unmet",
           "the shared judge: 3e-7 misses econv 1e-7");
     json none = engine;
-    none["omega_residual"] = {{"value", nullptr},
-                              {"availability", "unavailable"},
-                              {"phase", nullptr}};
+    none["excitation_energy_change"] = {{"value", nullptr},
+                                        {"availability", "unavailable"},
+                                        {"phase", nullptr}};
     check(madness::evaluate_explicit_criteria(
               named_stages::bundle_saved_measurements(none),
               cv::requested_targets(settings))

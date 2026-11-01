@@ -51,6 +51,9 @@ if not os.environ.get('MADQC_TEST_STORE'):
 sys.dont_write_bytecode = True  # nothing written into the source tree
 sys.path.insert(0, a.source)
 import make_test_store as store  # noqa: E402
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 data = store.listing()
 ancestor = subprocess.run(['git', '-C', a.source, 'merge-base', '--is-ancestor',
@@ -87,7 +90,7 @@ def run(label, root, text, ranks=1):
 
 
 def result(root, stage):
-    return json.loads((root / stage / 'results.json').read_text())
+    return named_records.stage_record(root / stage)
 
 
 def latest(root, stage):

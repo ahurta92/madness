@@ -3050,7 +3050,7 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         }
 
         FunctionResidualBlocks input_kinetic_diagonal;
-        if (checkpoint_observer || explicit_targets.contains("delta_kinetic_energy")) {
+        if (checkpoint_observer || explicit_targets.contains("absolute_kinetic_trace_change")) {
             input_kinetic_diagonal["alpha"] = kinetic_energy_diagonal(world, amo, gradop);
             if (!param.spin_restricted() && !bmo.empty())
                 input_kinetic_diagonal["beta"] = kinetic_energy_diagonal(world, bmo, gradop);
@@ -3142,13 +3142,13 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         explicit_measurements["charge_density_change"] = accuracy_sample(density_changes.charge, "a0^(-3/2)");
         explicit_measurements["bsh_residual"] = accuracy_sample(bsh_residual, "dimensionless");
         explicit_measurements["energy_change"] = accuracy_sample(energy_change, "hartree");
-        if (explicit_targets.contains("delta_kinetic_energy")) {
+        if (explicit_targets.contains("absolute_kinetic_trace_change")) {
             auto trace_change = function_metric_trace_change(
                 function_residual_record(input_kinetic_diagonal).at("blocks"),
                 function_residual_record(comparison_kinetic_diagonal).at("blocks"));
             trace_change["units"] = "hartree";
             trace_change["quantity"] = "absolute_kinetic_trace_change";
-            explicit_measurements["delta_kinetic_energy"] = trace_change;
+            explicit_measurements["absolute_kinetic_trace_change"] = trace_change;
         }
         const auto explicit_accuracy = evaluate_explicit_criteria(explicit_measurements, explicit_targets);
         MADNESS_CHECK_THROW(explicit_accuracy.at("status") != "invalid", "invalid explicitly requested SCF accuracy measurement");

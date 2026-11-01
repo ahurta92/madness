@@ -15,12 +15,16 @@
   (DESIGN P1: the failure is on rank 0's file work only)."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import stat
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -58,7 +62,7 @@ def run(label, root, text=deck, resume=False):
 
 
 def result(root):
-    return json.loads((root / 'gs/results.json').read_text())
+    return named_records.stage_record(root / 'gs')
 
 
 def generations(root):
@@ -75,12 +79,12 @@ def generations(root):
 
 
 def rung(m):
-    return m['position']['rung']
+    return m['position']['protocol_step']
 
 
 def is_decision_point(m):
     return (m['position']['phase'] == 'final_properties_on_saved_orbitals'
-            or rung(m)['stop'] != 'in_progress')
+            or rung(m)['stop_reason'] != 'in_progress')
 
 
 def latest(root):
@@ -108,7 +112,7 @@ for row in history:
     assert {'measurements', 'energy', 'kinetic_trace', 'explicit_accuracy', 'configured_progress',
             'engine_check_passed'} <= set(row), sorted(row)
     for name in ('density_change', 'bsh_residual', 'energy_change', 'charge_density_change',
-                 'spin_density_change', 'delta_kinetic_energy'):
+                 'spin_density_change', 'absolute_kinetic_trace_change'):
         assert name in row['measurements'], (name, sorted(row['measurements']))
 samples = [(row['kinetic_trace']['sample']['threshold'], row['kinetic_trace']['sample']['iteration'])
            for row in history]
@@ -125,7 +129,7 @@ assert result(fresh)['checkpoint_warnings'] == []
 every3 = work / 'Every3KeepAll'
 log = run('every3-keep-all', every3, with_keys('checkpoint.every_iterations 3', 'checkpoint.keep_all true'))
 published = generations(every3)
-mid = [(rung(m)['index'], rung(m)['iterations_at_rung']) for m in published if not is_decision_point(m)]
+mid = [(rung(m)['index'], rung(m)['iterations_at_protocol_step']) for m in published if not is_decision_point(m)]
 # A rung that stops on iteration n publishes its in-progress samples 1..n-1.
 expected = [(r, i) for r in (1, 2) for i in range(1, lengths[r]) if i % 3 == 0]
 assert mid == expected, (mid, expected)
@@ -133,8 +137,8 @@ assert sum(is_decision_point(m) for m in published) == 3, [m['position'] for m i
 # The rung ends (kept here only because the deck keeps every generation).
 ends = [m for m in published if m['position']['phase'] == 'after_final_rotation']
 assert [rung(m)['index'] for m in ends] == [1, 2], [rung(m) for m in ends]
-assert [rung(m)['stop'] for m in ends] == ['converged', 'converged'], [rung(m) for m in ends]
-assert [rung(m)['iterations_at_rung'] for m in ends] == [lengths[1], lengths[2]], [rung(m) for m in ends]
+assert [rung(m)['stop_reason'] for m in ends] == ['converged', 'converged'], [rung(m) for m in ends]
+assert [rung(m)['iterations_at_protocol_step'] for m in ends] == [lengths[1], lengths[2]], [rung(m) for m in ends]
 settings = result(every3)['convergence_report']['convergence_settings']['checkpoints']
 assert settings['every_iterations'] == 3 and settings['keep_all'], settings
 assert settings['every_iterations_set_by'] == 'user' and settings['keep_all_set_by'] == 'user'
@@ -163,8 +167,8 @@ for m in ordered[[g['generation'] for g in ordered].index(chosen['generation']) 
 before = {m['generation'] for m in generations(inside)}
 run('resume-inside-rung2', inside, resume=True)
 record = result(inside)['continuation']
-done = rung(chosen)['iterations_at_rung']
-assert record['action'] == 'resumed' and record['rung']['index'] == 2, record
+done = rung(chosen)['iterations_at_protocol_step']
+assert record['action'] == 'resumed' and record['protocol_step']['index'] == 2, record
 assert record['summary'] == 'resumed at rung 2 (thresh 1e-06, k 8), iteration %d of that rung' % (done + 1), record
 assert result(inside)['status'] == 'completed'
 after = generations(inside)
@@ -175,7 +179,7 @@ assert chosen['generation'] not in names, sorted(names)
 assert len(after) == 1 and after[0]['generation'] not in before, sorted(names)
 assert after[0]['position']['phase'] == 'final_properties_on_saved_orbitals', after[0]['position']
 final = latest(inside)
-assert rung(final)['iterations_at_rung'] == done + rung(final)['iterations_this_run'], rung(final)
+assert rung(final)['iterations_at_protocol_step'] == done + rung(final)['iterations_this_run'], rung(final)
 report = final['metrics']['convergence_report']
 earlier = report['earlier_runs_iteration_history']
 assert len(earlier) == len(chosen['metrics']['convergence_report']['iteration_history']), len(earlier)

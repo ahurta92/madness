@@ -80,8 +80,10 @@ inline nlohmann::json fd_accuracy_measurements(const nlohmann::json& measurement
       density["reason"] = "invalid_density_measurement";
     }
   }
+  // D-106: the engine records the kinetic trace change as
+  // delta_kinetic_energy; the target names it by its quantity.
   if (measurements.contains("delta_kinetic_energy"))
-    result["delta_kinetic_energy"] = measurements.at("delta_kinetic_energy");
+    result["absolute_kinetic_trace_change"] = measurements.at("delta_kinetic_energy");
   if (measurements.contains("bsh_residual")) {
     const auto& aggregate = measurements.at("bsh_residual");
     json metric = aggregate;
@@ -134,6 +136,8 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
     const json definitions = {
         {"bsh_residual", {{"quantity", "maximum_raw_fixed_point_function_L2"}, {"units", "response_amplitude_L2_atomic_units"}}},
         {"charge_density_change", {{"quantity", "kernel_induced_charge_density_change_L2"}, {"units", "kernel_induced_density_L2_atomic_units"}}},
+        {"absolute_kinetic_trace_change", {{"quantity", "absolute_kinetic_trace_change"}, {"units", "hartree_times_response_amplitude_scale_squared"}}},
+        // D-106: a request saved before the rename.
         {"delta_kinetic_energy", {{"quantity", "absolute_kinetic_trace_change"}, {"units", "hartree_times_response_amplitude_scale_squared"}}}};
     for (const auto& target : targets.items()) {
       if (!definitions.contains(target.key()) || target.value().at("quantity") != definitions.at(target.key()).at("quantity") ||

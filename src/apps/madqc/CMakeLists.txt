@@ -102,6 +102,12 @@ if(BUILD_TESTING)
     COMMAND test_named_replay ${CMAKE_CURRENT_SOURCE_DIR}/test_named_replay_fixture.json)
   set_tests_properties(madness/test/madqc/test_named_replay/run
     PROPERTIES LABELS "unittests;short" TIMEOUT 60)
+  # D-106: the fixture captured before the record-key batch, replayed through
+  # the reader's upgrade of v1 records (old generations judged as before).
+  add_test(NAME madness/test/madqc/test_named_replay/v1
+    COMMAND test_named_replay ${CMAKE_CURRENT_SOURCE_DIR}/test_named_replay_fixture_v1.json)
+  set_tests_properties(madness/test/madqc/test_named_replay/v1
+    PROPERTIES LABELS "unittests;short" TIMEOUT 60)
   add_mad_executable(test_response_properties "test_response_properties.cc" "MADchem")
   add_test(NAME madness/test/madqc/test_response_properties/run COMMAND test_response_properties)
   set_tests_properties(madness/test/madqc/test_response_properties/run

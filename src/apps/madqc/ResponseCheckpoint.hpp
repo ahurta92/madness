@@ -2,6 +2,7 @@
 
 #include "../molresponse/solvers/function_kinetics.hpp"
 
+#include "ConvergenceReport.hpp"
 #include "NamedStages.hpp"
 #include "ResponseProperties.hpp"
 #include "Sha256.hpp"
@@ -102,7 +103,7 @@ response_convergence_settings(const Stage& stage, double final_thresh) {
        "compares each leg's BSH residual against " + text(limits.bsh_residual)
            + " + " + text(limits.rtol) + " x ||x||"},
       {"kinetic trace change", "accuracy.kinetic_trace_change",
-       "delta_kinetic_energy", "absolute_kinetic_trace_change",
+       "absolute_kinetic_trace_change", "absolute_kinetic_trace_change",
        "hartree_times_response_amplitude_scale_squared",
        "has no kinetic term"}};
   const auto targets = molresponse_v3::fd_requested_accuracy_targets(rp);
@@ -371,9 +372,9 @@ requested_bundle(const json& request) {
 // the record lacks stays unavailable.
 [[nodiscard]] inline json kind_measurements(const std::string& kind) {
   if (kind == "excited_states")
-    return json::array({"omega_residual"});
-  return json::array(
-      {"charge_density_change", "bsh_residual", "delta_kinetic_energy"});
+    return json::array({"excitation_energy_change"});
+  return json::array({"charge_density_change", "bsh_residual",
+                      "absolute_kinetic_trace_change"});
 }
 
 // D-082: a state record's saved-state measurements under the names of the
@@ -381,7 +382,7 @@ requested_bundle(const json& request) {
 // a bundle's computed from its engine row (bundle_saved_measurements; a
 // record without engine_measurements gives none).
 [[nodiscard]] inline json record_measurements(const json& record) {
-  if (record.value("kind", "fd") == "excited_states")
+  if (record.value("kind", "") == "excited_states")
     return bundle_saved_measurements(
         record.value("engine_measurements", json::object()));
   return molresponse_v3::fd_accuracy_measurements(
@@ -432,24 +433,29 @@ bundle_engine_limits(const Stage& stage, double final_thresh) {
   policy.dconv_user = stage.params.get<ResponseParameters>().dconv();
   const auto limits = policy.effective_for_thresh(final_thresh);
   return {{"density_residual", limits.density_residual, 0.0, false},
-          {"omega_residual", limits.omega_residual, 0.0, false}};
+          {"excitation_energy_change", limits.omega_residual, 0.0, false}};
 }
 
 // A saved bundle's engine-check sample: per measurement the largest value
 // over the roots, and the root it came from; null when a root has none yet.
 // The phase is the engine's (D-059): the density change between the step's
 // input densities, the eigenvalue change across the step; null with no
-// value (D-063).
+// value (D-063). The rows take the record's names (D-106): the engine's
+// omega_residual is the excitation_energy_change.
 [[nodiscard]] inline json bundle_measurements(const json& bundle) {
   json measurements = json::object();
-  const std::map<std::string, const char*> phases
-      = {{"density_residual", "solver_step_input_before_acceleration"},
-         {"omega_residual", "solver_step_output"}};
-  for (const char* name : {"density_residual", "omega_residual"}) {
+  struct Row {
+    const char *name, *engine, *phase;
+  };
+  static const std::array<Row, 2> rows = {
+      {{"density_residual", "density_residual",
+        "solver_step_input_before_acceleration"},
+       {"excitation_energy_change", "omega_residual", "solver_step_output"}}};
+  for (const auto& [name, engine, phase] : rows) {
     json worst = {{"value", nullptr}, {"availability", "unavailable"}};
     bool every_root = true;
     for (const auto& root : bundle.value("roots", json::array())) {
-      const auto value = root.value(name, json());
+      const auto value = root.value(engine, json());
       if (!value.is_number()) {
         every_root = false;
         break;
@@ -462,8 +468,7 @@ bundle_engine_limits(const Stage& stage, double final_thresh) {
     }
     if (!every_root)
       worst = {{"value", nullptr}, {"availability", "unavailable"}};
-    worst["phase"]
-        = worst.at("value").is_null() ? json(nullptr) : json(phases.at(name));
+    worst["phase"] = worst.at("value").is_null() ? json(nullptr) : json(phase);
     measurements[name] = std::move(worst);
   }
   return measurements;
@@ -601,6 +606,7 @@ class ResponseCheckpoint {
   Manifest latest_;
   std::vector<std::string> attempt_copies_;
   json whole_load_;
+  json reference_evidence_;
   // S5: the seed block of a seeded stage (null when unseeded).
   json seed_ = nullptr;
   bool restored_ = false, loaded_ = false;
@@ -1006,9 +1012,21 @@ public:
                    {"decided_by", cv::to_string(settings.decider)},
                    {"convergence_settings", cv::to_json(settings)}};
     if (analyzed)
-      report["convergence_outcome"] = cv::outcome_to_json(
+      report["convergence_outcome"] = cv::outcome_record(
           settings,
           response_saved_outcomes(metadata, request_final_key(request)));
+    // D-105: the assembled report body, once, here: what the stage knew of
+    // its reference, and each leg's measurements and histories (the
+    // generation names itself, so no state_id is copied).
+    if (sample.contains("reference_evidence"))
+      report["reference"] = sample.at("reference_evidence");
+    auto body = response_convergence_report(metadata, "", json());
+    for (auto& channel : body["channels"]) {
+      channel.erase("state_id");
+      if (channel.contains("saved_state_validation"))
+        channel["saved_state_validation"].erase("state_id");
+    }
+    report["channels"] = std::move(body["channels"]);
     if (sample.contains("verdict")) {
       json accuracy = json::object();
       for (const auto& state : sample.at("verdict").at("states"))
@@ -1049,11 +1067,12 @@ public:
           {{"key",
             state_key(perturbation.description(), key,
                       molresponse_v3::ResponseMetadata::freq_key(frequency))},
-           {"rung", rung},
-           {"measurements", kind_measurements("fd")}});
+           {"protocol_step", rung},
+           {"measurements",
+            kind_measurements("frequency_dependent_response")}});
     if (const auto bundle = requested_bundle(request))
       states.push_back({{"key", bundle_key(bundle->id, key)},
-                        {"rung", rung},
+                        {"protocol_step", rung},
                         {"measurements", kind_measurements("excited_states")}});
     return states;
   }
@@ -1377,7 +1396,7 @@ public:
     // totals so far; and the plans, as the engine takes them.
     for (const auto& record : records)
       totals_.previous[record.at("key").get<std::string>()]
-          = record.at("iterations_at_rung").get<int>();
+          = record.at("iterations_at_protocol_step").get<int>();
     plans_ = response_engine_plans(*plans);
     totals_.resumed = plans_.resumed;
     // The engine's state entries are copied as saved (D7, D-016); the plans
@@ -1425,6 +1444,11 @@ public:
   const Manifest& latest() const { return latest_; }
   // D-094: the record of a stage loaded whole (null otherwise).
   [[nodiscard]] const json& whole_load() const { return whole_load_; }
+  // D-105: what this stage records about its reference, kept in each
+  // manifest's report.
+  void set_reference_evidence(json evidence) {
+    reference_evidence_ = std::move(evidence);
+  }
   // D-090: the archive shards the load copied into the attempt.
   [[nodiscard]] const std::vector<std::string>& attempt_copies() const {
     return attempt_copies_;
@@ -1544,6 +1568,8 @@ private:
         {"plans", plans_.records},
         {"bundle_verdicts",
          {{"loaded", loaded_}, {"planner_key", planner_bundle_key()}}}};
+    if (!reference_evidence_.is_null())
+      write.publish_sample["reference_evidence"] = reference_evidence_;
     if (!seed_.is_null())
       write.publish_sample["seed"] = seed_;
     write.iterations_this_run = iterations;
@@ -1650,7 +1676,8 @@ inline json response_request(const Stage& stage) {
   // written, so a request without econv is the one stored before.
   if (const auto& omega = stage.excited_states.omega_target)
     request["excited_state_targets"]
-        = {{"omega_residual", {{"value", *omega}, {"units", "hartree"}}}};
+        = {{"excitation_energy_change",
+            {{"value", *omega}, {"units", "hartree"}}}};
   // Who decides convergence (B8); reuse and property eligibility follow it.
   request["decided_by"] = stage.params.get<ResponseParameters>().get<bool>(
                               madness::convergence::use_default_criteria_key)
@@ -1700,20 +1727,19 @@ inline json response_state_records(const json& metadata,
                                                        rung.key(), point.key());
         const int total
             = iterations_across_runs(totals, key, e.value("iter", 0));
-        std::ostringstream frequency;
-        frequency << std::setprecision(17) << e.at("freq").get<double>();
         records.push_back(
             {{"schema", state_schema},
              {"key", key},
-             {"kind", "fd"},
-             {"identity", channel.key() + "|" + frequency.str()},
+             {"kind", "frequency_dependent_response"},
+             {"identity", frequency_dependent_identity(
+                              channel.key(), e.at("freq").get<double>())},
              {"perturbation", channel.key()},
              {"frequency", e.at("freq")},
              {"reference_generation", reference_generation},
-             {"rung",
+             {"protocol_step",
               {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
-             {"iterations_at_rung", total},
-             {"stop", response_stop(e)},
+             {"iterations_at_protocol_step", total},
+             {"stop_reason", response_stop(e)},
              {"diverged", e.value("diverged", false)},
              {"decided_by", e.value("checkpoint_decided_by", "engine_check")},
              {"engine_measurements",
@@ -1739,7 +1765,7 @@ inline json response_state_records(const json& metadata,
            {"locked", root.value("locked", false)},
            {"stalled", root.value("stalled", false)},
            {"density_residual", root.value("density_residual", json())},
-           {"omega_residual", root.value("omega_residual", json())}});
+           {"excitation_energy_change", root.value("omega_residual", json())}});
     records.push_back(
         {{"schema", state_schema},
          {"key", key},
@@ -1748,12 +1774,13 @@ inline json response_state_records(const json& metadata,
          {"perturbation", id},
          {"frequency", nullptr},
          {"reference_generation", reference_generation},
-         {"rung", {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
-         {"iterations_at_rung",
+         {"protocol_step",
+          {{"thresh", protocol.at("thresh")}, {"k", protocol.at("k")}}},
+         {"iterations_at_protocol_step",
           iterations_across_runs(totals, key, e.value("iter", 0))},
-         {"stop", e.contains("stop_reason")
-                      ? e.at("stop_reason").get<std::string>()
-                      : response_stop(e)},
+         {"stop_reason", e.contains("stop_reason")
+                             ? e.at("stop_reason").get<std::string>()
+                             : response_stop(e)},
          {"diverged", e.value("diverged", false)},
          {"decided_by", e.value("decided_by", "engine_check")},
          {"engine_measurements", bundle_measurements(e)},
@@ -1787,7 +1814,8 @@ inline StagePlans plan_response_states(const Stage& stage,
   // D-082: each state is planned on the written targets its kind has rows
   // for, the set the shared verdict judges (requested_states).
   const auto stage_settings = request.settings;
-  request.settings = targets_of_kind(stage_settings, kind_measurements("fd"));
+  request.settings = targets_of_kind(
+      stage_settings, kind_measurements("frequency_dependent_response"));
   // S5 (R4's wording): a state that starts fresh in a seeded stage takes its
   // starting guess from the Dalton seed; the plan says so.
   const auto seeded = [&](madness::planning::LadderPlan plan) {
@@ -1799,10 +1827,8 @@ inline StagePlans plan_response_states(const Stage& stage,
   };
   for (const auto& [perturbation, frequency] :
        response_needs(stage_request, natom).legs) {
-    std::ostringstream identity;
-    identity << perturbation.description() << '|' << std::setprecision(17)
-             << frequency;
-    request.identity = identity.str();
+    request.identity
+        = frequency_dependent_identity(perturbation.description(), frequency);
     const auto own = ResponseCheckpoint::own_state(
         records, request.identity, requested_rungs, request.ladder.back());
     const auto seed = own ? std::nullopt
@@ -1842,8 +1868,8 @@ inline StagePlans plan_response_states(const Stage& stage,
         if (record.value("identity", "") == bundle->id
             && record.value("kind", "") == "excited_states"
             && madness::scf_continuation::same_rung(
-                {record.at("rung").at("thresh").get<double>(),
-                 record.at("rung").at("k").get<int>()},
+                {record.at("protocol_step").at("thresh").get<double>(),
+                 record.at("protocol_step").at("k").get<int>()},
                 request.ladder.back()))
           for (const auto& root : record.value("roots", json::array()))
             if (root.value("stalled", false))
@@ -1929,6 +1955,7 @@ response_generation_records(const Stage&, int,
     records = response_state_records(manifest.numerical.at("engine_metadata"),
                                      manifest.reference.value("generation", ""),
                                      {});
-  return records;
+  // D-106: older generations' records in the current keys.
+  return upgrade_state_records(records);
 }
 } // namespace named_stages

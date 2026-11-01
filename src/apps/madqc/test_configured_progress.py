@@ -2,12 +2,16 @@
 """Explicit stall controls separate supplied-rung progress from accuracy."""
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
@@ -41,7 +45,7 @@ def run(label, text, stop_reason):
         proc = subprocess.run(launch + [binary, str(inp), '--prefix=' + str(root)],
                               cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=500)
     assert proc.returncode != 0  # unmet accuracy is never successful convergence
-    stage = json.loads((root / 'results.json').read_text())['stages'][0]
+    stage = named_records.stages(root)[0]
     assert stage['status'] == 'unconverged'
     store = root / 'gs/checkpoints'
     manifest = json.loads((store / json.loads((store / 'latest').read_text())['generation'] / 'manifest.json').read_text())

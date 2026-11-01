@@ -89,8 +89,8 @@ moldft_convergence_settings(const std::string& stage,
        "has no energy term",
        "engine default econv " + text(cp.econv()) + " is not a target (D8)"},
       {"kinetic trace change", "accuracy.kinetic_trace_change",
-       "delta_kinetic_energy", "absolute_kinetic_trace_change", "hartree",
-       "has no kinetic term", ""}};
+       "absolute_kinetic_trace_change", "absolute_kinetic_trace_change",
+       "hartree", "has no kinetic term", ""}};
   const auto targets = madness::SCF::requested_targets(cp);
   for (const auto& row : requested)
     settings.metrics.push_back(convergence::requested_metric(row, targets));
@@ -212,12 +212,19 @@ requested_ladder(const CalculationParameters& parameters) {
 // reason, with no iterations counted.
 [[nodiscard]] inline continuation::SavedRung
 saved_rung(const madness::checkpoint::Manifest& manifest) {
-  if (manifest.position.contains("rung")) {
-    const auto& rung = manifest.position.at("rung");
+  // D-106: position.protocol_step, or a generation's before it,
+  // position.rung with its v1 keys.
+  const auto& position = manifest.position;
+  if (position.contains("protocol_step") || position.contains("rung")) {
+    const auto& rung = position.contains("protocol_step")
+                           ? position.at("protocol_step")
+                           : position.at("rung");
     return {{rung.at("thresh").get<double>(), rung.at("k").get<int>()},
-            rung.at("iterations_at_rung").get<int>(),
+            rung.contains("iterations_at_protocol_step")
+                ? rung.at("iterations_at_protocol_step").get<int>()
+                : rung.at("iterations_at_rung").get<int>(),
             continuation::rung_stop_from_string(
-                rung.at("stop").get<std::string>())};
+                rung.value("stop_reason", rung.value("stop", "")))};
   }
   const auto phase = manifest.position.value("phase", "");
   const bool finished = manifest.stop_reason == "converged"
@@ -254,6 +261,15 @@ saved_state(const madness::checkpoint::Manifest& manifest) {
   state.saved_measurements
       = report.value("saved_state_validation", json::object())
             .value("measurements", json::object());
+  // D-106: a generation written before the rename keeps the kinetic trace
+  // change under its earlier name; it is read under the current one.
+  for (auto* measurements :
+       {&state.engine_measurements, &state.saved_measurements})
+    if (measurements->contains("delta_kinetic_energy")) {
+      (*measurements)["absolute_kinetic_trace_change"]
+          = measurements->at("delta_kinetic_energy");
+      measurements->erase("delta_kinetic_energy");
+    }
   return state;
 }
 
@@ -266,17 +282,18 @@ saved_state(const madness::checkpoint::Manifest& manifest) {
 moldft_state_record(const madness::checkpoint::Manifest& manifest,
                     const std::string& decided_by) {
   const auto state = saved_state(manifest);
-  return {{"schema", state_schema},
-          {"key", "ground_state"},
-          {"kind", "ground_state"},
-          {"identity", state.identity},
-          {"rung", {{"thresh", state.rung.thresh}, {"k", state.rung.k}}},
-          {"iterations_at_rung", state.iterations_at_rung},
-          {"stop", convergence::to_string(state.stop)},
-          {"diverged", false}, // moldft has no divergence exit
-          {"decided_by", decided_by},
-          {"engine_measurements", state.engine_measurements},
-          {"saved_measurements", state.saved_measurements}};
+  return {
+      {"schema", state_schema},
+      {"key", "ground_state"},
+      {"kind", "ground_state"},
+      {"identity", state.identity},
+      {"protocol_step", {{"thresh", state.rung.thresh}, {"k", state.rung.k}}},
+      {"iterations_at_protocol_step", state.iterations_at_rung},
+      {"stop_reason", convergence::to_string(state.stop)},
+      {"diverged", false}, // moldft has no divergence exit
+      {"decided_by", decided_by},
+      {"engine_measurements", state.engine_measurements},
+      {"saved_measurements", state.saved_measurements}};
 }
 
 // B6, the moldft AppSpec's state_records (S4b): the generation's records,
@@ -286,7 +303,7 @@ moldft_state_record(const madness::checkpoint::Manifest& manifest,
 moldft_state_records(const Stage&, int,
                      const madness::checkpoint::Manifest& manifest) {
   if (manifest.numerical.contains("states"))
-    return manifest.numerical.at("states");
+    return upgrade_state_records(manifest.numerical.at("states"));
   return json::array({moldft_state_record(
       manifest,
       manifest.position.contains("reused_from") ? "planner" : "engine_check")});
@@ -506,16 +523,17 @@ moldft_ladder_request(const Stage& stage, int natom,
                      <= econv_target.get<double>())
               : json(nullptr);
   }
-  evidence["delta_kinetic_energy"]
+  evidence["absolute_kinetic_trace_change"]
       = measured(value("kinetic_change"), "hartree",
                  "successive_iteration_kinetic_evaluations", false, nullptr,
                  nullptr, iteration);
   if (!has_previous)
     carried["previous_kinetic_blocks"] = json::object();
-  evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(
-      current_blocks,
-      carried.value("previous_kinetic_blocks", json::object())));
-  evidence["delta_kinetic_energy"]["quantity"]
+  evidence["absolute_kinetic_trace_change"].update(
+      madness::function_metric_trace_change(
+          current_blocks,
+          carried.value("previous_kinetic_blocks", json::object())));
+  evidence["absolute_kinetic_trace_change"]["quantity"]
       = "absolute_kinetic_trace_change";
   carried["previous_kinetic_blocks"] = current_blocks;
   // B2: each row keeps the raw total energy of its sample, so every change
@@ -582,9 +600,9 @@ moldft_ladder_request(const Stage& stage, int natom,
   json record = {{"index", index + 1},
                  {"thresh", rung.thresh},
                  {"k", rung.k},
-                 {"iterations_at_rung", earlier + this_run},
+                 {"iterations_at_protocol_step", earlier + this_run},
                  {"iterations_this_run", this_run},
-                 {"stop", stop}};
+                 {"stop_reason", stop}};
   const bool publish = madness::checkpoint::publish_now(
       stop != continuation::to_string(continuation::RungStop::in_progress),
       earlier + this_run, this_run,
@@ -605,8 +623,10 @@ moldft_stop_reason(bool converged, bool evaluated, const json& rung) {
     return "converged";
   if (!evaluated)
     return "in_progress";
-  const auto stop = rung.is_null() ? std::string("iteration_limit")
-                                   : rung.value("stop", "iteration_limit");
+  const auto stop
+      = rung.is_null()
+            ? std::string("iteration_limit")
+            : rung.value("stop_reason", rung.value("stop", "iteration_limit"));
   if (stop == "stalled")
     return "stalled";
   if (stop == "converged")
@@ -656,6 +676,20 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
       m.stop_reason = "converged";
     m.position["previous_generation"] = source;
     m.position["reused_from"] = source;
+    // D-106: the new generation writes the current keys; a source written
+    // before them carries its rung record as position.rung.
+    if (m.position.contains("rung")) {
+      auto step = m.position.at("rung");
+      for (const auto& [from, to] :
+           {std::pair{"iterations_at_rung", "iterations_at_protocol_step"},
+            std::pair{"stop", "stop_reason"}})
+        if (step.contains(from)) {
+          step[to] = step.at(from);
+          step.erase(from);
+        }
+      m.position["protocol_step"] = std::move(step);
+      m.position.erase("rung");
+    }
     m.targets = targets(m.numerical.at("threshold").get<double>());
     m.metrics["convergence_report"]["reuse_verdict"]
         = {{"work", "loaded"},
@@ -690,9 +724,9 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
   m.metrics = sample.at("metrics");
   m.targets = targets(threshold);
   const auto& position = m.position;
-  m.stop_reason = moldft_stop_reason(sample.at("converged").get<bool>(),
-                                     sample.at("evaluated").get<bool>(),
-                                     position.value("rung", json()));
+  m.stop_reason = moldft_stop_reason(
+      sample.at("converged").get<bool>(), sample.at("evaluated").get<bool>(),
+      position.value("protocol_step", position.value("rung", json())));
   m.properties = sample.at("properties");
   m.numerical["states"] = json::array({moldft_state_record(m, "engine_check")});
   return m;
@@ -705,7 +739,8 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
       = requested_ladder(stage.params.get<CalculationParameters>()).back();
   return json::array(
       {{{"key", "ground_state"},
-        {"rung", {{"thresh", final_rung.thresh}, {"k", final_rung.k}}}}});
+        {"protocol_step",
+         {{"thresh", final_rung.thresh}, {"k", final_rung.k}}}}});
 }
 
 // B1, B8 (S4d1), the moldft AppSpec's saved_measurements: the record's
@@ -725,6 +760,15 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
 republish_on_load(const std::string& stop_reason,
                   const std::vector<std::string>& unmet) {
   return stop_reason != "converged" && unmet.empty();
+}
+
+// D-106: the kinetic trace change of a measurement record, under its name
+// or, in a generation written before D-106, the earlier one.
+[[nodiscard]] inline const json&
+kinetic_trace_change(const json& measurements) {
+  return measurements.contains("absolute_kinetic_trace_change")
+             ? measurements.at("absolute_kinetic_trace_change")
+             : measurements.at("delta_kinetic_energy");
 }
 
 class MoldftCheckpoint {
@@ -877,7 +921,8 @@ class MoldftCheckpoint {
           require(expected.at("action") != "stop_invalid" && expected == progress,
                   "invalid ground-state measurement: configured progress");
         }
-        check_change(iteration.at("measurements").at("delta_kinetic_energy"), trace.at("blocks"), previous);
+        check_change(kinetic_trace_change(iteration.at("measurements")),
+                     trace.at("blocks"), previous);
         previous = trace.at("blocks");
         previous_sample = sample;
       }
@@ -921,7 +966,8 @@ class MoldftCheckpoint {
                 "invalid ground-state measurement: comparison history mismatch");
         previous = comparison.at("kinetic_trace").at("blocks");
       }
-      check_change(saved.at("measurements").at("delta_kinetic_energy"), saved.at("kinetic_trace").at("blocks"), previous);
+      check_change(kinetic_trace_change(saved.at("measurements")),
+                   saved.at("kinetic_trace").at("blocks"), previous);
     }
     validate(report.at("measurements"));
     if (report.contains("saved_state_validation"))
@@ -945,8 +991,9 @@ public:
     // check on both sides; publish_generation requires it): one current
     // record, the one this generation's own rung record and report give.
     if (m.numerical.contains("states")) {
-      const auto& states = m.numerical.at("states");
-      validate_state_records(states);
+      validate_state_records(m.numerical.at("states"));
+      // D-106: a record of either schema, read in the current one.
+      const auto states = upgrade_state_records(m.numerical.at("states"));
       require(states.size() == 1 && states[0].at("schema") == state_schema,
               "the ground state needs one " + std::string(state_schema)
                   + " record");
@@ -1138,7 +1185,7 @@ public:
               {{"iteration", step.iteration},
                {"phase", step.final_rotation ? "after_final_rotation"
                                              : "after_orbital_update"},
-               {"rung", current_rung_}},
+               {"protocol_step", current_rung_}},
               false);
   }
 
@@ -1201,7 +1248,7 @@ public:
          comparable ? std::optional<double>(
                           std::abs(energy - comparison_->comparison_energy))
                     : std::nullopt},
-        {"delta_kinetic_energy",
+        {"absolute_kinetic_trace_change",
          comparable ? std::optional<double>(std::abs(
                           evaluation.kinetic - comparison_->comparison_kinetic))
                     : std::nullopt}};
@@ -1231,10 +1278,12 @@ public:
     auto saved_trace = trace_record(evaluation.kinetic_diagonal);
     saved_trace["phase"] = "saved_orbitals_before_archive";
     const auto comparison_blocks = comparable ? kinetic_blocks(comparison_->comparison_kinetic_diagonal) : json::object();
-    evidence["delta_kinetic_energy"].update(madness::function_metric_trace_change(
-        saved_trace.at("blocks"), comparison_blocks));
-    evidence["delta_kinetic_energy"]["valid_for_saved_state"] =
-        evidence["delta_kinetic_energy"].at("availability") == "measured";
+    evidence["absolute_kinetic_trace_change"].update(
+        madness::function_metric_trace_change(saved_trace.at("blocks"),
+                                              comparison_blocks));
+    evidence["absolute_kinetic_trace_change"]["valid_for_saved_state"]
+        = evidence["absolute_kinetic_trace_change"].at("availability")
+          == "measured";
     // Replace historical components with evidence from the actual saved orbitals.
     evidence["bsh_residual"]["per_function"] = madness::function_residual_record(evaluation.function_residuals);
     auto comparison_trace = comparable ? trace_record(comparison_->comparison_kinetic_diagonal) : json(nullptr);
@@ -1257,10 +1306,10 @@ public:
     report["decided_by"] = convergence::to_string(settings_.decider);
     report["convergence_settings"] = convergence::to_json(settings_);
     report["convergence_outcome"]
-        = convergence::outcome_to_json(settings_, saved_outcomes(evidence));
+        = convergence::outcome_record(settings_, saved_outcomes(evidence));
     json position = {{"phase", "final_properties_on_saved_orbitals"}};
     if (!current_rung_.is_null())
-      position["rung"] = current_rung_;
+      position["protocol_step"] = current_rung_;
     // The skeleton forms the verdict from this generation's state record
     // and the publish takes it (D-077).
     publish(scf, false, properties, metrics, position, true, true);

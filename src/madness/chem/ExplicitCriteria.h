@@ -81,7 +81,7 @@ nlohmann::json requested_accuracy_targets(const Parameters& parameters,
     std::vector<Definition> definitions
         = {{density_keyword, "charge_density_change", density_units},
            {"accuracy.bsh_residual", "bsh_residual", bsh_units},
-           {"accuracy.kinetic_trace_change", "delta_kinetic_energy",
+           {"accuracy.kinetic_trace_change", "absolute_kinetic_trace_change",
             kinetic_units}};
     if (!energy_keyword.empty())
         definitions.push_back({energy_keyword, "energy_change", "hartree"});
@@ -96,8 +96,8 @@ nlohmann::json requested_accuracy_targets(const Parameters& parameters,
         targets[definition.metric]
             = {{"value", value}, {"units", definition.units}};
     }
-    if (targets.contains("delta_kinetic_energy"))
-        targets["delta_kinetic_energy"]["quantity"] = "absolute_kinetic_trace_change";
+    if (targets.contains("absolute_kinetic_trace_change"))
+        targets["absolute_kinetic_trace_change"]["quantity"] = "absolute_kinetic_trace_change";
     return targets;
 }
 

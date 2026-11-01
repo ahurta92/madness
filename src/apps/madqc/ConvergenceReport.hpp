@@ -23,9 +23,16 @@ inline nlohmann::json ground_convergence_report(const nlohmann::json& metrics,
   report["outcome"] = converged ? "converged" : "unfinished";
   if (report.contains("saved_state_validation"))
     report["saved_state_validation"]["state_id"] = state_id;
-  for (const char* name : {"density_change", "bsh_residual", "energy_change", "delta_kinetic_energy"})
-    if (!report["measurements"].contains(name))
-      report["measurements"][name] = unavailable_measurement("checkpoint_predates_measurement_reporting");
+  // D-106: a generation written before the rename keeps the kinetic trace
+  // change under its earlier name.
+  auto& measurements = report["measurements"];
+  if (measurements.contains("delta_kinetic_energy")) {
+    measurements["absolute_kinetic_trace_change"] = measurements.at("delta_kinetic_energy");
+    measurements.erase("delta_kinetic_energy");
+  }
+  for (const char* name : {"density_change", "bsh_residual", "energy_change", "absolute_kinetic_trace_change"})
+    if (!measurements.contains(name))
+      measurements[name] = unavailable_measurement("checkpoint_predates_measurement_reporting");
   return report;
 }
 
@@ -56,7 +63,7 @@ inline nlohmann::json response_convergence_report(const nlohmann::json& metadata
         const char* outcome = entry.value("diverged", false) ? "invalid"
             : converged ? "converged" : entry.value("stalled", false) ? "stalled" : "unfinished";
         report["channels"].push_back({{"channel", channel.key()}, {"frequency", entry.at("freq")},
-            {"protocol", metadata.at("protocols").at(rung.key())}, {"archive", entry.at("archive")},
+            {"protocol_step", metadata.at("protocols").at(rung.key())}, {"archive", entry.at("archive")},
             {"state_id", state_id}, {"outcome", outcome}, {"iterations_at_save", entry.at("iter")},
             {"convention", entry.value("measurement_convention", json::object())},
             {"measurements", measurements}});

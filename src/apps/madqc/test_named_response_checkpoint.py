@@ -3,11 +3,15 @@
 import argparse
 import hashlib
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -52,7 +56,7 @@ def published(root, stage='optical'):
     return directory, json.loads((directory / 'manifest.json').read_text())
 
 def result(root):
-    return json.loads((root / 'optical/results.json').read_text())
+    return named_records.stage_record(root / 'optical')
 
 def hashes(directory):
     return {str(f.relative_to(directory)): hashlib.sha256(f.read_bytes()).hexdigest()
@@ -129,7 +133,7 @@ assert hashes(generation) == original
 added_states = {s['frequency']: s for s in result(fresh)['continuation']['states']}
 assert added_states[0.0]['action'] == 'loaded'
 assert added_states[0.02]['action'] == 'seeded' and added_states[0.02]['seed_frequency'] == 0.0
-assert added_states[0.02]['rung']['index'] == 1
+assert added_states[0.02]['protocol_step']['index'] == 1
 assert [i['work'] for i in result(fresh)['work_items']][0] == 'seeded'
 print('add-frequency iterations (seeded from omega 0):',
       [(i['protocol'], i['iterations']) for i in result(fresh)['work_items']], flush=True)
@@ -159,8 +163,8 @@ first_rung = selected['position']['protocol']
 (store / 'latest').write_text(json.dumps({'generation': selected['generation']}))
 run('per-state', per_state, deck, resume=True)
 states = {s['frequency']: s for s in result(per_state)['continuation']['states']}
-assert states[0.0]['action'] == 'loaded' and states[0.0]['rung']['index'] == 2
-assert states[0.02]['action'] == 'resumed' and states[0.02]['rung']['index'] == 2
+assert states[0.0]['action'] == 'loaded' and states[0.0]['protocol_step']['index'] == 2
+assert states[0.02]['action'] == 'resumed' and states[0.02]['protocol_step']['index'] == 2
 items = result(per_state)['work_items']
 assert [(i['frequency'], i['protocol'] != first_rung) for i in items] == [(0.02, True)]
 assert abs(alpha(per_state) - alpha(fresh)) < 1e-12
@@ -301,7 +305,7 @@ ground, response_text = one.split('molresponse optical')
 response_text = response_text.replace('[1e-4, 1e-6]', '[1e-4]')
 run('independent-stages', twins, ground + 'molresponse first' + response_text +
     '\nmolresponse second' + response_text, resume=True)
-rows = json.loads((twins / 'results.json').read_text())['stages']
+rows = named_records.stages(twins)
 assert len({row['state_id'] for row in rows}) == len(rows)
 
 # D-025: an excited-state bundle is one state per rung. The generation holds
@@ -309,7 +313,7 @@ assert len({row['state_id'] for row in rows}) == len(rows)
 # analysis and says who decided; another root count starts fresh.
 es_deck = (Path(a.source) / 'named_h2_es_tda.in').read_text()
 def es_record(root):
-    stage = json.loads((root / 'excited/results.json').read_text())
+    stage = named_records.stage_record(root / 'excited')
     return stage, stage['properties']['excited_states']
 es = work / 'ExcitedStates'
 run('es-fresh', es, es_deck)
@@ -358,7 +362,7 @@ single_copy(retained)
 assert result(retained)['checkpoint_warnings'] == []
 run('retained-added', retained, default_deck, resume=True)
 single_copy(retained)
-assert result(retained)['convergence_settings']['checkpoints']['keep_all'] is False
+assert result(retained)['convergence_report']['convergence_settings']['checkpoints']['keep_all'] is False
 
 summary = {name: {'iterations': result(root)['iterations_this_run'],
                   'work': result(root)['work'], 'alpha_zz': alpha(root)}

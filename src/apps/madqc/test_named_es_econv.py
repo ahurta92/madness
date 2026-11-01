@@ -6,10 +6,14 @@ same with and without it, and on a stage without excited_states it is refused.
 """
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -46,7 +50,7 @@ def run(label, root, text, expect=0):
 
 
 def excited(root):
-    stages = {s['stage']: s for s in json.loads((root / 'results.json').read_text())['stages']}
+    stages = {s['stage']: s for s in named_records.stages(root)}
     return stages['excited']
 
 
@@ -58,15 +62,15 @@ plain = work / 'WithoutEconv'
 run('without-econv', plain, without_econv)
 es_with, es_without = excited(fresh)['properties']['excited_states'], excited(plain)['properties']['excited_states']
 assert es_with['converged'] and es_without['converged'], (es_with, es_without)
-assert es_with['iterations_at_rung'] == es_without['iterations_at_rung'], (es_with, es_without)
+assert es_with['iterations_at_protocol_step'] == es_without['iterations_at_protocol_step'], (es_with, es_without)
 assert excited(fresh)['iterations_this_run'] == excited(plain)['iterations_this_run']
 for root_with, root_without in zip(es_with['roots'], es_without['roots']):
     assert root_with['root_id'] == root_without['root_id']
     assert abs(root_with['omega'] - root_without['omega']) < 1e-10, (root_with, root_without)
     # The last step's eigenvalue change is a difference of two omegas, so it
     # carries their roundoff; the same tolerance as omega itself.
-    assert abs(root_with['omega_residual'] - root_without['omega_residual']) < 1e-10, (root_with, root_without)
-    assert root_with['omega_residual'] <= 1e-6, root_with  # H2 TDA ends far inside econv 1e-6
+    assert abs(root_with['excitation_energy_change'] - root_without['excitation_energy_change']) < 1e-10, (root_with, root_without)
+    assert root_with['excitation_energy_change'] <= 1e-6, root_with  # H2 TDA ends far inside econv 1e-6
 
 # D-096: the engine's screen at the default level (print_level unwritten,
 # Normal): the first iteration's density change is unavailable, not zero;
@@ -85,20 +89,20 @@ for noise in ('[SAVE]', 'MEMORY_HWM', '[CALC] run_protocol', '[CALC] fd solve', 
 block = es_with['requested_omega_target']
 assert block['target'] == 1e-6 and block['set_by'] == 'user', block
 assert block['units'] == 'hartree' and block['relation'] == 'less_than_or_equal', block
-assert block['worst']['value'] == max(r['omega_residual'] for r in es_with['roots']), block
+assert block['worst']['value'] == max(r['excitation_energy_change'] for r in es_with['roots']), block
 assert block['worst']['root_id'] in {r['root_id'] for r in es_with['roots']}, block
-assert all(r['omega_residual_within_requested'] is True for r in es_with['roots']), es_with['roots']
+assert all(r['excitation_energy_change_within_requested'] is True for r in es_with['roots']), es_with['roots']
 assert not {'status', 'enforced', 'outcome'} & set(block), block
 pointer = block['verdict_in']
 assert pointer['path'] == 'convergence_report.requested_accuracy', pointer
-assert pointer['criterion'] == 'omega_residual', pointer
+assert pointer['criterion'] == 'excitation_energy_change', pointer
 # S4d2: one requested_accuracy entry per state key on a response stage; the
 # pointer names the bundle's entry (its status is the shared verdict's).
 accuracy = excited(fresh)['convergence_report']['requested_accuracy']
 assert pointer['state_key'] in accuracy, (pointer, sorted(accuracy))
 plain_block = es_without['requested_omega_target']
 assert plain_block['target'] is None and plain_block['set_by'] == 'not_set', plain_block
-assert all('omega_residual_within_requested' not in r for r in es_without['roots'])
+assert all('excitation_energy_change_within_requested' not in r for r in es_without['roots'])
 
 # D-092: the same deck in criteria mode. The bundle's solve stops on the
 # engine check in both modes, so it ends at the same iteration with the same
@@ -116,7 +120,7 @@ pointer_crit = stage_crit['properties']['excited_states']['requested_omega_targe
 entry_crit = stage_crit['convergence_report']['requested_accuracy'][pointer_crit['state_key']]
 assert entry_crit['status'] == 'satisfied', entry_crit
 es_crit = stage_crit['properties']['excited_states']
-assert es_crit['iterations_at_rung'] == es_with['iterations_at_rung'], (es_crit['iterations_at_rung'], es_with['iterations_at_rung'])
+assert es_crit['iterations_at_protocol_step'] == es_with['iterations_at_protocol_step'], (es_crit['iterations_at_protocol_step'], es_with['iterations_at_protocol_step'])
 assert es_crit['stop_reason'] == 'converged' and es_crit['decided_by'] == 'engine_check', (es_crit['stop_reason'], es_crit['decided_by'])
 for root_crit, root_with in zip(es_crit['roots'], es_with['roots']):
     assert root_crit['root_id'] == root_with['root_id']

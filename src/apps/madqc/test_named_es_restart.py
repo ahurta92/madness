@@ -19,10 +19,14 @@ pointer), then continues the stage.
 """
 import argparse
 import json
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -72,7 +76,7 @@ def run(label, text, prefix, cont=False, expect=0):
 
 
 def excited(prefix):
-    return {s['stage']: s for s in json.loads((prefix / 'results.json').read_text())['stages']}['excited']
+    return {s['stage']: s for s in named_records.stages(prefix)}['excited']
 
 
 def engine_metadata(prefix):
@@ -87,7 +91,7 @@ run('alias-1e-4', es_only, alias)
 first = excited(alias)
 assert first['status'] == 'completed', first['status']
 es_first = first['properties']['excited_states']
-assert es_first['converged'] and es_first['protocol_key'] == '1e-04_k6', es_first
+assert es_first['converged'] and es_first['protocol_step_key'] == '1e-04_k6', es_first
 meta_first, _ = engine_metadata(alias)
 assert meta_first['protocols']['1e-04_k6']['thresh'] == 1e-4, meta_first['protocols']
 
@@ -98,8 +102,8 @@ run('alias-1.2e-4', aliased, alias, cont=True)
 second = excited(alias)
 assert second['status'] == 'completed', (second['status'], second.get('convergence_report', {}).get('decided_by'))
 es_second = second['properties']['excited_states']
-assert es_second['converged'] and es_second['protocol_key'] == '1e-04_k6', es_second
-assert es_second['iterations_at_rung'] > 0 and second['iterations_this_run'] > 0, 'the aliased request must re-solve, not load'
+assert es_second['converged'] and es_second['protocol_step_key'] == '1e-04_k6', es_second
+assert es_second['iterations_at_protocol_step'] > 0 and second['iterations_this_run'] > 0, 'the aliased request must re-solve, not load'
 meta_second, attempt = engine_metadata(alias)
 entry = meta_second['protocols']['1e-04_k6']
 assert abs(entry['thresh'] - 1.2e-4) < 1e-16 and entry['k'] == 6, entry
@@ -138,7 +142,7 @@ continued = excited(restart)
 es_cont = continued['properties']['excited_states']
 assert continued['iterations_this_run'] == 0, continued['iterations_this_run']
 assert es_cont['converged'] and es_cont['decided_by'] == 'planner', es_cont
-assert es_cont['iterations_at_rung'] == es_solved['iterations_at_rung'], (es_cont['iterations_at_rung'], es_solved['iterations_at_rung'])
+assert es_cont['iterations_at_protocol_step'] == es_solved['iterations_at_protocol_step'], (es_cont['iterations_at_protocol_step'], es_solved['iterations_at_protocol_step'])
 assert [r['root_id'] for r in es_cont['roots']] == [r['root_id'] for r in es_solved['roots']]
 _, attempt = engine_metadata(restart)
 analysis_file = attempt / 'es_analysis__1e-04_k6.json'

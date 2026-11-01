@@ -3,10 +3,14 @@
 import argparse
 import hashlib
 import json
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+sys.dont_write_bytecode = True  # nothing written into the source tree
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import named_records  # noqa: E402  (D-105: records by path)
 
 p = argparse.ArgumentParser()
 p.add_argument('--binary', required=True)
@@ -43,7 +47,7 @@ for label in ('response', 'repeat', 'additional-frequency'):
     requested = text.replace('[0.0]', '[0.0, 0.02]') if label == 'additional-frequency' else text
     run(label, requested, True)
     assert hashes() == before, 'response HDF5 mirror changed an immutable generation'
-    response = json.loads((root / 'optical/results.json').read_text())
+    response = named_records.stage_record(root / 'optical')
     assert response['reference']['state_id'] == generation
     if label == 'repeat':
         assert response['work'] == 'loaded' and response['iterations_this_run'] == 0
