@@ -812,7 +812,7 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
               + ": econv is not applicable: a driven response has no local "
                 "energy (see the reference stage's energy change); on a "
                 "stage that requests excited_states it is the excitation "
-                "energy change target (D8)");
+                "energy change target");
         stage.excited_states.omega_target = cp.econv();
       }
       // D-099 (B3): stall.window and stall.ratio drive the bundle's plateau
