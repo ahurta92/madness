@@ -488,7 +488,8 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
   row.relation = cv::Relation::less_than_or_equal;
   if (!target)
     row.note = "not set; the bundle stops on the engine's omega gate in both "
-               "modes (the dconv row above, D-025, D-092), not a target (D8)";
+               "modes (the dconv row above); the engine's default is never a "
+               "target";
   row.engine_check_instead
       = "stops the bundle when each root's eigenvalue change is below "
         + cv::detail::scientific(engine_omega_limit)

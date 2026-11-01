@@ -1007,7 +1007,8 @@ int main(int argc, char** argv) {
               && unset.set_by == cv::SetBy::not_set
               && unset.relation == cv::Relation::less_than_or_equal
               && !unset.effective_limit && unset.limit_formula.empty()
-              && unset.note.find("not a target (D8)") != std::string::npos
+              && unset.note.find("the engine's default is never a target")
+                     != std::string::npos
               && unset.engine_check_instead == instead,
           "econv row: unset, the engine's gate named as what is enforced "
           "instead");
