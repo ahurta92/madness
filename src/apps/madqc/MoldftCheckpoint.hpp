@@ -87,7 +87,7 @@ moldft_convergence_settings(const std::string& stage,
        ""},
       {"energy change", "econv", "energy_change", "", "hartree",
        "has no energy term",
-       "engine default econv " + text(cp.econv()) + " is not a target (D8)"},
+       "engine default econv " + text(cp.econv()) + " is not a target"},
       {"kinetic trace change", "accuracy.kinetic_trace_change",
        "absolute_kinetic_trace_change", "absolute_kinetic_trace_change",
        "hartree", "has no kinetic term", ""}};

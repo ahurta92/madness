@@ -506,7 +506,7 @@ to_json(const ConvergenceSettings& settings) {
          {"maxiter",
           {{"per_rung", settings.iteration_caps.per_rung},
            {"set_by", to_string(settings.iteration_caps.set_by)},
-           {"counts", "iterations at a rung in this run (D-007)"}}},
+           {"counts", "iterations at a rung in this run"}}},
          {"checkpoints", checkpoints_to_json(settings.checkpoints)},
          {"warnings", settings.warnings}};
   if (!settings.seed.empty())

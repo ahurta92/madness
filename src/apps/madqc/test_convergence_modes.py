@@ -104,7 +104,7 @@ engine_default = root
 _, plain, plain_log = run('engine-no-targets', deck(dconv=None, econv=None))
 assert not [m for m in plain['convergence_report']['convergence_settings']['metrics']
             if m['group'] == 'requested_criteria' and m['target'] is not None]
-assert 'engine default econv 1.0e-05 is not a target (D8)' in plain_log
+assert 'engine default econv 1.0e-05 is not a target' in plain_log
 check_table_matches_record(plain_log, plain)
 
 # Row 1 in criteria mode: loose written targets, met.

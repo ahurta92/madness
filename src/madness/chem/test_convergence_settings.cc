@@ -43,7 +43,7 @@ ConvergenceSettings scf_like(Decider decider, bool user_targets) {
        "hartree", user_targets ? std::optional<double>(1e-6) : std::nullopt,
        user_targets ? SetBy::user : SetBy::not_set,
        Relation::less_than_or_equal, std::nullopt, "",
-       user_targets ? "" : "engine default econv 1.0e-05 is not a target (D8)",
+       user_targets ? "" : "engine default econv 1.0e-05 is not a target",
        "has no energy term"}};
   settings.iteration_caps = {{30}, SetBy::engine_default};
   return settings;
