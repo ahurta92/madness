@@ -1832,6 +1832,33 @@ int main(int argc, char** argv) {
                             "59e87e03cd2091",
               "dalton_seed_block: the files the reader reads (molden.inp, "
               "RSPVEC; no .out here), by size and SHA-256");
+        {
+          // D-112: a ground-state seed reads molden.inp only, and says when
+          // no .out let the method be checked; the response block keeps its
+          // form.
+          const auto ground = named_stages::dalton_seed_block(
+              dalton.string(), named_stages::SeedUse::ground_state);
+          check(ground.at("files").size() == 1
+                    && ground.at("files")[0].at("path") == "seed/molden.inp"
+                    && ground.at("files")[0].at("sha256")
+                           == sums.at("seed/molden.inp")
+                    && ground.at("method") == "unknown"
+                    && ground.at("method_check")
+                               .get<std::string>()
+                               .find("could not be checked")
+                           != std::string::npos
+                    && !block.contains("method")
+                    && !block.contains("method_check"),
+                "dalton_seed_block (D-112): a ground-state seed lists "
+                "molden.inp and notes the unchecked method");
+          const auto manifest = named_stages::manifest_seed_block(ground);
+          check(!manifest.at("files")[0].contains("source")
+                    && manifest.at("source_files") == ground.at("files")
+                    && named_stages::seed_block_form_problem(manifest).empty()
+                    && !named_stages::seed_block_form_problem(json::object())
+                            .empty(),
+                "manifest_seed_block and seed_block_form_problem (D-112)");
+        }
         const auto generation
             = fs::temp_directory_path()
               / ("test_named_stages_seed_" + std::to_string(::getpid()));
@@ -1932,9 +1959,34 @@ int main(int argc, char** argv) {
                     + with(response, " seed.dalton_dir " + dalton.string()
                                          + "\n seed.freq_tol -1\n"),
                 "seed.freq_tol must be positive");
+        // D-112: a moldft stage takes seed.dalton_dir (its orbitals), not
+        // seed.freq_tol (no driven legs).
+        try {
+          const auto stages = named_stages::parse(
+              world,
+              geometry + with(gs, " seed.dalton_dir " + dalton.string() + "\n"));
+          check(stages[0].seed_dalton_dir == dalton.lexically_normal().string()
+                    && stages[0].seed_freq_tol == 0.0,
+                "seed.dalton_dir on a moldft stage (D-112): the directory, "
+                "absolute");
+          const auto settings = named_stages::moldft_fields().settings(
+              stages[0], 2);
+          check(settings.seed.find("Dalton directory") != std::string::npos
+                    && madness::convergence::to_json(settings).contains("seed"),
+                "moldft settings (D-112): the seed shown and recorded");
+          check(!madness::convergence::to_json(
+                     named_stages::moldft_fields().settings(
+                         named_stages::parse(world, geometry + gs)[0], 2))
+                     .contains("seed"),
+                "moldft settings (D-112): an unseeded stage's record is "
+                "unchanged");
+        } catch (const std::exception& e) {
+          check(false, std::string("seeded moldft stage: ") + e.what());
+        }
         rejects(geometry
-                    + with(gs, " seed.dalton_dir " + dalton.string() + "\n"),
-                "is a molresponse stage's");
+                    + with(gs, " seed.dalton_dir " + dalton.string()
+                                   + "\n seed.freq_tol 0.01\n"),
+                "a moldft stage takes seed.dalton_dir alone");
         rejects(geometry + gs
                     + with(response, " dalton.dir " + dalton.string() + "\n"),
                 "now seed.dalton_dir");

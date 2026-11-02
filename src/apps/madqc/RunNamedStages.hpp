@@ -889,6 +889,30 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
     checkpoint->load(*scf, m, plans.value());
   };
   steps.run_engine = [&] {
+    // D-112: a seeded stage whose plan used no saved state starts from the
+    // Dalton seed: the ground-state seed hook (seed_gs_from_dalton_dir, the
+    // unnamed path's) writes the orbital archive at the attempt's prefix and
+    // the SCF iterates from it, from the first rung. It fingerprints Dalton's
+    // geometry against the molecule the SCF runs with (scf->molecule) and
+    // stamps the archive with it. A saved state always wins: load() has set
+    // restart to read_only or iterate, and nothing is seeded.
+    if (checkpoint->starts_from_seed()) {
+      auto params = stage.params;
+      params.get<Molecule>() = scf->molecule;
+      params.get<CalculationParameters>().set_user_defined_value(
+          "restart", std::string("iterate"));
+      scf->param.set_user_defined_value("restart", std::string("iterate"));
+      molresponse_v3::seed_gs_from_dalton_dir(world, params, directory,
+                                              stage.seed_dalton_dir);
+      if (const auto note = checkpoint->seed_method_note();
+          !note.empty() && world.rank() == 0)
+        print("stage", stage.name + ": Dalton seed:", note);
+      checkpoint->seeded_from(
+          json::parse(madness::checkpoint::detail::on_root(world, [&] {
+            std::ifstream record(scf->param.prefix() + ".gs_seed.json");
+            return json::parse(record).dump();
+          })));
+    }
     // D-045: what observe carries across the samples of this run; S4c2:
     // the rung the plan resumed, for publish_now.
     json carried = json::object();

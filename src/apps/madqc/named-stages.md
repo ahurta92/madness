@@ -38,7 +38,7 @@ The first implementation supports these controls:
 | Block | Controls |
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
-| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `requested_properties [energy, dipole]` (either or both) |
+| `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `seed.dalton_dir` (see "Dalton seed"), `requested_properties [energy, dipole]` (either or both) |
 | `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level` (moldft's scale: unwritten or 1 to 3, one row per solver iteration; 4 to 9, channel and save detail; 10, debug), `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis`, `econv`, the excitation energy change target, and `stall.window`, `stall.ratio`, the bundle's plateau detector (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
@@ -535,8 +535,30 @@ linear-response output directory (S5, DESIGN B3):
   engine recorded seeding from. A generation whose copies are missing or altered is
   not published, and is refused when read.
 - The engine spellings `dalton.dir`, `io.dalton.dir` and `seed.es_warmup` are refused
-  in a named stage. The ground state's seed from `molden.inp` is not available on the
-  named path yet.
+  in a named stage.
+
+A `moldft` stage takes `seed.dalton_dir` too (D-112): its orbitals start from the
+Dalton `molden.inp` (projected at the first protocol step), as the unnamed path's
+`dalton.dir` seeds its SCF. `seed.freq_tol` is refused on a `moldft` stage.
+
+- The directory is found as for a response stage (the reader wants `molden.inp`
+  and `RSPVEC`), but only `molden.inp`, and a Dalton `.out` when present, are the
+  ground state's seed files. With no `.out` the method cannot be checked; the
+  manifest's `seed` block says so (`method`, `method_check`) and the stage prints
+  it. The named moldft stage is HF and closed shell already.
+- The seed is used only when the plan uses no saved state (a first run, or a fresh
+  start under R1); a saved state always wins on `--continue`, and a fresh plan's
+  `why` names the seed. The geometry in `molden.inp` must match the molecule the SCF
+  runs with; the stage is refused before the SCF otherwise.
+- Every generation the stage publishes holds `seed/molden.inp` (and the `.out`),
+  listed in the manifest's `seed` block by size and SHA-256 with what the seed
+  recorded (`seeded_from`: occupied, AO and MO counts, the box, the threshold, the
+  largest overlap before orthonormalization). A generation whose copies are missing
+  or altered is not published, and is refused when read. The settings table shows
+  the seed.
+- A response stage that takes a seeded ground state as its reference needs nothing
+  more; it reads the published generation as for any reference. Its own seed is its
+  own `seed.dalton_dir`.
 
 ## Record names
 

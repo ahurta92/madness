@@ -4,6 +4,7 @@
 #include <madness/chem/FunctionMetricSummary.h>
 #include <madness/chem/ExplicitCriteria.h>
 
+#include "DaltonSeed.hpp"
 #include "NamedStages.hpp"
 #include <filesystem>
 #include <optional>
@@ -168,6 +169,10 @@ moldft_stage_settings(const Stage& stage, int natom) {
   const auto& cp = stage.params.get<CalculationParameters>();
   settings.scope = convergence::protocol_scope(
       cp.protocol(), cp.k() == -1 ? protocol_k(cp.protocol().back()) : cp.k());
+  // D-112: the Dalton seed, as written (the starting orbitals when no saved
+  // state is used).
+  if (!stage.seed_dalton_dir.empty())
+    settings.seed = "Dalton directory " + stage.seed_dalton_dir + " (user)";
   return settings;
 }
 
@@ -342,6 +347,10 @@ moldft_ladder_request(const Stage& stage, int natom,
   PlannedState state;
   state.identity = records.at(0).at("key").get<std::string>();
   state.plan = planning::plan_ladder(saved, std::nullopt, request);
+  // D-112: a fresh start of a seeded stage starts from the Dalton seed.
+  if (state.plan.action == planning::Action::fresh
+      && !stage.seed_dalton_dir.empty())
+    state.plan.why += "; starts from the Dalton seed in " + stage.seed_dalton_dir;
   state.start = request.ladder.at(state.plan.start_rung);
   state.own_rung = saved.rung;
   StagePlans plans;
@@ -728,6 +737,10 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
       sample.at("converged").get<bool>(), sample.at("evaluated").get<bool>(),
       position.value("protocol_step", position.value("rung", json())));
   m.properties = sample.at("properties");
+  // D-112: a seeded stage's seed block: the files its generations hold, and
+  // what the ground-state seed recorded when this run started from it.
+  if (sample.contains("seed"))
+    m.seed = manifest_seed_block(sample.at("seed"));
   m.numerical["states"] = json::array({moldft_state_record(m, "engine_check")});
   return m;
 }
@@ -800,6 +813,9 @@ class MoldftCheckpoint {
   json current_rung_ = nullptr;
   // The skeleton's publish (publish_generation), from the run binding.
   GenerationPublisher publish_;
+  // D-112: the seed block of a seeded stage (null when unseeded), with what
+  // the seed recorded (seeded_from) once this run has started from it.
+  json seed_ = nullptr;
   static json kinetic_blocks(const madness::FunctionResidualBlocks& values) {
     return madness::function_residual_record(values).at("blocks");
   }
@@ -987,6 +1003,11 @@ public:
     require(m.numerical.at("representation") == "mo",
             "unsupported representation");
     validate_measurements(m.metrics, m.stage, m.numerical);
+    // D-112: the seed block's form (seed_block_form_problem).
+    if (m.seed.is_object()) {
+      const auto problem = seed_block_form_problem(m.seed);
+      require(problem.empty(), problem);
+    }
     // S4a: the state record, when the generation has one (D-052: the same
     // check on both sides; publish_generation requires it): one current
     // record, the one this generation's own rung record and report give.
@@ -1058,7 +1079,27 @@ public:
                    GenerationPublisher publish)
       : world_(world), stage_(stage), store_(directory / "checkpoints"),
         run_id_(std::move(run_id)), settings_(std::move(settings)),
-        publish_(std::move(publish)) {}
+        publish_(std::move(publish)) {
+    if (!stage.seed_dalton_dir.empty())
+      seed_ = json::parse(madness::checkpoint::detail::on_root(world_, [&] {
+        return dalton_seed_block(stage.seed_dalton_dir, SeedUse::ground_state)
+            .dump();
+      }));
+  }
+
+  // D-112: whether the engine starts from the Dalton seed: the stage is
+  // seeded and the plan used no saved state (a saved state always wins).
+  [[nodiscard]] bool starts_from_seed() const {
+    return !seed_.is_null() && !has_latest_;
+  }
+  // What the ground-state seed recorded (its <prefix>.gs_seed.json), kept in
+  // this run's seed blocks.
+  void seeded_from(json record) { seed_["seeded_from"] = std::move(record); }
+  // D-112: the seed block's note when no Dalton .out let the method be
+  // checked (empty otherwise).
+  [[nodiscard]] std::string seed_method_note() const {
+    return seed_.is_null() ? std::string() : seed_.value("method_check", "");
+  }
 
   // The engine's progress controls and the problem, before any generation is
   // read.
@@ -1080,6 +1121,14 @@ public:
     const auto &cp = scf.param;
     const auto report
         = latest_.metrics.value("convergence_report", json::object());
+    // D-112, as S5: a generation's seed copies are checked before it is used.
+    if (latest_.seed.is_object()) {
+      const auto problem = madness::checkpoint::detail::on_root(world_, [&] {
+        return check_seed_files(store_ / latest_.generation, latest_.seed,
+                                SeedUse::ground_state);
+      });
+      require(problem.empty(), problem);
+    }
     plan_ = plans.states.at(0).plan;
     if (plan_.action == planning::Action::fresh) {
       // R1: a different problem starts fresh; the old generations stay.
@@ -1337,6 +1386,8 @@ private:
             has_latest_ ? json(latest_.generation) : json(nullptr)},
            {"converged", converged},
            {"evaluated", evaluated}};
+    if (!seed_.is_null())
+      write.publish_sample["seed"] = seed_;
     write.iterations_this_run = iterations;
     write.final = final;
     write.check_before_write = [](const checkpoint::Manifest& m) {
@@ -1366,6 +1417,10 @@ private:
                     directory / "state.restartdata.00000", true);
                 m.archives.push_back(checkpoint::inspect_archive(
                     directory, "orbitals", "state.restartdata", {}, writers));
+                // D-112: every generation of a seeded stage holds its seed
+                // files (D-052: without them it stays unpublished).
+                if (!seed_.is_null())
+                  error = copy_seed_files(directory, seed_, SeedUse::ground_state);
               } catch (const std::exception& e) {
                 error = e.what();
               }
@@ -1410,6 +1465,15 @@ private:
                 require(copied.shards.at(i).checksum
                             == orbitals.shards.at(i).checksum,
                         "copied orbital shard differs from its source");
+              // D-112: the reused generation's seed files come with it.
+              if (latest_.seed.is_object()) {
+                fs::create_directories(directory / "seed");
+                for (const auto& f : latest_.seed.at("files"))
+                  fs::copy_file(store_ / source / f.at("path").get<std::string>(),
+                                directory / f.at("path").get<std::string>());
+                return check_seed_files(directory, latest_.seed,
+                                        SeedUse::ground_state);
+              }
               return std::string{};
             });
           };

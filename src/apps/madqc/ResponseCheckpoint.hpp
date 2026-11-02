@@ -5,6 +5,7 @@
 #include "ConvergenceReport.hpp"
 #include "NamedStages.hpp"
 #include "ResponseProperties.hpp"
+#include "DaltonSeed.hpp"
 #include "Sha256.hpp"
 #include <apps/molresponse/solvers/dalton_import.hpp>
 #include <apps/molresponse/solvers/es_save_load.hpp>
@@ -537,63 +538,6 @@ response_engine_plans(const StagePlans& plans);
   return item;
 }
 
-// S5, skeleton spec 3.5: the Dalton seed's member kind, held by the
-// application (C5: the storage core does not know it). A seeded stage's
-// generations each hold a copy of the files the engine's Dalton reader reads,
-// under seed/, listed in the manifest's seed block by name, size and SHA-256.
-
-// The seed block of a stage seeded from `dir`: each file the engine's reader
-// locates there (molden.inp, RSPVEC, a Dalton .out when present), with its
-// source, size and SHA-256. The reader is the first validator: it refuses an
-// ambiguous directory; loose files only (no tarball extraction on the named
-// path); a .out naming another method than HF is refused here. Rank 0.
-[[nodiscard]] inline json dalton_seed_block(const std::string& dir) {
-  const auto found
-      = molresponse_v3::locate_dalton_dir(dir, "", {}, {}, {}, false);
-  if (found.method != "unknown" && found.method != "HF")
-    throw std::runtime_error("Dalton seed: method " + found.method
-                             + " (only HF seeds are validated)");
-  json files = json::array();
-  for (const auto& path :
-       {found.molden_path, found.rspvec_path, found.out_path})
-    if (!path.empty())
-      files.push_back(
-          {{"path", "seed/" + std::filesystem::path(path).filename().string()},
-           {"source", path},
-           {"bytes", std::filesystem::file_size(path)},
-           {"sha256", named_stages::sha256_file(path)}});
-  return {{"dalton_dir", dir}, {"files", std::move(files)}};
-}
-
-// The copies a generation holds against its seed block: present, size and
-// SHA-256 as listed; then the reader on the copies. Returns what is wrong
-// (empty when nothing is). Rank 0.
-[[nodiscard]] inline std::string
-check_seed_files(const std::filesystem::path& generation, const json& seed) {
-  namespace fs = std::filesystem;
-  std::string problems;
-  const auto note = [&](const std::string& what) {
-    problems += (problems.empty() ? "" : "; ") + what;
-  };
-  for (const auto& f : seed.at("files")) {
-    const auto copy = generation / f.at("path").get<std::string>();
-    if (!fs::is_regular_file(fs::symlink_status(copy)))
-      note(f.at("path").get<std::string>() + " missing");
-    else if (fs::file_size(copy) != f.at("bytes").get<std::uintmax_t>()
-             || named_stages::sha256_file(copy.string())
-                    != f.at("sha256").get<std::string>())
-      note(f.at("path").get<std::string>() + " altered");
-  }
-  if (problems.empty()) {
-    try {
-      (void)dalton_seed_block((generation / "seed").string());
-    } catch (const std::exception& e) {
-      note(e.what());
-    }
-  }
-  return problems.empty() ? std::string{} : "Dalton seed files: " + problems;
-}
-
 // Scientific policy for the named response frontend. The engine still owns
 // state serialization, restart guesses, protocol scheduling and analysis.
 class ResponseCheckpoint {
@@ -988,10 +932,7 @@ public:
     // S5: a seeded stage's seed block: the files its generations hold, and
     // what the engine recorded seeding from.
     if (sample.contains("seed")) {
-      m.seed = sample.at("seed");
-      for (auto& f : m.seed.at("files"))
-        f.erase("source");
-      m.seed["source_files"] = sample.at("seed").at("files");
+      m.seed = manifest_seed_block(sample.at("seed"));
       if (metadata.contains("seeded_from"))
         m.seed["seeded_from"] = metadata.at("seeded_from");
     }
@@ -1099,18 +1040,10 @@ public:
       require(origins.contains(attempt) && origins.at(attempt) == m.numerical.at("request"),
               "invalid response state: missing or inconsistent originating request registry");
     }
-    // S5: a seed block lists the copied seed files by path under seed/,
-    // size and SHA-256 (the files themselves are checked where the
-    // generation's directory is read: at publish and before a load).
+    // S5: the seed block's form (seed_block_form_problem).
     if (m.seed.is_object()) {
-      require(m.seed.contains("files") && m.seed.at("files").is_array()
-                  && !m.seed.at("files").empty(),
-              "Dalton seed block without files");
-      for (const auto& f : m.seed.at("files"))
-        require(f.at("path").get<std::string>().starts_with("seed/")
-                    && f.at("bytes").is_number_unsigned()
-                    && f.at("sha256").get<std::string>().size() == 64,
-                "Dalton seed block: malformed file entry");
+      const auto problem = seed_block_form_problem(m.seed);
+      require(problem.empty(), problem);
     }
     auto expected = members(m.numerical.at("engine_metadata"));
     std::vector<std::string> actual;
@@ -1619,14 +1552,8 @@ private:
         // S5: every generation of a seeded stage holds its seed files; the
         // copies are checked here, so a generation without them stays
         // unpublished (D-052).
-        if (!seed_.is_null()) {
-          std::filesystem::create_directories(directory / "seed");
-          for (const auto& f : seed_.at("files"))
-            std::filesystem::copy_file(f.at("source").get<std::string>(),
-                                       directory
-                                           / f.at("path").get<std::string>());
-          return check_seed_files(directory, m.seed);
-        }
+        if (!seed_.is_null())
+          return copy_seed_files(directory, seed_);
         return std::string{};
       });
     };

@@ -181,12 +181,14 @@ struct Controls : madness::QCCalculationParametersBase {
     initialize<bool>("checkpoint.keep_all", false,
                      "keep every generation (debugging); default: delete "
                      "older mid-rung generations");
-    // S5, DESIGN B3: a molresponse stage's Dalton seed (a starting guess for
-    // states with no saved state); no defaults.
+    // S5, DESIGN B3: the Dalton seed (a starting guess for states with no
+    // saved state), of a molresponse stage and (D-112) a moldft stage; no
+    // defaults.
     initialize<std::string>("seed.dalton_dir", "",
-                            "a Dalton linear-response output directory "
-                            "(molden.inp and RSPVEC) seeding the stage's "
-                            "excited states and driven legs");
+                            "a Dalton output directory seeding the stage: a "
+                            "moldft stage's orbitals from molden.inp; a "
+                            "molresponse stage's excited states and driven "
+                            "legs from RSPVEC");
     initialize<double>("seed.freq_tol", 0.0,
                        "the largest frequency distance (au) at which a "
                        "driven leg takes a Dalton RSPVEC record as its seed");
@@ -235,8 +237,9 @@ struct Stage {
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
   int checkpoint_every_iterations = 0;
   bool checkpoint_keep_all = false;
-  // S5, B3: the Dalton seed directory (absolute; empty: unseeded) and the
-  // driven legs' frequency tolerance (0 when the stage has no driven legs).
+  // S5, B3, D-112: the Dalton seed directory (absolute; empty: unseeded) and
+  // the driven legs' frequency tolerance (0 when the stage has no driven
+  // legs, always for moldft).
   std::string seed_dalton_dir;
   double seed_freq_tol = 0.0;
   // The keywords this stage's deck wrote, so "who set it" (B9) does not
@@ -700,14 +703,24 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
           b.name
           + ": checkpoint.every_iterations is not available for molresponse, "
             "which publishes at solve ends only");
-    // S5, B3: the Dalton seed is a molresponse stage's; seed.freq_tol is
+    // S5, B3: the Dalton seed of a molresponse stage; seed.freq_tol is
     // required when the stage requests driven-response states (the legs it
     // seeds) and refused otherwise: a key that does nothing is refused.
-    for (const auto* k : {"seed.dalton_dir", "seed.freq_tol"})
-      if (seen.contains(k) && b.kind != "molresponse")
-        throw std::runtime_error(b.name + ": " + k
-                                 + " is a molresponse stage's (the Dalton "
-                                   "seed)");
+    // D-112: a moldft stage takes seed.dalton_dir too (its orbitals start
+    // from the Dalton molden.inp); it has no driven legs, so no
+    // seed.freq_tol.
+    if (seen.contains("seed.freq_tol") && b.kind != "molresponse")
+      throw std::runtime_error(b.name
+                               + ": seed.freq_tol is a molresponse stage's "
+                                 "(it seeds driven legs); a moldft stage "
+                                 "takes seed.dalton_dir alone");
+    if (b.kind == "moldft" && seen.contains("seed.dalton_dir"))
+      // Relative to where madqc was launched, as for a response stage.
+      stage.seed_dalton_dir
+          = std::filesystem::absolute(
+                controls.get<std::string>("seed.dalton_dir"))
+                .lexically_normal()
+                .string();
     if (b.kind == "molresponse") {
       const auto requested
           = controls.get<std::vector<std::string>>("requested_properties");
