@@ -570,7 +570,13 @@ Where the report is: a stage's `results.json` keeps this run's judgement
 `metrics.convergence_report`, which `published_in` names (the manifest path and
 the JSON pointer). A stage loaded from a generation that holds no report
 keeps the report it assembled. The root `results.json` lists each stage with
-its `status`, `work` and `path`.
+its `status`, `work`, `path` and the `run_id` of the run that wrote that
+stage's record. A fresh run lists the stages it runs. A `--continue` run starts
+from the earlier list (D-109): a stage this deck does not run stays listed, with
+its earlier `run_id`, while its `results.json` is there; a stage this run
+writes replaces its entry in place, and a new one is added at the end. So
+`gs` run by one deck and `optical` by a second, `--continue` deck are both
+listed, each with its own run.
 
 What some names mean:
 

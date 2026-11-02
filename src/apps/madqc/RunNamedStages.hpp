@@ -1301,7 +1301,7 @@ inline bool run_if_named(madness::World& world,
   // 3. Reopening an output root requires the explicit --continue option.
   // Each invocation gets separate working files; checkpoints remain immutable.
   fs::path root;
-  std::string root_string, run_id;
+  std::string root_string, run_id, earlier_stages = "[]";
   on_root(world, [&] {
     root = fs::absolute(parser.key_exists("user_defined_prefix")
                             ? fs::path(parser.value_raw("prefix"))
@@ -1338,9 +1338,33 @@ inline bool run_if_named(madness::World& world,
       if (!fs::create_directory(root / stage.name) && !continuing)
         throw std::runtime_error("stage output directory collision: "
                                  + stage.name);
+    // D-109: on --continue the index starts from the earlier one, so a stage
+    // this deck does not run stays listed, with the run that wrote it, while
+    // its results.json is there. An entry from before D-109 has no run_id of
+    // its own and takes its index's; one from before D-105 is a whole stage
+    // record, read here by its stage name.
+    if (continuing && fs::exists(root / "results.json")) {
+      json earlier;
+      std::ifstream(root / "results.json") >> earlier;
+      json kept = json::array();
+      for (const auto& entry : earlier.value("stages", json::array())) {
+        const std::string name = entry.value("stage", "");
+        const std::string path = entry.value("path", name + "/results.json");
+        if (name.empty() || !fs::exists(root / path)) continue;
+        kept.push_back({{"stage", name},
+                        {"status", entry.value("status", json())},
+                        {"work", entry.value("work", json())},
+                        {"path", path},
+                        {"run_id",
+                         entry.value("run_id",
+                                     earlier.value("run_id", json()))}});
+      }
+      earlier_stages = kept.dump();
+    }
   });
   world.gop.broadcast_serializable(root_string, 0);
   world.gop.broadcast_serializable(run_id, 0);
+  world.gop.broadcast_serializable(earlier_stages, 0);
   root = root_string;
 
   // A8, D-036: one AppSpec per application, looked up by its name; each
@@ -1358,7 +1382,7 @@ inline bool run_if_named(madness::World& world,
                 {"run_id", run_id},
                 {"mode", continuing ? "continue" : "fresh"},
                 {"mpi_ranks", world.size()},
-                {"stages", json::array()}};
+                {"stages", json::parse(earlier_stages)}};
 
   // 4. Execute in input order; parse() has already checked the references.
   for (auto& stage : stages) {
@@ -1385,11 +1409,22 @@ inline bool run_if_named(madness::World& world,
     auto& result = outcome.result;
     result["status"] = outcome.converged ? "completed" : "unconverged";
     write_result(world, stage_directory / "results.json", result);
-    // D-105: the root lists each stage and where its record is.
-    index["stages"].push_back({{"stage", stage.name},
-                               {"status", result.at("status")},
-                               {"work", result.value("work", json())},
-                               {"path", stage.name + "/results.json"}});
+    // D-105: the root lists each stage and where its record is; D-109: this
+    // run's entry replaces the stage's earlier one in its place.
+    const json entry = {{"stage", stage.name},
+                        {"status", result.at("status")},
+                        {"work", result.value("work", json())},
+                        {"path", stage.name + "/results.json"},
+                        {"run_id", run_id}};
+    auto& listed = index["stages"];
+    const auto same = std::find_if(listed.begin(), listed.end(),
+                                   [&](const json& e) {
+                                     return e.at("stage") == stage.name;
+                                   });
+    if (same != listed.end())
+      *same = entry;
+    else
+      listed.push_back(entry);
     write_result(world, root / "results.json", index);
     if (!application.release(outcome))
       throw StageStopped("stage " + stage.name + " stopped unconverged: "

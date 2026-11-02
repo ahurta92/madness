@@ -75,7 +75,20 @@ run('together', together, both)
 split = work / 'Split'
 run('gs-alone', split, ground)
 gs_generation = manifest(split, 'gs')['generation']
+gs_run = json.loads((split / 'results.json').read_text())['run_id']
 run('optical-alone', split, response, resume=True)
+
+# D-109: the root index after --continue still lists the stage the second deck
+# does not run, each entry with the run that wrote it; a fresh root starts empty.
+index = json.loads((split / 'results.json').read_text())
+listed = {e['stage']: e for e in index['stages']}
+assert sorted(listed) == ['gs', 'optical'], index['stages']
+assert listed['gs']['run_id'] == gs_run and listed['gs']['status'] == 'completed', listed['gs']
+assert listed['optical']['run_id'] == index['run_id'] != gs_run, (listed['optical'], gs_run)
+assert all(e['path'] == e['stage'] + '/results.json' for e in index['stages']), index['stages']
+fresh = json.loads((together / 'results.json').read_text())
+assert [e['stage'] for e in fresh['stages']] == ['gs', 'optical'], fresh['stages']
+assert {e['run_id'] for e in fresh['stages']} == {fresh['run_id']}, fresh['stages']
 
 # The consumer context: the molecule the SCF used, not the deck's.
 context = manifest(split, 'gs')['numerical']['consumer_context']
