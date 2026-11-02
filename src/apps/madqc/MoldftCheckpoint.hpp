@@ -747,7 +747,8 @@ moldft_manifest(const Stage& stage, int natom, const json& sample) {
 
 // B8 (S4d1), the moldft AppSpec's requested_states: the ground state, at the
 // requested ladder's final rung.
-[[nodiscard]] inline json moldft_requested_states(const Stage& stage, int) {
+[[nodiscard]] inline json moldft_requested_states(const Stage& stage, int,
+                                                  const json&) {
   const auto final_rung
       = requested_ladder(stage.params.get<CalculationParameters>()).back();
   return json::array(

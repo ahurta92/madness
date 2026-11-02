@@ -290,8 +290,12 @@ struct ResponseNeeds {
   std::vector<std::pair<molresponse_v3::Perturbation, double>> legs;
   std::vector<std::string> sources;
 };
-[[nodiscard]] inline ResponseNeeds response_needs(const json& request,
-                                                  int natom) {
+// D-113: two_photon's legs are the dipole legs at half each root's
+// frequency, so they are known once the bundle is: `bundle_omegas` are the
+// roots' omegas at the final rung (empty before the bundle is saved).
+[[nodiscard]] inline ResponseNeeds
+response_needs(const json& request, int natom,
+               const std::vector<double>& bundle_omegas = {}) {
   using molresponse_v3::Perturbation;
   ResponseNeeds needs;
   std::set<std::string> seen;
@@ -346,7 +350,23 @@ struct ResponseNeeds {
         }
       }
   }
+  // The engine's derived legs (expand_converged_es): es_freq_factor 0.5 times
+  // the root's omega, per axis.
+  if (properties.contains("two_photon"))
+    for (double omega : bundle_omegas)
+      for (char axis : {'x', 'y', 'z'})
+        leg(dipole(axis), 0.5 * omega);
   return needs;
+}
+
+// D-113: the omegas of the bundle's roots in a state record of the bundle
+// (response_state_records), or in the engine metadata's entry for it.
+[[nodiscard]] inline std::vector<double> root_omegas(const json& bundle) {
+  std::vector<double> omegas;
+  for (const auto& root : bundle.value("roots", json::array()))
+    if (root.contains("omega") && root.at("omega").is_number())
+      omegas.push_back(root.at("omega").get<double>());
+  return omegas;
 }
 
 // The excited-state bundle a request names (D-025): one state, keyed by the
@@ -409,7 +429,8 @@ targets_of_kind(madness::convergence::ConvergenceSettings settings,
   static const std::map<std::string, std::string> names
       = {{"polarizability", "alpha"},
          {"hyperpolarizability", "beta"},
-         {"raman", "raman"}};
+         {"raman", "raman"},
+         {"two_photon", "tpa"}};
   return names.at(name);
 }
 
@@ -792,7 +813,13 @@ private:
     if (!metadata.at("protocols").contains(key) ||
         metadata.at("protocols").at(key).at("thresh").get<double>() != threshold)
       return false;
-    const auto needs = response_needs(request, natom);
+    // D-113: two_photon's legs from the bundle's roots at the final rung,
+    // as the engine derived them; the bundle itself is checked below.
+    std::vector<double> omegas;
+    if (metadata.contains("excited_states")
+        && metadata.at("excited_states").contains(key))
+      omegas = root_omegas(metadata.at("excited_states").at(key));
+    const auto needs = response_needs(request, natom, omegas);
     for (const auto& [perturbation, frequency] : needs.legs) {
       const auto fkey = molresponse_v3::ResponseMetadata::freq_key(frequency);
       const auto channel = perturbation.description();
@@ -845,6 +872,14 @@ private:
       if (!loaded.contains(bundle_key(bundle->id, key))
           && (!e.value("converged", false) || e.value("stalled", false)))
         return false;
+      // D-113: two_photon's values, one row per root at the final rung.
+      if (requested_properties(request).contains("two_photon")) {
+        const auto rows = metadata.at("properties")
+                              .value("tpa", json::object())
+                              .value(key, json::array());
+        if (!rows.is_array() || rows.size() != omegas.size())
+          return false;
+      }
       // Its written omega target blocks completion only when targets decide
       // (B8, D-061).
       if (!loaded.contains(bundle_key(bundle->id, key))
@@ -995,15 +1030,24 @@ public:
   // request needs (response_needs) and its excited-state bundle, at the
   // request's final protocol, as request_complete lists them; each with the
   // written targets its kind has rows for (kind_measurements, D-082).
-  static json requested_states(const Stage& stage, int natom) {
+  // D-113: two_photon's legs are the bundle's: their frequencies are half
+  // the roots' omegas in the bundle's record at the final rung, so every leg
+  // the engine solved for a root is judged.
+  static json requested_states(const Stage& stage, int natom,
+                               const json& records) {
     const auto request = response_request(stage);
     const double threshold = request.at("protocol").back();
     const int k = protocol_k(threshold);
     const auto key = molresponse_v3::protocol_key(threshold, k);
     const json rung = {{"thresh", threshold}, {"k", k}};
+    std::vector<double> omegas;
+    if (const auto bundle = requested_bundle(request))
+      for (const auto& record : records)
+        if (record.at("key") == bundle_key(bundle->id, key))
+          omegas = root_omegas(record);
     json states = json::array();
     for (const auto& [perturbation, frequency] :
-         response_needs(request, natom).legs)
+         response_needs(request, natom, omegas).legs)
       states.push_back(
           {{"key",
             state_key(perturbation.description(), key,
@@ -1588,6 +1632,8 @@ inline json response_request(const Stage& stage) {
                           {"method", stage.excited_states.method},
                           {"guess", stage.excited_states.guess},
                           {"guess_basis", stage.excited_states.guess_basis}};
+    else if (name == "two_photon")
+      properties[name] = json::object(); // D-113: every root of the bundle
     else
       ResponseCheckpoint::require(false, "unsupported property " + name);
   }
@@ -1752,8 +1798,16 @@ inline StagePlans plan_response_states(const Stage& stage,
                   "dalton)";
     return plan;
   };
-  for (const auto& [perturbation, frequency] :
-       response_needs(stage_request, natom).legs) {
+  // One frequency-dependent leg's plan; `leg_request` is the legs' request
+  // (the bundle's section below changes `request`).
+  const auto leg_request = request;
+  std::set<std::string> planned_legs;
+  const auto plan_leg = [&](const molresponse_v3::Perturbation& perturbation,
+                            double frequency) {
+    if (!planned_legs.insert(molresponse_v3::fd_node_id(perturbation, frequency))
+             .second)
+      return;
+    auto request = leg_request;
     request.identity
         = frequency_dependent_identity(perturbation.description(), frequency);
     const auto own = ResponseCheckpoint::own_state(
@@ -1772,7 +1826,10 @@ inline StagePlans plan_response_states(const Stage& stage,
         [&](const std::string& protocol) {
           return ResponseCheckpoint::state_key(channel, protocol, fkey);
         });
-  }
+  };
+  for (const auto& [perturbation, frequency] :
+       response_needs(stage_request, natom).legs)
+    plan_leg(perturbation, frequency);
   // The excited-state bundle (D-025): one state, judged on its worst root
   // against the engine's own check; no seed (the engine cannot start a
   // bundle from another root count or method, DESIGN §5).
@@ -1820,6 +1877,17 @@ inline StagePlans plan_response_states(const Stage& stage,
                         "starts fresh";
           break;
         }
+    // D-113: two_photon's legs are at half the roots' omegas. A loaded
+    // bundle keeps its saved omegas, so its legs are planned here (loaded,
+    // resumed or seeded from the nearest saved frequency). A bundle solved in
+    // this run moves its omegas; the engine adds its legs once it converges
+    // (expand_converged_es) and plans them by its own restart rule, and the
+    // shared verdict judges them from the saved bundle's roots.
+    const bool two_photon
+        = requested_properties(stage_request).contains("two_photon");
+    if (two_photon && plan.action != madness::planning::Action::load)
+      plan.why += "; its two-photon legs are planned by the engine once it "
+                  "converges";
     ResponseCheckpoint::adopt(
         plans, plan, own, std::nullopt, request, bundle->id,
         {{"kind", "excited_states"},
@@ -1828,6 +1896,17 @@ inline StagePlans plan_response_states(const Stage& stage,
         [&](const std::string& protocol) {
           return ResponseCheckpoint::bundle_key(bundle->id, protocol);
         });
+    if (two_photon && plan.action == madness::planning::Action::load)
+      for (const auto& record : records)
+        if (record.value("identity", "") == bundle->id
+            && record.value("kind", "") == "excited_states"
+            && madness::scf_continuation::same_rung(
+                {record.at("protocol_step").at("thresh").get<double>(),
+                 record.at("protocol_step").at("k").get<int>()},
+                request.ladder.back()))
+          for (double omega : root_omegas(record))
+            for (int axis = 0; axis < 3; ++axis)
+              plan_leg(molresponse_v3::Perturbation::dipole(axis), 0.5 * omega);
   }
   return plans;
 }

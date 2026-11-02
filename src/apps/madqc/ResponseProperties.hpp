@@ -460,6 +460,80 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
   return record;
 }
 
+// D-113: the two-photon absorption of the bundle's roots, from the engine's
+// tpa rows at the final rung (calc_executor's assemble_tpa), one per root.
+// The convention is the theory note two-photon-normalization-sign (settled
+// EQ-09/EQ-10): S with the singlet sqrt(2) (T3), D_f = (Tr S)^2/30,
+// D_g = sum S_ab^2/30, D_linear = 2 D_f + 4 D_g, D_circular = -2 D_f + 6 D_g
+// (T14), as kernels/tpa.hpp computes them; madqc builds no formula of its
+// own. The engine's cross sections in GM are left out: they carry a fixed
+// 0.1 eV FWHM lineshape, a convention not yet decided (D-113 (b)). Each root
+// carries its own convergence in the bundle (density residual, excitation
+// energy change) beside its three legs at half its frequency, the saved
+// states the value comes from. Converged when every root has a row, its
+// legs converged and its bundle root converged.
+inline json selected_two_photon(const Stage& stage, const json& properties,
+                                const json& metadata) {
+  const auto pkey = final_protocol_key(stage);
+  json record = {{"protocol_step_key", pkey},
+                 {"units", "au"},
+                 {"convention", "theory note two-photon-normalization-sign "
+                                "(T3, T12-T14)"},
+                 {"converged", false},
+                 {"roots", json::array()}};
+  const json* bundle = nullptr;
+  if (metadata.is_object() && metadata.contains("excited_states")
+      && metadata.at("excited_states").contains(pkey))
+    bundle = &metadata.at("excited_states").at(pkey);
+  const auto rows = properties.is_object()
+                        ? properties.value("tpa", json::object())
+                              .value(pkey, json::array())
+                        : json::array();
+  if (bundle == nullptr || !rows.is_array() || rows.empty()) {
+    record["unavailable"]
+        = bundle == nullptr
+              ? "the engine saved no excited-state bundle at the final rung "
+                    + pkey
+              : "the engine assembled no two-photon rows at the final rung "
+                    + pkey + " (the bundle or its legs did not converge)";
+    return record;
+  }
+  const auto& bundle_roots = bundle->value("roots", json::array());
+  bool every_root = rows.size() == bundle_roots.size();
+  json roots = json::array();
+  for (const auto& row : rows) {
+    const int index = row.value("es_root_id", -1);
+    const json root = index >= 0 && index < static_cast<int>(bundle_roots.size())
+                          ? bundle_roots.at(index)
+                          : json::object();
+    const double omega = row.at("omega").get<double>();
+    json entry = {{"root", index},
+                  {"omega", omega},
+                  {"photon_frequency", 0.5 * omega},
+                  {"tensor", row.at("S")},
+                  {"D_f", row.at("Df")},
+                  {"D_g", row.at("Dg")},
+                  {"D_linear", row.at("D_linear")},
+                  {"D_circular", row.at("D_circular")},
+                  {"R", row.at("R")},
+                  {"root_convergence",
+                   {{"converged", root.value("converged", false)},
+                    {"density_residual", root.value("density_residual", json())},
+                    {"excitation_energy_change",
+                     root.value("omega_residual", json())}}},
+                  {"legs", row.value("row_accuracy", json::array())},
+                  {"legs_converged", row.value("converged", false)},
+                  {"max_leg_bsh_residual", row.value("max_bsh_residual", json())}};
+    every_root = every_root && row.value("converged", false)
+                 && root.value("converged", false)
+                 && !root.value("stalled", false);
+    roots.push_back(std::move(entry));
+  }
+  record["roots"] = std::move(roots);
+  record["converged"] = every_root;
+  return record;
+}
+
 // D-061: a written econv on a stage that requests excited_states is the
 // target of the excitation energy change per root (D8: the engine's default
 // is never a request), judged on the worst root with <=, in hartree. It is
@@ -627,6 +701,8 @@ inline json select_response_properties(const Stage& stage,
                            raman_spectra, natom);
     else if (property == "excited_states")
       selected[property] = selected_excited_states(stage, metadata, transition);
+    else if (property == "two_photon")
+      selected[property] = selected_two_photon(stage, properties, metadata);
     else
       throw std::runtime_error("no selector for property " + property);
   }

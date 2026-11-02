@@ -232,6 +232,9 @@ struct Stage {
     // root (D8); empty when the deck wrote none (the engine's default econv
     // is not a request).
     std::optional<double> omega_target;
+    // D-113: two_photon requested: the two-photon absorption of every root,
+    // from the dipole legs at half its frequency.
+    bool two_photon = false;
   };
   ExcitedStatesRequest excited_states;
   // A3: checkpoint cadence and retention (moldft); 0 is "decision points only".
@@ -301,7 +304,8 @@ raman_coordinates(std::vector<int> atoms, std::string directions, int natom) {
 // excited_states.method, both required, and the optional guess.
 inline const std::vector<std::string>& named_response_properties() {
   static const std::vector<std::string> names
-      = {"polarizability", "hyperpolarizability", "raman", "excited_states"};
+      = {"polarizability", "hyperpolarizability", "raman", "excited_states",
+         "two_photon"};
   return names;
 }
 // The tensor rank of a property's Cartesian components: beta_ABC is a
@@ -378,14 +382,15 @@ inline void translate_response_properties(const std::string& stage_name,
         stage_name
         + ": molresponse requested_properties must name at least "
           "one of polarizability, hyperpolarizability, raman, "
-          "excited_states");
+          "excited_states, two_photon");
   std::set<std::string> requested;
   for (const auto& p : stage.properties)
     if (std::find(known.begin(), known.end(), p) == known.end()
         || !requested.insert(p).second)
       throw std::runtime_error(
           stage_name + ": unsupported or repeated molresponse property " + p
-          + " (polarizability, hyperpolarizability, raman, excited_states)");
+          + " (polarizability, hyperpolarizability, raman, excited_states, "
+            "two_photon)");
   // A property's block without the property is a mistake, not a default.
   for (const auto& p : known) {
     if (requested.contains(p))
@@ -517,6 +522,22 @@ inline void translate_response_properties(const std::string& stage_name,
       rp.set_user_defined_value("excited.guess", es.guess);
     if (!es.guess_basis.empty())
       rp.set_user_defined_value("excited.guess_basis", es.guess_basis);
+  }
+  if (requested.contains("two_photon")) {
+    // D-113: the two-photon absorption of the bundle's roots; the engine's
+    // excited.tpa adds the dipole legs at half each root's frequency. Its
+    // convention (theory note two-photon-normalization-sign: S with the
+    // singlet sqrt(2), D from the orientational average) is set for RPA
+    // roots, so a TDA bundle is refused.
+    if (!requested.contains("excited_states")
+        || stage.excited_states.method != "rpa")
+      throw std::runtime_error(
+          stage_name
+          + ": two_photon needs excited_states in the same stage with "
+            "excited_states.method rpa (the two-photon convention is set for "
+            "RPA roots)");
+    stage.excited_states.two_photon = true;
+    rp.set_user_defined_value("excited.tpa", true);
   }
 }
 
@@ -727,7 +748,7 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
       const bool driven = std::any_of(
           requested.begin(), requested.end(), [](const std::string& p) {
             return p == "polarizability" || p == "hyperpolarizability"
-                   || p == "raman";
+                   || p == "raman" || p == "two_photon";
           });
       const bool seeded = seen.contains("seed.dalton_dir");
       if (seen.contains("seed.freq_tol") && !(seeded && driven))

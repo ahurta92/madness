@@ -299,7 +299,11 @@ struct AppSpec {
   // k}, measurements}], keyed as the state records are. `measurements`
   // (D-082) names the written targets the state's kind has rows for; absent,
   // every written target.
-  std::function<json(const Stage&, int natom)> requested_states;
+  // `records`: the state records the verdict judges (D-113: a request's
+  // states can depend on what was saved, two_photon's legs on the bundle's
+  // roots).
+  std::function<json(const Stage&, int natom, const json& records)>
+      requested_states;
   // B1, B8 (S4d1): one state record's saved-state measurements, keyed as the
   // written targets are (convergence::requested_targets), for the skeleton's
   // one call of evaluate_explicit_criteria.
@@ -348,7 +352,7 @@ shared_verdict(const AppSpec& spec, const Stage& stage, int natom,
   bool converged = true;
   json states = json::array();
   std::set<std::string> measured;
-  for (const auto& needed : spec.requested_states(stage, natom)) {
+  for (const auto& needed : spec.requested_states(stage, natom, records)) {
     const auto& key = needed.at("key");
     json judged = json::object();
     for (const auto& [name, target] : targets.items())

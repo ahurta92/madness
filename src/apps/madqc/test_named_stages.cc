@@ -286,6 +286,25 @@ int main(int argc, char** argv) {
         check(named_stages::response_needs(legacy, 2).legs.size() == 2 &&
                   named_stages::response_needs(legacy, 2).sources.empty(),
               "response_needs: a request saved before it named properties is polarizability");
+        // D-113: two_photon's legs are the dipole legs at half each root's
+        // omega, known once the bundle is; none before.
+        const json two_photon = {{"protocol", {1e-4}},
+                                 {"properties", {{"excited_states", {{"roots", 2}, {"method", "rpa"}}},
+                                                 {"two_photon", json::object()}}}};
+        std::vector<std::string> tpa_legs;
+        for (const auto& [p, f] : named_stages::response_needs(two_photon, 2, {0.4, 0.5}).legs)
+          tpa_legs.push_back(molresponse_v3::fd_node_id(p, f));
+        check(tpa_legs == std::vector<std::string>{
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(0), 0.2),
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(1), 0.2),
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(2), 0.2),
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(0), 0.25),
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(1), 0.25),
+                  molresponse_v3::fd_node_id(molresponse_v3::Perturbation::dipole(2), 0.25)}
+                  && named_stages::response_needs(two_photon, 2).legs.empty()
+                  && named_stages::root_omegas({{"roots", {{{"omega", 0.4}}, {{"omega", 0.5}}}}})
+                         == std::vector<double>{0.4, 0.5},
+              "response_needs (D-113): two_photon's legs at half each root's omega");
     }
     // S3a (D-036): the AppSpec rows, one table per field.
     try {
@@ -881,7 +900,7 @@ int main(int argc, char** argv) {
           state["stop_reason"] = "converged";
           if (at_final_rung)
             state["protocol_step"]
-                = moldft.requested_states(ground, 2)[0].at("protocol_step");
+                = moldft.requested_states(ground, 2, json::array())[0].at("protocol_step");
           last.numerical["states"] = json::array({state});
           auto write = writing("final");
           write.final = true;
@@ -1435,7 +1454,7 @@ int main(int argc, char** argv) {
       }
       // S4d1 (D-046, D-057): the shared verdict from the state records.
       {
-        const auto needed = moldft.requested_states(ground, 2);
+        const auto needed = moldft.requested_states(ground, 2, json::array());
         check(needed.size() == 1 && needed[0].at("key") == "ground_state"
                   && needed[0].at("protocol_step").at("thresh") == 1e-6,
               "spec requested_states (moldft): the ground state at the final "
@@ -1543,7 +1562,7 @@ int main(int argc, char** argv) {
                   .at("converged"),
               "shared verdict (D-016): a loaded state's met request stands "
               "under the written targets too");
-        const auto response_needed = molresponse.requested_states(optical, 2);
+        const auto response_needed = molresponse.requested_states(optical, 2, json::array());
         check(response_needed.size() == 2
                   && response_needed[0].at("key")
                          == "dipole_z|1e-04_k6|f0.00000",
@@ -1572,7 +1591,7 @@ int main(int argc, char** argv) {
         };
         const auto bundle_record = [&](const named_stages::Stage& stage,
                                        double omega, bool engine_rows = true) {
-          const auto needed = molresponse.requested_states(stage, 2).back();
+          const auto needed = molresponse.requested_states(stage, 2, json::array()).back();
           json record = {{"key", needed.at("key")},
                          {"kind", "excited_states"},
                          {"protocol_step", needed.at("protocol_step")},
@@ -1604,7 +1623,7 @@ int main(int argc, char** argv) {
         const auto es_dconv = es_deck("excited_states", "");
         const auto mixed_dconv
             = es_deck("polarizability, excited_states", criteria);
-        const auto needed = molresponse.requested_states(es_dconv, 2);
+        const auto needed = molresponse.requested_states(es_dconv, 2, json::array());
         check(needed.size() == 1
                   && needed[0].at("measurements")
                          == json::array({"excitation_energy_change"}),
@@ -1619,7 +1638,7 @@ int main(int argc, char** argv) {
               "shared verdict (D-082): dconv, which no needed state measures, "
               "listed once, not a failed state");
         const auto mixed_needed_dconv
-            = molresponse.requested_states(mixed_dconv, 2);
+            = molresponse.requested_states(mixed_dconv, 2, json::array());
         const json planner_leg
             = {{"key", mixed_needed_dconv[0].at("key")},
                {"kind", "frequency_dependent_response"},
@@ -1671,7 +1690,7 @@ int main(int argc, char** argv) {
         // A stage with legs and a bundle: each kind on its own rows.
         const auto mixed = es_deck("polarizability, excited_states",
                                    criteria + " econv 1e-6\n");
-        const auto mixed_needed = molresponse.requested_states(mixed, 2);
+        const auto mixed_needed = molresponse.requested_states(mixed, 2, json::array());
         json leg = {{"key", mixed_needed[0].at("key")},
                     {"kind", "frequency_dependent_response"},
                     {"protocol_step", mixed_needed[0].at("protocol_step")},
@@ -1992,6 +2011,31 @@ int main(int argc, char** argv) {
                 "now seed.dalton_dir");
         rejects(geometry + gs + with(response, " seed.es_warmup true\n"),
                 "unsupported parameter seed.es_warmup");
+        // D-113: two_photon needs an rpa bundle in the same stage; it is a
+        // driven-response property for seed.freq_tol.
+        {
+          auto tpa = seeded_es;
+          tpa.replace(tpa.find("[excited_states]"), 16,
+                      "[excited_states, two_photon]");
+          rejects(geometry + gs + tpa, "seed.freq_tol is required");
+          auto rpa = with(tpa, " seed.freq_tol 0.01\n");
+          rpa.replace(rpa.find("method tda"), 10, "method rpa");
+          try {
+            const auto stages = named_stages::parse(world, geometry + gs + rpa);
+            check(stages[1].excited_states.two_photon
+                      && stages[1].params.get<ResponseParameters>().excited_tpa(),
+                  "two_photon (D-113): mapped onto the engine's excited.tpa");
+          } catch (const std::exception& e) {
+            check(false, std::string("two_photon stage: ") + e.what());
+          }
+          rejects(geometry + gs + with(tpa, " seed.freq_tol 0.01\n"),
+                  "two_photon needs excited_states in the same stage with "
+                  "excited_states.method rpa");
+          auto alone = response;
+          alone.replace(alone.find("requested_properties ["), 22,
+                        "requested_properties [two_photon, ");
+          rejects(geometry + gs + alone, "two_photon needs excited_states");
+        }
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

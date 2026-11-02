@@ -39,7 +39,7 @@ The first implementation supports these controls:
 |---|---|
 | `molecule NAME` | Ordinary atom coordinates, `units`, `eprec`, `no_orient` |
 | `moldft NAME` | `molecule`, `xc hf`, `protocol`, `dconv`, `econv`, `maxiter` (one number or one per rung), `checkpoint.every_iterations`, `checkpoint.keep_all`, `convergence.use_default_criteria`, `accuracy.bsh_residual`, `accuracy.kinetic_trace_change`, `progress.*`, `L`, `k`, `charge`, `localize`, `print_level`, `maxsub`, `maxrotn`, `seed.dalton_dir` (see "Dalton seed"), `requested_properties [energy, dipole]` (either or both) |
-| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level` (moldft's scale: unwritten or 1 to 3, one row per solver iteration; 4 to 9, channel and save detail; 10, debug), `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis`, `econv`, the excitation energy change target, and `stall.window`, `stall.ratio`, the bundle's plateau detector (see "Excited states") |
+| `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level` (moldft's scale: unwritten or 1 to 3, one row per solver iteration; 4 to 9, channel and save detail; 10, debug), `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`, `two_photon`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis`, `econv`, the excitation energy change target, and `stall.window`, `stall.ratio`, the bundle's plateau detector (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
 frequencies and `frequency_units au` (numbers are never defaulted); its
@@ -379,7 +379,7 @@ the engine's `solid_harmonics`) and, for `virtual_ao` only,
 engine's `excited.*` spellings are not stage controls. The stage's `maxiter`
 caps the bundle's rung as it caps the dipole legs' (one cap); the engine's
 warmup length and subspace size are its defaults. Two-photon absorption is
-not exposed.
+the property `two_photon` (see "Two-photon absorption").
 The bundle's saved id, in the records and in the engine's own log lines, keeps
 the engine's spelling, `full` for `rpa` (`es:full_n2` is an `rpa` bundle of two
 roots); madqc's own lines say `rpa with 2 roots` (D-110).
@@ -483,7 +483,7 @@ and the quadratic sources with the dipole legs, one property record per
 requested property, and `--continue` judges every leg the requested values
 are built from (above).
 
-2PA, Nemo, MP2, CC2, and optimization are not exposed
+Nemo, MP2, CC2, and optimization are not exposed
 through this named frontend yet. The broader convergence contract is milestone 2d.
 
 Checkpointing assumes a shared filesystem and supported archive reader counts
@@ -507,6 +507,42 @@ tighter targets, unpublished-generation isolation, publication failure, missing
 or corrupt payloads, incomplete inventory and incompatible geometry in serial
 and two MPI ranks. It compares final H2 energy and dipole and preserves the
 original generation hashes across continuation.
+
+## Two-photon absorption
+
+A `molresponse` stage that requests an `rpa` bundle can ask for the two-photon
+absorption of its roots (D-113):
+
+```
+  requested_properties [excited_states, two_photon]
+  excited_states.roots 2
+  excited_states.method rpa
+```
+
+- `two_photon` has no keys of its own: both photons are at half each root's
+  frequency (degenerate photons, `omega_B = omega_C = Omega_f/2`), and the tensor is
+  always full. It needs `excited_states` in the same stage with `method rpa`; a `tda`
+  bundle is refused, since the convention below is set for RPA roots.
+- The engine adds the dipole legs `x`, `y`, `z` at `Omega_f/2` for each root once the
+  bundle has converged. The stage's verdict judges the bundle and every one of these
+  legs at the final protocol step; the stage converges only when all of them do.
+- On `--continue`, a loaded bundle keeps its saved frequencies, so its legs are
+  planned with it (loaded when converged). A bundle solved again moves its
+  frequencies; the engine then solves its new legs after it converges, from its own
+  restart rule (or from the Dalton seed, below), and the verdict judges them.
+- `properties.two_photon`, per root: `root`, `omega` (`Omega_f`), `photon_frequency`
+  (`Omega_f/2`), `tensor` (the 3x3 two-photon transition tensor `S`), `D_f`, `D_g`,
+  `D_linear` (`2 D_f + 4 D_g`), `D_circular` (`-2 D_f + 6 D_g`) and `R`, all atomic
+  units; `root_convergence` (the root's own `converged`, `density_residual` and
+  `excitation_energy_change` in the bundle) and its three `legs` as the engine
+  reports them. The record names its convention: the theory note
+  `two-photon-normalization-sign` (`S` with the singlet `sqrt(2)`; `D_f = (Tr S)^2/30`,
+  `D_g = sum S_ab^2/30`, with no further factor of 30). Cross sections in GM are not
+  reported: the engine's carry a fixed 0.1 eV lineshape, a convention not yet
+  decided.
+- A seeded stage (`seed.dalton_dir`, below) starts the bundle from the Dalton
+  vectors and each leg from the Dalton dipole record within `seed.freq_tol`, which
+  `two_photon` requires as the other driven properties do.
 
 ## Dalton seed
 

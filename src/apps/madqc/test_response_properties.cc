@@ -987,6 +987,55 @@ int main(int argc, char** argv) {
     throws(
         [&] { named_stages::selected_excited_states(stage, metadata, json()); },
         "not the requested tda with 3 roots");
+    // D-113: two_photon's record from the engine's tpa rows: per root the
+    // tensor and strengths, its own convergence in the bundle, its legs; no
+    // cross sections in GM.
+    stage.excited_states.roots = 2;
+    auto tpa_row = [](int root, double omega, bool converged) {
+      return json{{"es_root_id", root},
+                  {"omega", omega},
+                  {"S", {{1.0, 0.0, 0.0}, {0.0, 2.0, 0.0}, {0.0, 0.0, 3.0}}},
+                  {"Df", 1.2}, {"Dg", 0.4667}, {"D_linear", 4.2668},
+                  {"D_circular", 0.4002}, {"R", 0.1},
+                  {"sigma_linear_gm", 9.0}, {"sigma_circular_gm", 8.0},
+                  {"row_accuracy", json::array({{{"converged", converged}},
+                                                {{"converged", true}},
+                                                {{"converged", true}}})},
+                  {"converged", converged},
+                  {"max_bsh_residual", 1e-5}};
+    };
+    json tpa_metadata;
+    tpa_metadata["excited_states"][pkey]
+        = {{"type", "full"}, {"n_roots", 2}, {"converged", true},
+           {"stop_reason", "converged"},
+           {"roots", json::array({root(0, 0, 0.42, true, false, false),
+                                  root(1, 1, 0.47, true, false, false)})}};
+    json tpa_properties;
+    tpa_properties["tpa"][pkey]
+        = json::array({tpa_row(0, 0.42, true), tpa_row(1, 0.47, true)});
+    auto tp = named_stages::selected_two_photon(stage, tpa_properties, tpa_metadata);
+    const auto& tp_root = tp.at("roots").at(0);
+    check(tp.at("converged") == true && tp.at("units") == "au"
+              && tp.at("roots").size() == 2 && tp_root.at("root") == 0
+              && tp_root.at("omega") == 0.42 && tp_root.at("photon_frequency") == 0.21
+              && tp_root.at("D_linear") == 4.2668 && tp_root.at("tensor")[2][2] == 3.0
+              && tp_root.at("legs").size() == 3 && tp_root.at("legs_converged") == true
+              && tp_root.at("root_convergence").at("density_residual") == 2e-6
+              && tp_root.at("root_convergence").at("excitation_energy_change") == 3e-7
+              && !tp_root.contains("sigma_linear_gm"),
+          "selected_two_photon (D-113): per root the tensor, D, the root's own "
+          "convergence and its legs; no GM cross sections");
+    tpa_properties["tpa"][pkey] = json::array({tpa_row(0, 0.42, false), tpa_row(1, 0.47, true)});
+    check(named_stages::selected_two_photon(stage, tpa_properties, tpa_metadata)
+                  .at("converged") == false,
+          "selected_two_photon: a leg not converged, the record not converged");
+    tpa_properties["tpa"][pkey] = json::array({tpa_row(0, 0.42, true)});
+    check(named_stages::selected_two_photon(stage, tpa_properties, tpa_metadata)
+                  .at("converged") == false,
+          "selected_two_photon: a root without a row, not converged");
+    check(named_stages::selected_two_photon(stage, json::object(), tpa_metadata)
+              .contains("unavailable"),
+          "selected_two_photon: no rows, unavailable");
   } catch (const std::exception& e) {
     check(false, e.what());
   }
