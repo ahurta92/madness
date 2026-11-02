@@ -981,12 +981,12 @@ int main(int argc, char** argv) {
     stage.excited_states.method = "rpa";
     throws(
         [&] { named_stages::selected_excited_states(stage, metadata, json()); },
-        "not the requested rpa");
+        "not the requested rpa with ");
     stage.excited_states.method = "tda";
     stage.excited_states.roots = 3;
     throws(
         [&] { named_stages::selected_excited_states(stage, metadata, json()); },
-        "not the requested tda with 3");
+        "not the requested tda with 3 roots");
   } catch (const std::exception& e) {
     check(false, e.what());
   }

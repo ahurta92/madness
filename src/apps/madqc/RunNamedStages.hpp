@@ -677,7 +677,8 @@ continuation_plan_lines(const std::string& stage, const json& continuation) {
   std::vector<std::string> lines;
   if (continuation.contains("states"))
     for (const auto& state : continuation.at("states"))
-      lines.push_back(line(state.at("state").get<std::string>(), state));
+      lines.push_back(line(
+          excited_state_words(state.at("state").get<std::string>()), state));
   else
     lines.push_back(line(continuation.contains("protocol_step") ? "ground state"
                                                                 : "the stage",

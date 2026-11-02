@@ -1887,7 +1887,8 @@ inline StagePlans plan_response_states(const Stage& stage,
       for (const auto& record : records)
         if (record.value("kind", "") == "excited_states") {
           plan.why += "; the saved bundle is "
-                      + record.at("identity").get<std::string>()
+                      + excited_state_words(
+                          record.at("identity").get<std::string>())
                       + ", another method or root count, so this one "
                         "starts fresh";
           break;

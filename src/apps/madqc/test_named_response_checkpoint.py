@@ -337,12 +337,15 @@ assert 'transition' in record['roots'][0]
 assert all(w.get('kind') != 'excited_states' for w in stage['work_items'])
 es_roots = work / 'ExcitedStatesRoots'
 shutil.copytree(es, es_roots)
-run('es-two-roots', es_roots,
-    es_deck.replace('excited_states.roots 1', 'excited_states.roots 2'), resume=True)
+log = run('es-two-roots', es_roots,
+          es_deck.replace('excited_states.roots 1', 'excited_states.roots 2'), resume=True)
 stage, record = es_record(es_roots)
 plans = {s['state']: s for s in stage['continuation']['states']}
 assert plans['es:tda_n2']['action'] == 'fresh'
-assert 'the saved bundle is es:tda_n1' in plans['es:tda_n2']['why']
+# D-110: the record keeps the saved id; madqc's own lines say the deck's words.
+assert 'the saved bundle is tda with 1 root, another method' in plans['es:tda_n2']['why']
+assert 'plan: tda with 2 roots - fresh' in log and 'plan: es:tda_n2' not in log, \
+    [l for l in log.splitlines() if ' plan: ' in l]
 assert len(record['roots']) == 2 and record['converged']
 
 # D-070, D-072: by default each stage keeps one generation (the latest, or

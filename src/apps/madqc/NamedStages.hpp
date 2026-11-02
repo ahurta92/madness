@@ -1059,6 +1059,26 @@ frequency_dependent_identity(const std::string& perturbation,
   return perturbation + "|" + frequency_text(frequency);
 }
 
+// D-110: an excited-state bundle in the deck's words. The saved id keeps the
+// engine's spelling, es:<tda|full>_n<roots>, "full" being rpa (es_node_id in
+// calc_manager.hpp); a line madqc prints says "rpa with 2 roots". Any other
+// identity is returned as it is.
+[[nodiscard]] inline std::string
+excited_state_words(const std::string& identity) {
+  const std::string prefix = "es:";
+  const auto n = identity.rfind("_n");
+  if (identity.rfind(prefix, 0) != 0 || n == std::string::npos
+      || n < prefix.size())
+    return identity;
+  const std::string type = identity.substr(prefix.size(), n - prefix.size());
+  const std::string roots = identity.substr(n + 2);
+  if ((type != "tda" && type != "full") || roots.empty()
+      || roots.find_first_not_of("0123456789") != std::string::npos)
+    return identity;
+  return (type == "full" ? "rpa" : "tda") + std::string(" with ") + roots
+         + (roots == "1" ? " root" : " roots");
+}
+
 // D-106: a state record in the current schema's keys. A v1 (or pre-S4a
 // response) record gets the renamed keys: rung -> protocol_step,
 // iterations_at_rung -> iterations_at_protocol_step, stop -> stop_reason,

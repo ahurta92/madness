@@ -398,12 +398,14 @@ inline json selected_excited_states(const Stage& stage, const json& metadata,
   const std::string type = request.method == "tda" ? "tda" : "full";
   if (bundle->value("type", type) != type
       || bundle->value("n_roots", request.roots) != request.roots)
-    throw std::runtime_error("the excited-state bundle at " + pkey + " is "
-                             + bundle->value("type", std::string("?"))
-                             + " with "
-                             + std::to_string(bundle->value("n_roots", 0))
-                             + " root(s), not the requested " + request.method
-                             + " with " + std::to_string(request.roots));
+    throw std::runtime_error(
+        "the excited-state bundle at " + pkey + " is "
+        + excited_state_words("es:" + bundle->value("type", std::string("?"))
+                              + "_n"
+                              + std::to_string(bundle->value("n_roots", 0)))
+        + ", not the requested "
+        + excited_state_words("es:" + type + "_n"
+                              + std::to_string(request.roots)));
   const std::string stop = bundle->value("stop_reason", std::string());
   const bool bundle_converged = bundle->value("converged", false)
                                 && stop == "converged"

@@ -1108,6 +1108,35 @@ int main(int argc, char** argv) {
                          == "0.3333333333333333"
                   && named_stages::frequency_text(0.0) == "0",
               "frequency_text (D-101): the shortest decimal that reads back");
+        check(named_stages::excited_state_words("es:full_n1") == "rpa with 1 root"
+                  && named_stages::excited_state_words("es:tda_n2")
+                         == "tda with 2 roots"
+                  && named_stages::excited_state_words("dipole_z|0.04")
+                         == "dipole_z|0.04"
+                  && named_stages::excited_state_words("es:other_n1")
+                         == "es:other_n1"
+                  && named_stages::excited_state_words("es:full_n")
+                         == "es:full_n",
+              "excited_state_words (D-110): a bundle id in the deck's words, "
+              "any other identity as it is");
+        {
+          const json continuation
+              = {{"states",
+                  {{{"state", "es:full_n1"},
+                    {"action", "fresh"},
+                    {"protocol_step", {{"index", 0}, {"thresh", 1e-4}, {"k", 6}}},
+                    {"why", "no saved state"}}}}};
+          const auto lines
+              = named_stages::continuation_plan_lines("optical", continuation);
+          check(lines.size() == 1
+                    && lines.front().rfind(
+                           "stage optical plan: rpa with 1 root - fresh at rung 0",
+                           0)
+                           == 0,
+                "the --continue plan line names an rpa bundle in the deck's "
+                "words (D-110): "
+                    + (lines.empty() ? std::string() : lines.front()));
+        }
         const auto fd_records
             = named_stages::response_state_records(sampled, "g-ref", {});
         const auto& rows = fd_records.at(0).at("engine_measurements");

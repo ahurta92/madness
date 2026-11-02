@@ -380,6 +380,9 @@ engine's `excited.*` spellings are not stage controls. The stage's `maxiter`
 caps the bundle's rung as it caps the dipole legs' (one cap); the engine's
 warmup length and subspace size are its defaults. Two-photon absorption is
 not exposed.
+The bundle's saved id, in the records and in the engine's own log lines, keeps
+the engine's spelling, `full` for `rpa` (`es:full_n2` is an `rpa` bundle of two
+roots); madqc's own lines say `rpa with 2 roots` (D-110).
 
 The engine solves the roots together as one bundle per rung, each root
 with its own verdict (a stalled root is never relabelled converged), and

@@ -422,8 +422,9 @@ struct molresponse_v3_lib {
         r.raman_nuc_atom = -1;   // full set; the axis is ignored
         r.raman_nuc_axis = -1;
         if (world.rank() == 0)
-          print("response: raman.nuc_atom -1 — full polarizability gradient over",
-                3 * natom, "nuclear coordinates with normal-mode analysis");
+          print("Raman: all atoms, directions x y z ("
+                + std::to_string(3 * natom)
+                + " nuclear coordinates, with normal-mode analysis)");
       }
       add(r);
     }
