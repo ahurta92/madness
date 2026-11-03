@@ -103,7 +103,7 @@ int main() {
     const AccuracyParameters supplied{{{"accuracy.kinetic_trace_change", 0.01}}};
     const auto supplied_targets = madness::requested_accuracy_targets(
         supplied, "density", "amplitude", "hartree", "dconv", "econv");
-    expect(supplied_targets.size() == 1 && supplied_targets.at("delta_kinetic_energy").at("value") == 0.01,
+    expect(supplied_targets.size() == 1 && supplied_targets.at("absolute_kinetic_trace_change").at("value") == 0.01,
            "only explicitly supplied accuracy controls become targets");
     const auto charge_target = madness::requested_accuracy_targets(
         AccuracyParameters{{{"dconv", 0.75}}}, "density", "amplitude",
@@ -114,7 +114,7 @@ int main() {
         {"charge_density_change", {{"availability", "measured"}, {"units", "density"}, {"value", 1.0}}}};
     expect(madness::evaluate_explicit_criteria(density_evidence, charge_target).at("status") == "unmet",
            "restricted single-spin change below target cannot hide charge change above target");
-    const json legacy_kinetic = {{"delta_kinetic_energy", {{"availability", "measured"},
+    const json legacy_kinetic = {{"absolute_kinetic_trace_change", {{"availability", "measured"},
         {"units", "hartree"}, {"value", 0.0}, {"quantity", "physical_energy_change"}}}};
     expect(madness::evaluate_explicit_criteria(legacy_kinetic, supplied_targets).at("status") == "unavailable",
            "historical physical energy cannot certify a new trace-change target");
