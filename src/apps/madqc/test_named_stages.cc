@@ -2036,6 +2036,35 @@ int main(int argc, char** argv) {
                         "requested_properties [two_photon, ");
           rejects(geometry + gs + alone, "two_photon needs excited_states");
         }
+        // D-115: a written frequency keeps every digit into the stage and the
+        // engine; two that differ but share the engine's key are refused, as
+        // is a repeat.
+        {
+          auto precise = response;
+          precise.replace(precise.find("[0.0,0.02]"), 10, "[0.0198666875]");
+          try {
+            const auto stages = named_stages::parse(world, geometry + gs + precise);
+            check(stages[1].frequencies == std::vector<double>{0.0198666875}
+                      && stages[1].params.get<ResponseParameters>()
+                                 .get<std::vector<double>>("dipole.frequencies")
+                             == std::vector<double>{0.0198666875},
+                  "D-115: a written 0.0198666875 reaches the stage and the engine "
+                  "unchanged");
+          } catch (const std::exception& e) {
+            check(false, std::string("precise frequency: ") + e.what());
+          }
+          auto both = precise;
+          both.replace(both.find("requested_properties [polarizability]"), 37,
+                       "requested_properties [polarizability, hyperpolarizability]\n"
+                       " hyperpolarizability.frequencies [0.019867]\n"
+                       " hyperpolarizability.frequency_units au\n"
+                       " hyperpolarizability.components [zzz]");
+          rejects(geometry + gs + both,
+                  "differ but share the engine's frequency key f0.01987");
+          auto repeat = response;
+          repeat.replace(repeat.find("[0.0,0.02]"), 10, "[0.02,0.02]");
+          rejects(geometry + gs + repeat, "distinct at engine frequency-key precision");
+        }
       }
       // release (B5): only a converged outcome is a reference.
       named_stages::StageOutcome outcome;

@@ -49,6 +49,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -247,16 +248,27 @@ inline bool entry_diverged(const nlohmann::json &e) {
   return e.value("diverged", false);
 }
 
-/// FD status entry at an exact (pert, key, freq) or nullptr.
+/// FD status entry at an exact (pert, key, freq) or nullptr. D-115: the
+/// frequency key is "f%.5f", so two frequencies closer than its last digit
+/// share it; an entry whose stored freq differs from `freq` beyond roundoff
+/// holds another state and is not this one (it can still seed it, through
+/// best_usable_fd_source_key). An entry with no stored freq (an older writer)
+/// matches by its key, as before. A NaN `freq` skips the check.
 inline const nlohmann::json *
 fd_entry(const nlohmann::json &meta, const std::string &pert,
-         const std::string &key, const std::string &fkey) {
+         const std::string &key, const std::string &fkey,
+         double freq = std::numeric_limits<double>::quiet_NaN()) {
   if (!meta.contains("fd_states")) return nullptr;
   const auto &fs = meta["fd_states"];
   if (!fs.contains(pert) || !fs[pert].contains(key) ||
       !fs[pert][key].contains(fkey))
     return nullptr;
-  return &fs[pert][key][fkey];
+  const auto &e = fs[pert][key][fkey];
+  if (freq == freq && e.contains("freq") && e["freq"].is_number() &&
+      std::abs(e["freq"].get<double>() - freq) >
+          1e-12 * std::max(1.0, std::abs(freq)))
+    return nullptr;
+  return &e;
 }
 
 // FD coarser-source selection now lives in one shared helper —
@@ -517,7 +529,7 @@ NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
   // FD / NuclearFD / (concrete) DerivedFD all live in fd_states.
   const std::string pert = node.pert.description();
   const std::string fkey = ResponseMetadata::freq_key(node.freq);
-  if (const auto *e = detail_calc::fd_entry(meta, pert, key, fkey)) {
+  if (const auto *e = detail_calc::fd_entry(meta, pert, key, fkey, node.freq)) {
     if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
     if (detail_calc::entry_diverged(*e))
       // Re-seed from the nearest coarser NON-diverged source (best_usable
@@ -635,7 +647,8 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
     } else {
       const auto *e = detail_calc::fd_entry(meta, dep->pert.description(),
                                             key,
-                                            ResponseMetadata::freq_key(dep->freq));
+                                            ResponseMetadata::freq_key(dep->freq),
+                                            dep->freq);
       ok = e && detail_calc::entry_converged(*e);
     }
     if (!ok) return false;

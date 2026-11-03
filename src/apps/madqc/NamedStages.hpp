@@ -295,6 +295,19 @@ raman_coordinates(std::vector<int> atoms, std::string directions, int natom) {
   return coordinates;
 }
 
+// D-101, D-106: a frequency as a state identity prints it: the shortest
+// decimal that reads back to the same double (a written 0.04 is "0.04"), so
+// the identity a generation saved and the one a request asks for are the
+// same string exactly when the doubles are equal.
+[[nodiscard]] inline std::string frequency_text(double frequency) {
+  std::array<char, 32> buffer{};
+  const auto [end, error]
+      = std::to_chars(buffer.data(), buffer.data() + buffer.size(), frequency);
+  if (error != std::errc())
+    throw std::runtime_error("frequency_text: cannot print the frequency");
+  return {buffer.data(), end};
+}
+
 // The named property language of a molresponse stage (D-017). Each optical
 // property in requested_properties has its own block: <property>.frequencies
 // and <property>.frequency_units are required (B3: a number is never
@@ -417,6 +430,22 @@ inline void translate_response_properties(const std::string& stage_name,
   std::vector<double> grid;
   std::set<std::string> grid_keys;
   std::set<char> axes;
+  // D-115: every dipole leg the properties need (alpha's and Raman's at w,
+  // beta's at w and 2w), by the engine's frequency key ("f%.5f"): two
+  // written frequencies that differ but share a key would share one stored
+  // state, so they are refused, naming both. Equal values are one leg.
+  std::map<std::string, double> leg_keys;
+  auto leg = [&](const std::string& p, double f) {
+    const auto key = molresponse_v3::ResponseMetadata::freq_key(f);
+    const auto [at, inserted] = leg_keys.emplace(key, f);
+    if (!inserted && at->second != f)
+      throw std::runtime_error(
+          stage_name + ": " + p + " frequency " + frequency_text(f)
+          + " and frequency " + frequency_text(at->second)
+          + " differ but share the engine's frequency key " + key
+          + " (five decimals), so they would share one stored state; write "
+            "one of them, or frequencies further apart");
+  };
   auto gather = [&](const PropertyRequest& r) {
     for (double f : r.frequencies)
       if (grid_keys.insert(molresponse_v3::ResponseMetadata::freq_key(f))
@@ -429,14 +458,22 @@ inline void translate_response_properties(const std::string& stage_name,
     const auto r = request("polarizability");
     stage.frequencies = r.frequencies;
     stage.components = r.components;
+    for (double f : r.frequencies)
+      leg("polarizability", f);
     gather(r);
   }
   if (requested.contains("hyperpolarizability")) {
     stage.hyperpolarizability = request("hyperpolarizability");
+    for (double f : stage.hyperpolarizability.frequencies) {
+      leg("hyperpolarizability", f);
+      leg("hyperpolarizability (its 2w leg)", 2.0 * f);
+    }
     gather(stage.hyperpolarizability);
   }
   if (requested.contains("raman")) {
     stage.raman = request("raman");
+    for (double f : stage.raman.frequencies)
+      leg("raman", f);
     gather(stage.raman);
     stage.raman_atoms = controls.get<std::vector<int>>("raman.atoms");
     std::set<int> distinct_atoms;
@@ -1071,19 +1108,6 @@ using GenerationPublisher
 inline constexpr const char* state_schema = "madqc.state.v2";
 inline constexpr const char* state_schema_v1 = "madqc.state.v1";
 inline constexpr const char* response_state_schema = "madqc.response.state.v1";
-
-// D-101, D-106: a frequency as a state identity prints it: the shortest
-// decimal that reads back to the same double (a written 0.04 is "0.04"), so
-// the identity a generation saved and the one a request asks for are the
-// same string exactly when the doubles are equal.
-[[nodiscard]] inline std::string frequency_text(double frequency) {
-  std::array<char, 32> buffer{};
-  const auto [end, error]
-      = std::to_chars(buffer.data(), buffer.data() + buffer.size(), frequency);
-  if (error != std::errc())
-    throw std::runtime_error("frequency_text: cannot print the frequency");
-  return {buffer.data(), end};
-}
 
 // D-101: a frequency-dependent response state's identity, the one form the
 // saved records, the request and upgrade_state_record use.

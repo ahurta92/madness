@@ -42,7 +42,16 @@ The first implementation supports these controls:
 | `molresponse NAME` | `reference`, `protocol`, `dconv`, `maxiter`, `kain`, `print_level` (moldft's scale: unwritten or 1 to 3, one row per solver iteration; 4 to 9, channel and save detail; 10, debug), `checkpoint.keep_all`, `seed.dalton_dir`, `seed.freq_tol` (see "Dalton seed"), `requested_properties` (any of `polarizability`, `hyperpolarizability`, `raman`, `excited_states`, `two_photon`), and per optical property `<property>.frequencies`, `<property>.frequency_units au`, `<property>.components`; for Raman also `raman.atoms`, `raman.directions` (see "Hyperpolarizability and Raman"); for excited states `excited_states.roots`, `excited_states.method`, `excited_states.guess`, `excited_states.guess_basis`, `econv`, the excitation energy change target, and `stall.window`, `stall.ratio`, the bundle's plateau detector (see "Excited states") |
 
 Ground states must be closed shell. Every requested property names its own
-frequencies and `frequency_units au` (numbers are never defaulted); its
+frequencies and `frequency_units au` (numbers are never defaulted). A written
+frequency is solved and recorded with every digit it was written with (D-115;
+before, a list kept five significant digits, so `0.0198666875` was solved as
+`0.019867`). The engine names a saved state by its frequency to five decimals
+(`f0.01987`), so two written frequencies that differ but round to the same name
+are refused, within one property's list and across the properties' legs (the
+polarizability's and Raman's at the frequency, the hyperpolarizability's at it and
+at twice it); a repeated frequency is refused. A state saved at another frequency
+under the same name (a generation written before D-115) is a starting guess for
+the requested one, never the same state: it is solved again. Its
 components are Cartesian tuples such as `[zz]` or `[xx, xy]` and mean every
 tuple when omitted (9 pairs for the polarizability and Raman, 27 triples for
 the hyperpolarizability). The engine takes axes and one frequency grid, not
@@ -526,6 +535,9 @@ absorption of its roots (D-113):
 - The engine adds the dipole legs `x`, `y`, `z` at `Omega_f/2` for each root once the
   bundle has converged. The stage's verdict judges the bundle and every one of these
   legs at the final protocol step; the stage converges only when all of them do.
+  Two roots whose half frequencies round to the same five-decimal name (degenerate
+  roots) share one set of legs, at the first root's frequency, as the engine solves
+  them; both roots' rows are built from it.
 - On `--continue`, a loaded bundle keeps its saved frequencies, so its legs are
   planned with it (loaded when converged). A bundle solved again moves its
   frequencies; the engine then solves its new legs after it converges, from its own

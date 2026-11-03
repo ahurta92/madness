@@ -16,6 +16,7 @@ class Parameters : public QCCalculationParametersBase {
 public:
     [[nodiscard]] std::set<std::string> full_precision_keys() const override { return {"precise"}; }
     void read_text(World& world, std::string input) { read_internal(world, input, "mp3"); }
+    std::string stored(const std::string& key) const { return get_parameter(key).get_value(); }
 	Parameters() : QCCalculationParametersBase() {
 
 		// initialize with: key, value, comment (optional), allowed values (optional)
@@ -568,6 +569,32 @@ void test_full_precision_controls(World& world) {
     test_same(parameter.econv(), 0.12346); // unopted legacy values are unchanged
 }
 
+// D-115: a list of doubles keeps every written digit, through the deck, the
+// json record and the printed parameters; a default and the same list written
+// are one stored string; scalars outside full_precision_keys are unchanged.
+void test_full_precision_lists(World& world) {
+    const std::vector<double> written = {0.0198666875, 1.0 / 3.0, 1e-4, 0.0};
+    Parameters from_input;
+    from_input.read_text(world, "mp3\nproto [0.0198666875, 0.3333333333333333, 1e-4, 0]\nend\n");
+    test_same(from_input.get<std::vector<double>>("proto"), written);
+    Parameters set;
+    set.set_user_defined_value("proto", written);
+    test_same(set.get<std::vector<double>>("proto"), written);
+    Parameters from_json;
+    from_json.from_json(set.to_json().at("parameters"));
+    test_same(from_json.get<std::vector<double>>("proto"), written);
+    Parameters from_printed;
+    from_printed.read_text(world, "mp3\n" + from_input.print_to_string() + "end\n");
+    test_same(from_printed.get<std::vector<double>>("proto"), written);
+    Parameters defaults, same;
+    same.set_user_defined_value("proto", std::vector<double>{1, 2});
+    test_same(defaults.stored("proto"), same.stored("proto"));
+    test_same(defaults.stored("proto"), std::string("[1, 2]"));
+    Parameters scalar;
+    scalar.set_user_defined_value("econv", 0.123456789);
+    test_same(scalar.econv(), 0.12346); // scalars: as before
+}
+
 int main(int argc, char** argv) {
 	initialize(argc, argv);
 	World world(SafeMPI::COMM_WORLD);
@@ -577,6 +604,7 @@ int main(int argc, char** argv) {
 	int success=0;
 	try {
         test_full_precision_controls(world);
+        test_full_precision_lists(world);
 		test_serialize(world);
 		test_type_conversion1(world);
 		test_type_conversion2(world);

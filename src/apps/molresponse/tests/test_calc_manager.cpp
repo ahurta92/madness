@@ -228,6 +228,31 @@ int main() {
     EXPECT(reconcile_protocol(fd, m4, 1e-6) == NodeAction::Fresh,
            "present, diverged -> Fresh");
 
+    // D-115: the frequency key is "f%.5f". A converged entry under the same
+    // key whose stored freq is another frequency (a deck stored at five
+    // digits before D-115) is another state: Restart from it, never Skip. An
+    // entry with no stored freq (an older writer) matches by its key.
+    {
+      CalcNode written = fd;
+      written.freq = 0.0198666875;
+      written.id = fd_node_id(written.pert, written.freq);
+      json other = empty_meta();
+      put_fd(other, "dipole_x", 1e-6, 0.019867, /*converged=*/true);
+      EXPECT(ResponseMetadata::freq_key(0.019867) == ResponseMetadata::freq_key(0.0198666875),
+             "the two frequencies share the engine's key");
+      EXPECT(reconcile_protocol(written, other, 1e-6) == NodeAction::Restart,
+             "same key, another stored freq -> Restart (a seed, not the same state)");
+      json legacy = other;
+      legacy["fd_states"]["dipole_x"][protocol_key_at(1e-6)]
+            [ResponseMetadata::freq_key(0.019867)].erase("freq");
+      EXPECT(reconcile_protocol(written, legacy, 1e-6) == NodeAction::Skip,
+             "same key, no stored freq (older writer) -> Skip, as before");
+      json same = empty_meta();
+      put_fd(same, "dipole_x", 1e-6, 0.0198666875 * (1 + 1e-15), /*converged=*/true);
+      EXPECT(reconcile_protocol(written, same, 1e-6) == NodeAction::Skip,
+             "same frequency to roundoff -> Skip");
+    }
+
     // refinement #5: a coarser-or-equal PARTIAL (not converged, not diverged) is
     // a usable restart seed — must be Restart, not Fresh (else the good partial
     // is discarded and the finer step re-seeds from zero).

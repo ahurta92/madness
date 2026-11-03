@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <array>
+#include <charconv>
 #include <typeindex>
 #include <map>
 #include <set>
@@ -647,6 +649,24 @@ namespace madness {
             std::ostringstream ss;
             ss << std::boolalpha << arg;
             return ss.str();
+        }
+
+        /// D-115: a list of doubles is stored element by element in the
+        /// shortest decimal that reads back to the same double, so a written
+        /// 0.0198666875 stays 0.0198666875 (the general form below keeps five
+        /// significant digits). Every storing path goes through tostring:
+        /// initialize, to_stored_string and the json reader.
+        static std::string tostring(const std::vector<double>& arg) {
+            std::string str = "[";
+            for (std::size_t i = 0; i < arg.size(); ++i) {
+                std::array<char, 32> buffer{};
+                const auto [end, error]
+                    = std::to_chars(buffer.data(), buffer.data() + buffer.size(), arg[i]);
+                if (error != std::errc())
+                    throw std::runtime_error("tostring: cannot print a list element");
+                str += (i == 0 ? "" : ", ") + std::string(buffer.data(), end);
+            }
+            return str + "]";
         }
 
         template <typename T>
