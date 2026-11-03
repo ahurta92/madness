@@ -864,6 +864,7 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
   std::optional<MoldftCheckpoint> checkpoint;
   std::optional<decltype(library.run(world, stage.params, NextAction::Redo))>
       values;
+  double seed_wall_s = -1.0; // D-118: set when the Dalton seed is used
   LadderSteps steps;
   const auto natom = static_cast<int>(scf->molecule.natom());
   steps.natom = natom;
@@ -906,16 +907,21 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
       params.get<CalculationParameters>().set_user_defined_value(
           "restart", std::string("iterate"));
       scf->param.set_user_defined_value("restart", std::string("iterate"));
+      const double seed_started = madness::wall_time(); // D-118
       molresponse_v3::seed_gs_from_dalton_dir(world, params, directory,
                                               stage.seed_dalton_dir);
+      seed_wall_s = madness::wall_time() - seed_started;
       if (const auto note = checkpoint->seed_method_note();
           !note.empty() && world.rank() == 0)
         print("stage", stage.name + ": Dalton seed:", note);
-      checkpoint->seeded_from(
-          json::parse(madness::checkpoint::detail::on_root(world, [&] {
-            std::ifstream record(scf->param.prefix() + ".gs_seed.json");
-            return json::parse(record).dump();
-          })));
+      auto seeded = json::parse(madness::checkpoint::detail::on_root(world, [&] {
+        std::ifstream record(scf->param.prefix() + ".gs_seed.json");
+        return json::parse(record).dump();
+      }));
+      // D-118: the seed's own time (reading molden.inp, projecting it), never
+      // part of the stage's wall_s or the SCF's timings.
+      seeded["seed_wall_s"] = seed_wall_s;
+      checkpoint->seeded_from(std::move(seeded));
     }
     // D-045: what observe carries across the samples of this run; S4c2:
     // the rung the plan resumed, for publish_now.
@@ -994,6 +1000,10 @@ inline StageOutcome run_moldft_stage(const StageContext& ctx) {
       record["source_state_id"] = saved.generation;
       result["properties"][name] = std::move(record);
     }
+    // D-118: what this run's seed cost, apart from the stage's wall_s.
+    if (seed_wall_s >= 0.0)
+      result["seed"] = {{"wall_s", seed_wall_s},
+                        {"seeded_states", {{"ground_state", 1}}}};
   };
   return run_ladder_stage(ctx, moldft_spec(), steps);
 }
@@ -1194,6 +1204,9 @@ inline StageOutcome run_response_stage(const StageContext& ctx) {
         result["properties"][name] = std::move(record);
       }
       result["engine_metadata"] = response.metadata;
+      // D-118: the seed's own cost, apart from wall_s and the solver times.
+      if (const auto seed = response_seed_cost(response.metadata); !seed.is_null())
+        result["seed"] = seed;
     });
   };
   return run_ladder_stage(ctx, response_spec(), steps);
@@ -1330,7 +1343,8 @@ inline bool run_if_named(madness::World& world,
   // 3. Reopening an output root requires the explicit --continue option.
   // Each invocation gets separate working files; checkpoints remain immutable.
   fs::path root;
-  std::string root_string, run_id, earlier_stages = "[]";
+  std::string root_string, run_id, earlier_stages = "[]",
+      earlier_decks = "{}";
   on_root(world, [&] {
     root = fs::absolute(parser.key_exists("user_defined_prefix")
                             ? fs::path(parser.value_raw("prefix"))
@@ -1380,20 +1394,40 @@ inline bool run_if_named(madness::World& world,
         const std::string name = entry.value("stage", "");
         const std::string path = entry.value("path", name + "/results.json");
         if (name.empty() || !fs::exists(root / path)) continue;
-        kept.push_back({{"stage", name},
-                        {"status", entry.value("status", json())},
-                        {"work", entry.value("work", json())},
-                        {"path", path},
-                        {"run_id",
-                         entry.value("run_id",
-                                     earlier.value("run_id", json()))}});
+        auto kept_entry = entry;
+        kept_entry.erase("stage");
+        kept_entry.update({{"stage", name},
+                           {"status", entry.value("status", json())},
+                           {"work", entry.value("work", json())},
+                           {"path", path},
+                           {"run_id",
+                            entry.value("run_id",
+                                        earlier.value("run_id", json()))}});
+        // D-116: an entry from before D-116 names its index's deck.
+        if (!kept_entry.contains("deck_sha256")
+            && earlier.contains("deck"))
+          kept_entry["deck_sha256"] = earlier.at("deck").at("sha256");
+        kept.push_back(std::move(kept_entry));
       }
       earlier_stages = kept.dump();
+      // D-116: the decks the kept entries name, with their text.
+      json decks = earlier.value("decks", json::object());
+      if (earlier.contains("deck"))
+        decks[earlier.at("deck").at("sha256").get<std::string>()]
+            = earlier.at("deck").at("text");
+      json named = json::object();
+      for (const auto& entry : kept)
+        if (entry.contains("deck_sha256")
+            && decks.contains(entry.at("deck_sha256").get<std::string>()))
+          named[entry.at("deck_sha256").get<std::string>()]
+              = decks.at(entry.at("deck_sha256").get<std::string>());
+      earlier_decks = named.dump();
     }
   });
   world.gop.broadcast_serializable(root_string, 0);
   world.gop.broadcast_serializable(run_id, 0);
   world.gop.broadcast_serializable(earlier_stages, 0);
+  world.gop.broadcast_serializable(earlier_decks, 0);
   root = root_string;
 
   // A8, D-036: one AppSpec per application, looked up by its name; each
@@ -1412,6 +1446,19 @@ inline bool run_if_named(madness::World& world,
                 {"mode", continuing ? "continue" : "fresh"},
                 {"mpi_ranks", world.size()},
                 {"stages", json::parse(earlier_stages)}};
+  // D-116: the deck this invocation read, exactly, and every deck an entry of
+  // the index names (an earlier deck stays while its stage is listed); the
+  // thread budget it ran with.
+  const std::string deck_sha256 = sha256_hex(text);
+  index["deck"] = {{"sha256", deck_sha256}, {"text", text}};
+  index["decks"] = json::parse(earlier_decks);
+  index["decks"][deck_sha256] = text;
+  {
+    const char* threads = std::getenv("MAD_NUM_THREADS");
+    index["threads"]
+        = {{"pool", static_cast<int>(madness::ThreadPool::size())},
+           {"MAD_NUM_THREADS", threads ? json(std::string(threads)) : json()}};
+  }
 
   // 4. Execute in input order; parse() has already checked the references.
   for (auto& stage : stages) {
@@ -1431,20 +1478,64 @@ inline bool run_if_named(madness::World& world,
       ctx.inputs.emplace("reference",
                          read_input(world, root, stage.reference, outcomes));
     const auto& application = applications.at(stage.kind);
+    // D-116: the stage's own wall clock, from here to its record; and, for a
+    // stage that is only loaded, the time of the run that wrote what it
+    // loaded, from that run's record (the earlier index's run_id when the
+    // record predates D-116).
+    json prior = json::object();
+    if (continuing) {
+      std::string text = "{}";
+      on_root(world, [&] {
+        const auto file = stage_directory / "results.json";
+        if (!fs::exists(file))
+          return;
+        json earlier;
+        std::ifstream(file) >> earlier;
+        json found = {{"wall_s", earlier.value("wall_s", json())},
+                      {"run_id", earlier.value("wall_s_run_id",
+                                               earlier.value("run_id", json()))}};
+        if (found.at("run_id").is_null())
+          for (const auto& e : index.at("stages"))
+            if (e.value("stage", "") == stage.name)
+              found["run_id"] = e.value("run_id", json());
+        text = found.dump();
+      });
+      world.gop.broadcast_serializable(text, 0);
+      prior = json::parse(text);
+    }
+    const double started = madness::wall_time();
     auto outcome = application.run(ctx);
 
     // 5. Record the outcome before stopping an unconverged sequence. Later
     // stages must not run against a reference that failed its completion check.
     auto& result = outcome.result;
     result["status"] = outcome.converged ? "completed" : "unconverged";
+    result["run_id"] = run_id;
+    result["deck_sha256"] = deck_sha256;
+    const double elapsed = madness::wall_time() - started;
+    if (result.value("work", "") == "loaded") {
+      // D-116: loading is not the stage's work: its wall_s is the run that
+      // solved it, and this run's time on it is load_wall_s, never added in.
+      result["wall_s"] = prior.value("wall_s", json());
+      result["wall_s_run_id"] = prior.value("run_id", json());
+      result["load_wall_s"] = elapsed;
+    } else {
+      result["wall_s"] = elapsed;
+      result["wall_s_run_id"] = run_id;
+    }
     write_result(world, stage_directory / "results.json", result);
     // D-105: the root lists each stage and where its record is; D-109: this
     // run's entry replaces the stage's earlier one in its place.
-    const json entry = {{"stage", stage.name},
-                        {"status", result.at("status")},
-                        {"work", result.value("work", json())},
-                        {"path", stage.name + "/results.json"},
-                        {"run_id", run_id}};
+    json entry = {{"stage", stage.name},
+                  {"status", result.at("status")},
+                  {"work", result.value("work", json())},
+                  {"path", stage.name + "/results.json"},
+                  {"run_id", run_id},
+                  {"deck_sha256", deck_sha256},
+                  {"wall_s", result.at("wall_s")},
+                  {"wall_s_run_id", result.at("wall_s_run_id")}};
+    if (result.contains("load_wall_s"))
+      entry["load_wall_s"] = result.at("load_wall_s");
     auto& listed = index["stages"];
     const auto same = std::find_if(listed.begin(), listed.end(),
                                    [&](const json& e) {

@@ -292,9 +292,11 @@ resolution is refused; upstream refinement must be requested explicitly.
 
 Response publication occurs after each completed channel/protocol solve, including
 an unfinished solve that reached its iteration limit. Interruption within a solve
-loses work since that boundary. Every publication copies the current saved-state
-inventory, trading disk space and I/O for a simple complete generation. Retention
-and incremental storage are not implemented. Named response checkpoint payloads
+loses work since that boundary. Every publication is a complete generation of the
+current saved-state inventory; the retention rule (D-070, "Every stage keeps one
+copy of each saved function" above) then removes the older generations, so a stage
+keeps one copy of each saved function unless it writes `checkpoint.keep_all true`.
+Named response checkpoint payloads
 use checked native archives even in HDF5-enabled builds; the optional ground-state
 HDF5 mirror stays in the attempt directory. Standalone/legacy response backend
 selection remains unchanged.
@@ -501,7 +503,8 @@ published generation selectable. This does not provide fault-tolerant MPI or
 power-loss durability. Unpublished generations are ignored, and automatic
 cleanup is deferred. A stale `.publish-lock` requires manual recovery after
 confirming no publisher is active. Saving each iteration adds disk space and
-I/O costs; retention/cadence controls are not included in this slice.
+I/O costs; `checkpoint.every_iterations` sets the moldft cadence and the retention
+rule above keeps one copy of each saved function (D-070).
 
 Tests: `test_named_stages` covers block parsing, ownership and errors in serial
 and two ranks. `test_named_stages_e2e.py` compares fresh H2 energy/alpha with the
@@ -650,6 +653,31 @@ its earlier `run_id`, while its `results.json` is there; a stage this run
 writes replaces its entry in place, and a new one is added at the end. So
 `gs` run by one deck and `optical` by a second, `--continue` deck are both
 listed, each with its own run.
+
+What a database can key on (D-116, D-118):
+
+- The root `results.json`: `deck` (`sha256` and `text`, this invocation's deck
+  exactly as read), `decks` (the text of every deck an entry still names, by its
+  SHA-256), and `threads` (`pool`, the runtime's thread count, and `MAD_NUM_THREADS`
+  as set, or null). Each entry carries `deck_sha256`, `wall_s` and `wall_s_run_id`.
+- A stage's `results.json`: `run_id`, `deck_sha256`, and `wall_s`, the stage's own
+  wall clock from its start to its record, with `wall_s_run_id`, the run it is
+  from. A stage that is only loaded keeps the `wall_s` of the run that solved it
+  and records this run's time as `load_wall_s`, never added in. A seeded stage
+  adds `seed`: the seed's own time (`wall_s`, and for a response stage
+  `import_wall_s`, `seed_guard_wall_s`, `legs_wall_s`) and how many states it
+  seeded; it is never part of `wall_s` or of the solver's timings.
+- Property rows: `omega_index`, the row's position in the property's written
+  `frequencies` (polarizability and Raman), and `n_b`, `n_c` for the
+  hyperpolarizability (equal: the engine's processes have `omega_B = omega_C`).
+  A list has no repeated value (D-115), so a position names one frequency.
+- Response state records (`numerical.states[]`): each frequency-dependent leg's
+  `roles`, every request it serves, in the requests' order: `driven` (with
+  `omega_index`, or `n_b`, `n_c`), `shg_2w` (the hyperpolarizability's leg at twice
+  its frequency), `nuclear` (`atom`, `direction`), `two_photon_half` (`parent_root`,
+  the bundle root's stable `root_id`). A seeded state carries `seed_wall_s`: a
+  leg's Dalton record seed, a bundle's seed guard at that rung, the moldft ground
+  state's `molden.inp` seed.
 
 What some names mean:
 

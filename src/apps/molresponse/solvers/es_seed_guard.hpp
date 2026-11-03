@@ -299,11 +299,15 @@ inline void print_es_seed_guard(madness::World &world,
 inline void record_es_seed_guard(madness::World &world,
                                  const std::string &calc_dir,
                                  const std::string &protocol_key,
-                                 const EsSeedGuardReport &rep) {
+                                 const EsSeedGuardReport &rep,
+                                 double wall_s = -1.0) { // D-118: the guard's time
   if (world.rank() == 0) {
     auto meta =
         ResponseMetadata::load_or_create(calc_dir + "/response_metadata.json");
-    meta.set_es_seed_guard(protocol_key, rep.to_json());
+    auto entry = rep.to_json();
+    if (wall_s >= 0.0)
+      entry["wall_s"] = wall_s;
+    meta.set_es_seed_guard(protocol_key, entry);
     meta.save();
   }
   world.gop.fence();

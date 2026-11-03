@@ -287,7 +287,7 @@ saved_state(const madness::checkpoint::Manifest& manifest) {
 moldft_state_record(const madness::checkpoint::Manifest& manifest,
                     const std::string& decided_by) {
   const auto state = saved_state(manifest);
-  return {
+  json record = {
       {"schema", state_schema},
       {"key", "ground_state"},
       {"kind", "ground_state"},
@@ -299,6 +299,11 @@ moldft_state_record(const madness::checkpoint::Manifest& manifest,
       {"decided_by", decided_by},
       {"engine_measurements", state.engine_measurements},
       {"saved_measurements", state.saved_measurements}};
+  // D-118: a seeded state carries its seed's own wall time.
+  if (manifest.seed.is_object() && manifest.seed.contains("seeded_from")
+      && manifest.seed.at("seeded_from").contains("seed_wall_s"))
+    record["seed_wall_s"] = manifest.seed.at("seeded_from").at("seed_wall_s");
+  return record;
 }
 
 // B6, the moldft AppSpec's state_records (S4b): the generation's records,

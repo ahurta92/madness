@@ -359,6 +359,123 @@ response_needs(const json& request, int natom,
   return needs;
 }
 
+// D-116: what each frequency-dependent state is for, by the requests in
+// their written order (as response_needs walks them), so a reader keys a leg
+// on its request, not on its frequency. Keyed "<perturbation>@<freq key>" (a
+// state record's perturbation and the engine's frequency key); each leg has
+// every role it serves (dipole_z at w can serve alpha and beta):
+//   driven           alpha's or Raman's leg at w (omega_index), beta's legs at
+//                    omega_B and omega_C (n_b, n_c);
+//   shg_2w           beta's leg at 2w (n_b, n_c of its driver);
+//   nuclear          a Raman nuclear leg (atom, direction);
+//   two_photon_half  a two-photon leg at Omega_f/2 (parent_root: the bundle
+//                    root's stable root_id, not its slot).
+// `bundle_roots`: the bundle's roots at the final rung (root_id, omega).
+[[nodiscard]] inline std::map<std::string, json>
+state_roles(const json& request, int natom, const json& bundle_roots = json::array()) {
+  using molresponse_v3::Perturbation;
+  std::map<std::string, json> roles;
+  const auto add = [&](const Perturbation& p, double frequency, json role) {
+    auto& list = roles[p.description() + "@"
+                       + molresponse_v3::ResponseMetadata::freq_key(frequency)];
+    if (list.is_null())
+      list = json::array();
+    if (std::find(list.begin(), list.end(), role) == list.end())
+      list.push_back(std::move(role));
+  };
+  const auto dipole = [](char axis) { return Perturbation::dipole(axis - 'x'); };
+  const auto properties = requested_properties(request);
+  if (properties.contains("polarizability")) {
+    const auto& r = properties.at("polarizability");
+    std::set<char> axes;
+    for (const auto& component : r.at("components"))
+      for (char axis : component.get<std::string>())
+        axes.insert(axis);
+    const auto& frequencies = r.at("frequencies");
+    for (std::size_t i = 0; i < frequencies.size(); ++i)
+      for (char axis : axes)
+        add(dipole(axis), frequencies[i].get<double>(),
+            {{"property", "polarizability"}, {"role", "driven"}, {"omega_index", i}});
+  }
+  if (properties.contains("hyperpolarizability")) {
+    const auto& r = properties.at("hyperpolarizability");
+    const auto& frequencies = r.at("frequencies");
+    for (std::size_t n = 0; n < frequencies.size(); ++n) {
+      const double f = frequencies[n].get<double>();
+      for (const auto& component : r.at("components")) {
+        const auto abc = component.get<std::string>();
+        add(dipole(abc[0]), 2.0 * f,
+            {{"property", "hyperpolarizability"},
+             {"role", f == 0.0 ? "driven" : "shg_2w"}, {"n_b", n}, {"n_c", n}});
+        for (char axis : {abc[1], abc[2]})
+          add(dipole(axis), f,
+              {{"property", "hyperpolarizability"}, {"role", "driven"},
+               {"n_b", n}, {"n_c", n}});
+      }
+    }
+  }
+  if (properties.contains("raman")) {
+    const auto& r = properties.at("raman");
+    const auto coordinates
+        = raman_coordinates(r.at("atoms").get<std::vector<int>>(),
+                            r.at("directions").get<std::string>(), natom);
+    const auto& frequencies = r.at("frequencies");
+    for (std::size_t i = 0; i < frequencies.size(); ++i)
+      for (const auto& [atom, axis] : coordinates) {
+        add(Perturbation::nuclear(atom, axis - 'x'), 0.0,
+            {{"property", "raman"}, {"role", "nuclear"}, {"atom", atom},
+             {"direction", std::string(1, axis)}});
+        for (const auto& component : r.at("components"))
+          for (char a : component.get<std::string>())
+            add(dipole(a), frequencies[i].get<double>(),
+                {{"property", "raman"}, {"role", "driven"}, {"omega_index", i}});
+      }
+  }
+  if (properties.contains("two_photon"))
+    for (const auto& root : bundle_roots)
+      if (root.contains("omega") && root.at("omega").is_number())
+        for (char axis : {'x', 'y', 'z'})
+          add(dipole(axis), 0.5 * root.at("omega").get<double>(),
+              {{"property", "two_photon"}, {"role", "two_photon_half"},
+               {"parent_root", root.value("root_id", json())}});
+  return roles;
+}
+
+// D-118: what the Dalton seed of a response stage cost, from its engine
+// metadata: the import (reading the Dalton files, building the MRA guesses
+// and their gauge rotation, once per stage), the bundle's seed guard per rung,
+// and each leg's nearest-record seed; the total and how many states each
+// part seeded. Null when nothing was seeded. Never part of wall_s.
+[[nodiscard]] inline json response_seed_cost(const json& metadata) {
+  double imported = -1.0, guards = 0.0, legs = 0.0;
+  int guard_count = 0, leg_count = 0;
+  if (metadata.contains("seeded_from")
+      && metadata.at("seeded_from").contains("import_wall_s"))
+    imported = metadata.at("seeded_from").at("import_wall_s").get<double>();
+  const auto bundles = metadata.value("excited_states", json::object());
+  const auto legs_metadata = metadata.value("fd_states", json::object());
+  for (const auto& rung : bundles.items())
+    if (rung.value().contains("seed_guard")
+        && rung.value().at("seed_guard").contains("wall_s")) {
+      guards += rung.value().at("seed_guard").at("wall_s").get<double>();
+      ++guard_count;
+    }
+  for (const auto& channel : legs_metadata.items())
+    for (const auto& rung : channel.value().items())
+      for (const auto& point : rung.value().items())
+        if (point.value().contains("seed_wall_s")) {
+          legs += point.value().at("seed_wall_s").get<double>();
+          ++leg_count;
+        }
+  if (imported < 0.0 && guard_count == 0 && leg_count == 0)
+    return nullptr;
+  return {{"wall_s", std::max(imported, 0.0) + guards + legs},
+          {"import_wall_s", imported < 0.0 ? json() : json(imported)},
+          {"seed_guard_wall_s", guards},
+          {"legs_wall_s", legs},
+          {"seeded_states", {{"bundle_rungs", guard_count}, {"legs", leg_count}}}};
+}
+
 // D-113: the omegas of the bundle's roots in a state record of the bundle
 // (response_state_records), or in the engine metadata's entry for it.
 [[nodiscard]] inline std::vector<double> root_omegas(const json& bundle) {
@@ -925,7 +1042,7 @@ public:
   // the attempt directory, the reference, this attempt's iteration totals,
   // the plan records, and the bundle verdicts' inputs. The request is the
   // stage's (response_request).
-  static Manifest manifest(const Stage& stage, int, const json& sample) {
+  static Manifest manifest(const Stage& stage, int natom, const json& sample) {
     const auto request = response_request(stage);
     const bool analyzed = sample.at("analyzed").get<bool>();
     const bool converged = sample.at("converged").get<bool>();
@@ -963,6 +1080,25 @@ public:
            {"states", response_state_records(
                           metadata, reference.value("generation", ""), totals)},
            {"plans", sample.at("plans")}};
+    // D-116: each frequency-dependent state's roles in the request.
+    {
+      const auto pkey = request_final_key(request);
+      const auto bundle_roots
+          = metadata.contains("excited_states")
+                    && metadata.at("excited_states").contains(pkey)
+                ? metadata.at("excited_states").at(pkey).value("roots", json::array())
+                : json::array();
+      const auto roles = state_roles(request, natom, bundle_roots);
+      for (auto& state : m.numerical.at("states"))
+        if (state.value("kind", "") == "frequency_dependent_response") {
+          const auto found = roles.find(
+              state.at("perturbation").get<std::string>() + "@"
+              + molresponse_v3::ResponseMetadata::freq_key(
+                  state.at("frequency").get<double>()));
+          if (found != roles.end())
+            state["roles"] = found->second;
+        }
+    }
     m.targets = {{"dconv", request.at("dconv")}};
     // S5: a seeded stage's seed block: the files its generations hold, and
     // what the engine recorded seeding from.
@@ -1720,6 +1856,9 @@ inline json response_state_records(const json& metadata,
              {"saved_measurements",
               with_phases(e.value("saved_state_validation", json::object())
                               .value("measurements", json::object()))}});
+        // D-118: a leg seeded from Dalton carries its seed's own time.
+        if (e.contains("seed_wall_s"))
+          records.back()["seed_wall_s"] = e.at("seed_wall_s");
       }
     }
   const auto bundles = metadata.value("excited_states", json::object());
@@ -1759,6 +1898,9 @@ inline json response_state_records(const json& metadata,
          {"engine_measurements", bundle_measurements(e)},
          {"saved_measurements", json::object()},
          {"roots", std::move(roots)}});
+    // D-118: a seeded bundle carries its seed guard's time at this rung.
+    if (e.contains("seed_guard") && e.at("seed_guard").contains("wall_s"))
+      records.back()["seed_wall_s"] = e.at("seed_guard").at("wall_s");
   }
   return records;
 }

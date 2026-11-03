@@ -530,6 +530,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     s0.responses[0].from_flat(zflat);           // independent zeros
   }
   const char *seed_kind = "zero";
+  double seed_wall_s = -1.0; // D-118: set when the Dalton seed is tried
 
   bool seeded = false;
   if (action != NodeAction::Fresh) {
@@ -588,8 +589,11 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     // DALTON N(omega) within the tolerance as the initial guess.
     if (!seeded && ctx.seed_freq_tol > 0.0 && !ctx.dalton_dir.empty() &&
         pert.kind == Perturbation::Kind::Dipole) {
+      const double seed_started = madness::wall_time();
       auto guess = dalton_fd_guess(world, gs, ctx.dalton_dir, ctx.calc_dir,
                                    pert.axis, freq, ctx.seed_freq_tol);
+      // D-118: the seed's own time, kept apart from the solve's.
+      seed_wall_s = madness::wall_time() - seed_started;
       if (guess) {
         s0.responses[0].x_alpha = std::move(guess->x_alpha);
         s0.responses[0].y_alpha = std::move(guess->y_alpha);
@@ -714,7 +718,8 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         ctx.policy.diagnostic_iterations_per_rung,
         /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration,
         /*checkpoint_decider=*/ctx.policy.decider,
-        /*print_level=*/ctx.print_level);
+        /*print_level=*/ctx.print_level,
+        /*seed_wall_s=*/seed_wall_s);
     if (ctx.checkpoint_observer)
       ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
           {"frequency", freq}, {"protocol", protocol_key()},
@@ -1004,9 +1009,11 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   // Collective evaluate; rank-0 print + metadata write. Fresh (unseeded)
   // solves skip the guard entirely.
   if (seed_ref) {
+    const double guard_started = madness::wall_time(); // D-118
     auto guard = evaluate_es_seed_guard<TDA, ClosedShell>(world, sf, r.converged, *seed_ref);
     print_es_seed_guard(world, guard);
-    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard);
+    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard,
+                         madness::wall_time() - guard_started);
   }
   // Post-convergence transition-property report (legacy TDDFT::analysis +
   // analyze_vectors). Runs on the IN-MEMORY converged state `sf` at the solve's
@@ -1238,9 +1245,11 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   }
   // Root-identity guard (W5) — same contract as the TDA path above.
   if (seed_ref) {
+    const double guard_started = madness::wall_time(); // D-118
     auto guard = evaluate_es_seed_guard<Full, ClosedShell>(world, sf, r.converged, *seed_ref);
     print_es_seed_guard(world, guard);
-    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard);
+    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard,
+                         madness::wall_time() - guard_started);
   }
   // Post-convergence transition-property report (legacy TDDFT::analysis +
   // analyze_vectors). Runs on the in-memory `sf` (no bundle reload), so it never

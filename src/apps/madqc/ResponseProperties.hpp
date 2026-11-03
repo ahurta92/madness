@@ -26,7 +26,11 @@ inline json selected_alpha(const Stage& stage, const json& properties) {
       cp.protocol().back(), protocol_k(cp.protocol().back()));
   const auto& rows = properties.at("alpha").at(pkey);
   json selected = json::array();
-  for (double omega : stage.frequencies) {
+  // D-116: omega_index, the row's position in polarizability.frequencies as
+  // written (distinct after D-115), so a reader keys on it, not on a float.
+  for (std::size_t omega_index = 0; omega_index < stage.frequencies.size();
+       ++omega_index) {
+    const double omega = stage.frequencies[omega_index];
     const json* found = nullptr;
     for (const auto& row : rows) {
       if (std::abs(row.at("omega").get<double>() - omega) < 1e-12) {
@@ -50,6 +54,7 @@ inline json selected_alpha(const Stage& stage, const json& properties) {
       values[component] = value;
     }
     selected.push_back({{"frequency", omega},
+                        {"omega_index", omega_index},
                         {"frequency_units", "au"},
                         {"units", "a0^3"},
                         {"components", values},
@@ -170,7 +175,12 @@ inline json selected_beta(const Stage& stage, const json& properties,
   const auto& rows
       = quadratic_rows(properties, "beta", final_protocol_key(stage));
   json selected = json::array();
-  for (double omega : stage.hyperpolarizability.frequencies) {
+  // D-116: n_b and n_c, the positions of omega_B and omega_C in
+  // hyperpolarizability.frequencies as written; the engine's processes have
+  // omega_B = omega_C, so the two are equal.
+  const auto& frequencies = stage.hyperpolarizability.frequencies;
+  for (std::size_t n = 0; n < frequencies.size(); ++n) {
+    const double omega = frequencies[n];
     QuadraticElements elements;
     for (const auto& component : stage.hyperpolarizability.components) {
       const std::string b = std::string("dipole_") + component[1];
@@ -182,6 +192,8 @@ inline json selected_beta(const Stage& stage, const json& properties,
           elements);
     }
     json record = {{"frequency", omega},
+                   {"n_b", n},
+                   {"n_c", n},
                    {"frequency_units", "au"},
                    {"process", omega == 0.0 ? "static" : "shg"},
                    {"output_frequency", 2.0 * omega},
@@ -222,7 +234,10 @@ inline json selected_raman(const Stage& stage, const json& properties,
   const auto pkey = final_protocol_key(stage);
   const auto& rows = quadratic_rows(properties, "raman", pkey);
   json values_out = json::array();
-  for (double omega : stage.raman.frequencies) {
+  // D-116: omega_index, the row's position in raman.frequencies as written.
+  for (std::size_t omega_index = 0; omega_index < stage.raman.frequencies.size();
+       ++omega_index) {
+    const double omega = stage.raman.frequencies[omega_index];
     for (const auto& [atom, axis] : raman_coordinates(stage, natom)) {
       const std::string coordinate
           = "nuc_" + std::to_string(atom) + "_" + std::string(1, axis);
@@ -237,6 +252,7 @@ inline json selected_raman(const Stage& stage, const json& properties,
             elements);
       }
       json record = {{"frequency", omega},
+                     {"omega_index", omega_index},
                      {"frequency_units", "au"},
                      {"coordinate", coordinate},
                      {"atom", atom},

@@ -150,7 +150,8 @@ void save_fd_state(
     const nlohmann::json* checkpoint_progress = nullptr,
     madness::convergence::Decider checkpoint_decider
     = madness::convergence::Decider::engine_check,
-    PrintLevel print_level = PrintLevel::Normal) { // F2d; D-096: the
+    PrintLevel print_level = PrintLevel::Normal, // F2d; D-096: the
+    double seed_wall_s = -1.0) { // D-118: the Dalton seed's time (< 0: none)
   // [SAVE] and MEMORY_HWM lines print at Verbose only (the executor's
   // identified solve-end line is the one line at Normal).
   // F2 (doc 32 §5.3): when metadata_shard is set the metadata upsert goes to a
@@ -242,6 +243,10 @@ void save_fd_state(
         {"writer_nproc", static_cast<int>(world.size())},
         {"metrics",      metrics.to_json()},
     };
+    // D-118: the Dalton seed's own wall time (the RSPVEC read and the
+    // projection of the guess), never part of the solve's wall_s.
+    if (seed_wall_s >= 0.0)
+      entry["seed_wall_s"] = seed_wall_s;
     if (checkpoint_native) {
       entry["checkpoint_dconv"] = checkpoint_dconv;
       entry["measurement_phase"] = "solver_step_before_acceleration";

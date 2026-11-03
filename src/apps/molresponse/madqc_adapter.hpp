@@ -598,9 +598,22 @@ struct molresponse_v3_lib {
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
     if (!dalton_dir.empty()) {
+      const double import_started = madness::wall_time(); // D-118
       run_dalton_import(world, gs, reference_molecule, in.plan,
                         in.settings.calc_dir, dalton_dir, {}, {}, {}, 1e-4,
                         /*es_y_from_dalton=*/rp.seed_es_y() == "dalton");
+      // D-118: the import's own time (reading the Dalton files, building the
+      // MRA guesses and their gauge rotation), beside what it seeded from.
+      const double import_wall_s = madness::wall_time() - import_started;
+      if (world.rank() == 0) {
+        auto meta = ResponseMetadata::load_or_create(
+            in.settings.calc_dir + "/response_metadata.json");
+        auto seeded = meta.json().value("seeded_from", nlohmann::json::object());
+        seeded["import_wall_s"] = import_wall_s;
+        meta.set_seeded_from(seeded);
+        meta.save();
+      }
+      world.gop.fence();
     }
 
     // Pass the RESOLVED fock path through (review finding: "" here made every

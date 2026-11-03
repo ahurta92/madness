@@ -305,6 +305,50 @@ int main(int argc, char** argv) {
                   && named_stages::root_omegas({{"roots", {{{"omega", 0.4}}, {{"omega", 0.5}}}}})
                          == std::vector<double>{0.4, 0.5},
               "response_needs (D-113): two_photon's legs at half each root's omega");
+        // D-116: each leg's roles, by request position; a leg serving two
+        // requests has both. D-118: the seed's cost from the metadata.
+        {
+          const json request = {
+              {"protocol", {1e-4}},
+              {"properties",
+               {{"polarizability", {{"frequencies", {0.0, 0.02}}, {"components", {"zz"}}}},
+                {"hyperpolarizability", {{"frequencies", {0.02}}, {"components", {"zzz"}}}},
+                {"raman", {{"frequencies", {0.0}}, {"components", {"zz"}},
+                           {"atoms", {0}}, {"directions", "z"}}},
+                {"two_photon", json::object()}}}};
+          const json roots = {{{"root_id", "es_root_0001"}, {"omega", 0.4}}};
+          const auto roles = named_stages::state_roles(request, 2, roots);
+          const auto at = [&](const std::string& key) {
+            const auto found = roles.find(key);
+            return found == roles.end() ? json::array() : found->second;
+          };
+          const auto has = [&](const std::string& key, const json& role) {
+            const auto list = at(key);
+            return std::find(list.begin(), list.end(), role) != list.end();
+          };
+          check(has("dipole_z@f0.00000", {{"property", "polarizability"}, {"role", "driven"}, {"omega_index", 0}})
+                    && has("dipole_z@f0.00000", {{"property", "raman"}, {"role", "driven"}, {"omega_index", 0}})
+                    && has("dipole_z@f0.02000", {{"property", "polarizability"}, {"role", "driven"}, {"omega_index", 1}})
+                    && has("dipole_z@f0.02000", {{"property", "hyperpolarizability"}, {"role", "driven"}, {"n_b", 0}, {"n_c", 0}})
+                    && has("dipole_z@f0.04000", {{"property", "hyperpolarizability"}, {"role", "shg_2w"}, {"n_b", 0}, {"n_c", 0}})
+                    && has(molresponse_v3::Perturbation::nuclear(0, 2).description() + "@f0.00000",
+                           {{"property", "raman"}, {"role", "nuclear"}, {"atom", 0}, {"direction", "z"}})
+                    && has("dipole_x@f0.20000", {{"property", "two_photon"}, {"role", "two_photon_half"}, {"parent_root", "es_root_0001"}})
+                    && at("dipole_z@f0.02000").size() == 2,
+                "state_roles (D-116): each leg's roles by request position, the "
+                "2PA legs under their root's stable id");
+          json metadata;
+          metadata["seeded_from"]["import_wall_s"] = 2.0;
+          metadata["excited_states"]["1e-04_k6"]["seed_guard"]["wall_s"] = 0.5;
+          metadata["fd_states"]["dipole_x"]["1e-04_k6"]["f0.20000"]["seed_wall_s"] = 0.25;
+          const auto cost = named_stages::response_seed_cost(metadata);
+          check(cost.at("wall_s") == 2.75 && cost.at("import_wall_s") == 2.0
+                    && cost.at("seed_guard_wall_s") == 0.5 && cost.at("legs_wall_s") == 0.25
+                    && cost.at("seeded_states").at("legs") == 1
+                    && named_stages::response_seed_cost(json::object()).is_null(),
+                "response_seed_cost (D-118): the seed's parts and total, null "
+                "when unseeded");
+        }
     }
     // S3a (D-036): the AppSpec rows, one table per field.
     try {

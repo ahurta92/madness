@@ -5,6 +5,7 @@ archive and the consumer context in its manifest). Running gs alone, then a
 deck holding only the response stage on that output directory, gives the same
 results as running both stages in one deck."""
 import argparse
+import hashlib
 import json
 import sys
 import os
@@ -86,6 +87,18 @@ assert sorted(listed) == ['gs', 'optical'], index['stages']
 assert listed['gs']['run_id'] == gs_run and listed['gs']['status'] == 'completed', listed['gs']
 assert listed['optical']['run_id'] == index['run_id'] != gs_run, (listed['optical'], gs_run)
 assert all(e['path'] == e['stage'] + '/results.json' for e in index['stages']), index['stages']
+# D-116: the root keeps each deck by its SHA-256 and every entry names its
+# own; the thread budget; each stage's own wall clock.
+sha = lambda label: hashlib.sha256((work / (label + '.in')).read_bytes()).hexdigest()
+assert index['deck'] == {'sha256': sha('optical-alone'), 'text': (work / 'optical-alone.in').read_text()}, index['deck']['sha256']
+assert listed['gs']['deck_sha256'] == sha('gs-alone') and listed['optical']['deck_sha256'] == sha('optical-alone')
+assert set(index['decks']) == {sha('gs-alone'), sha('optical-alone')}, list(index['decks'])
+assert index['decks'][sha('gs-alone')] == (work / 'gs-alone.in').read_text()
+assert index['threads']['MAD_NUM_THREADS'] == env['MAD_NUM_THREADS'] and index['threads']['pool'] >= 1, index['threads']
+for name in ('gs', 'optical'):
+    record = result(split, name)
+    assert record['wall_s'] > 0 and record['deck_sha256'] == listed[name]['deck_sha256'], (name, record.get('wall_s'))
+    assert listed[name]['wall_s'] == record['wall_s'] and 'load_wall_s' not in record
 fresh = json.loads((together / 'results.json').read_text())
 assert [e['stage'] for e in fresh['stages']] == ['gs', 'optical'], fresh['stages']
 assert {e['run_id'] for e in fresh['stages']} == {fresh['run_id']}, fresh['stages']
@@ -160,6 +173,7 @@ capped = ground.replace('moldft gs\n', 'moldft gs\n  convergence.use_default_cri
 reused = work / 'Reused'
 run('gs-capped', reused, capped, success=False)
 before = manifest(reused, 'gs')
+capped_wall = {k: result(reused, 'gs')[k] for k in ('wall_s', 'run_id')}
 assert before['stop_reason'] == 'iteration_limit', before['stop_reason']
 # Run 2: looser targets that the saved orbitals meet. The state is loaded, and
 # because its generation did not stop converged, the verdict is published as a
@@ -168,6 +182,11 @@ loose = capped.replace('  econv 1e-14\n', '  econv 1e-2\n').replace('  dconv 1e-
 run('gs-reused', reused, loose, resume=True)
 record = result(reused, 'gs')
 assert record['work'] == 'loaded' and record['iterations_this_run'] == 0, record['work']
+# D-116: a loaded stage keeps the wall_s of the run that solved it (gs-capped)
+# with that run's id; this run's time on it is load_wall_s.
+capped_record_wall = capped_wall
+assert record['wall_s'] == capped_record_wall['wall_s'] and record['wall_s_run_id'] == capped_record_wall['run_id'], (record['wall_s'], capped_record_wall)
+assert record['load_wall_s'] > 0 and record['run_id'] != record['wall_s_run_id']
 assert record['status'] == 'completed', record['status']
 after = manifest(reused, 'gs')
 assert after['generation'] != before['generation'] and record['state_id'] == after['generation']

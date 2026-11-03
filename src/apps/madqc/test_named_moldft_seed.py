@@ -122,6 +122,12 @@ for key in ('seed', 'stage', 'molden', 'dalton_dir', 'n_occ', 'n_ao', 'n_mo', 'L
             'max_offdiag_pre_loewdin', 'archive', 'preserved_copy'):
     assert key in seeded_from, (key, seeded_from)
 assert seeded_from['n_occ'] == 5 and seeded_from['stage'] == 'ground_state', seeded_from
+# D-118: the seed's own time, in the seed's record, on the ground state's
+# record and on the stage record, apart from the stage's wall_s.
+assert seeded_from['seed_wall_s'] > 0, seeded_from
+assert m['numerical']['states'][0]['seed_wall_s'] == seeded_from['seed_wall_s']
+assert s['seed'] == {'wall_s': seeded_from['seed_wall_s'], 'seeded_states': {'ground_state': 1}}, s.get('seed')
+assert s['wall_s'] > s['seed']['wall_s'] and 'seed' not in c, (s['wall_s'], c.get('seed'))
 copy = work / 'Seeded/gs/checkpoints' / generation / 'seed/molden.inp'
 assert sha256(copy) == entry['sha256']
 settings = m['metrics']['convergence_report']['convergence_settings']
@@ -137,6 +143,7 @@ log = run('seeded-continue', again, seeded, resume=True)
 record = result(again)
 assert record['work'] == 'loaded' and record['iterations_this_run'] == 0, (record['work'], record['iterations_this_run'])
 assert '[DALTON-SEED]' not in log, [line for line in log.splitlines() if 'DALTON' in line]
+assert 'seed' not in record, record.get('seed')  # nothing seeded in this run
 
 # An altered seed copy is refused when the generation is read.
 tampered = work / 'Tampered'

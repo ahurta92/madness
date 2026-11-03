@@ -606,6 +606,8 @@ int main(int argc, char** argv) {
               && beta[0].at("process") == "static"
               && beta[0].at("engine_evidence").contains("zzz"),
           "static beta_zzz selected with its row as evidence");
+    check(beta[0].at("n_b") == 0 && beta[0].at("n_c") == 0,
+          "beta row (D-116): n_b and n_c, its position in the written list");
     auto selected = named_stages::select_response_properties(
         stage, properties, json(), json(), json(), 2);
     check(selected.contains("polarizability")
@@ -615,8 +617,10 @@ int main(int argc, char** argv) {
                          .at("components")
                          .at("zz")
                      == 22.15
-              && every_row_converged(selected),
-          "both properties selected, stage converged");
+              && every_row_converged(selected)
+              && selected.at("polarizability").at("values")[0].at("omega_index") == 0,
+          "both properties selected, stage converged; the alpha row's "
+          "omega_index (D-116)");
     stage.hyperpolarizability.components = {"zzz", "xzz"};
     selected = named_stages::select_response_properties(
         stage, properties, json(), json(), json(), 2);
@@ -709,7 +713,8 @@ int main(int argc, char** argv) {
                      == "a.u. (e^2 bohr^2 / Eh per bohr)"
               && raman.at("coordinates") == "written"
               && raman.at("normal_mode_analysis") == false
-              && raman.contains("normal_mode_analysis_unavailable"),
+              && raman.contains("normal_mode_analysis_unavailable")
+              && raman.at("values")[0].at("omega_index") == 0,
           "one written coordinate: its row, no normal modes, and why");
     stage.raman_atoms = {};
     raman = named_stages::selected_raman(stage, properties, json(), json(),
