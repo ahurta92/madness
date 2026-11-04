@@ -598,6 +598,13 @@ struct molresponse_v3_lib {
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
     if (!dalton_dir.empty()) {
+      // D-120: the import writes its seeds into the calc dir, so the
+      // ground-state stamp comes first (the same gate the workflow runs): a
+      // fresh dir is stamped before any state is written there, and one
+      // stamped for another ground state is refused before the import
+      // touches it. Outside import_wall_s (D-118).
+      if (!in.archive_file.empty())
+        gs_fingerprint_gate(world, in.archive_file, in.settings.calc_dir);
       const double import_started = madness::wall_time(); // D-118
       run_dalton_import(world, gs, reference_molecule, in.plan,
                         in.settings.calc_dir, dalton_dir, {}, {}, {}, 1e-4,

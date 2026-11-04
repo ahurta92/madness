@@ -305,6 +305,36 @@ int main(int argc, char** argv) {
                   && named_stages::root_omegas({{"roots", {{{"omega", 0.4}}, {{"omega", 0.5}}}}})
                          == std::vector<double>{0.4, 0.5},
               "response_needs (D-113): two_photon's legs at half each root's omega");
+        // D-120: the gate on a fresh calc dir stamps it, so seeds written
+        // after it (the Dalton import) are under a stamp and the workflow's
+        // gate then finds Match, not MissingStamp.
+        {
+          namespace fs = std::filesystem;
+          const auto dir = fs::temp_directory_path()
+                           / ("test_named_stages_gate_" + std::to_string(::getpid()));
+          fs::remove_all(dir);
+          fs::create_directories(dir);
+          const std::string archive = (dir / "gs.restartdata").string();
+          if (world.rank() == 0) {
+            std::ofstream(archive + ".00000", std::ios::binary) << "orbitals";
+          }
+          world.gop.fence();
+          const std::string calc = (dir / "calc").string();
+          molresponse_v3::gs_fingerprint_gate(world, archive, calc);
+          if (world.rank() == 0) {
+            auto meta = molresponse_v3::ResponseMetadata::load_or_create(
+                calc + "/response_metadata.json");
+            const auto fp = molresponse_v3::gs_archive_fingerprint(archive);
+            meta.set_es_bundle("1e-04_k6", {{"type", "full"}, {"converged", false}});
+            check(meta.ground_state_fingerprint() == fp.hex
+                      && molresponse_v3::gs_fingerprint_verdict(meta.json(), fp.hex)
+                             == molresponse_v3::GsGateVerdict::Match,
+                  "gs_fingerprint_gate (D-120): a fresh dir is stamped, and a "
+                  "seed written after it is under the stamp (Match)");
+            fs::remove_all(dir);
+          }
+          world.gop.fence();
+        }
         // D-116: each leg's roles, by request position; a leg serving two
         // requests has both. D-118: the seed's cost from the metadata.
         {
