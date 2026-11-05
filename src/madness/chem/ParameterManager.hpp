@@ -100,6 +100,9 @@ struct IOParameters : public QCCalculationParametersBase {
   }
 
   std::string get_tag() const override { return std::string(tag); }
+  // D-128: a directory is a path: its case is kept (the deck reader and the
+  // stored text lowercase every other value).
+  std::set<std::string> case_sensitive_keys() const override { return {"dalton.dir"}; }
 
   using QCCalculationParametersBase::read_input_and_commandline_options;
 

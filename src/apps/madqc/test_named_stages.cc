@@ -305,6 +305,54 @@ int main(int argc, char** argv) {
                   && named_stages::root_omegas({{"roots", {{{"omega", 0.4}}, {{"omega", 0.5}}}}})
                          == std::vector<double>{0.4, 0.5},
               "response_needs (D-113): two_photon's legs at half each root's omega");
+        // D-128: a Dalton directory keeps its case: on a named stage
+        // (seed.dalton_dir, moldft and molresponse), in the engine's
+        // response and io parameters, through a deck read and a store.
+        {
+          namespace fs = std::filesystem;
+          const std::string mixed = "Mixed/CaseDir";
+          const std::string expect_path
+              = fs::absolute(mixed).lexically_normal().string();
+          const std::string gs_seeded = "molecule H2\n units atomic\n H 0 0 -0.7\n H 0 0 0.7\nend\n"
+                                        "moldft GS\n molecule H2\n xc hf\n protocol [1e-4]\n dconv 1e-4\n"
+                                        " requested_properties [energy]\n seed.dalton_dir " + mixed + "\nend\n"
+                                        "molresponse ES\n reference GS\n protocol [1e-4]\n dconv 1e-4\n"
+                                        " requested_properties [excited_states]\n excited_states.roots 1\n"
+                                        " excited_states.method rpa\n seed.dalton_dir " + mixed + "\nend\n";
+          try {
+            const auto stages = named_stages::parse(world, gs_seeded);
+            check(stages[0].seed_dalton_dir == expect_path
+                      && stages[1].seed_dalton_dir == expect_path
+                      && stages[1].params.get<ResponseParameters>().dalton_dir() == expect_path,
+                  "D-128: seed.dalton_dir keeps its case on moldft and molresponse "
+                  "stages and in the engine's dalton.dir");
+          } catch (const std::exception& e) {
+            check(false, std::string("D-128 mixed-case seed: ") + e.what());
+          }
+          ResponseParameters rp;
+          rp.set_user_defined_value<std::string>("dalton.dir", mixed);
+          IOParameters io;
+          io.set_user_defined_value<std::string>("dalton.dir", mixed);
+          ResponseParameters rp_json;
+          rp_json.from_json(rp.to_json().at("parameters"));
+          check(rp.dalton_dir() == mixed && io.dalton_dir() == mixed
+                    && rp_json.dalton_dir() == mixed,
+                "D-128: dalton.dir keeps its case when stored (response, io, json)");
+          const auto deck = fs::temp_directory_path()
+                            / ("test_named_stages_d128_" + std::to_string(::getpid()) + ".in");
+          if (world.rank() == 0)
+            std::ofstream(deck) << "io\n  dalton.dir " << mixed << "\nend\n"
+                                << "response\n  dalton.dir " << mixed << "\nend\n";
+          world.gop.fence();
+          madness::commandlineparser parser;
+          parser.set_keyval("input", deck.string());
+          const IOParameters io_read(world, parser);
+          const ResponseParameters rp_read(world, parser);
+          check(io_read.dalton_dir() == mixed && rp_read.dalton_dir() == mixed,
+                "D-128: dalton.dir keeps its case through a deck read (io, response)");
+          world.gop.fence();
+          if (world.rank() == 0) fs::remove(deck);
+        }
         // D-120: the gate on a fresh calc dir stamps it, so seeds written
         // after it (the Dalton import) are under a stamp and the workflow's
         // gate then finds Match, not MissingStamp.

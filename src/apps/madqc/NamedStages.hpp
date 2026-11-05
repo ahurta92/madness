@@ -195,7 +195,7 @@ struct Controls : madness::QCCalculationParametersBase {
   }
   [[nodiscard]] std::string get_tag() const override { return "stage"; }
   [[nodiscard]] std::set<std::string> case_sensitive_keys() const override {
-    return {"molecule", "reference"};
+    return {"molecule", "reference", "seed.dalton_dir"}; // D-128: a path
   }
 };
 // One optical property request of a molresponse stage: explicit frequencies
