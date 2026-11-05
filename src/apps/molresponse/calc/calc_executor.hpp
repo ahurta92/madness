@@ -228,6 +228,9 @@ struct ExecutorSettings {
   // Full-deflation locking of converged ES roots (workstream B). ON by default
   // (sweep-validated: required to converge near-degenerate h2o/c2h4 clusters).
   bool              es_lock_converged     = true;
+  // D-122: the deck wrote kain.min_residual (policy.kain_min_residual is then
+  // the written value, which wins over the cold-start rule below).
+  bool              es_kain_min_residual_written = false;
   // Cache the (promoted) TDA warmup guess to a side bundle es_warmup__<pkey> and
   // reuse it on later runs, so iterating on the Full main solve skips the warmup.
   // Opt-in; the main solve never overwrites the cache (stable fixed start point).
@@ -330,11 +333,19 @@ inline nlohmann::json load_metadata_rank0(madness::World &world,
 /// the TDA and Full executors. The warmup runs es_tda_warmup_iters iterations
 /// inside a no-KAIN window of the same length, so it is KAIN-free whatever
 /// `kain` says; the main solve delays KAIN by es_main_kain_delay.
+/// D-122: the KAIN hold-off (kain_min_residual) is for a main solve that
+/// starts from a seed or a saved bundle, whose first residual can make KAIN
+/// extrapolate garbage. A main solve that starts from this solver's own TDA
+/// warm-up (`own_warmup`: a fresh warm-up or the cached one) gets none: its
+/// plain BSH step need not contract (C2H6 cold, 2026-11-04: max_res grew from
+/// 0.11 every iteration, KAIN never engaged, the roots left for the
+/// continuum). A written kain.min_residual wins in both cases.
 struct EsIterationPolicies {
   ConvergencePolicy warm;
   ConvergencePolicy main;
 };
-inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s) {
+inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s,
+                                                 bool own_warmup = false) {
   EsIterationPolicies p;
   p.warm                          = s.policy;
   p.warm.kain                     = true;
@@ -346,7 +357,21 @@ inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s) {
   p.main.kain             = s.es_kain;
   p.main.tda_warmup_iters = s.es_main_kain_delay;
   p.main.lock_converged   = s.es_lock_converged;  // warmup never locks
+  if (own_warmup && !s.es_kain_min_residual_written)
+    p.main.kain_min_residual = 0.0;
   return p;
+}
+
+/// D-122: the main solve's KAIN hold-off and why, at Verbose.
+inline void print_es_kain_hold_off(madness::World &world,
+                                   const ConvergencePolicy &main,
+                                   const ExecutorSettings &s, bool own_warmup) {
+  if (world.rank() == 0 && s.print_level >= PrintLevel::Verbose)
+    madness::print("[KAIN] main solve hold-off kain_min_residual =",
+                   main.kain_min_residual,
+                   s.es_kain_min_residual_written ? "(written in the deck)"
+                   : own_warmup ? "(none: starts from its own TDA warm-up)"
+                                : "(starts from a seed or a saved bundle)");
 }
 
 /// Remove the wall-clock and RSS fields from every `metrics` object in a
@@ -872,7 +897,6 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   const detail_exec::EsIterationPolicies es_policies =
       detail_exec::es_iteration_policies(ctx);
   const ConvergencePolicy &warm_policy = es_policies.warm;
-  const ConvergencePolicy &main_policy = es_policies.main;
 
   Solver::State s0;
   bool seeded = false;
@@ -905,6 +929,11 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   }
   const int iter_at_start = s0.iter;
 
+  // D-122: the main policy once the start is known (no hold-off after its
+  // own TDA warm-up, fresh or cached; 0.1 after a seed or a saved bundle).
+  const ConvergencePolicy main_policy =
+      detail_exec::es_iteration_policies(ctx, /*own_warmup=*/!seeded).main;
+  detail_exec::print_es_kain_hold_off(world, main_policy, ctx, !seeded);
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
   solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
   // Review HIGH: the locked step variant (lock_converged, the production
@@ -1068,7 +1097,6 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   const detail_exec::EsIterationPolicies es_policies =
       detail_exec::es_iteration_policies(ctx);
   const ConvergencePolicy &warm_policy = es_policies.warm;
-  const ConvergencePolicy &main_policy = es_policies.main;
 
   Solver::State s0;
   bool seeded = false;
@@ -1162,6 +1190,11 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   }
   const int iter_at_start = s0.iter;
 
+  // D-122: the main policy once the start is known (no hold-off after its
+  // own TDA warm-up, fresh or cached; 0.1 after a seed or a saved bundle).
+  const ConvergencePolicy main_policy =
+      detail_exec::es_iteration_policies(ctx, /*own_warmup=*/!seeded).main;
+  detail_exec::print_es_kain_hold_off(world, main_policy, ctx, !seeded);
   Solver solver(world, std::move(problem), main_policy, ctx.print_level);
 
   double prepared_t = t0;

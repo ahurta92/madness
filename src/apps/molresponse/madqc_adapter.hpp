@@ -537,8 +537,10 @@ struct molresponse_v3_lib {
     // apply_deck_es_knobs above.
     if (rp.is_user_defined("kain"))    in.settings.policy.kain    = rp.kain();
     if (rp.is_user_defined("maxrotn")) in.settings.policy.maxrotn = rp.maxrotn();
-    if (rp.is_user_defined("kain.min_residual"))
+    if (rp.is_user_defined("kain.min_residual")) {
       in.settings.policy.kain_min_residual = rp.kain_min_residual();
+      in.settings.es_kain_min_residual_written = true;  // D-122: it wins
+    }
     // Plateau detector (deck defaults equal the policy defaults: window 6, ratio 0.1).
     if (rp.is_user_defined("stall.window")) in.settings.policy.stall_window = rp.stall_window();
     if (rp.is_user_defined("stall.ratio"))  in.settings.policy.stall_ratio  = rp.stall_ratio();

@@ -109,6 +109,25 @@ int main() {
 
     const auto d = es_iteration_policies(ExecutorSettings{});
     expect(d.main.kain && d.warm.kain, "defaults: KAIN on");
+    // D-122: the KAIN hold-off is the seeded or loaded start's; a main solve
+    // from its own TDA warm-up gets none; a written kain.min_residual wins.
+    const ExecutorSettings unwritten;
+    expect(es_iteration_policies(unwritten, /*own_warmup=*/true).main.kain_min_residual == 0.0,
+           "cold start (own warm-up): no KAIN hold-off");
+    expect(es_iteration_policies(unwritten, /*own_warmup=*/false).main.kain_min_residual == 0.1,
+           "seeded or loaded start: hold-off 0.1");
+    expect(es_iteration_policies(unwritten, true).warm.kain_min_residual
+               == unwritten.policy.kain_min_residual,
+           "the warm-up's policy is unchanged");
+    ExecutorSettings written;
+    written.policy.kain_min_residual = 0.1;
+    written.es_kain_min_residual_written = true;
+    expect(es_iteration_policies(written, /*own_warmup=*/true).main.kain_min_residual == 0.1,
+           "a written 0.1 on a cold start keeps the hold-off");
+    written.policy.kain_min_residual = 0.02;
+    expect(es_iteration_policies(written, true).main.kain_min_residual == 0.02
+               && es_iteration_policies(written, false).main.kain_min_residual == 0.02,
+           "a written value wins on both starts");
   }
 
   std::printf("\n%s (%d failure(s))\n", failed ? "FAILED" : "PASSED", failed);
