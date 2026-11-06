@@ -511,11 +511,16 @@ private:
     if (out.stalled && print_level_ >= PrintLevel::Normal && world_.rank() == 0) {
       const std::size_t n = out.gate_history[0].size();
       const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
-      plog("[STALL] iter", out.iter, ": every gated quantity flat over", policy_.stall_window,
-           "iters (<", 100.0 * policy_.stall_ratio, "% improvement) — bsh",
-           out.gate_history[0][n - 1], "vs", out.gate_history[0][n - 1 - w],
-           ", density", out.gate_history[1][n - 1], "vs", out.gate_history[1][n - 1 - w],
-           "(normalised); stopping.");
+      // D-133: "not improving" covers a quantity that rose; say which.
+      plog("[STALL] iter", out.iter, ": no gated quantity improved by",
+           100.0 * policy_.stall_ratio, "% over", policy_.stall_window,
+           "iters — bsh",
+           stall_change(out.gate_history[0][n - 1],
+                        out.gate_history[0][n - 1 - w])
+               + ", density",
+           stall_change(out.gate_history[1][n - 1],
+                        out.gate_history[1][n - 1 - w]),
+           "(normalised to target); stopping.");
     }
   }
 

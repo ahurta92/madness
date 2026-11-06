@@ -552,13 +552,15 @@ int main(int argc, char** argv) {
             "stall keys written: two engine rows, set by the user");
       const auto plain = named_stages::parse(world, geometry + gs + es_deck);
       const auto defaults = named_stages::bundle_stall_rows(plain[1]);
-      check(defaults[0].target == 6.0
+      check(defaults[0].target == 0.0
+                && defaults[0].note.find("detector off") != std::string::npos
                 && defaults[0].set_by
                        == madness::convergence::SetBy::engine_default
                 && defaults[1].target == 0.1
                 && defaults[1].set_by
                        == madness::convergence::SetBy::engine_default,
-            "stall keys unwritten: the engine's defaults, 6 and 0.1");
+            "stall keys unwritten: the engine's defaults, 0 (off, D-133) "
+            "and 0.1");
       auto off = es_deck;
       off.insert(off.rfind("end\n"), " stall.window 0\n");
       const auto disabled = named_stages::bundle_stall_rows(
@@ -575,7 +577,7 @@ int main(int argc, char** argv) {
                   " polarizability.frequencies [0.0]\n"
                   " polarizability.frequency_units au\n"
                   " polarizability.components [zz]\n stall.window 10\nend\n",
-            "drives the excited-state bundle's plateau detector");
+            "the dipole legs have no plateau detector");
   }
   {
     auto zero = es_deck;

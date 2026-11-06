@@ -888,10 +888,10 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
                 "energy change target");
         stage.excited_states.omega_target = cp.econv();
       }
-      // D-099 (B3): stall.window and stall.ratio drive the bundle's plateau
-      // detector (the engine's, in both modes); the dipole legs' detector
-      // takes progress.* instead, so on a stage without excited_states the
-      // keys would do nothing and are refused.
+      // D-099 (B3), D-133: stall.window and stall.ratio switch on the
+      // bundle's plateau detector (the engine's, in both modes); the dipole
+      // legs have none in this release, so on a stage without excited_states
+      // the keys would do nothing and are refused.
       for (const char* key : {"stall.window", "stall.ratio"})
         if (seen.contains(key)
             && std::find(stage.properties.begin(), stage.properties.end(),
@@ -899,10 +899,10 @@ inline std::vector<Stage> parse(madness::World& world, const std::string& text,
                    == stage.properties.end())
           throw std::runtime_error(
               b.name + ": " + key
-              + " drives the excited-state bundle's plateau detector; on a "
-                "stage without excited_states it does nothing (the dipole "
-                "legs' stall rules are progress.window and "
-                "progress.minimum_relative_improvement)");
+              + ": in this release the dipole legs have no plateau "
+                "detector; stall.window/stall.ratio switch on the "
+                "excited-state bundle's detector, and this stage has no "
+                "excited_states");
       // Validate both controls before executing any stage, including reuse.
       // B8 (Q3, Q5), D-092: as for moldft, letting the written targets decide
       // needs a target for every loop it would otherwise leave without one.

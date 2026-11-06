@@ -280,7 +280,8 @@ int main() {
     EXPECT(reconcile_protocol(fd, m7, 1e-6) == NodeAction::Resume,
            "max_iters unspecified (0) -> legacy Resume");
     // ---- a STALLED rung is exhausted too, however few iterations it used ----
-    // The plateau detector gives up at stall_window (~6) iterations, far short
+    // The plateau detector (when a deck writes stall.window; off by default
+    // since D-133) gives up at stall_window iterations, far short
     // of the shipped decks' max_iters (60), so `iter >= max_iters` never fired
     // for it: reconcile said Resume, the re-solve plateaued in the same place,
     // and reconcile said Resume again — forever. Re-solving a plateaued state

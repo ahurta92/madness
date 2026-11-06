@@ -128,6 +128,19 @@ int main() {
     expect(es_iteration_policies(written, true).main.kain_min_residual == 0.02
                && es_iteration_policies(written, false).main.kain_min_residual == 0.02,
            "a written value wins on both starts");
+    // D-133: both plateau detectors are off by default; a written
+    // stall.window (es_stall_window) reaches the bundle's policies only.
+    expect(ExecutorSettings{}.policy.stall_window == 0
+               && d.main.stall_window == 0 && d.warm.stall_window == 0,
+           "defaults: the legs' and the bundle's plateau detectors are off");
+    ExecutorSettings stall;
+    stall.es_stall_window = 6;
+    stall.es_stall_ratio = 0.2;
+    const auto sp = es_iteration_policies(stall);
+    expect(sp.main.stall_window == 6 && sp.warm.stall_window == 6
+               && sp.main.stall_ratio == 0.2 && stall.policy.stall_window == 0,
+           "a written stall.window switches on the bundle's detector, not the "
+           "legs'");
   }
 
   std::printf("\n%s (%d failure(s))\n", failed ? "FAILED" : "PASSED", failed);

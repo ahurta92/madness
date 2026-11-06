@@ -541,9 +541,13 @@ struct molresponse_v3_lib {
       in.settings.policy.kain_min_residual = rp.kain_min_residual();
       in.settings.es_kain_min_residual_written = true;  // D-122: it wins
     }
-    // Plateau detector (deck defaults equal the policy defaults: window 6, ratio 0.1).
-    if (rp.is_user_defined("stall.window")) in.settings.policy.stall_window = rp.stall_window();
-    if (rp.is_user_defined("stall.ratio"))  in.settings.policy.stall_ratio  = rp.stall_ratio();
+    // Plateau detector (D-133): off by default; a written stall.window
+    // switches on the excited-state bundle's only (es_iteration_policies).
+    // The driven legs' policy keeps stall_window 0.
+    if (rp.is_user_defined("stall.window"))
+      in.settings.es_stall_window = rp.stall_window();
+    if (rp.is_user_defined("stall.ratio"))
+      in.settings.es_stall_ratio = rp.stall_ratio();
     in.settings.print_level = engine_print_level(rp.print_level());
     // ES initial-guess knobs (deck: response { excited.guess virtual_ao,
     // excited.guess_basis aug-cc-pvtz }). Deck default (solid_harmonics /

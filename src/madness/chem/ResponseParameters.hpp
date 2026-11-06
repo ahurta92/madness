@@ -49,15 +49,18 @@ struct ResponseParameters : public QCCalculationParametersBase {
                         "Explicit named FD progress lookback; 0 disables.");
         initialize<double>("progress.minimum_relative_improvement", -1.0,
                            "Explicit experimental improvement fraction strictly between zero and one; requires accuracy targets.");
-        initialize<int>("stall.window", 6,
-                        "Plateau detector: stop a response/ES solve when its gated residuals "
-                        "(FD: bsh, density; ES: density, |dw|) have not improved by "
-                        "stall.ratio over this many iterations while still above the "
-                        "targets (the truncation-noise floor). Same acceptance as maxiter, "
-                        "fewer wasted iterations. 0 disables.");
-        initialize<double>("stall.ratio", 0.1,
-                           "Plateau detector: minimum relative improvement of the gate "
-                           "distance over stall.window iterations to count as progress.");
+        initialize<int>(
+            "stall.window", 0,
+            "Excited-state plateau detector: stop the bundle's solve when its "
+            "density change and |dw| have not improved by stall.ratio over "
+            "this many iterations while still above the targets. 0 (the "
+            "default) leaves it off: the solve runs to maxiter. The driven "
+            "legs have no plateau detector.");
+        initialize<double>(
+            "stall.ratio", 0.1,
+            "Excited-state plateau detector: minimum relative improvement of "
+            "the gate distance over stall.window iterations to count as "
+            "progress.");
         initialize<double>("maxrotn", .50, "Max orbital rotation per iteration");
         initialize<size_t>("maxsub", 8, "size of iterative subspace ... set to 0 or 1 to disable");
         initialize<std::string>("xc", "hf", "XC input line");

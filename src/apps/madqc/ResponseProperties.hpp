@@ -590,9 +590,9 @@ excited_state_omega_target_row(const Stage& stage, double engine_omega_limit) {
 // eigenvalue change has improved by stall.ratio over stall.window
 // iterations while the other active roots are converged or likewise flat;
 // the solve then stops as stalled. The keys are the engine's own; unwritten,
-// its defaults apply (6 iterations, 0.1). stall.window 0 disables the
-// detector, so the bundle runs to maxiter and --continue resumes it. The
-// legs' detector takes progress.* instead. Not a target: no relation to a
+// its defaults apply (window 0, ratio 0.1; D-133): the detector is off, so
+// the bundle runs to maxiter and --continue resumes it. The dipole legs have
+// no plateau detector in this release. Not a target: no relation to a
 // measurement, the limit is the setting itself. The response settings table
 // (ResponseCheckpoint.hpp) places them beside the bundle's engine rows.
 [[nodiscard]] inline std::vector<madness::convergence::MetricSetting>
@@ -625,7 +625,7 @@ bundle_stall_rows(const Stage& stage) {
           row("bundle stall ratio", "stall.ratio", "fraction", rp.stall_ratio(),
               ratio_written,
               "the relative improvement over stall.window that counts as "
-              "progress; the legs take progress.* instead")};
+              "progress; the dipole legs have no plateau detector")};
 }
 
 // D-061, B1: the saved bundle's measurement under the name of its written

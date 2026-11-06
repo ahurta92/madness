@@ -51,8 +51,12 @@ described in the report.
 
 ## Plateau (stall) detector
 
-`stall.window` (default 6) and `stall.ratio` (default 0.1), deck block `response`.
-Each iteration appends the normalised gate distance
+`stall.window` (default 0: off) and `stall.ratio` (default 0.1), deck block `response`.
+Since D-133 the detector is off by default: a solve that does not converge runs
+to maxiter and is reported unconverged. A written `stall.window` switches on the
+excited-state bundle's detector only; the driven (FD) legs have none, though the
+FD test below is kept in the code. While it is on, each iteration appends the
+normalised gate distance
 
 ```
 FD: g = max_c max(bsh_c / bsh_target, drho_c / density_target)
@@ -66,7 +70,10 @@ to a per-rung history (reset when thresh changes). When `g > 1` and
 carries `"stalled": true`. The verdict is unchanged with respect to running to the
 cap: FD applies the same best-effort acceptance as maxiter (`--accept-at-maxiter`,
 metadata `accepted: true`, log `ACCEPTED best-effort @ stall`); ES reports the
-bundle as not converged. `stall.window 0` disables the detector. An iteration
+bundle as not converged. `stall.window 0` (the default) disables the detector. The
+`[STALL]` line gives each quantity now and how it moved over the window
+(`rising`, `flat` or `falling slowly`): the test fires on anything that did not
+fall by `ratio`, which includes a quantity that rose. An iteration
 without a measurable |dw| records +inf, which never counts as a stall, so a cold
 ES start cannot trip it.
 

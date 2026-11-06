@@ -33,12 +33,29 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
 #include <madness/chem/ConvergenceSettings.h>
 #include <nlohmann/json.hpp>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace molresponse_v3 {
+
+/// D-133: a plateau-test quantity for the [STALL] log line, now and how it
+/// moved over the window, e.g. "3.100e+00 (rising from 2.400e+00)". The test
+/// fires on anything that did not fall by stall_ratio, which includes a rise.
+inline std::string stall_change(double now, double then) {
+  const char* how = !std::isfinite(now) || !std::isfinite(then) ? "unmeasured"
+                    : now > then                                ? "rising"
+                    : now < then                                ? "falling slowly"
+                                                                : "flat";
+  std::ostringstream os;
+  os << std::scientific << std::setprecision(3) << now << " (" << how
+     << " from " << then << ")";
+  return os.str();
+}
 
 struct ConvergencePolicy {
   // Named FD only (DESIGN B8): the written targets. Which check stops a solve
@@ -151,8 +168,11 @@ struct ConvergencePolicy {
   // best-effort acceptance it applies at maxiter (--accept-at-maxiter). So the
   // verdict is unchanged - only the wasted iterations are gone. The history is
   // reset whenever the protocol thresh changes (targets change with it).
-  // stall_window <= 0 disables. Deck: response { stall.window 6  stall.ratio 0.1 }.
-  int    stall_window = 6;
+  // stall_window <= 0 disables, and 0 is the default (D-133): a solve that
+  // does not converge runs to maxiter. A deck switches the excited-state
+  // bundle's detector on with response { stall.window 6  stall.ratio 0.1 }
+  // (ExecutorSettings::es_stall_window); the driven legs have none.
+  int    stall_window = 0;
   double stall_ratio  = 0.10;
 
   /// Plateau test. `tracks` holds one history per gated quantity (FD: the BSH

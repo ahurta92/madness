@@ -1173,22 +1173,33 @@ public:
     if (out.stalled && !solve_flat && print_level_ >= PrintLevel::Normal &&
         world_.rank() == 0) {
       print("[STALL] iter", out.iter, ": no active root is still improving —",
-            out.stalled_roots.size(), "root(s) flat above target over",
-            policy_.stall_window, "iters (<", 100.0 * policy_.stall_ratio,
-            "% improvement), the rest converged; stopping.");
-      for (int s2 : out.stalled_roots)
-        print("  root", s2, ": density", out.root_gate_history[s2][0].back(),
-              ", |dw|", out.root_gate_history[s2][1].back(), "(normalised)");
+            out.stalled_roots.size(),
+            "root(s) above target improved by less than",
+            100.0 * policy_.stall_ratio, "% over", policy_.stall_window,
+            "iters, the rest converged; stopping.");
+      const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
+      for (int s2 : out.stalled_roots) {
+        const auto& d = out.root_gate_history[s2][0];
+        const auto& o = out.root_gate_history[s2][1];
+        print("  root", s2, ": density",
+              stall_change(d.back(), d[d.size() - 1 - w]) + ", |dw|",
+              stall_change(o.back(), o[o.size() - 1 - w]),
+              "(normalised to target)");
+      }
     }
     if (out.stalled && solve_flat && print_level_ >= PrintLevel::Normal &&
         world_.rank() == 0) {
       const std::size_t n = out.gate_history[0].size();
       const std::size_t w = static_cast<std::size_t>(policy_.stall_window);
-      print("[STALL] iter", out.iter, ": density and |dw| both flat over",
-            policy_.stall_window, "iters (<", 100.0 * policy_.stall_ratio,
-            "% improvement) — density", out.gate_history[0][n - 1], "vs",
-            out.gate_history[0][n - 1 - w], ", |dw|", out.gate_history[1][n - 1],
-            "vs", out.gate_history[1][n - 1 - w], "(normalised); stopping.");
+      print("[STALL] iter", out.iter, ": neither density nor |dw| improved by",
+            100.0 * policy_.stall_ratio, "% over", policy_.stall_window,
+            "iters — density",
+            stall_change(out.gate_history[0][n - 1],
+                         out.gate_history[0][n - 1 - w])
+                + ", |dw|",
+            stall_change(out.gate_history[1][n - 1],
+                         out.gate_history[1][n - 1 - w]),
+            "(normalised to target); stopping.");
     }
   }
 

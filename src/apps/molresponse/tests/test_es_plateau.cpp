@@ -48,7 +48,8 @@ Track geometric(double v0, double f, int n) {
 } // namespace
 
 int main() {
-  ConvergencePolicy p;  // stall_window 6, stall_ratio 0.10
+  ConvergencePolicy p; // stall_ratio 0.10
+  p.stall_window = 6;  // off by default (D-133); the test switches it on
   const int n = p.stall_window + 1;
   const double inf = std::numeric_limits<double>::infinity();
 

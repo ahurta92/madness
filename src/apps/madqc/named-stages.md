@@ -439,13 +439,16 @@ roots are converged or likewise flat; the check is the engine's and applies in
 both modes (it is not a written target). A stalled bundle is done at its rung:
 `--continue` loads it and does not iterate it further. The keys are the
 engine's own: `stall.window <iterations>` and `stall.ratio <fraction>` on a
-stage that requests `excited_states`; unwritten, the engine's defaults 6 and
-0.1 apply, and the settings table shows them as engine rows ("bundle stall
-window", "bundle stall ratio"). `stall.window 0` disables the detector, so the
-bundle runs to `maxiter` and `--continue` resumes it. On a stage without
-`excited_states` the keys do nothing and are refused: the dipole legs' stall
-rules are `progress.window` and `progress.minimum_relative_improvement`,
-which act on the legs only and never on a bundle. A root that stalls at the
+stage that requests `excited_states`; unwritten, the engine's defaults 0 and
+0.1 apply (D-133: the detector is off), and the settings table shows them as
+engine rows ("bundle stall window", "bundle stall ratio"). With
+`stall.window 0` the bundle runs to `maxiter` and `--continue` resumes it; a
+written window switches the bundle's detector on, and only the bundle's. In
+this release the dipole legs have no plateau detector: a leg that does not
+converge runs to `maxiter` and is reported unconverged. On a stage without
+`excited_states` the keys would do nothing and are refused. (The
+`progress.*` keys are a different rule: the configured progress check under
+written accuracy targets.) A root that stalls at the
 edge of a cluster of states (the warmup lists them) is usually told apart by
 requesting more roots.
 A bundle written on another number of ranks is refused

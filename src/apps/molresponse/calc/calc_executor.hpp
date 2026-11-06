@@ -231,6 +231,10 @@ struct ExecutorSettings {
   // D-122: the deck wrote kain.min_residual (policy.kain_min_residual is then
   // the written value, which wins over the cold-start rule below).
   bool              es_kain_min_residual_written = false;
+  // D-133: the bundle's plateau detector (deck stall.window / stall.ratio).
+  // Off unless written; the driven legs' policy keeps it off.
+  int               es_stall_window       = 0;
+  double            es_stall_ratio        = 0.10;
   // Cache the (promoted) TDA warmup guess to a side bundle es_warmup__<pkey> and
   // reuse it on later runs, so iterating on the Full main solve skips the warmup.
   // Opt-in; the main solve never overwrites the cache (stable fixed start point).
@@ -353,6 +357,8 @@ inline EsIterationPolicies es_iteration_policies(const ExecutorSettings &s,
   p.warm.maxrotn                  = s.es_maxrotn;
   p.warm.tda_warmup_iters         = s.es_tda_warmup_iters;
   p.warm.warmup_oversample_factor = s.es_warmup_oversample;
+  p.warm.stall_window             = s.es_stall_window;
+  p.warm.stall_ratio              = s.es_stall_ratio;
   p.main                  = p.warm;
   p.main.kain             = s.es_kain;
   p.main.tda_warmup_iters = s.es_main_kain_delay;
