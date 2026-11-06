@@ -15,7 +15,7 @@
 //
 //   State Solver::step(State in);
 //   StopReason Solver::stop_reason(const State&, int iterations, int cap,
-//                                  int forced_iterations) const;   // DESIGN B5
+//                                  int forced_iterations, bool final_protocol) const;
 //   (a solver not yet on rung_exit supplies bool converged(const State&) const
 //    instead; none is left in the tree)
 //
@@ -34,6 +34,7 @@ struct IteratePolicy {
   int max_iters = 25;
   // Explicit diagnostic only: zero preserves the ordinary convergence loop.
   int forced_iterations = 0;
+  bool final_protocol = true; // false when a later requested protocol remains
 };
 
 template <typename State>
@@ -57,16 +58,16 @@ auto iterate(Solver &solver, typename Solver::State state,
     // the order of the exits to the shared rung_exit; divergence, its
     // validity check, comes first. The branch below serves a solver without
     // stop_reason(); none is left in the tree.
-    if constexpr (requires { solver.stop_reason(state, 0, 0, 0); }) {
+    if constexpr (requires { solver.stop_reason(state, 0, 0, 0, true); }) {
       if (iteration_diverged(state, 0))
         break;
       state.stop = solver.stop_reason(state, k + 1, policy.max_iters,
-                                      policy.forced_iterations);
+                                      policy.forced_iterations, policy.final_protocol);
       if (state.stop == decltype(state.stop)::in_progress)
         continue;
       converged = state.stop == decltype(state.stop)::converged;
       break;
-    } else if (policy.forced_iterations) {
+    } else if (policy.forced_iterations || !policy.final_protocol) {
       if (iteration_diverged(state, 0)) { converged = false; break; }
       converged = !iteration_stalled(state, 0) && solver.converged(state);
     } else if (solver.converged(state)) {

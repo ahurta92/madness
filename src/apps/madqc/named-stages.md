@@ -135,16 +135,17 @@ targets; a saved verdict is never trusted. Rungs are matched by value (`thresh`,
 `k`), not by position in the `protocol` list. A finished rung is never redone:
 the stage continues at the next tighter requested rung. An unfinished rung
 resumes where it stopped. A finished final rung is loaded if it meets the
-current request and resumed otherwise, except that a final rung that stalled
-with the request unmet is loaded and reported unmet (resuming would stall
-again; tighten the protocol or loosen a target). A changed problem (geometry,
+current request and resumed otherwise, including a final rung that stalled
+with the request unmet. Each resumed stage gets a fresh iteration allowance. A changed problem (geometry,
 model, charge, cell) starts fresh in the same stage directory, leaving the
 old generations untouched until the new problem publishes: retention then
 deletes them unless another stage's manifest references them or the deck
 writes `checkpoint.keep_all true`, and `latest` names the new problem's. A generation with no recorded measurements (from
 before the convergence report) cannot be re-judged and is resumed.
 `maxiter` (one number, or one per rung such as `maxiter [30, 10]`) is the
-number of iterations a rung may take in this run; a `--continue` run starts
+number of iterations each intermediate rung performs in this run, and the
+cap for the final rung. Intermediate convergence or plateau observations do
+not end the rung early; divergence still stops it. A `--continue` run starts
 the count again, so a resumed rung gets `maxiter` more iterations. Each
 generation records the rung (`position.protocol_step`): its index, `thresh`, `k`, the
 iterations in this run (`iterations_this_run`), the total across runs
@@ -238,8 +239,8 @@ legs at w; for `raman` the A and B legs at w and the nuclear leg at 0), from
 that state's records in the generation (`numerical.states`), by the same
 rules: saved values are re-judged against today's engine limits and written
 targets; a finished rung is never redone; a state that meets the request is
-loaded; a final rung that stalled with the request unmet is loaded and
-reported unmet; a state with no record (a new frequency, or a changed exact
+loaded; a final rung that stalled with the request unmet resumes with a
+fresh allowance; a state with no record (a new frequency, or a changed exact
 frequency) starts at the first rung from the same perturbation's saved state
 at the nearest frequency, the lower one on a tie (`action: seeded`, with
 `seed_from` and `seed_frequency`), and a new perturbation with nothing saved
@@ -987,10 +988,9 @@ has a record at the request's final rung (or finer, when a finished state
 was loaded under R3, D-085) that is not diverged and either was
 loaded under a met request (`decided_by: planner`) or stopped `converged`
 and, with the written targets deciding, its saved measurements meet them. The
-records are the generation's `numerical.states`. A moldft state loaded
-after its final rung stalled (R2) is not published again: the stalled
-generation stays latest, the stage is unconverged and the next stage does
-not run (D-091). The written targets are
+records are the generation's `numerical.states`. A resumed stalled final
+state remains unconverged until a new attempt meets the applicable checks;
+dependent stages remain blocked in the meantime. The written targets are
 judged once per state; a molresponse stage records the result at
 `convergence_report.requested_accuracy` too, one entry per state key, in the
 same form as moldft's.

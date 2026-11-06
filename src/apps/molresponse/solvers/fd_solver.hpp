@@ -735,7 +735,8 @@ public:
         out.progress_criteria_history.push_back(out.explicit_accuracy.at(0).at("criteria"));
         out.configured_progress = fd_progress_decision(out.progress_criteria_history,
             policy_.explicit_progress_configuration, madness::FunctionDefaults<3>::get_thresh(),
-            out.diverged, policy_.diagnostic_iterations_per_rung);
+            out.diverged, policy_.diagnostic_iterations_per_rung,
+            /*fixed_intermediate_work=*/true);
         MADNESS_CHECK_THROW(out.diverged || out.configured_progress.at("action") != "stop_invalid",
             "invalid configured FD progress evidence");
         out.configured_progress_history.push_back(out.configured_progress);
@@ -875,11 +876,11 @@ public:
   /// verdicts. iterate<> checks divergence before asking.
   [[nodiscard]] madness::convergence::StopReason
   stop_reason(const State& state, int iterations, int cap,
-              int forced_iterations) const {
+              int forced_iterations, bool final_protocol = true) const {
     return madness::convergence::rung_exit(
         {policy_.decider, engine_check_passed(state),
          requested_criteria_met(state), state.stalled, iterations, cap,
-         forced_iterations});
+         forced_iterations, final_protocol});
   }
 
   /// Every written target met on the solver's input and on the saved state

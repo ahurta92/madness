@@ -16,7 +16,7 @@
 //   2. solver.refresh_convergence_targets() — re-derives BSH /
 //      density-residual targets from the new thresh.
 //   3. solvers::iterate(solver, state, IteratePolicy{max_iters}) —
-//      drive to convergence at this protocol.
+//      consume intermediate work; allow convergence at the final protocol.
 //
 // The intermediate state propagates between protocol steps as the
 // initial guess for the next one (post-projection inside prepare).
@@ -37,6 +37,7 @@ namespace molresponse_v3::solvers {
 struct IterateProtocolPolicy {
   int max_iters_per_step = 25;
   int forced_iterations_per_step = 0;
+  bool final_protocol = true; // false when a later requested protocol remains
 };
 
 /// SFINAE helper: call solver.sort_state_by_omega(state) if the solver
@@ -78,12 +79,14 @@ auto iterate_protocol(Solver &solver,
                       const IterateProtocolPolicy &policy = {})
     -> typename Solver::State {
   maybe_assign_initial_identity(solver, state, 0);
-  for (double thresh : thresholds) {
+  for (std::size_t i = 0; i < thresholds.size(); ++i) {
+    const double thresh = thresholds[i];
     prepare(thresh, solver, state);
     solver.refresh_convergence_targets();
     state = solvers::iterate(
         solver, std::move(state),
-        IteratePolicy{policy.max_iters_per_step, policy.forced_iterations_per_step});
+        IteratePolicy{policy.max_iters_per_step, policy.forced_iterations_per_step,
+                      policy.final_protocol && i + 1 == thresholds.size()});
     post_step(thresh, solver, state);
     if (state.diverged) break;  // bail rather than tighten on garbage
   }

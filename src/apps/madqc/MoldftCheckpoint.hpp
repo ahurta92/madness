@@ -940,6 +940,14 @@ class MoldftCheckpoint {
           expected["has_next_supplied_rung"] = has_next;
           expected["action_applied"] = expected.at("status") == "stalled" &&
               diagnostic == 0;
+          // Older checkpoints applied intermediate plateau exits. New ones
+          // retain the observation while consuming fixed intermediate work.
+          if (progress.contains("fixed_intermediate_work")) {
+            require(has_next && progress.at("fixed_intermediate_work") == true,
+                    "invalid ground-state measurement: fixed intermediate work");
+            expected["fixed_intermediate_work"] = true;
+            expected["action_applied"] = false;
+          }
           require(expected.at("action") != "stop_invalid" && expected == progress,
                   "invalid ground-state measurement: configured progress");
         }

@@ -36,7 +36,8 @@ nlohmann::json fd_requested_progress(const Parameters& parameters) {
 }
 
 inline nlohmann::json fd_progress_decision(const nlohmann::json& history,
-    const nlohmann::json& configuration, double threshold, bool invalid, int diagnostic) {
+    const nlohmann::json& configuration, double threshold, bool invalid, int diagnostic,
+    bool fixed_intermediate_work = false) {
   using json = nlohmann::json;
   if (!configuration.at("window").is_number_integer())
     throw std::invalid_argument("configured FD progress window must be an integer");
@@ -53,6 +54,10 @@ inline nlohmann::json fd_progress_decision(const nlohmann::json& history,
       configuration.at("minimum_relative_improvement"), has_next, invalid);
   decision["has_next_supplied_rung"] = has_next;
   decision["action_applied"] = decision.at("status") == "stalled" && diagnostic == 0 && !invalid;
+  if (fixed_intermediate_work && has_next) {
+    decision["fixed_intermediate_work"] = true;
+    decision["action_applied"] = false;
+  }
   return decision;
 }
 
@@ -223,7 +228,9 @@ inline bool valid_fd_explicit_accuracy(const nlohmann::json& entry, double thres
       json prefix = json::array();
       for (std::size_t i = 0; i < criteria.size(); ++i) {
         prefix.push_back(criteria.at(i).at("criteria").at("criteria"));
-        const auto expected = fd_progress_decision(prefix, configuration, threshold, false, diagnostic);
+        const auto expected = fd_progress_decision(
+            prefix, configuration, threshold, false, diagnostic,
+            decisions.at(i).value("fixed_intermediate_work", false));
         if (expected.at("action") == "stop_invalid" || decisions.at(i) != expected) return false;
         if (expected.at("action_applied") == true && i + 1 != criteria.size()) return false;
       }

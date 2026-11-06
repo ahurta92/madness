@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Baseline: madqc-drop-6, 9179f5d32076a2ba555906dd146dc330ffc040d7. Work only in the isolated codex/madqc-simple-policy worktree.
-- No numerical kernel, metric definition, checkpoint format, or release-checkout change.
+- No numerical kernel, metric definition, binary archive format, or release-checkout change. Additive progress metadata distinguishes fixed intermediate work from older records.
 - Intermediate work may terminate on divergence; convergence and plateau observations cannot end it before its configured count. At the boundary, report the actual convergence verdict; an unmet count limit is not convergence.
 - Explicit diagnostic iteration counts keep their existing precedence.
 - Final-stage criteria selection, removal of excited-state freezing, changed-setup validity, expanded roots, refined-reference reuse and persistence/history auditing are subsequent slices, explicitly tracked in the amendment.
@@ -37,12 +37,12 @@
 
 ### Task 2: Wire protocol roles through solver drivers
 
-**Files:** `src/apps/molresponse/solvers/{iterate.hpp,iterate_protocol.hpp,fd_solver.hpp,es_solver.hpp}`, `src/apps/molresponse/calc/calc_executor.hpp`, `src/madness/chem/SCF.cc`, new `src/apps/molresponse/tests/test_iteration_protocol.cpp`, `src/apps/molresponse/CMakeLists.txt`.
+**Files:** `src/apps/molresponse/solvers/{iterate.hpp,iterate_protocol.hpp,fd_solver.hpp,es_solver.hpp}`, `src/apps/molresponse/calc/calc_executor.hpp`, `src/madness/chem/SCF.cc`, new `src/apps/molresponse/tests/test_iteration_protocol.cpp`, `src/apps/molresponse/CMakeLists.txt`. Progress evidence also requires `fd_explicit_accuracy.hpp`, both named checkpoint adapters, their tests and `named-stages.md`. The all-locked ES branch must retain eigenvalue-change evidence; the H2 acceptance test covers both TDA and RPA.
 
-- [ ] Add pure driver scenario tests: early convergence/plateau at intermediate stage, mandatory final stage, single-threshold scheduler call marked intermediate, fresh allowance from nonzero history, divergence, one-iteration cap, diagnostic override.
-- [ ] Add explicit final-protocol fields to driver policies and optional final-protocol arguments to solver stop_reason methods; run tests to observe wrong early exit before implementing forwarding.
-- [ ] Wire the complete requested node ladder into the response executor's role flag; named SCF uses its existing supplied-ladder lookup. Preserve reported convergence at the completed intermediate boundary.
-- [ ] Register the pure test in CMake, run focused tests and compile the changed production paths. Commit adapters/tests.
+- [x] Add pure driver scenario tests: early convergence/plateau at intermediate stage, mandatory final stage, single-threshold scheduler call marked intermediate, fresh allowance from nonzero history, divergence, one-iteration cap, diagnostic override.
+- [x] Add explicit final-protocol fields to driver policies and optional final-protocol arguments to solver stop_reason methods; run tests to observe wrong early exit before implementing forwarding.
+- [x] Wire the complete requested node ladder into the response executor's role flag; named SCF uses its existing supplied-ladder lookup. Preserve reported convergence at the completed intermediate boundary.
+- [x] Register the pure test in CMake, run focused tests and compile the changed production paths. Commit adapters/tests.
 
 ### Task 3: Validate and record the slice
 

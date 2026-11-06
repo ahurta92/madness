@@ -1914,8 +1914,7 @@ int main(int argc, char** argv) {
                   && criteria_plan.at("action") != "loaded",
               "planner (D-061, D-082): a saved bundle missing econv, loaded "
               "and reported in engine mode, not loaded under written targets");
-        // D-099 (R-063): a bundle stalled at its final rung names what moves
-        // it, and that the protocol and dconv do not.
+        // A stalled final bundle gets a new attempt at the saved stage.
         auto stalled_meta = es_meta;
         auto& stalled_bundle = stalled_meta["excited_states"][es_key];
         stalled_bundle["converged"] = false;
@@ -1931,14 +1930,10 @@ int main(int argc, char** argv) {
                                                        {}))
                   .continuation.at("states")
                   .back();
-        const auto stalled_why = stalled_plan.at("why").get<std::string>();
-        check(stalled_plan.at("action") == "loaded"
-                  && stalled_why.find("root r0") != std::string::npos
-                  && stalled_why.find("stall.window") != std::string::npos
-                  && stalled_why.find("do not move a stalled bundle")
-                         != std::string::npos,
-              "planner (D-099): a stalled bundle's message names the stalled "
-              "root and what moves it");
+        check(stalled_plan.at("action") == "resumed"
+                  && stalled_plan.at("iterations_done_at_protocol_step") == 6
+                  && stalled_plan.at("unmet").empty(),
+              "planner: a stalled final bundle resumes and retains its historical count");
         check(bundle_plan(mixed_dconv).at("action") == "loaded",
               "planner (D-082): a bundle under written targets none of its "
               "kind's (dconv only) is loaded on its stop");

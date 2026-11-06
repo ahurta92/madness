@@ -978,6 +978,9 @@ public:
     }
 
     if (nA == 0) {  // every root converged + locked
+      // Fixed intermediate work can continue after all roots lock. Their
+      // unchanged eigenvalues still provide a valid, zero change sample.
+      fill_omega_residual(out, in);
       update_stall(out, in);
       print_iter_banner(out);
       append_convergence_log(out);
@@ -1237,10 +1240,11 @@ public:
   /// divergence before asking.
   [[nodiscard]] madness::convergence::StopReason
   stop_reason(const State& state, int iterations, int cap,
-              int forced_iterations) const {
-    return madness::convergence::rung_exit(
-        bundle_rung_sample(engine_check_passed(state), state.stalled,
-                           iterations, cap, forced_iterations));
+              int forced_iterations, bool final_protocol = true) const {
+    auto sample = bundle_rung_sample(engine_check_passed(state), state.stalled,
+                                     iterations, cap, forced_iterations);
+    sample.final_protocol = final_protocol;
+    return madness::convergence::rung_exit(sample);
   }
 
   void save(const State &s, const std::string &path_prefix) const {

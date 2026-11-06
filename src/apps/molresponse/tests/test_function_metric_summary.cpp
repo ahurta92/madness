@@ -3,6 +3,7 @@
 #include <madness/chem/ExplicitCriteria.h>
 #include "../solvers/function_metric_diagnostics.hpp"
 #include "../solvers/iterate.hpp"
+#include "../solvers/fd_explicit_accuracy.hpp"
 #include "../solvers/convergence_policy.hpp"
 #include <cstdio>
 #include <limits>
@@ -82,6 +83,23 @@ int main() {
            "final explicit stall retains state without successful accuracy");
     expect(madness::explicit_progress(stalled_history, 1, 0.1, true, true).at("action") == "stop_invalid",
            "invalid state cannot be promoted by a stall");
+    const json progress_configuration = {{"window", 1},
+        {"minimum_relative_improvement", 0.1}, {"protocol", {1e-4, 1e-6}}};
+    const auto fixed_progress = molresponse_v3::fd_progress_decision(
+        stalled_history, progress_configuration, 1e-4, false, 0, true);
+    expect(fixed_progress.at("status") == "stalled"
+           && !fixed_progress.at("action_applied").get<bool>()
+           && fixed_progress.value("fixed_intermediate_work", false),
+           "fixed intermediate work records plateau evidence without applying an exit");
+    expect(molresponse_v3::fd_progress_decision(
+               stalled_history, progress_configuration, 1e-4, false, 0)
+               .at("action_applied") == true,
+           "legacy progress evidence can still be reconstructed");
+    const auto final_progress = molresponse_v3::fd_progress_decision(
+        stalled_history, progress_configuration, 1e-6, false, 0, true);
+    expect(final_progress.at("action_applied") == true
+           && !final_progress.contains("fixed_intermediate_work"),
+           "this slice preserves the optional final plateau decision");
     auto improving_history = stalled_history;
     improving_history[1]["metric"]["value"] = 1.5;
     expect(madness::explicit_progress(improving_history, 1, 0.1, true, false).at("action") == "continue",

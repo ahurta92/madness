@@ -471,3 +471,11 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
       PROPERTIES LABELS "applications;verylong" TIMEOUT 900)
   endif()
 endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME madness/test/madqc/test_fixed_intermediate_work/run
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_fixed_intermediate_work.py
+      --binary $<TARGET_FILE:madqc> --source ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(madness/test/madqc/test_fixed_intermediate_work/run
+    PROPERTIES LABELS "applications;verylong" TIMEOUT 1800)
+endif()

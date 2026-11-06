@@ -3172,6 +3172,10 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         const bool stalled = configured_progress.at("status") == "stalled" && diagnostic_iterations == 0;
         configured_progress["has_next_supplied_rung"] = has_next_supplied_rung;
         configured_progress["action_applied"] = stalled;
+        if (checkpoint_observer && has_next_supplied_rung) {
+            configured_progress["fixed_intermediate_work"] = true;
+            configured_progress["action_applied"] = false;
+        }
 
         bool engine_check_passed = false;
         if (iter > 0) {
@@ -3190,7 +3194,8 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
             // verdicts it computed above. The cap is what this run may take.
             const auto rung_stop = convergence::rung_exit(
                 {decider, engine_check_passed, criteria_met, stalled, iter + 1,
-                 iteration_limit, diagnostic_iterations});
+                 iteration_limit, diagnostic_iterations,
+                 !checkpoint_observer || !has_next_supplied_rung});
             converged = rung_stop == convergence::StopReason::converged;
             // previous conv was too tight for small systems
             // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()

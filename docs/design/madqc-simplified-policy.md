@@ -18,6 +18,10 @@ This slice implements fixed intermediate iteration counts and removes the final-
 
 Response execution must determine the role from the whole requested node ladder, because the scheduler invokes a single protocol at a time. Direct multi-stage response driver calls likewise treat every stage before the last as intermediate. Named SCF uses its supplied ladder. Standalone SCF behavior is unchanged.
 
+Configured-progress records add `fixed_intermediate_work: true` where the plateau remains an observation rather than an applied exit. Validators retain support for older records. Binary function archives are unchanged.
+
+The existing excited-state freezing rule is retained in this slice. Loop iterations continue through the intermediate allowance, including iterations with frozen roots. The all-locked path now records the zero eigenvalue change instead of dropping that measurement; the separate removal of freezing remains below.
+
 Final convergence selection and optional live final plateau exits retain their existing behavior in this slice. A saved stalled final stage with unmet criteria receives a resume plan, including its historical count without deducting that count from the new allowance. A saved final state that now satisfies the applicable existing checks can still be loaded.
 
 | Scenario | Required result in this slice |

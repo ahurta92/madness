@@ -1422,7 +1422,7 @@ private:
     json record = continuation_record(state, request.ladder);
     record["state"] = request.identity;
     record.update(fields);
-    // R2 loads a stalled final rung with the request unmet: not met.
+    // Preserve explicit unmet evidence when translating saved plans.
     if (plan.action == planning::Action::load && plan.unmet.empty())
       record["loaded_state"]
           = key_at(molresponse_v3::protocol_key(own->rung.thresh, own->rung.k));
@@ -2000,29 +2000,6 @@ inline StagePlans plan_response_states(const Stage& stage,
         records, bundle->id, requested_rungs, request.ladder.back());
     auto plan
         = seeded(madness::planning::plan_ladder(own, std::nullopt, request));
-    // D-099 (R-063): a bundle loaded stalled at its final rung (R2) is done at
-    // that rung for the engine; the protocol and dconv do not move it.
-    if (plan.action == madness::planning::Action::load && !plan.unmet.empty()) {
-      std::string stalled;
-      for (const auto& record : records)
-        if (record.value("identity", "") == bundle->id
-            && record.value("kind", "") == "excited_states"
-            && madness::scf_continuation::same_rung(
-                {record.at("protocol_step").at("thresh").get<double>(),
-                 record.at("protocol_step").at("k").get<int>()},
-                request.ladder.back()))
-          for (const auto& root : record.value("roots", json::array()))
-            if (root.value("stalled", false))
-              stalled += (stalled.empty() ? "" : ", ")
-                         + root.value("root_id", std::string("?"));
-      plan.why = "the bundle stalled on the engine check ("
-                 + (stalled.empty() ? std::string("a root") : "root " + stalled)
-                 + ": its density change and its eigenvalue change both flat "
-                   "over the stall detector's window); to go on, request more "
-                   "roots when the last root borders a cluster, or write "
-                   "stall.window 0 or a larger window, or raise maxiter; the "
-                   "protocol and dconv do not move a stalled bundle";
-    }
     if (!own)
       for (const auto& record : records)
         if (record.value("kind", "") == "excited_states") {
@@ -2084,7 +2061,7 @@ response_engine_plans(const StagePlans& plans) {
       engine_plan.kind = Kind::load;
       engine_plan.loaded_key = molresponse_v3::protocol_key(
           state.own_rung->thresh, state.own_rung->k);
-      // R2 loads a stalled final rung with the request unmet: not met.
+      // Preserve explicit unmet evidence when translating saved plans.
       engine_plan.met = state.plan.unmet.empty();
       break;
     case planning::Action::resume:

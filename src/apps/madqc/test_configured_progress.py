@@ -56,11 +56,14 @@ def run(label, text, stop_reason):
     return stage, report
 
 stage, report = run('Stalled', deck, 'stalled')
-assert stage['iterations_this_run'] == 6
+assert stage['iterations_this_run'] == 15  # 12 fixed coarse + 3 final plateau
 history = report['iteration_history']
 assert len({row['kinetic_trace']['sample']['threshold'] for row in history}) == 2
 applied = [row['configured_progress']['action'] for row in history if row['configured_progress']['action_applied']]
-assert applied == ['advance_supplied_rung', 'retain_unmet'], applied
+assert applied == ['retain_unmet'], applied
+coarse = [row for row in history if row['configured_progress']['has_next_supplied_rung']]
+assert len(coarse) == 12
+assert all(row['configured_progress']['fixed_intermediate_work'] for row in coarse)
 assert report['configured_progress']['action'] == 'retain_unmet'
 
 # An altered recorded decision is not accepted as valid continuation evidence.

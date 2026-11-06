@@ -28,6 +28,7 @@ deck = (Path(args.source) / 'named_h2.in').read_text().replace(
 # kinetic target is the only one, as the response dconv is not written.
 assert deck.count('  dconv 1e-4\n') == 1  # the response stage's dconv
 deck = deck.replace('  dconv 1e-4\n', '')
+deck = deck.replace('  maxiter 30\n', '  maxiter 8\n')
 deck = deck.replace('molresponse optical\n', 'molresponse optical\n'
                     '  convergence.use_default_criteria false\n'
                     '  accuracy.kinetic_trace_change 0\n  progress.window 1\n'
@@ -61,13 +62,15 @@ def entries(manifest):
 root = work / 'Stalled'
 run('stalled', root, deck)
 result = named_records.stages(root)[-1]
-assert result['status'] == 'unconverged' and result['iterations_this_run'] == 6
+assert result['status'] == 'unconverged' and result['iterations_this_run'] == 11
 _, _, _, manifest = latest(root)
 assert manifest['archives'] and not manifest['properties']
 rows = sorted(entries(manifest), key=lambda e: -e['function_bsh_history'][0]['sample']['threshold'])
 assert [e['configured_progress']['action'] for e in rows] == ['advance_supplied_rung', 'retain_unmet']
-assert all(e['configured_progress']['action_applied'] and e['stalled'] and
-           not e['converged'] and not e['accepted'] for e in rows)
+assert rows[0]['configured_progress']['fixed_intermediate_work']
+assert not rows[0]['configured_progress']['action_applied'] and not rows[0]['stalled']
+assert rows[1]['configured_progress']['action_applied'] and rows[1]['stalled']
+assert all(not e['converged'] and not e['accepted'] for e in rows)
 
 for corruption in ('decision', 'fractional-window', 'missing-rung', 'inserted-rung', 'missing-progress', 'missing-registry'):
     bad = work / ('BadEvidence-' + corruption)
@@ -96,16 +99,17 @@ for corruption in ('decision', 'fractional-window', 'missing-rung', 'inserted-ru
     assert (store / 'latest').read_text() == pointer
     assert 'invalid response state' in (work / ('bad-' + corruption + '.log')).read_text()
 
-# The final rung stalled with the request unmet, so --continue loads it and
-# reports it unmet instead of stalling again (DESIGN B6 R2, D-005.1). The new
+# A stalled final rung with the request unmet gets a fresh attempt. The new
 # generation keeps the originating request beside the current attempt's.
 continued = work / 'Continued'
 shutil.copytree(root, continued)
 run('continued', continued, deck, resume=True)
 result = named_records.stages(continued)[-1]
-assert result['status'] == 'unconverged' and result['iterations_this_run'] == 0
+assert result['status'] == 'unconverged' and result['iterations_this_run'] > 0
 states = result['continuation']['states']
-assert [s['action'] for s in states] == ['loaded'] and states[0]['unmet']
+assert [s['action'] for s in states] == ['resumed']
+assert states[0]['protocol_step']['index'] == 2
+assert states[0]['iterations_done_at_protocol_step'] > 0
 _, _, _, manifest = latest(continued)
 assert len(manifest['numerical']['engine_metadata']['checkpoint_requests']) >= 2
 assert not manifest['properties']

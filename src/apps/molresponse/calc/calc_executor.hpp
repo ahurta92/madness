@@ -301,6 +301,7 @@ struct ExecutorContext : ExecutorSettings {
   GroundState      &gs;            // mutable: re-prepared at each protocol
   double            L = 0.0;       // cubic cell half-edge (from archive header)
   std::string       fock_json;     // moldft.fock.json path ("" -> none)
+  bool final_protocol = true; // role of the current work item in its full ladder
 
   ExecutorContext(madness::World &w, GroundState &g, double L_,
                   std::string fock, ExecutorSettings s = {})
@@ -760,6 +761,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.max_iters;
   pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
+  pp.final_protocol = ctx.final_protocol;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -1015,6 +1017,7 @@ inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
   pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
+  pp.final_protocol = ctx.final_protocol;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -1258,6 +1261,7 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
   solvers::IterateProtocolPolicy pp;
   pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
   pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
+  pp.final_protocol = ctx.final_protocol;
   const std::vector<double> one_protocol = {thresh};
   auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
                                       prepare, post_step, pp);
@@ -1394,6 +1398,11 @@ public:
 
   NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
+    // Each solve receives one threshold, but its role belongs to the full
+    // requested ladder. This also applies in subworld executors.
+    ctx_.final_protocol = std::none_of(
+        node.protocols.begin(), node.protocols.end(),
+        [&](double threshold) { return threshold < item.thresh; });
 
     if (node.kind == CalcKind::ES) {
       const bool restricted = ctx_.gs.is_spin_restricted();
