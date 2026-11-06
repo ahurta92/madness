@@ -48,7 +48,7 @@
 
 **Files:** `docs/design/madqc-simplified-policy.md`, this plan, validation artifacts under the ignored plan workspace.
 
-- [ ] Build affected production targets in isolation (reuse installed dependencies). Run focused CTest and small named-stage scenarios if build/runtime resources permit; record any limits honestly.
-- [ ] Run clang-tidy on changed translation units; distinguish pre-existing findings.
-- [ ] Request one fresh whole-branch review as required by executing-plans. Fix substantive findings and rerun affected checks.
-- [ ] Update the amendment with actual evidence and remaining alignment work; leave the branch reviewable without changing the other agent's drop or vault history.
+- [x] Build affected production targets in isolation (reuse installed dependencies). Run focused CTest and small named-stage scenarios if build/runtime resources permit; record any limits honestly.
+- [x] Run clang-tidy on changed translation units; distinguish pre-existing findings.
+- [x] Request one fresh whole-branch review as required by executing-plans. Fix substantive findings and rerun affected checks.
+- [x] Update the amendment with actual evidence and remaining alignment work; leave the branch reviewable without changing the other agent's drop or vault history.

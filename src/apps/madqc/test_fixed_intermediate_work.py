@@ -92,7 +92,7 @@ for name in ('optical', 'excited', 'full'):
         }
         assert len(locked_iterations) >= 2, (name, locked_iterations)
     print(name, 'fixed coarse work and final protocol verified', flush=True)
-assert all(stage['status'] == 'converged' for stage in stages)
+assert all(stage['status'] == 'completed' for stage in stages)
 continued = run('continued', resume=True)
 assert all(stage['iterations_this_run'] == 0 for stage in continued), continued
 print('fixed intermediate work acceptance passed', flush=True)

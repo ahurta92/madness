@@ -47,4 +47,12 @@ The existing vault design and decision log remain historical records. B5's early
 
 ## Validation
 
-Pending implementation and validation. Policy tests alone do not establish molecular convergence, root identity, or restart crash safety.
+Validated on November 6, 2026 in the isolated `build/simple-policy` Ninja build: Release, GCC 13.3, MPI enabled, Pthreads, sequential ARMPL. The affected production target `madqc` and focused test targets build successfully.
+
+Ten focused checks passed: six CTest unit/driver checks (`test_convergence_settings`, `test_plan_ladder`, `test_calc_manager`, `test_es_plateau`, `test_iteration_protocol`, `test_function_metric_summary`), the directly built and run `test_named_stages` executable, and three live named-calculation tests (`test_configured_progress`, `test_response_configured_progress`, `test_fixed_intermediate_work`). The last test initially used the wrong successful-stage label; correcting its assertion from `converged` to the existing API value `completed` allowed its continuation check to run and pass.
+
+The H2 integration case verifies eight coarse iterations and execution of the final protocol for the ground state, two independent frequency states, TDA and full RPA. Excited-state assertions check finite eigenvalue changes and multiple samples after locking, covering the all-locked continuation fix. An unchanged converged restart performs zero additional iterations. Configured-progress cases verify that an intermediate plateau does not shorten the allowance and a stalled final response checkpoint resumes. Against the unmodified baseline binary, the fixed-work case failed because the coarse ground state stopped after four iterations instead of eight; a separate baseline probe reproduced the missing eigenvalue-change measurement after all roots locked.
+
+`clang-tidy` completed on the changed test translation units and SCF with no errors. Existing-source warnings remain; four suggestions in the new driver test were fixed and that file was checked again without visible warnings. A fresh whole-change review identified the all-locked evidence defect and the corresponding missing integration assertions; both were addressed before the successful molecular checks.
+
+Molecular acceptance used one process with `MAD_NUM_THREADS=10`, sequential BLAS, and serial CTest execution. These checks establish the exercised iteration and restart behavior; they do not establish distributed multi-rank behavior, general molecular accuracy, root identity, or restart crash safety. Full logs, binary/source hashes and the review record are in the ignored `.superpowers/sdd/2026-11-06-madqc-fixed-stage-work/` workspace.
