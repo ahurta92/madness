@@ -222,10 +222,12 @@ struct RungSample {
   int iterations_at_rung = 0; ///< in this run, this sample included
   int cap = 0;                ///< maxiter at this rung, per run
   int forced_iterations = 0;  ///< diagnostic.iterations_per_rung; 0: off
+  bool final_protocol = true; ///< false: consume the full intermediate allowance
 };
 
-/// B5: the one place the exits of a rung are ordered. Converged (by the B8
-/// decider), else the iteration cap, else a stall, else the rung goes on.
+/// Intermediate protocols consume their full cap before reporting the
+/// selected convergence verdict. Final protocols retain the B8 decider,
+/// followed by the cap and optional stall exit.
 /// Forced iterations (the trajectory-study control) run exactly that many:
 /// no exit before, and at the last one converged or iteration limit; the
 /// stall is ignored. Divergence is the engine's validity check, made before.
@@ -234,6 +236,11 @@ struct RungSample {
                                  sample.criteria_met);
   if (sample.forced_iterations > 0) {
     if (sample.iterations_at_rung < sample.forced_iterations)
+      return StopReason::in_progress;
+    return decided ? StopReason::converged : StopReason::iteration_limit;
+  }
+  if (!sample.final_protocol) {
+    if (sample.iterations_at_rung < sample.cap)
       return StopReason::in_progress;
     return decided ? StopReason::converged : StopReason::iteration_limit;
   }

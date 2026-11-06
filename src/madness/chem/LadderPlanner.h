@@ -11,10 +11,11 @@
 // records, in pure functions (B5: engines compare live state, everything else
 // takes verdicts or judges saved records).
 //
-// Rules (DESIGN v3.6 B6): a finished rung is never redone; rungs are matched
+// Rules (B6, with the simplified-policy final-resume amendment): a finished
+// rung is never redone; rungs are matched
 // by value; R1 a changed reference or problem starts fresh (or seeded when the
-// deck says seed); R2 a stalled final rung with unmet targets loads and
-// reports unmet; R3 a saved rung tighter than every requested rung is judged
+// deck says seed); R2 an unmet final rung resumes with a fresh allowance;
+// R3 a saved rung tighter than every requested rung is judged
 // at the final one; R4 a new response state is seeded from the nearest saved
 // frequency, R7 the lower on a tie; R5 removed states are not planned; R6 a
 // diverged state is never resumed (seeded from its converged coarser rung,
@@ -249,16 +250,8 @@ plan_ladder(const std::optional<SavedState>& own,
       plan.unmet_not_enforceable = reuse.unmet_not_enforceable;
       return plan;
     }
-    // R2: a stalled final rung would stall again; load and report.
-    if (same_final && own->stop == StopReason::stalled
-        && !request.forced_iterations) {
-      plan.action = Action::load;
-      plan.unmet.push_back("stalled at " + detail::rung_text(last, final_rung)
-                           + " with the request unmet");
-      plan.why = "the final rung stalled; tighten the protocol or loosen a "
-                 "target";
-      return plan;
-    }
+    // An earlier stall is evidence about that attempt, not a prohibition
+    // on a fresh allowance in this run.
     plan.action = Action::resume;
     plan.iterations_done = same_final ? own->iterations_at_rung : 0;
     plan.why = engine_unjudgeable

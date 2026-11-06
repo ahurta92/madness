@@ -281,6 +281,29 @@ int main() {
        {C, false, false, true, 5, 30, 5},
        cap},
   };
+  // Intermediate protocols consume their per-run allowance, independent of
+  // transient convergence or plateau verdicts. The final stage still uses
+  // the existing convergence selection.
+  for (const auto decider : {E, C}) {
+    for (const bool met : {false, true}) {
+      for (const bool stalled : {false, true}) {
+        for (int iteration = 1; iteration <= 5; ++iteration) {
+          RungSample sample{decider, met, met, stalled, iteration, 5, 0};
+          sample.final_protocol = false;
+          check(rung_exit(sample) == (iteration < 5 ? none : met ? conv : cap),
+                "intermediate protocol consumes exactly its allowance");
+        }
+      }
+    }
+  }
+  RungSample single{E, false, false, true, 1, 1, 0};
+  single.final_protocol = false;
+  check(rung_exit(single) == cap,
+        "one-iteration intermediate allowance ends without false convergence");
+  RungSample diagnostic{E, true, true, true, 3, 5, 3};
+  diagnostic.final_protocol = false;
+  check(rung_exit(diagnostic) == conv,
+        "explicit diagnostic count overrides intermediate allowance");
   for (const auto& row : exits)
     check(rung_exit(row.sample) == row.expected,
           std::string("rung_exit: ") + row.name);
