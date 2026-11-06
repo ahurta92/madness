@@ -1028,8 +1028,9 @@ be read as a ground-state energy or density. A driven response has no local
 energy, so there is no energy target; `accuracy.energy_change` is rejected
 with that message, and `accuracy.density_change` is replaced by `dconv`. The
 one exception is `econv` on a stage that requests `excited_states`: the
-excitation energy change target of its bundle, reported and never enforced
-(see "Excited states"); on any other `molresponse` stage `econv` is rejected
+excitation energy change target of its bundle; it never stops the loop, and
+it is reported or, when the written targets decide, judged as the stage
+verdict (see "Excited states"); on any other `molresponse` stage `econv` is rejected
 with the same message.
 
 - **Engine check decides** (default): each leg converges when `||dx|| <= 5
