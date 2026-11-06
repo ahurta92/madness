@@ -760,10 +760,22 @@ public:
               "unsupported channel");
       for (const auto& rung : channel.value().items()) {
         const auto& protocol = metadata.at("protocols").at(rung.key());
-        require(molresponse_v3::protocol_key(protocol.at("thresh"), protocol.at("k")) == rung.key(),
+        // D-131: a Dalton seed step holds only unsolved seeds; their archives
+        // stay members so a later --continue can still start from them.
+        const bool seed = dalton_seed_step(metadata, rung.key());
+        require(seed
+                    || molresponse_v3::protocol_key(protocol.at("thresh"),
+                                                    protocol.at("k"))
+                           == rung.key(),
                 "inconsistent protocol definition");
         for (const auto& point : rung.value().items()) {
           const auto& e = point.value();
+          if (seed)
+            require(e.value("seed", "") == "dalton_import"
+                        && e.value("iter", -1) == 0
+                        && !e.value("converged", false)
+                        && !e.value("accepted", false),
+                    "invalid response state: Dalton seed");
           // Named continuation must not silently turn a failed state into a
           // fresh solve. This check runs both before loading and publication,
           // so a diverged solve cannot replace the previous usable generation.
@@ -841,7 +853,7 @@ public:
                   e.at("shell") == "closed_shell" &&
                   e.at("type") == (std::abs(frequency) < 1e-12 ? "static" : "full"),
                   "inconsistent archive/channel/model definition");
-          require(e.at("checkpoint_dconv").get<double>() > 0.0,
+          require(seed || e.at("checkpoint_dconv").get<double>() > 0.0,
                   "missing response convergence target");
           names.push_back(name);
         }
@@ -1829,6 +1841,8 @@ inline json response_state_records(const json& metadata,
   const auto states = metadata.value("fd_states", json::object());
   for (const auto& channel : states.items())
     for (const auto& rung : channel.value().items()) {
+      if (dalton_seed_step(metadata, rung.key()))
+        continue; // D-131: seeds are not states
       const auto& protocol = metadata.at("protocols").at(rung.key());
       for (const auto& point : rung.value().items()) {
         const auto& e = point.value();

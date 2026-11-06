@@ -1,8 +1,27 @@
 #pragma once
 
+// ResponseProtocol.hpp needs the MRA declarations first.
+#include <madness/mra/mra.h>
+
+#include "../molresponse/ResponseProtocol.hpp"
 #include <nlohmann/json.hpp>
 
 namespace named_stages {
+// D-131: the step a Dalton seed is written under (dalton_import.hpp,
+// dalton_seed_protocol_key): exactly "<step>_dseed" at that step's own thresh
+// and k. Its legs are initial guesses, not solves.
+inline bool dalton_seed_step(const nlohmann::json& metadata,
+                             const std::string& key) {
+  const auto protocols = metadata.value("protocols", nlohmann::json::object());
+  if (!protocols.contains(key))
+    return false;
+  const auto& protocol = protocols.at(key);
+  return key
+         == molresponse_v3::protocol_key(protocol.at("thresh"),
+                                         protocol.at("k"))
+                + "_dseed";
+}
+
 // Reporting only. Preserve the gate policy recorded by the application.
 // Older generations may lack samples; a successful engine verdict must never
 // manufacture missing measurement evidence.
@@ -49,6 +68,8 @@ inline nlohmann::json response_convergence_report(const nlohmann::json& metadata
                  {"channels", json::array()}};
   for (const auto& channel : metadata.at("fd_states").items()) {
     for (const auto& rung : channel.value().items()) {
+      if (dalton_seed_step(metadata, rung.key()))
+        continue;
       for (const auto& point : rung.value().items()) {
         const auto& entry = point.value();
         auto measurements = entry.value("convergence_measurements", json::object());
