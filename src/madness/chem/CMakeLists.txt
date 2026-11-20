@@ -257,6 +257,8 @@ if(BUILD_TESTING)
   add_unittests(chem "test_convergence_settings.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Measurement-based shared policy; pure scalar fixtures, no numerical solve.
   add_unittests(chem "test_iteration_metrics.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  # Convergence decision module (step 1): header-only, plain values, no runtime.
+  add_unittests(chem "test_convergence_decision.cc" "MADworld" "unittests;short")
   add_unittests(chem "test_metric_helpers.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_optimizer_settings.cc" "MADchem" "unittests;short")
   add_unittests(chem "test_timing_records.cc" "MADchem" "unittests;short")
