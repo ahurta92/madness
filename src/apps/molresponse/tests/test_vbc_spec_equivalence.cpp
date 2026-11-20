@@ -259,8 +259,7 @@ int main(int argc, char **argv) {
 
         ConvergencePolicy policy;
         ExecutorContext ctx(world, gs, header.L, fock_json,
-                            ExecutorSettings{policy, PrintLevel::Normal,
-                                             calc_dir, max_iters});
+                            [&] { ExecutorSettings settings; settings.policy=policy; settings.print_level=PrintLevel::Normal; settings.calc_dir=calc_dir; settings.max_iters=max_iters; return settings; }());
         // static dipole responses for the Kleinman pair (zxx vs xxz): axes x,z
         for (int ax : {0, 2}) {
           bool first = true;

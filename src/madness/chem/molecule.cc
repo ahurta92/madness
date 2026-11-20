@@ -98,12 +98,23 @@ Molecule::Molecule(std::vector<Atom> atoms, double eprec, CorePotentialManager c
 Molecule::Molecule(World &world, const commandlineparser &parser)
     : atoms(), rcut(), core_pot(), field(3L), parameters(world, parser) {
   try {
+    std::string load_error;
     if (world.rank() == 0) {
-      get_structure();
-      if (parameters.core_type() != "none") {
-        read_core_file(parameters.core_type());
+      try {
+        get_structure();
+        if (parameters.core_type() != "none") {
+          read_core_file(parameters.core_type());
+        }
+      } catch (const std::exception& error) {
+        load_error = error.what();
+      } catch (...) {
+        load_error = "failed to load molecular geometry or core potential";
       }
     }
+    // Every rank must learn about a root-only read failure before entering the
+    // molecule broadcast. Otherwise the other ranks wait there indefinitely.
+    world.gop.broadcast_serializable(load_error, 0);
+    if (!load_error.empty()) throw std::runtime_error(load_error);
     world.gop.broadcast_serializable(*this, 0);
     MADNESS_CHECK(parameters.field().size() == 3);
     for (int i = 0; i < 3; ++i)
@@ -509,6 +520,32 @@ const Atom& Molecule::get_atom(unsigned int i) const {
 // geometry (3*nat,) vector of xyz coordinates [a0] of the atoms.  array[number]
 // There are optional parameters yet to be implemented
 // https://molssi-qc-schema.readthedocs.io/en/latest/auto_topology.html
+nlohmann::json Molecule::electronic_settings() const {
+    auto settings = parameters.to_json().at("parameters");
+    for (const auto* key : {"source_type", "source_name", "units", "no_orient", "symtol", "field"})
+        settings.erase(key);
+    json atom_settings = json::array(), core_settings = json::array();
+    std::set<unsigned int> recorded;
+    for (const auto& atom : atoms) {
+        atom_settings.push_back({{"atomic_number", atom.atomic_number}, {"charge", atom.q},
+                                  {"coordinates", {atom.x, atom.y, atom.z}}, {"pseudo_atom", atom.pseudo_atom}});
+        if (!core_pot.is_defined(atom.atomic_number) || !recorded.insert(atom.atomic_number).second) continue;
+        const auto core = core_pot.get_atom_core(atom.atomic_number);
+        const auto& potential = core.potential;
+        json orbitals = json::array();
+        for (const auto& orbital : core.orbital)
+            orbitals.push_back({{"type", orbital.type}, {"bc", orbital.Bc}, {"coefficients", orbital.coeff},
+                                {"exponents", orbital.expnt}, {"rsqmax", orbital.rsqmax}});
+        core_settings.push_back({{"atomic_number", atom.atomic_number}, {"ncore", core.ncore}, {"orbitals", orbitals},
+            {"potential", {{"l", potential.l}, {"n", potential.n}, {"coefficients", potential.A},
+                           {"exponents", potential.alpha}, {"eprec", potential.eprec},
+                           {"rcut0", potential.rcut0}, {"rcut", potential.rcut}}}});
+    }
+    MADNESS_CHECK_THROW(field.size() == 3, "electronic field must have three components");
+    return {{"atoms", atom_settings}, {"parameters", settings}, {"field", {field[0], field[1], field[2]}},
+            {"smoothing_radii_inverse", rcut}, {"pointgroup", pointgroup_}, {"core_potentials", core_settings}};
+}
+
 nlohmann::json Molecule::to_json() const {
   nlohmann::json mol_schema;
   mol_schema["symbols"] = {};

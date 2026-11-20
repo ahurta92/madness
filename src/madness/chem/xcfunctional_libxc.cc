@@ -64,6 +64,7 @@ void XCfunctional::initialize(const std::string& input_line, bool polarized,
         World& world, const bool verbose) {
 
     reset_screening_defaults();
+    specification_ = input_line;
 
     bool printit=verbose and (world.rank()==0);
     double factor;      // weight factor for the various functionals

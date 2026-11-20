@@ -93,11 +93,20 @@ inline std::size_t write_viz_manifest(const std::string &prefix,
           }
         }
 
+        std::string calculation;
+        const auto relative = fs::relative(p, topDir);
+        auto component = relative.begin();
+        if (component != relative.end() && *component++ == "analysis" &&
+            component != relative.end()) {
+          const auto id = component->string();
+          if (id == "ground_state" || id == "response") calculation = id;
+        }
         const auto cl = viz_detail::classify(p.stem().string());
         nlohmann::json a;
         a["path"] = p.string();
         a["format"] = format;
         a["kind"] = cl.kind;
+        if (!calculation.empty()) a["calculation_id"] = calculation;
         if (cl.index >= 0)
           a["index"] = cl.index;
         if (task >= 0)

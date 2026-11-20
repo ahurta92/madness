@@ -27,6 +27,9 @@
 #include "../kernels/tda_batch.hpp"  // tda_batch:: bundle-batched V0x/T0x/BSH
 #include "convergence_policy.hpp"
 #include "es_root_identity.hpp"
+#include "es_comparison.hpp"
+#include "function_residuals.hpp"
+#include <madness/chem/MetricHelpers.h>
 #include "es_kinetic_evidence.hpp"
 #include "function_kinetics.hpp"
 #include "iterate.hpp"
@@ -140,6 +143,12 @@ public:
     /// them in update_stall; negative before the first iteration.
     double density_target = -1.0;
     double omega_target = -1.0;
+  };
+
+  struct EvaluationWork {
+    bool prepare_only=false;
+    std::vector<Storage> proposal;
+    std::vector<madness::FunctionResidualBlocks> residuals;
   };
 
   /// Preferred ctor — caller supplies a problem and a policy.
@@ -380,6 +389,124 @@ public:
   ///     gamma against the rotated X to stream Theta in place.
   ///     ~3-4M Storage peak. ~2× the per-iter kernel work but big
   ///     memory savings.
+  // The shared controller observes the prepared, rotated roots. The existing
+  // kernels produce one cached BSH proposal; only advance touches KAIN.
+  void reset_shared() {
+    kain_.reset(); shared_work_={}; shared_state_=nullptr;
+    shared_previous_roots_.clear(); shared_density_.clear(); shared_previous_density_.clear();
+    shared_norms_.clear(); shared_previous_norms_.clear();
+    shared_kinetic_.clear(); shared_previous_kinetic_.clear();
+    shared_previous_ids_.clear(); shared_previous_omega_.clear(); shared_previous_info_.reset();
+  }
+
+  /// Order a cold trial space with the existing Ritz preparation only. No
+  /// BSH proposal, KAIN update, comparison history or solver iteration occurs.
+  State prepare_initial_guess(State state) {
+    MADNESS_CHECK(!policy_.lock_converged && state.iter==0);
+    reset_shared();
+    EvaluationWork work;work.prepare_only=true;
+    auto prepared=step_rotate_pieces(std::move(state),&work);
+    sort_state_by_omega(prepared);
+    return prepared;
+  }
+
+  madness::iteration::IterationMetrics evaluate(
+      State& state,const madness::iteration::IterationInfo& info) {
+    namespace it=madness::iteration;
+    MADNESS_CHECK_THROW(!policy_.lock_converged && state.roots.size()==static_cast<std::size_t>(n_roots_) &&
+        !state.roots.empty() && info.iteration==static_cast<std::size_t>(state.iter),
+        "ES evaluation requires the complete active bundle and current iteration");
+    ensure_root_identity(state);
+    shared_state_=nullptr;shared_work_={};
+    state=policy_.stream_theta ? step_recompute_pieces(std::move(state),&shared_work_) :
+                                step_rotate_pieces(std::move(state),&shared_work_);
+    shared_density_.clear();shared_kinetic_.clear();shared_norms_.clear();
+    it::IterationMetrics result{info,{}};
+    for (std::size_t root=0;root<state.roots.size();++root) {
+      const auto& functions=state.roots[root];
+      std::vector<it::ComponentEvidence> components;
+      double norm_squared=0.;
+      const auto add=[&](const char* block,const auto& values) {
+        const auto norms=madness::norm2s(world_,values);
+        for (std::size_t i=0;i<values.size();++i) {
+          components.push_back({std::string(block)+":"+std::to_string(i),
+              shared_work_.residuals.at(root).at(block).at(i),norms[i]});
+          norm_squared+=norms[i]*norms[i];
+        }
+      };
+      add("x_alpha",functions.x_alpha);
+      if constexpr(rs::detail::has_y_alpha<Storage>::value) add("y_alpha",functions.y_alpha);
+      if constexpr(rs::detail::has_x_beta<Storage>::value) add("x_beta",functions.x_beta);
+      if constexpr(rs::detail::has_y_beta<Storage>::value) add("y_beta",functions.y_beta);
+      shared_norms_.push_back(std::sqrt(norm_squared));
+      double kinetic=0.;
+      for(const auto& [block,values]:measure_function_kinetics(world_,functions))
+        for(double value:values) kinetic+=value;
+      shared_kinetic_.push_back(kinetic);
+      shared_density_.push_back(K::compute_density(world_,gs_,functions));
+      it::StateMetrics values;values.id=make_root_id(state.stable_index.at(root));
+      values.metrics[it::Metric::bsh_residual]=it::maximum_residual(std::move(components));
+      state.diverged=state.diverged || !std::isfinite(state.omega(static_cast<long>(root))) ||
+          !std::isfinite(kinetic) || values.metrics.at(it::Metric::bsh_residual).status==it::Availability::invalid ||
+          state.last_bsh_residual.at(root)>policy_.explosion_guard;
+      result.states.push_back(std::move(values));
+    }
+    std::vector<RootComparison> matches(state.roots.size());
+    if(shared_previous_info_) {
+      const auto overlaps=rs::inner(state.roots,shared_previous_roots_);
+      std::vector<std::vector<double>> values(state.roots.size(),std::vector<double>(shared_previous_roots_.size()));
+      for(std::size_t i=0;i<values.size();++i)
+        for(std::size_t j=0;j<values[i].size();++j) values[i][j]=overlaps(i,j);
+      matches=match_prepared_roots(values,shared_norms_,shared_previous_norms_);
+    }
+    for(std::size_t i=0;i<result.states.size();++i) {
+      auto& values=result.states[i];
+      const auto& match=matches[i];
+      it::FieldNorms field{shared_density_[i].norm2(),{}, {}};
+      std::optional<double> previous_omega,previous_kinetic;
+      if(match.previous) {
+        const auto j=*match.previous;
+        const auto& old=*shared_previous_info_;
+        values.comparison=it::Comparison{old.task_id,old.attempt_id,old.protocol,old.iteration,shared_previous_ids_.at(j)};
+        field.previous=shared_previous_density_[j].norm2();
+        // Align only the comparison density; neither root nor KAIN is rotated.
+        field.change=(shared_density_[i]-match.phase*shared_previous_density_[j]).norm2();
+        previous_omega=shared_previous_omega_.at(j);previous_kinetic=shared_previous_kinetic_.at(j);
+      }
+      values.metrics[it::Metric::density_change]=it::maximum_field_change({field},values.comparison);
+      values.metrics[it::Metric::energy_change]=it::scalar_change(state.omega(static_cast<long>(i)),previous_omega,values.comparison);
+      values.metrics[it::Metric::kinetic_change]=it::scalar_change(shared_kinetic_[i],previous_kinetic,values.comparison);
+      if(!match.previous && shared_previous_info_)
+        for(auto metric:{it::Metric::density_change,it::Metric::energy_change,it::Metric::kinetic_change})
+          values.metrics[metric].reason=match.reason;
+    }
+    shared_info_=info;shared_state_=&state;
+    return result;
+  }
+
+  void advance(State& state) {
+    MADNESS_CHECK_THROW(shared_state_==&state && !state.diverged &&
+        shared_info_.iteration==static_cast<std::size_t>(state.iter),
+        "ES update requires its current evaluated proposal");
+    shared_previous_roots_.clear();shared_previous_ids_.clear();shared_previous_omega_.clear();
+    for(std::size_t i=0;i<state.roots.size();++i) {
+      // Function handles are shallow; the next preparation mutates functions.
+      shared_previous_roots_.push_back(state.roots[i].copy(world_));
+      shared_previous_ids_.push_back(make_root_id(state.stable_index.at(i)));
+      shared_previous_omega_.push_back(state.omega(static_cast<long>(i)));
+    }
+    const int diagnostics=print_level_>=PrintLevel::Verbose ? 1 : 0;
+    // Keep the existing concatenated residual for this algorithmic guard.
+    // The shared maximum-per-function metric controls convergence only.
+    if(!kain_held_off(state)) kain_.apply(state.roots,shared_work_.proposal,diagnostics);
+    state.roots=std::move(shared_work_.proposal);
+    shared_previous_density_=std::move(shared_density_);
+    shared_previous_norms_=std::move(shared_norms_);
+    shared_previous_kinetic_=std::move(shared_kinetic_);
+    shared_previous_info_=shared_info_;
+    ++state.iter;shared_state_=nullptr;
+  }
+
   State step(State in) {
     auto history = std::move(in.kinetic_history);
     State out = policy_.lock_converged ? step_rotate_pieces_locked(std::move(in)) :
@@ -404,6 +531,15 @@ public:
   }
 
 private:
+  double measure_shared_residual(EvaluationWork& work,std::size_t root,
+                                const Storage& current,const Storage& proposal) {
+    work.residuals.at(root)=measure_function_residuals(world_,current,proposal);
+    double squared=0.;
+    for(const auto& [block,values]:work.residuals[root])
+      for(double value:values) squared+=value*value;
+    return std::sqrt(squared);
+  }
+
   /// Debug: the four blocks that sum to the Ritz matrix, so an indefinite A can
   /// be attributed to a piece. T = ½<∇x|∇x> (gradient form), V = <x|V0x>,
   /// E = <x|E0x_full>, G = <x|γ>; A = T + V − E + G. Collective (inner
@@ -564,7 +700,7 @@ public:
   ///      Lambda-only and can be discarded).
   ///   5. Assemble Theta = V0x - E0x + gamma  (from rotated pieces).
   ///   6. BSH apply → new X; residual = || X_old - X_new ||.
-  State step_rotate_pieces(State in) {
+  State step_rotate_pieces(State in, EvaluationWork* work=nullptr) {
     State out;
     out.iter  = in.iter + 1;
     out.roots = in.roots;
@@ -639,7 +775,7 @@ public:
       if (gamma_tensor_) {
         for (int s = 0; s < M; ++s) {
           rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
-          if (!in.rho_alpha_prev.empty()) {
+          if (!work && !in.rho_alpha_prev.empty()) {
             auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
             out.last_density_residual[s] = drho.norm2();
           }
@@ -659,7 +795,7 @@ public:
         rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
         gamma[s]     = K::compute_gamma(world_, gs_, out.roots[s], rho_alpha[s]);
         // Δρ vs previous iter (per slot — see note in State).
-        if (!in.rho_alpha_prev.empty()) {
+        if (!work && !in.rho_alpha_prev.empty()) {
           auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
           out.last_density_residual[s] = drho.norm2();
         }
@@ -720,6 +856,10 @@ public:
 
     // ---- 4. rotate the response pieces needed for Theta -------------------
     rs::transform(world_, out.roots, U);
+    if(work && work->prepare_only) {
+      out.iter=in.iter;
+      return out;
+    }
     rs::transform(world_, V0x,        U);
     rs::transform(world_, E0x,        U);
     rs::transform(world_, gamma,      U);
@@ -743,6 +883,7 @@ public:
     // and produce garbage iterates.
     std::vector<Storage> x_pre_bsh = out.roots;
     out.last_bsh_residual.assign(M, 0.0);
+    if(work) work->residuals.resize(M);
 
     // Stage-1 batching: one BSH apply over the flattened M·n_occ bundle
     // (per-root ω ⇒ per-root op set, concatenated). Residual per slot from
@@ -763,6 +904,10 @@ public:
           for (std::size_t p = 0; p < n; ++p)
             acc += dn[s * n + p] * dn[s * n + p];
           out.last_bsh_residual[s] = std::sqrt(acc);
+          if(work) {
+            auto& values=work->residuals[s]["x_alpha"];
+            for(std::size_t p=0;p<n;++p) values.push_back(dn[s*n+p]);
+          }
         }
         tda_batch::unflatten_into(NXf, n, out.roots);
         for (int s = 0; s < M; ++s)
@@ -776,12 +921,19 @@ public:
       for (int s = 0; s < M; ++s) {
         auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
                                   theta[s], omega_new(s));
-        out.last_bsh_residual[s] =
+        out.last_bsh_residual[s] = work ?
+            measure_shared_residual(*work,s,out.roots[s],x_new) :
             K::compute_residual_norm(world_, out.roots[s], x_new);
         print_debug_norms(s, in, V0x[s].x_alpha, Tg(s, s),
                           gamma[s].x_alpha, theta[s].x_alpha);
         out.roots[s] = std::move(x_new);
       }
+    }
+
+    if(work) {
+      work->proposal=std::move(out.roots);
+      out.roots=std::move(x_pre_bsh);out.iter=in.iter;
+      return out;
     }
 
     // ---- 7. KAIN acceleration + step restriction --------------------------
@@ -833,7 +985,7 @@ public:
   /// Peak memory: ~3-4M Storage (vs ~8M for step_rotate_pieces).
   /// Cost: ~2× the per-iter kernel work (each V0x/E0x/gamma computed
   /// twice — once for Lambda, once for Theta).
-  State step_recompute_pieces(State in) {
+  State step_recompute_pieces(State in, EvaluationWork* work=nullptr) {
     State out;
     out.iter  = in.iter + 1;
     out.roots = in.roots;
@@ -851,7 +1003,7 @@ public:
     out.last_density_residual.assign(M, 0.0);
     for (int s = 0; s < M; ++s) {
       rho_alpha[s] = K::compute_density(world_, gs_, out.roots[s]);
-      if (!in.rho_alpha_prev.empty()) {
+      if (!work && !in.rho_alpha_prev.empty()) {
         auto drho = rho_alpha[s] - in.rho_alpha_prev[s];
         out.last_density_residual[s] = drho.norm2();
       }
@@ -900,6 +1052,7 @@ public:
     // step_rotate_pieces. Snapshot before BSH overwrites out.roots.
     std::vector<Storage> x_pre_bsh = out.roots;
     out.last_bsh_residual.assign(M, 0.0);
+    if(work) work->residuals.resize(M);
     for (int s = 0; s < M; ++s) {
       // ρ on rotated X (different from the pre-rotation ρ we used for
       // Lambda — gamma here needs the rotated coupling).
@@ -920,11 +1073,17 @@ public:
       // BSH
       auto x_new = K::bsh_apply(world_, gs_, out.roots[s],
                                 theta, omega_new(s));
-      out.last_bsh_residual[s] =
+      out.last_bsh_residual[s] = work ?
+          measure_shared_residual(*work,s,out.roots[s],x_new) :
           K::compute_residual_norm(world_, out.roots[s], x_new);
       out.roots[s] = std::move(x_new);
     }
 
+    if(work) {
+      work->proposal=std::move(out.roots);
+      out.roots=std::move(x_pre_bsh);out.iter=in.iter;
+      return out;
+    }
     // ---- 7. KAIN + guard + banner + log -----------------------------------
     finalize_iter(in, out, x_pre_bsh);
     return out;
@@ -1105,7 +1264,9 @@ public:
   void fill_omega_residual(State &out, const State &in) const {
     const long M = out.omega.dim(0);
     out.last_omega_residual.assign(static_cast<size_t>(M), 1.0e9);
-    if (in.omega.dim(0) != M) return;
+    // An empty Tensor has no initialized dimension array. Cold guesses have
+    // no previous frequencies, so test size before looking at its shape.
+    if (in.omega.size() != M || in.omega.ndim() != 1) return;
     for (long s = 0; s < M; ++s)
       out.last_omega_residual[s] = std::abs(out.omega(s) - in.omega(s));
   }
@@ -1374,6 +1535,14 @@ private:
     }
   }
 
+  EvaluationWork shared_work_;
+  State* shared_state_=nullptr;
+  madness::iteration::IterationInfo shared_info_;
+  std::optional<madness::iteration::IterationInfo> shared_previous_info_;
+  std::vector<Storage> shared_previous_roots_;
+  std::vector<madness::real_function_3d> shared_density_,shared_previous_density_;
+  std::vector<double> shared_norms_,shared_previous_norms_,shared_kinetic_,shared_previous_kinetic_,shared_previous_omega_;
+  std::vector<std::string> shared_previous_ids_;
   madness::World            &world_;
   ResponseGroundState        gs_;
   int                        n_roots_ = 0;

@@ -6,13 +6,12 @@
 
 `madqc` builds execution pipelines through `src/madness/chem/WorkflowBuilders.hpp`.
 
-For personal Seawulf interactive build/test commands, see `src/apps/madqc/SEAWULF_INTERACTIVE_WORKFLOW.md`.
-For molresponse state-level subgroup-parallel design notes, see `src/apps/molresponse_v2/STATE_PARALLEL_DESIGN.md`.
 
 ## Current Architecture
 
-1. `madqc.cpp` parses CLI and creates `Params` + `qcapp::Workflow`.
-2. `madqc.cpp` calls:
+1. `madqc.cpp` owns runtime/help/inspection and calls `WorkflowDriver.hpp`.
+   The driver validates input and creates `Params` + `qcapp::Workflow`.
+2. `WorkflowDriver.hpp` wires SCF and response at the app layer and otherwise calls:
 
 ```cpp
 workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf);
@@ -50,7 +49,7 @@ inline void add_myworkflow_drivers(World& world, Params& pm, qcapp::Workflow& wf
 
 4. Update `help()` text and available workflow list in `src/apps/madqc/madqc.cpp`.
    This should use `runnable_workflow_list()` instead of hard-coded strings.
-5. If there is a standalone compatibility executable, keep it thin and call the same builder helper (no duplicated orchestration logic).
+5. Supported engines use only `madqc`; retain separate executables only for engines not yet represented by a madqc workflow.
 6. Add at least one integration test under `src/apps/madqc/` using the new `--wf=<name>` route.
 7. Update `src/apps/madqc/test_workflow_builders.cpp` with the new workflow name and expected kind mapping.
 
@@ -70,7 +69,7 @@ inside the driver: for the optimizer that is only the target
 
 ## Workflow Design Rules
 
-1. Keep orchestration in `WorkflowBuilders.hpp`; keep algorithm code in libraries/applications.
+1. Keep orchestration in `WorkflowDriver.hpp` and `WorkflowBuilders.hpp`; keep algorithm code in libraries/applications.
 2. Prefer composable driver chains over one large monolithic app.
 3. Apply parameter-derived logic in one place before driver creation.
 4. Throw explicit errors for unsupported/disabled workflows.
@@ -82,7 +81,7 @@ inside the driver: for the optimizer that is only the target
 auto reference = std::make_shared<SCFApplication<moldft_lib>>(world, pm);
 wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
 wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-    std::make_unique<ResponseApplication<molresponse_lib>>(world, pm, reference->calc())));
+    std::make_unique<ResponseApplication<molresponse_v3_lib>>(world, pm, reference->calc())));
 ```
 
-This pattern keeps workflow composition centralized and reusable across executables.
+The response adapter stays in the app layer to avoid a MADchem dependency on src/apps.

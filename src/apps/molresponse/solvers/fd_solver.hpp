@@ -54,6 +54,7 @@
 #include "iterate.hpp"
 #include "response_state.hpp"
 #include "response_subspace_kain.hpp"
+#include <madness/chem/MetricHelpers.h>
 
 #include <madness/mra/mra.h>
 
@@ -153,7 +154,7 @@ public:
     target_ = std::move(t);
     // KAIN's stored iterates live at the old k/thresh; drop them on
     // protocol-driven target swaps.
-    kain_.reset();
+    reset_shared();
   }
   const FDProblem<Type, Shell>& target() const { return target_; }
 
@@ -557,6 +558,16 @@ private:
   Storage raw_fixed_point(const Storage& response, const madness::real_function_3d& rho,
                           int r, double& theta_norm) {
     const double thr = madness::FunctionDefaults<3>::get_thresh();
+    // Inc-2: build the φ-only g0 exchange tensor ONCE per protocol (cached on the
+    // ground state) so assemble_theta_tensor doesn't rebuild it every iteration.
+    // Only for the ClosedShell Static/Full tensor path (matches the θ gate below).
+    if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
+                  std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
+      if (policy_.exchange_tensor && target_.gs.g0_alpha.empty())
+        target_.gs.g0_alpha =
+            exch::build_g0(world_, target_.gs, thr * 0.1, policy_.exchange_tile);
+    }
+
     // θ = V0x − E0x + γ. Gate 1 (policy_.exchange_tensor, --fd-tensor): the
     // fused tensor-exchange assembly (exch::, ClosedShell Static/Full only);
     // gate 0 (default) = the per-op reference path, streamed via Storage::axpy,
@@ -632,6 +643,99 @@ public:
     plog("");
   }
 
+  // Shared measurements describe the current functions. Only advance() can
+  // consume this evaluation's proposal and touch KAIN/comparison history.
+  void reset_shared() {
+    kain_.reset();
+    shared_proposal_.clear(); shared_density_.clear(); shared_previous_density_.clear();
+    shared_kinetic_.clear(); shared_previous_kinetic_.clear();
+    shared_previous_info_.reset(); shared_state_ = nullptr;
+  }
+
+  madness::iteration::IterationMetrics evaluate(
+      State& state, const madness::iteration::IterationInfo& info) {
+    namespace it = madness::iteration;
+    MADNESS_CHECK_THROW(state.responses.size() == target_.responses.size() &&
+        !state.responses.empty() && info.iteration == static_cast<std::size_t>(state.iter),
+        "FD evaluation state does not match its iteration context");
+    shared_state_ = nullptr;
+    shared_proposal_.clear(); shared_density_.clear(); shared_kinetic_.clear();
+    state.last_bsh_residual.clear(); state.last_density_residual.clear();
+    state.last_x_norm.clear(); state.last_rho_norm.clear();
+    state.diverged = false;
+    it::IterationMetrics result{info, {}};
+    for (std::size_t channel = 0; channel < state.responses.size(); ++channel) {
+      const auto& response = state.responses[channel];
+      auto rho = K::compute_density(world_, target_.gs, response);
+      double theta_norm = 0.0;
+      auto proposal = raw_fixed_point(response, rho, static_cast<int>(channel), theta_norm);
+      const auto residuals = measure_function_residuals(world_, response, proposal);
+      std::vector<it::ComponentEvidence> components;
+      // flatten() has the storage's canonical block order. Build each block's
+      // norms explicitly so map ordering cannot swap X/Y/spin scales.
+      const auto add = [&](const char* block, const auto& functions) {
+        const auto& values = residuals.at(block);
+        for (std::size_t i = 0; i < functions.size(); ++i)
+          components.push_back({std::string(block) + ":" + std::to_string(i),
+                                values.at(i), functions[i].norm2()});
+      };
+      add("x_alpha", response.x_alpha);
+      if constexpr (rs::detail::has_y_alpha<Storage>::value) add("y_alpha", response.y_alpha);
+      if constexpr (rs::detail::has_x_beta<Storage>::value) add("x_beta", response.x_beta);
+      if constexpr (rs::detail::has_y_beta<Storage>::value) add("y_beta", response.y_beta);
+      it::StateMetrics values;
+      values.id = state.responses.size() == 1 ? "response" : "response_" + std::to_string(channel);
+      if (shared_previous_info_) {
+        const auto& old = *shared_previous_info_;
+        values.comparison = it::Comparison{old.task_id, old.attempt_id, old.protocol, old.iteration, values.id};
+      }
+      auto residual = it::maximum_residual(std::move(components));
+      state.last_bsh_residual.push_back(residual.value.value_or(0.0));
+      state.last_x_norm.push_back(storage_norm(world_, response));
+      const double density_norm = rho.norm2();
+      it::FieldNorms field{density_norm, {}, {}};
+      if (values.comparison) {
+        field.previous = shared_previous_density_.at(channel).norm2();
+        field.change = (rho - shared_previous_density_.at(channel)).norm2();
+      }
+      auto density = it::maximum_field_change({field}, values.comparison);
+      double kinetic = 0.0;
+      for (const auto& [block, functions] : measure_function_kinetics(world_, response))
+        for (double value : functions) kinetic += value;
+      const std::optional<double> previous = values.comparison ?
+          std::optional<double>(shared_previous_kinetic_.at(channel)) : std::nullopt;
+      values.metrics = {{it::Metric::bsh_residual, residual},
+          {it::Metric::density_change, density},
+          {it::Metric::energy_change, it::MetricValue::not_applicable("driven_frequency_is_input")},
+          {it::Metric::kinetic_change, it::scalar_change(kinetic, previous, values.comparison)}};
+      state.diverged = state.diverged || residual.status == it::Availability::invalid ||
+          !std::isfinite(kinetic) || fd_exploded(residual.value.value_or(0.0),
+              std::max(state.last_x_norm.back(), storage_norm(world_, proposal)), policy_.explosion_guard);
+      state.last_density_residual.push_back(density.value.value_or(0.0));
+      state.last_rho_norm.push_back(density_norm);
+      shared_proposal_.push_back(std::move(proposal));
+      shared_density_.push_back(std::move(rho));
+      shared_kinetic_.push_back(kinetic);
+      result.states.push_back(std::move(values));
+    }
+    shared_info_ = info; shared_state_ = &state;
+    return result;
+  }
+
+  void advance(State& state) {
+    MADNESS_CHECK_THROW(shared_state_ == &state && !state.diverged &&
+        shared_info_.iteration == static_cast<std::size_t>(state.iter),
+        "FD update requires its current evaluated proposal");
+    const int diagnostics = print_level_ >= PrintLevel::Verbose ? 1 : 0;
+    kain_.apply(state.responses, shared_proposal_, diagnostics);
+    state.responses = std::move(shared_proposal_);
+    shared_previous_density_ = std::move(shared_density_);
+    shared_previous_kinetic_ = std::move(shared_kinetic_);
+    shared_previous_info_ = shared_info_;
+    ++state.iter;
+    shared_state_ = nullptr;
+  }
+
   /// One outer iteration. Streamed-theta layout: for each response
   /// in turn, build theta in place (V0x → += gamma → -= E0x → += source)
   /// then BSH-apply, freeing the intermediates before moving to the next
@@ -664,16 +768,6 @@ public:
     out.last_x_norm.assign(M, 0.0);
     out.last_rho_norm.assign(M, 0.0);
     out.rho_alpha_prev.resize(M);
-
-    // Inc-2: build the φ-only g0 exchange tensor ONCE per protocol (cached on the
-    // ground state) so assemble_theta_tensor doesn't rebuild it every iteration.
-    // Only for the ClosedShell Static/Full tensor path (matches the θ gate below).
-    if constexpr (std::is_same_v<typename K::State, ResponseStateX<ClosedShell>> ||
-                  std::is_same_v<typename K::State, ResponseStateXY<ClosedShell>>) {
-      if (policy_.exchange_tensor && target_.gs.g0_alpha.empty())
-        target_.gs.g0_alpha =
-            exch::build_g0(world_, target_.gs, thr * 0.1, policy_.exchange_tile);
-    }
 
     for (int r = 0; r < M; ++r) {
       // ρ (one density function per response; kept for next iter's Δρ check)
@@ -947,6 +1041,13 @@ private:
           << prop << ',' << gate << ',' << (s.stalled ? 1 : 0) << '\n';
     }
   }
+
+  State* shared_state_ = nullptr;
+  std::vector<Storage> shared_proposal_;
+  std::vector<madness::real_function_3d> shared_density_, shared_previous_density_;
+  std::vector<double> shared_kinetic_, shared_previous_kinetic_;
+  madness::iteration::IterationInfo shared_info_;
+  std::optional<madness::iteration::IterationInfo> shared_previous_info_;
 
   madness::World            &world_;
   FDProblem<Type, Shell>      target_;

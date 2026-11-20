@@ -18,6 +18,7 @@
 #ifndef MADNESS_CHEM_STAGECHECKPOINT_H_INCLUDED
 #define MADNESS_CHEM_STAGECHECKPOINT_H_INCLUDED
 
+#include <madness/chem/CheckpointRecords.h>
 #include <madness/world/world.h>
 #include <madness/world/worldgop.h>
 #include <madness/world/parallel_archive.h>
@@ -65,6 +66,7 @@ struct Manifest {
     std::string stop_reason;
     json properties = json::array();
     std::vector<Archive> archives;
+    json record = nullptr; ///< Version-2 shared task metadata, excluding archives.
 };
 struct Validation {
     std::vector<std::string> diagnostics;
@@ -119,7 +121,12 @@ inline int integer(const json& value) {
     return static_cast<int>(n);
 }
 inline void structure(const Manifest& m) {
-    require(m.version == 1, "unsupported manifest version " + std::to_string(m.version));
+    require(m.version == 1 || m.version == 2, "unsupported manifest version " + std::to_string(m.version));
+    if (m.version == 2) {
+        records::validate(m.record);
+        require(m.record.at("generation") == m.generation, "record/generation mismatch");
+        require(!m.record.contains("archives"), "duplicate archive inventory");
+    } else {
     require(!m.stage.empty() && !m.method.empty(), "stage and method are required");
     require(generation_name(m.generation), "unsafe generation: " + m.generation);
     require(m.physical.is_object() && m.numerical.is_object() && m.position.is_object()
@@ -130,6 +137,8 @@ inline void structure(const Manifest& m) {
     for (const auto& property : m.properties)
         require(property.is_object() && property.at("generation") == m.generation,
                 "property belongs to a different generation");
+    }
+    require(generation_name(m.generation), "unsafe generation");
     std::set<std::string> basenames, members;
     for (const auto& a : m.archives) {
         require(!a.role.empty(), "archive role is required");
@@ -248,6 +257,7 @@ inline json to_json_record(const Manifest& m) {
         archives.push_back({{"role", a.role}, {"basename", a.basename}, {"indices", a.indices},
                             {"writers", a.writers}, {"shards", shards}});
     }
+    if (m.version == 2) { auto result=m.record; result["archives"]=std::move(archives); return result; }
     return {{"version", m.version}, {"stage", m.stage}, {"method", m.method}, {"generation", m.generation},
             {"physical", m.physical}, {"numerical", m.numerical}, {"reference", m.reference},
             {"working_orbitals", m.working_orbitals}, {"seed", m.seed}, {"position", m.position},
@@ -257,12 +267,16 @@ inline json to_json_record(const Manifest& m) {
 inline Manifest from_json_record(const json& j) {
     Manifest m;
     m.version = detail::integer(j.at("version"));
-    detail::require(m.version == 1, "unsupported manifest version");
+    detail::require(m.version == 1 || m.version == 2, "unsupported manifest version");
+    if (m.version == 2) {
+        m.record=j; m.record.erase("archives");j.at("generation").get_to(m.generation);
+    } else {
     j.at("stage").get_to(m.stage); j.at("method").get_to(m.method); j.at("generation").get_to(m.generation);
     m.physical = j.at("physical"); m.numerical = j.at("numerical"); m.reference = j.at("reference");
     m.working_orbitals = j.at("working_orbitals"); m.seed = j.at("seed"); m.position = j.at("position");
     m.metrics = j.at("metrics"); m.targets = j.at("targets"); j.at("stop_reason").get_to(m.stop_reason);
     m.properties = j.at("properties");
+    }
     detail::require(j.at("archives").is_array(), "archives must be an array");
     for (const auto& entry : j.at("archives")) {
         Archive a;
@@ -435,36 +449,55 @@ read_generation_manifests(World& world, const fs::path& stage_dir) {
     return manifests;
 }
 
-/// Collective retention step (DESIGN A3): rank zero deletes the named
-/// generations of `stage_dir`. Each is first renamed to `.deleting-<name>`,
-/// so a crash never leaves a partial directory under a generation name, then
-/// removed. The generation `latest` names is never touched. A deletion that
-/// fails leaves extra files only, so it is returned as a warning (empty on
-/// success), the same text on every rank, instead of thrown.
+namespace detail {
+/// Noncollective deletion under the caller's publication/retention lock. A
+/// protected name is never touched. Shared records retain their manifest and
+/// reserve the generation name; legacy callers can still remove the whole dir.
+inline std::string remove_generation_directories(const fs::path& stage_dir,
+        const std::vector<std::string>& names, const std::set<std::string>& protected_names,
+        bool keep_manifest = false) {
+    std::string warning;
+    for (const auto& name : names) {
+        try {
+            require(generation_name(name), "not a generation name: " + name);
+            require(!protected_names.contains(name), "refusing to delete protected generation " + name);
+            const auto source = member_path(stage_dir, name);
+            const auto doomed = member_path(stage_dir, ".deleting-" + name);
+            if (!fs::exists(fs::symlink_status(doomed))) {
+                if (!fs::exists(fs::symlink_status(source))) continue;
+                if (keep_manifest && fs::is_regular_file(fs::symlink_status(source / "manifest.json"))
+                    && std::distance(fs::directory_iterator(source), fs::directory_iterator{}) == 1) continue;
+                fs::rename(source, doomed);
+            }
+            require(fs::is_directory(fs::symlink_status(doomed)), "invalid deletion directory");
+            if (keep_manifest) {
+                const auto doomed_manifest = member_path(doomed, "manifest.json");
+                const auto metadata = read_json(fs::exists(fs::symlink_status(doomed_manifest))
+                    ? doomed_manifest : member_path(source, "manifest.json"));
+                if (!fs::exists(fs::symlink_status(source))) fs::create_directory(source);
+                require(fs::is_directory(fs::symlink_status(source)), "invalid retained metadata directory");
+                const auto manifest = member_path(source, "manifest.json");
+                if (fs::exists(fs::symlink_status(manifest)))
+                    require(read_json(manifest) == metadata, "retained manifest differs from deletion source");
+                else write_exclusive(manifest, metadata.dump(2) + "\n");
+            }
+            fs::remove_all(doomed);
+        } catch (const std::exception& error) {
+            warning += (warning.empty() ? "" : "; ") + std::string(error.what());
+        }
+    }
+    return warning;
+}
+} // namespace detail
+
+/// Collective legacy retention. Never removes the published generation.
 inline std::string remove_generations(World& world, const fs::path& stage_dir,
                                       const std::vector<std::string>& names) {
     return detail::on_root(world, [&] {
-        const auto latest
-            = detail::read_json(detail::member_path(stage_dir, "latest"))
-                  .at("generation")
-                  .get<std::string>();
-        std::string warning;
-        for (const auto& name : names) {
-            try {
-                detail::require(detail::generation_name(name),
-                                "not a generation name: " + name);
-                detail::require(name != latest,
-                                "refusing to delete the latest generation "
-                                    + name);
-                const auto doomed = stage_dir / (".deleting-" + name);
-                fs::rename(detail::member_path(stage_dir, name), doomed);
-                fs::remove_all(doomed);
-            } catch (const std::exception& e) {
-                warning
-                    += (warning.empty() ? "" : "; ") + std::string(e.what());
-            }
-        }
-        return warning;
+        const auto pointer = detail::read_json(detail::member_path(stage_dir, "latest")).at("generation");
+        std::set<std::string> protected_names;
+        if (!pointer.is_null()) protected_names.insert(pointer.get<std::string>());
+        return detail::remove_generation_directories(stage_dir, names, protected_names);
     });
 }
 } // namespace madness::checkpoint

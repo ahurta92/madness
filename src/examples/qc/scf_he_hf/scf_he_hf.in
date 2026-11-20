@@ -8,8 +8,10 @@
 dft
     xc       hf
     maxiter  10
-    econv    1e-4
-    dconv    1e-3
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 1e-4
+    convergence.density_change 1e-4
+    convergence.energy_change 1e-5
 end
 
 molecule

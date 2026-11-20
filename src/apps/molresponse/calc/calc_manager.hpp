@@ -179,6 +179,7 @@ struct StatePlan {
   std::string loaded_key;   ///< load: protocol key of the saved state loaded
   bool        met = false;  ///< load: the saved state meets today's request
   double      seed_frequency = 0.0;  ///< seed: the frequency it starts from
+  bool        controller_owned = false; // shared controller owns completion and update allowance
 };
 /// The plans of one run, by fd_node_id.
 using StatePlans = std::map<std::string, StatePlan>;
@@ -582,7 +583,8 @@ planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
   if (!at_start && thresh > start) return NodeAction::Skip;
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
-  if (solved.contains(node.id + "|" + key)) return std::nullopt;
+  if (solved.contains(node.id + "|" + key))
+    return plan.controller_owned ? std::optional<NodeAction>(NodeAction::Skip) : std::nullopt;
   if (at_start && plan.kind == StatePlan::Kind::fresh) return NodeAction::Fresh;
   // The executor loads the seed (seed_start) for a Restart at the start rung.
   if (at_start && plan.kind == StatePlan::Kind::seed) return NodeAction::Restart;

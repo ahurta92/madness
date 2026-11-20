@@ -89,6 +89,8 @@ apply_kinetic(madness::World &world,
 /// the MAXIMUM, not the last entry: with localized orbitals `eps` holds the
 /// Fock diagonals in LMO order, which is not sorted (review finding C11).
 inline double bsh_shift(const madness::Tensor<double> &eps, double omega) {
+  // An unoccupied spin channel has no BSH operators or level shift.
+  if (eps.size() == 0) return 0.0;
   constexpr double guard = 0.05;
   const double homo_shifted = eps.max() + omega;
   return (homo_shifted >= 0.0) ? -guard - homo_shifted : 0.0;

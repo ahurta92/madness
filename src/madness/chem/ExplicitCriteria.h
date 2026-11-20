@@ -1,5 +1,8 @@
 #pragma once
 
+#include <madness/chem/IterationMetrics.h>
+
+#include <algorithm>
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -185,3 +188,76 @@ inline nlohmann::json explicit_progress(const nlohmann::json& history,
     }
 }
 } // namespace madness
+
+// Shared measurement-based assessment, used by live and restart controllers.
+// Legacy JSON entry points above remain until their callers migrate.
+namespace madness::iteration {
+
+inline Scale measurement_scale(Metric metric, const MetricValue& measurement) {
+    if (measurement.scale.status != Availability::unavailable)
+        return measurement.scale;
+    const auto& evidence = measurement.evidence;
+    if (metric == Metric::energy_change || metric == Metric::kinetic_change) {
+        if (evidence.current && evidence.previous && std::isfinite(*evidence.current)
+            && std::isfinite(*evidence.previous))
+            return Scale::measured(std::max(std::abs(*evidence.current), std::abs(*evidence.previous)));
+    } else if (metric == Metric::density_change) {
+        if (evidence.current_norm && evidence.previous_norm
+            && finite_nonnegative(*evidence.current_norm) && finite_nonnegative(*evidence.previous_norm))
+            return Scale::measured(std::max(*evidence.current_norm, *evidence.previous_norm));
+    } else if (!evidence.components.empty()) {
+        double maximum = 0.0;
+        for (const auto& component : evidence.components) {
+            if (!component.function_norm || !finite_nonnegative(*component.function_norm))
+                return measurement.scale;
+            maximum = std::max(maximum, *component.function_norm);
+        }
+        return Scale::measured(maximum);
+    }
+    return measurement.scale;
+}
+
+inline MetricCheck evaluate_metric(Metric metric, const MetricValue& measurement,
+                                   const std::optional<Comparison>& predecessor,
+                                   const IterationInfo& info, double absolute, double relative) {
+    MetricCheck check;
+    check.metric = metric; check.absolute = absolute; check.relative = relative;
+    if (!finite_nonnegative(absolute) || !finite_nonnegative(relative))
+        throw std::invalid_argument("invalid resolved convergence tolerance");
+    if (measurement.status != Availability::measured) {
+        check.result = measurement.status == Availability::invalid ? CheckResult::invalid : CheckResult::unavailable;
+        check.reason = measurement.reason.empty() ? "measurement_unavailable" : measurement.reason;
+        return check;
+    }
+    if (!measurement.value || !finite_nonnegative(*measurement.value)) {
+        check.result = CheckResult::invalid; check.reason = "invalid_measurement"; return check;
+    }
+    if (metric != Metric::bsh_residual) {
+        const auto& comparison = measurement.comparison ? measurement.comparison : predecessor;
+        if (!comparison || comparison->attempt_id.empty() || comparison->subject.empty()
+            || comparison->task_id != info.task_id
+            || !std::isfinite(comparison->protocol.thresh) || comparison->protocol.thresh <= 0.0
+            || comparison->protocol.k <= 0
+            || (comparison->attempt_id == info.attempt_id && comparison->protocol == info.protocol
+                && comparison->iteration >= info.iteration)) {
+            check.reason = "comparison_unavailable"; return check;
+        }
+    }
+    const auto scale = measurement_scale(metric, measurement);
+    if (scale.status == Availability::measured && scale.value && finite_nonnegative(*scale.value))
+        check.scale = scale.value;
+    if (relative > 0.0 && !check.scale) {
+        check.result = scale.status == Availability::invalid || scale.status == Availability::measured
+                           ? CheckResult::invalid : CheckResult::unavailable;
+        check.reason = "scale_unavailable"; return check;
+    }
+    const double limit = absolute + (relative > 0.0 ? relative * *check.scale : 0.0);
+    if (!finite_nonnegative(limit)) {
+        check.result = CheckResult::invalid; check.reason = "invalid_effective_limit"; return check;
+    }
+    check.limit = limit;
+    check.result = *measurement.value <= limit ? CheckResult::met : CheckResult::unmet;
+    return check;
+}
+
+} // namespace madness::iteration

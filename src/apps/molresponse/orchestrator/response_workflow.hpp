@@ -119,6 +119,31 @@ struct StageTimer {
                           {"cpu_s", madness::cpu_time() - c0}};
   }
 };
+// Compatibility output follows this invocation's qualified shared properties.
+// Persisted analysis may contain older requests and protocols; it is not output authority.
+inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohmann::json& current,
+                                     const std::string& protocol) {
+  output.properties=nlohmann::json::object();
+  output.vibrational_analysis=nullptr;output.raman_spectra=nullptr;
+  const auto& metadata=output.metadata;
+  for(const auto& [shared,legacy]:std::vector<std::pair<std::string,std::string>>{
+      {"polarizability","alpha"},{"hyperpolarizability","beta"},
+      {"polarizability_gradient","raman"},{"two_photon_absorption","tpa"}}) {
+    if(!current.contains(shared)) continue;
+    bool measured=false;
+    for(const auto& value:current.at(shared).at("values"))
+      measured=measured || !value.at("components").empty();
+    if(measured && metadata.contains("properties") && metadata.at("properties").contains(legacy) &&
+        metadata.at("properties").at(legacy).contains(protocol))
+      output.properties[legacy]={{protocol,metadata.at("properties").at(legacy).at(protocol)}};
+  }
+  for(const auto& [shared,legacy]:std::vector<std::pair<std::string,std::string>>{
+      {"vibrational_analysis","vibrational_analysis"},{"raman_spectrum","raman_spectra"}}) {
+    if(!current.contains(shared) || current.at(shared).at("values").empty() || !metadata.contains(legacy)) continue;
+    if(shared=="vibrational_analysis") output.vibrational_analysis=metadata.at(legacy);
+    else output.raman_spectra=metadata.at(legacy);
+  }
+}
 } // namespace detail_workflow
 
 // ---------------------------------------------------------------------------
@@ -224,7 +249,7 @@ inline void gs_fingerprint_gate(madness::World &world,
 /// total). Shared by the CLI entry (run_response) and the madqc adapter, which
 /// supplies a `gs` built from an in-memory SCF rather than an archive (R3).
 inline ResponseWorkflowOutput
-run_response_with_ground(madness::World &world, GroundState &gs, double L,
+run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
                          const std::string &fock_json,
                          const ResponseWorkflowInput &in) {
   ResponseWorkflowOutput out;
@@ -246,15 +271,42 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
 
   // 2a. Build the DAG.
   detail_workflow::StageTimer t_build;
+  if (in.settings.shared_response) in.settings.shared_response->timing().begin("plan_build");
   CalcManager::Policy mgr_policy;
   mgr_policy.max_iters_per_step = in.settings.max_iters;
   mgr_policy.es_max_iters_per_step = in.settings.es_max_iters;
   mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   mgr_policy.fd_subworld_ranks  = in.settings.fd_subworld_ranks;
   mgr_policy.state_plans        = in.settings.state_plans;     // named, D-016
+  if(in.settings.shared_response) {
+    auto session=in.settings.shared_response;
+    mgr_policy.collect_subworlds=[session]{session->collect_subworlds();};
+    mgr_policy.dependencies_ready=[session](const CalcNode& node) {
+      return std::all_of(node.prerequisites.begin(),node.prerequisites.end(),[&](const auto& id) {
+        const auto found=session->states.find(id);
+        return found!=session->states.end() && found->second->complete();
+      });
+    };
+    mgr_policy.qualified_bundle=[session](const std::string& id){return session->at(id).complete();};
+    mgr_policy.plan_derived=[session,&in](const CalcNode& node) {
+      const auto& bundle=session->at(node.prerequisites.front());
+      auto& binding=session->bind_derived(node.id,{
+          {"frequency",node.freq},{"perturbation",node.pert.description()},
+          {"layout",detail_exec::is_static_freq(node.freq)?"closed_shell_static":"closed_shell_full"},
+          {"exchange_tensor",in.settings.policy.exchange_tensor},
+          {"derived_from",{{"bundle",bundle.info().task_id},{"root",node.es_root_id},{"factor",node.es_freq_factor}}}});
+      StatePlan entry;
+      entry.kind=binding.reusable()?StatePlan::Kind::load : binding.has_saved()?StatePlan::Kind::resume:StatePlan::Kind::fresh;
+      entry.controller_owned=true;entry.start_thresh=binding.controls().protocol.thresh;
+      if(binding.reusable()) {entry.met=true;entry.loaded_key=protocol_key(binding.controls().protocol.thresh,binding.controls().protocol.k);}
+      return entry;
+    };
+  }
+
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
   mgr.build(gs.molecule().natom());
   timing["plan_build"] = t_build.lap();
+  if (in.settings.shared_response) in.settings.shared_response->timing().end();
 
   // 2a'. GS-archive fingerprint gate (restart safety — see gs_fingerprint.hpp
   // for the failure mode: phase-flipped regenerated orbitals + cached X/Y =>
@@ -264,7 +316,7 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   // hang the other ranks in the solve). MADRESPONSE_ALLOW_GS_MISMATCH=1
   // downgrades the abort to a restamp — the stale states then remain loadable,
   // so it is only sane when the caller KNOWS the states match this archive.
-  if (!in.archive_file.empty())
+  if (!in.settings.shared_response && !in.archive_file.empty())
     gs_fingerprint_gate(world, in.archive_file, in.settings.calc_dir);
 
   // 2a''. F2 restart safety: sweep in any metadata shards stranded by an
@@ -321,24 +373,39 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
     fan_out = [archive, mol, fock, L_, base](
                   madness::World &sub, const std::vector<WorkItem> &items,
                   double thresh, int gid, const std::string &log_prefix) {
-      // F2d-ii: verbose=false suppresses the redundant per-subworld GS/protocol
-      // banners (the universe already printed them once).
-      set_response_protocol(sub, L_, thresh, /*override_k=*/-1, /*verbose=*/false);
-      auto gs_s = GroundState::from_archive(sub, archive, mol);
-      const double t0 = madness::FunctionDefaults<3>::get_thresh();
-      auto cop = madness::poperatorT(
-          madness::CoulombOperatorPtr(sub, gs_s.params().lo(), 0.001 * t0));
-      gs_s.prepare(sub, 0.001 * t0, cop, fock, /*verbose=*/false);
-      ExecutorSettings s = base;
-      s.metadata_shard = std::to_string(gid);  // F2: per-subworld metadata shard
-      s.log_prefix     = log_prefix;     // F2d-i: tag this subworld's per-state lines
-      s.log_group      = gid;            // F2d-i: MEMORY_HWM group= field
-      ExecutorContext ctx_s(sub, gs_s, L_, fock, s);
-      FdResponseExecutor exec_s(ctx_s);
-      for (const auto &it : items) exec_s.run_protocol(it);
+      std::shared_ptr<response_shared::Session> shared;
+      if(base.shared_response) {
+        std::set<std::string> states;
+        for(const auto& item:items) {
+          if(item.node->kind==CalcKind::VBC) {
+            states.insert(fd_node_id(item.node->pert,item.node->freq));
+            states.insert(fd_node_id(item.node->pert_c,item.node->freq_c));
+          } else states.insert(item.node->id);
+        }
+        shared=base.shared_response->for_world(sub,states,gid);
+      }
+      try {
+        if(shared) shared->timing().begin("reference_load");
+        set_response_protocol(sub,L_,thresh,-1,false);
+        auto gs_s=GroundState::from_archive(sub,archive,mol);
+        if(shared) shared->timing().end();
+        ExecutorSettings settings=base;
+        settings.shared_response=shared;
+        settings.metadata_shard=std::to_string(gid);
+        settings.log_prefix=log_prefix;settings.log_group=gid;
+        ExecutorContext context(sub,gs_s,L_,fock,settings);
+        FdResponseExecutor executor(context);
+        for(const auto& item:items) executor.run_protocol(item);
+        if(shared) {
+          shared->timing().end();shared->timing().end();shared->publish_timings();
+        }
+      } catch(const std::exception& error) {
+        if(shared) try {shared->publish_timings(error.what());} catch(...) {}
+        throw;
+      }
     };
   }
-  nlohmann::json sched_diag = mgr.run(world, exec, fan_out);   // R1c scheduler trace
+  const auto sched_diag=mgr.run(world,exec,fan_out);
   timing["solve"] = t_solve.lap();
 
   // 3. Tier-A property assembly (off the solve path). A mixed request may want
@@ -347,24 +414,44 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
   //    if no dipole FD; it ignores nuclear FD) so it is safe to always attempt;
   //    beta/raman come from VBC. (ES-derived scalar properties are a later step.)
   detail_workflow::StageTimer t_assemble;
+  if (in.settings.shared_response) in.settings.shared_response->timing().begin("properties");
   assemble_alpha(ctx, in.plan, in.protocols.back());
+  if(in.settings.shared_response) for(const auto& bundle:in.plan.es) {
+    if(bundle.tda) assemble_shared_excited<TDA>(ctx,bundle.n_roots,in.protocols.back());
+    else assemble_shared_excited<Full>(ctx,bundle.n_roots,in.protocols.back());
+  }
   if (!in.plan.vbc.empty())
     assemble_beta(ctx, in.plan, in.protocols.back());
   // Full Raman: the plan carries the all-atoms nuclear sentinel only when the
   // request asked for every coordinate, so its presence IS the gate for the
   // normal-mode analysis (Hessian from the nuclear response states, then the
   // per-mode spectrum from the raman rows assemble_beta just wrote).
-  if (plan_requests_full_raman(in.plan))
-    assemble_raman_spectrum(ctx, in.plan, in.protocols.back());
+  if (plan_requests_full_raman(in.plan)) {
+    if(in.settings.shared_response) in.settings.shared_response->timing().begin("vibrational_analysis");
+    assemble_raman_spectrum(ctx,in.plan,in.protocols.back());
+    if(in.settings.shared_response) in.settings.shared_response->timing().end();
+  }
   // 2PA: derived FD legs are only planned when the request asked for the
   // two-photon contraction (request.tpa), so their presence IS the gate.
   // assemble_tpa self-guards (returns if no ES bundle; ClosedShell only).
   if (!in.plan.derived_fd.empty())
     assemble_tpa(ctx, in.plan, in.protocols.back());
   timing["assemble"] = t_assemble.lap();
+  if (in.settings.shared_response) {
+    auto& session=*in.settings.shared_response;
+    session.timing().end();
+    session.timing().begin("publish_results");
+    session.report();
+    session.timing().end();
+    session.timing().end(); // calculation
+    session.timing().end(); // run
+    session.publish_timings();
+  }
+  if (in.settings.shared_response && !in.settings.shared_response->complete())
+    throw std::runtime_error("response convergence criteria unmet; native endpoint and unavailable property recorded");
 
   // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).
-  if (world.rank() == 0) {
+  madness::checkpoint::detail::on_root(world,[&] {
     auto meta = ResponseMetadata::load_or_create(
         in.settings.calc_dir + "/response_metadata.json");
     // Provenance: stamp the effective restart-I/O backend into the metadata
@@ -376,16 +463,28 @@ run_response_with_ground(madness::World &world, GroundState &gs, double L,
 #endif
     meta.save();
     out.metadata = meta.json();
-    if (out.metadata.contains("properties"))
-      out.properties = out.metadata["properties"];
-    if (out.metadata.contains("vibrational_analysis"))
-      out.vibrational_analysis = out.metadata["vibrational_analysis"];
-    if (out.metadata.contains("raman_spectra"))
-      out.raman_spectra = out.metadata["raman_spectra"];
+    if(in.settings.shared_response) {
+      const auto protocol=madness::iteration::Protocol{in.protocols.back(),madness::FunctionDefaults<3>::get_k()};
+      detail_workflow::export_shared_properties(out,in.settings.shared_response->properties(),
+          protocol_key(protocol.thresh,protocol.k));
+    } else {
+      if(out.metadata.contains("properties")) out.properties=out.metadata["properties"];
+      if(out.metadata.contains("vibrational_analysis")) out.vibrational_analysis=out.metadata["vibrational_analysis"];
+      if(out.metadata.contains("raman_spectra")) out.raman_spectra=out.metadata["raman_spectra"];
+    }
     out.timing = std::move(timing);
-    out.diagnostics = std::move(sched_diag);   // R1c scheduler trace
-  }
+    out.diagnostics = sched_diag;   // R1c scheduler trace
+    return std::string{};
+  });
   return out;
+}
+
+inline ResponseWorkflowOutput
+run_response_with_ground(madness::World& world,GroundState& gs,double L,
+                         const std::string& fock_json,const ResponseWorkflowInput& in) {
+  const auto work=[&] {return run_response_with_ground_impl(world,gs,L,fock_json,in);};
+  if(in.settings.shared_response) return in.settings.shared_response->with_failure_timing(work);
+  return work();
 }
 
 inline ResponseWorkflowOutput

@@ -48,7 +48,7 @@ def make_cmd(prefix, protocols, state_parallel_opts):
         f"--dft=k=6;maxiter=1;econv=1e-3;dconv=1e-2;protocol=[{protocol_list}];localize=canon",
         "--response=dipole=true;dipole.directions=z;dipole.frequencies=[0.0];"
         "excited.enable=true;excited.tda=true;excited.num_states=1;"
-        "excited.guess_max_iter=1;excited.maxiter=2;excited.maxsub=4;"
+        "excited.guess_max_iter=1;maxiter=2;excited.maxsub=4;"
         "print_level=2;"
         + state_parallel_opts,
     ]
@@ -57,7 +57,7 @@ def make_cmd(prefix, protocols, state_parallel_opts):
 def run_case(prefix, first_parallel_opts, second_parallel_opts, description, env):
     outputfile = prefix + ".calc_info.json"
     response_metadata_file = os.path.join(
-        prefix, "task_1", "molresponse", "response_metadata.json"
+        prefix, "analysis", "response", "response_metadata.json"
     )
     cleanup(prefix)
     try:

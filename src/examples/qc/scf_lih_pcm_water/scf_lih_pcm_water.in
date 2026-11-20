@@ -18,6 +18,10 @@
 # Run:   ./run.sh          (or: madqc scf_lih_pcm_water.in)
 
 dft
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 0.005
+    convergence.density_change 0.001
+    convergence.energy_change 0.0001
     xc        hf
     pcm_data  water      # switch PCM on, and pick the solvent
     # one protocol rung rather than the default ladder: PCM rebuilds the cavity
@@ -25,8 +29,6 @@ dft
     # here than it does in vacuum. 12 s vs 34 s, same energy to 1e-4.
     protocol  [1.e-4]
     maxiter   10
-    econv     1e-4
-    dconv     1e-3
 end
 
 pcm

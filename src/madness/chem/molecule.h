@@ -628,6 +628,9 @@ class Molecule {
     return h;
   }
   [[nodiscard]] json to_json() const;
+  /// Effective electronic model, including field, smoothing and loaded core data.
+  /// Omits input provenance, isotope masses and geometry-preparation controls.
+  [[nodiscard]] json electronic_settings() const;
   void insert_symbols_and_geometry(json &mol_json) const;
   void from_json(const json &mol_json);
 };

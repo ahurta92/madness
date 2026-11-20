@@ -42,6 +42,9 @@ bool all_exponents_real(const madness::Tensor<double> &eps, double omega) {
 int main() {
   using molresponse_v3::common_ops::bsh_shift;
 
+  expect(bsh_shift(madness::Tensor<double>(), 0.1) == 0.0,
+         "empty spin channel needs no BSH shift");
+
   std::printf("=== bsh_shift: canonical (ascending) energies ===\n");
   {
     const auto eps = energies({-0.5, -0.3, -0.2});

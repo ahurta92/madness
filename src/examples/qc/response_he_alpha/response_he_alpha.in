@@ -9,8 +9,10 @@
 
 dft
     xc        hf
-    econv     1e-4
-    dconv     1e-4
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 1e-4
+    convergence.density_change 1e-4
+    convergence.energy_change 1e-5
     k         6
     protocol  [1e-4]
     maxiter   20
@@ -20,7 +22,10 @@ response
     dipole              true
     dipole.directions   z
     dipole.frequencies  [0.0, 0.05]
-    dconv               1e-4
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 0.0005
+    convergence.density_change 0.0005
+    convergence.energy_change 0.0005
     maxiter             30
     print_level         1
 end

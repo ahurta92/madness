@@ -78,6 +78,7 @@ public:
 
     /// true if a correction is actually being applied
     bool active() const { return damping != none; }
+    [[nodiscard]] bool includes_three_body() const { return atm; }
 
     /// short human-readable tag, e.g. "D3(BJ)/pbe0" -- "none" if inactive
     std::string description() const;

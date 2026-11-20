@@ -22,8 +22,7 @@
 dft
     xc       pbe0
     maxiter  10
-    econv    1e-4
-    dconv    1e-3
+    convergence.criteria [bsh_residual, density_change, energy_change]
 end
 
 molecule

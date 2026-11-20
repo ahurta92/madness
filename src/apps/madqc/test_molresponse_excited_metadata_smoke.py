@@ -46,7 +46,7 @@ if __name__ == "__main__":
     outputfile = prefix + ".calc_info.json"
     protocol_key = f"{1.0e-2:.0e}"
     response_metadata_file = os.path.join(
-        prefix, "task_1", "molresponse", "response_metadata.json"
+        prefix, "analysis", "response", "response_metadata.json"
     )
 
     cleanup(prefix)
@@ -64,7 +64,7 @@ if __name__ == "__main__":
         "--dft=k=6;maxiter=1;econv=1e-3;dconv=1e-2;protocol=[1e-2];localize=canon",
         "--response=dipole=true;dipole.directions=z;dipole.frequencies=[0.0];"
         "excited.enable=true;excited.num_states=2;excited.guess_max_iter=1;"
-        "excited.maxiter=3;excited.maxsub=4;print_level=2",
+        "maxiter=3;excited.maxsub=4;print_level=2",
     ]
     run = run_cmd(cmd, env=env)
     if run.returncode != 0:

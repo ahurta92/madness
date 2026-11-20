@@ -306,6 +306,11 @@ double Nemo::value(const Tensor<double> &x) {
   }
 
   if (not plan.iterate) {
+    const bool qualified = plan.archive_same_hamiltonian
+        && calc->orbital_metadata().is_converged_to(target_thresh, target_dconv);
+    calc->last_calculation_outcome = CalculationOutcome{
+        qualified, !plan.archive_same_hamiltonian ? "reference_settings_changed"
+                   : qualified ? "saved_criteria_met" : "criteria_unmet"};
     if (world.rank() == 0)
       print("not solving the SCF equations:", plan.why);
     // the archive's energy, from its header -- load_mos clears current_energy
@@ -570,6 +575,11 @@ vecfuncT apply_bsh_green(World &world, SCF &calc, const BSHApply<double, 3> &bsh
 
 /// solve the HF equations
 double Nemo::solve(const SCFProtocol &proto) {
+  // Loaded convergence stamps no longer describe functions changed by a new
+  // solve, including its per-iteration archives and a capped final exit.
+  calc->converged_for_thresh = 1.e10;
+  calc->converged_for_dconv = 1.e10;
+  calc->last_calculation_outcome = CalculationOutcome{false, "iteration_limit"};
 
   // guess has already been performed in value()
   vecfuncT &nemo = calc->amo;
@@ -753,6 +763,7 @@ double Nemo::solve(const SCFProtocol &proto) {
   }
 
   if (converged) {
+    calc->last_calculation_outcome = CalculationOutcome{true, "converged"};
     if (world.rank() == 0)
       print("\nIterations converged\n");
     // Record the rung actually converged to, not the user's econv/dconv -- the

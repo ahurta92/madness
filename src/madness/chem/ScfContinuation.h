@@ -27,10 +27,7 @@
 namespace madness::scf_continuation {
 
 /// One rung of a protocol ladder, identified by value.
-struct Rung {
-  double thresh = 0.0;
-  int k = 0;
-};
+using Rung = iteration::Protocol;
 
 /// Thresholds come from decks and JSON; equal to this relative tolerance
 /// means the same rung.

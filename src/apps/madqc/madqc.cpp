@@ -50,13 +50,9 @@
 #include <fstream>
 #include <iostream>
 
-#include "RunNamedStages.hpp"
-#include <Drivers.hpp>
-#include <ParameterManager.hpp>
-#include <WorkflowBuilders.hpp>
-#include <madness/chem/ResultsSummary.hpp>
-#include <madness/chem/VizManifest.hpp>
-#include <apps/molresponse/madqc_adapter.hpp>  // molresponse_v3_lib (R3 engine)
+#include "WorkflowDriver.hpp"
+#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/SCFRun.h>
 #include <madness_exception.h>
 
 using namespace madness;
@@ -68,18 +64,20 @@ using namespace madness;
 
 void help(const std::string &wf) {
   print("Usage: madqc [options] [input_file]");
-  print("Named decks: molecule H2 / moldft gs / molresponse optical (see named-stages.md).");
-  print("  --prefix=<new-directory>    : output root for a fresh named-stage run");
-  print("  --continue                  : load or resume the named stages' checkpoints in --prefix");
+  print("  --prefix=<directory>        : workflow output root");
+  print("  --continue                  : require an existing shared SCF "
+        "checkpoint");
   print("\nOptions:");
   print("  --help=<workflow>           : show this help message");
   print("  --print_parameters=<group>  : print all parameters and exit");
-  print("  --restart_info=<prefix>     : describe a restart archive and exit");
+  print("  --restart_info=<directory>  : describe a shared SCF checkpoint and "
+        "exit");
   print("  --workflow=<name>           : specify the workflow to run (default: "
         "scf)");
   print("  --optimize                  : optimize the geometry of the "
         "workflow's reference (scf|nemo)");
-  print("\nAvailable workflows: " + workflow_builders::runnable_workflow_list());
+  print("\nAvailable workflows: " +
+        workflow_builders::runnable_workflow_list());
   print("Parameter groups (for --print_parameters): dft, nemo, response, cc2, "
         "cis, oep, pcm, optimization, geometry");
   print("");
@@ -89,7 +87,8 @@ void help(const std::string &wf) {
     print("\nexamples: ");
     print("madqc --wf=scf --geometry=h2o.xyz");
     print("madqc --wf=scf --geometry=he --dft=\"k=8\",xc=lda");
-    print("madqc --wf=scf --geometry=h2o --dft=\"k=8; econv=1.e-4; L=30\"");
+    print("madqc --wf=scf --geometry=h2o --dft=\"k=8; "
+          "convergence.energy_change=1.e-4; L=30\"");
   } else if (wf == "nemo") {
     print("madqc --wf=nemo");
     print("molecular Hartree-Fock and DFT code with regularized orbitals");
@@ -124,10 +123,12 @@ void help(const std::string &wf) {
     print("\nexamples: ");
     print("madqc --optimize --wf=scf --geometry=h2o");
     print("madqc --optimize --wf=nemo --geometry=lih");
-    print("madqc --optimize --wf=scf --geometry=h2o --optimization=\"gtol=1.e-4; "
-          "maxiter=10\"");
+    print(
+        "madqc --optimize --wf=scf --geometry=h2o --optimization=\"gtol=1.e-4; "
+        "maxiter=10\"");
     print("\nsee  madqc --print_parameters=optimization  for all knobs.");
-    print("the in-SCF form (--dft=\"gopt=1\") has been removed; its keyvals are");
+    print(
+        "the in-SCF form (--dft=\"gopt=1\") has been removed; its keyvals are");
     print("retired and error with a pointer to the `optimization` group.");
   }
 }
@@ -142,7 +143,9 @@ void print_parameters(World &world, const commandlineparser &parser,
           "optimization, geometry");
   } else if (group == "dft" || group == "scf") {
     print("Available parameters for data group: dft");
-    pm.get<CalculationParameters>().print();
+    auto parameters = pm.get<CalculationParameters>();
+    parameters.enable_scf_inputs();
+    parameters.print();
   } else if (group == "nemo") {
     print("Available parameters for data group: nemo");
     pm.get<Nemo::NemoCalculationParameters>().print();
@@ -177,239 +180,43 @@ void print_parameters(World &world, const commandlineparser &parser,
 
 int main(int argc, char **argv) {
   World &world = initialize(argc, argv);
-  // exit code: a run that died in the main loop must not report success --
-  // CI and driver scripts have no other way to tell the difference
   int rc = 0;
-  if (world.rank() == 0) {
-    print_header1("MADQC -- Multiresolution Quantum Chemistry Code ");
-  }
-
-  commandlineparser parser(argc, argv);
-
-  if (parser.key_exists("help")) {
-    help(parser.value("help"));
-  } else if (parser.key_exists("print_parameters")) {
-    print_parameters(world, parser, parser.value("print_parameters"));
-  } else if (parser.key_exists("restart_info")) {
-    // Report what a restart archive holds and stop. No startup() needed: the
-    // header and the orbital bookkeeping are plain Molecule/Tensor data, and no
-    // MRA function is constructed.
-    std::string p = parser.value("restart_info");
-    if (p.empty() or p == "restart_info") p = "mad";
-    madness::print_restartdata_info(world, p);
-  } else {
-    // limit lifetime of world so that finalize() can execute cleanly
-    try {
-      // Load info for MADNESS numerical routines
+  bool solver_started = false;
+  if (world.rank() == 0)
+    print_header1("MADQC -- Multiresolution Quantum Chemistry Code");
+  try {
+    commandlineparser parser(argc, argv);
+    if (parser.key_exists("help")) {
+      help(parser.value("help"));
+    } else if (parser.key_exists("print_parameters")) {
+      print_parameters(world, parser, parser.value("print_parameters"));
+    } else if (parser.key_exists("restart_info")) {
+      std::string path = parser.value_raw("restart_info");
+      if (path.empty() || path == "restart_info")
+        path = ".";
+      CalculationParameters inspection;
+      inspect_scf(world, std::filesystem::absolute(path), inspection);
+    } else {
       startup(world, argc, argv, true);
+      solver_started = true;
       if (world.rank() == 0) {
         print(info::print_revision_information());
-        // D-093: the commit beside the description, so a drop's banner can be
-        // checked against its tag.
         print("    git source commit ...     ", info::git_commit());
       }
-
-      if (!named_stages::run_if_named(world, parser)) {
-      // Create workflow
-      qcapp::Workflow wf;
-      std::string user_workflow = "scf";
-      if (parser.key_exists("workflow"))
-        user_workflow = parser.value("workflow");
-      else if (parser.key_exists("wf"))
-        user_workflow = parser.value("wf");
-      else if (parser.key_exists("w"))
-        user_workflow = parser.value("w");
-
-      if (world.rank() == 0) {
-        print("input file  :", parser.value("input"));
-        print("workflow    :", user_workflow);
-        print("");
-      }
-
-      // read in all parameters from the input file and the command line
-      // logic and interdependent parameter follow later
-      Params pm(world, parser);
-
-      // A relative `dalton.dir` names a directory beside the deck, but every
-      // stage runs from its own task directory (task_0/moldft, ...), where the
-      // same relative path finds nothing. Resolve it once, against the launch
-      // directory, before any stage changes directory.
-      auto absolute_dalton_dir = [](auto &params) {
-        const auto d = params.template get<std::string>("dalton.dir");
-        if (!d.empty() && std::filesystem::path(d).is_relative())
-          params.template set_user_defined_value<std::string>(
-              "dalton.dir",
-              std::filesystem::absolute(d).lexically_normal().string());
-      };
-      absolute_dalton_dir(pm.get<IOParameters>());
-      absolute_dalton_dir(pm.get<ResponseParameters>());
-
-      // Deck-level `io` block (roadmap change 5): run-wide restart-backend
-      // selection. `io backend hdf5` turns the HDF5 opt-in on for every task
-      // that supports it; the response-only `response.hdf5 true` keeps
-      // working as an alias (applied here and re-checked in the response
-      // adapter). The effective config is stamped into calc_info for ALL
-      // tasks via Workflow::set_provenance below.
-      // HDF5 restart I/O is a molresponse-only path today, so only honor the
-      // deck flag (and stamp the provenance below) for the response workflow —
-      // a stray `response.hdf5`/`io backend hdf5` in a cc2/cis/oep/moldft deck
-      // must NOT flip the global flag or mis-stamp backend=hdf5 (review LOW).
-      // `--optimize` turns the workflow's reference into an optimization task
-      // (WorkflowBuilders::add_optimize_workflow_drivers).
-      const bool optimize_geometry = parser.key_exists("optimize");
-      const bool is_response_wf =
-          workflow_builders::workflow_kind_from_name(user_workflow) ==
-          workflow_builders::WorkflowKind::Response;
-      const bool deck_io_hdf5 =
-          pm.get<IOParameters>().hdf5() || pm.get<ResponseParameters>().hdf5();
-      if (deck_io_hdf5 && is_response_wf) {
-#ifdef MADNESS_HAS_HDF5
-        molresponse_v3::set_hdf5_io_enabled(true);
-#else
-        throw std::runtime_error(
-            "io backend hdf5 (or response.hdf5) requested but this build has "
-            "no HDF5 support — configure with -DMADNESS_ENABLE_HDF5=ON");
-#endif
-      } else if (deck_io_hdf5 && !is_response_wf && world.rank() == 0) {
-        print("NOTE: `io backend hdf5` / `response.hdf5` only affects the "
-              "response workflow's MRA restart I/O — ignored for --wf=",
-              user_workflow);
-      }
-
-      // The response workflow is built HERE in the app — MADchem's
-      // WorkflowBuilders cannot reference v3 (circular lib dependency), and the
-      // v2 engine was removed (M1 decoupling Stage 2). molresponse_v3 is THE
-      // response engine; `engine v2` in old decks fails loudly below.
-      if (is_response_wf && optimize_geometry) {
-        // The response step would have to run at the optimized geometry, which
-        // needs the downstream consumer work of ARCHITECTURE_ROADMAP change 2.
-        throw std::runtime_error(
-            "--optimize is not supported for --wf=response; optimize the "
-            "geometry first (--optimize --wf=scf) and run the response "
-            "calculation on the result");
-      }
-
-      if (is_response_wf) {
-        const std::string engine = pm.get<ResponseParameters>().engine();
-        if (engine == "v2") {
-          if (world.rank() == 0)
-            print("ERROR: response engine 'v2' (MolresponseLib) was removed.\n"
-                  "       Delete the `engine v2` line (v3 is the default) — the\n"
-                  "       input deck is otherwise unchanged; see\n"
-                  "       molresponse_v3/MIGRATION_FROM_V2.md.");
-          throw std::runtime_error("response engine v2 removed — use v3");
-        }
-        if (world.rank() == 0)
-          print("response engine : molresponse_v3");
-        pm.get<CalculationParameters>().set_derived_value("save", true);
-        auto reference =
-            std::make_shared<SCFApplication<moldft_lib>>(world, pm);
-        // Seeding showcase (2026-09-09): with `dalton.dir` in the deck, the
-        // ground state is seeded from the DALTON molden before the SCF plans
-        // its restart (see molresponse_v3::seed_gs_from_dalton_dir).
-        // io.dalton.dir (run-wide) wins; response.dalton.dir is the alias.
-        if (const std::string ddir =
-                !pm.get<IOParameters>().dalton_dir().empty()
-                    ? pm.get<IOParameters>().dalton_dir()
-                    : pm.get<ResponseParameters>().dalton_dir();
-            !ddir.empty()) {
-          reference->set_pre_run_hook(
-              [ddir](World &w, const Params &p, const std::filesystem::path &d) {
-                molresponse_v3::seed_gs_from_dalton_dir(w, p, d, ddir);
-              });
-        }
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(reference));
-        wf.addDriver(std::make_unique<qcapp::SinglePointDriver>(
-            std::make_unique<ResponseApplication<molresponse_v3_lib>>(
-                world, pm, reference->calc())));
-      } else {
-        workflow_builders::add_workflow_drivers(world, pm, user_workflow, wf,
-                                                optimize_geometry);
-      }
-
-      // io provenance for ALL tasks (today only response writes MRA restart
-      // state, but the stamp is run-level: an HDF5 run and a native run must
-      // be distinguishable from any task's calc_info).
-#ifdef MADNESS_HAS_HDF5
-      wf.set_provenance(
-          "io", {{"backend",
-                  molresponse_v3::hdf5_io_enabled() ? "hdf5" : "native"},
-                 {"hdf5_compiled", true}});
-#else
-      wf.set_provenance("io",
-                        {{"backend", "native"}, {"hdf5_compiled", false}});
-#endif
-
-      // Echo the effective input of the whole run before any work starts: the
-      // molecule, then each driver's own parameter group. This is the only
-      // record of what was actually computed (defaults and derived values
-      // included) for a run whose deck sets just a handful of keys.
-      if (world.rank() == 0) {
-        print_header1("Calculation parameters");
-        pm.get<Molecule>().print();
-        wf.print_parameters(world);
-        print("");
-        print_header1("Starting calculations");
-      }
-
-      std::string prefix = pm.prefix();
-      wf.run(prefix);
-
-      // Human-readable chemistry report: to stdout and <prefix>.out. The
-      // machine-readable <prefix>.calc_info.json remains the source of truth.
-      if (world.rank() == 0) {
-        qcapp::write_results_summary(std::cout, wf.results());
-        // APPEND, never truncate: with the usual `#SBATCH --output=<prefix>.out`
-        // this file IS the job's stdout, and opening it for writing wiped the
-        // whole run log at the end of every successful run (closeout attempt
-        // 12, 2026-09-10: a 97-minute LiH log reduced to the summary).
-        std::ofstream report(prefix + ".out", std::ios::app);
-        qcapp::write_results_summary(report, wf.results());
-        print("Wrote results summary :", prefix + ".out");
-
-        // Index any visualization artifacts (cube/dx/line plots) the run
-        // produced into <prefix>.viz_manifest.json for gecko/ParaView/VMD.
-        qcapp::write_viz_manifest(prefix, wf.results());
-      }
-      } // existing unnamed workflow
-    } catch (const MadnessException &e) {
-      rc = 1;
-      if (world.rank() == 0) {
-        print_header2("caught a MADNESS exception in the main loop");
-        print(e.what(), e.filename, e.msg, e.line);
-        print_header2("ending program run");
-      }
-    } catch (const json::exception &e) {
-      rc = 1;
-      if (world.rank() == 0) {
-        print_header2("caught a JSON exception in the main loop");
-        print(e.what());
-        print_header2("ending program run");
-      }
+      madqc::run_workflow(world, parser);
     }
-
-    catch (const named_stages::StageStopped &e) {
-      // An expected stop (D-104): the stage was not converged.
-      rc = 1;
-      if (world.rank() == 0)
-        print(e.what());
-    }
-
-    catch (std::exception &e) {
-      rc = 1;
-      if (world.rank() == 0) {
-        print_header2("caught an exception in the main loop");
-        print(e.what());
-        print_header2("ending program run");
-      }
-    }
-
-    // Nearly all memory will be freed at this point
-    world.gop.fence();
-    world.gop.fence();
+  } catch (const MadnessException &e) {
+    rc = 1;
+    if (world.rank() == 0)
+      print(e.what(), e.filename, e.msg, e.line);
+  } catch (const std::exception &e) {
+    rc = 1;
+    if (world.rank() == 0)
+      print(e.what());
+  }
+  world.gop.fence();
+  if (solver_started)
     print_stats(world);
-  } // world is dead -- ready to finalize
   finalize();
-
   return rc;
 }

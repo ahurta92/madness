@@ -27,6 +27,19 @@ namespace madness {
 /// return the path with original case.
 struct commandlineparser {
 
+    struct Argument {
+        std::string key;
+        std::string value;
+    };
+
+private:
+    std::vector<Argument> original_arguments_;
+
+public:
+    /// Ordered human-supplied arguments, before duplicate keys are overridden.
+    /// Programmatic defaults and transformations do not append occurrences.
+    [[nodiscard]] const std::vector<Argument>& original_arguments() const { return original_arguments_; }
+
     std::map<std::string, std::string> keyval;        // case-folded values
     std::map<std::string, std::string> keyval_raw;    // original-case values
 
@@ -49,6 +62,7 @@ struct commandlineparser {
             std::stringstream sa(a);
             sa >> key;
             val=a.substr(key.size());
+            original_arguments_.push_back({tolower(key), trim_blanks(val)});
             if (key=="input") set_keyval("user_defined_input_file","1");
             if (key=="prefix") set_keyval("user_defined_prefix","1");
 
@@ -156,7 +170,7 @@ public:
         const std::string item="=";
         const std::string blank=" ";
         auto it=std::find_first_of(result.begin(),result.end(),item.begin(),item.end());
-        std::replace(it,it+1,item.front(),blank.front());
+        if (it != result.end()) *it = blank.front();
         return result;
     }
 
@@ -172,6 +186,7 @@ public:
     static std::string trim_blanks(const std::string arg) {
         if (arg.size()==0) return arg;
         std::size_t first=arg.find_first_not_of(' ');
+        if (first == std::string::npos) return {};
         std::size_t last=arg.find_last_not_of(' ');
         return arg.substr(first,last-first+1);
     }

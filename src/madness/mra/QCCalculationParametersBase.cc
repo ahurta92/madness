@@ -28,6 +28,43 @@ bool is_missing_datagroup_exception(const std::exception& ex) {
 
 
 
+std::string QCParameter::print_line(const std::string& key, int key_width, int value_width) const {
+    const int comment_column = key_width + 2 + value_width + 1;
+    const std::string continuation = std::string(comment_column, ' ') + "# " + std::string(10, ' ');
+    std::ostringstream output;
+    output << std::right << std::setw(key_width) << key << "  "
+           << std::left << std::setw(value_width) << get_value();
+    // Values remain on one line so a printed deck is valid input. Long values
+    // put their explanation on the next line instead of shifting the table.
+    if (get_value().size() > static_cast<std::size_t>(value_width))
+        output << '\n' << std::string(comment_column, ' ');
+    else output << ' ';
+    output << "# " << std::setw(10) << print_precedence();
+    std::string description = get_comment();
+    if (!allowed_values.empty()) {
+        using madness::operators::operator<<;
+        std::ostringstream allowed;
+        allowed << allowed_values;
+        description += "  Allowed: " + allowed.str();
+    }
+    const auto width = std::max(20, 120 - comment_column - 12);
+    std::istringstream words(description);
+    std::string word;
+    int used = 0;
+    while (words >> word) {
+        if (used && used + 1 + static_cast<int>(word.size()) > width) {
+            output << '\n' << continuation;
+            used = 0;
+        }
+        if (used) { output << ' '; ++used; }
+        output << word;
+        used += static_cast<int>(word.size());
+    }
+    auto result = output.str();
+    const auto last = result.find_last_not_of(' ');
+    return result.substr(0, last + 1);
+}
+
 /// print all parameters
 void QCCalculationParametersBase::print(const std::string header,
 		const std::string footer) const {
@@ -43,7 +80,8 @@ std::string QCCalculationParametersBase::print_to_string(const std::list<std::st
 	// sort parameters according to increasing print_order
 	typedef std::tuple<int,std::string,QCParameter> keyvalT;
 	std::list<keyvalT> list;
-	for (auto& p : parameters) list.push_back(keyvalT(p.second.get_print_order(),p.first,p.second));
+	for (auto& p : parameters)
+        if (visible_input(p.first)) list.push_back(keyvalT(p.second.get_print_order(),p.first,p.second));
 	list.sort([](const keyvalT& first, const keyvalT& second) {return std::get<0>(first) < std::get<0>(second);});
 
 	// check if we have to print only non-default parameters
@@ -52,7 +90,9 @@ std::string QCCalculationParametersBase::print_to_string(const std::list<std::st
 	bool print_derived = std::find(precedence.begin(), precedence.end(), "derived") != precedence.end();
 	bool print_defined = std::find(precedence.begin(), precedence.end(), "defined") != precedence.end();
 
-	std::stringstream ss;
+    int key_width = 20;
+    for (const auto& p : list) key_width = std::max(key_width, static_cast<int>(std::get<1>(p).size()));
+    std::stringstream ss;
     int counter=0;
 	for (auto& p : list) {
 		const QCParameter& param=std::get<2>(p);
@@ -63,7 +103,20 @@ std::string QCCalculationParametersBase::print_to_string(const std::list<std::st
 		if (print_all) skip=false;
 		if (skip) continue;
 		if ((counter++)>0) ss << std::endl; // no newline at the very end
-		ss << param.print_line(std::get<1>(p));
+        const auto row = param.print_line(std::get<1>(p), key_width);
+        // A full listing documents defaults/derived settings without turning
+        // them into explicit requests when copied into an input deck. Callers
+        // explicitly selecting a precedence retain their serialization mode.
+        if (print_all) {
+            std::istringstream lines(row);
+            std::string line;
+            bool first = true;
+            while (std::getline(lines, line)) {
+                if (!first) ss << '\n';
+                ss << (param.precedence == QCParameter::defined ? "  " : "# ") << line;
+                first = false;
+            }
+        } else ss << row;
 	}
 	return ss.str();
 }
@@ -80,72 +133,109 @@ bool QCCalculationParametersBase::file_exists(World& world, std::string filename
     return file_exists;
 }
 
-/// read the parameters from file and broadcast
-void QCCalculationParametersBase::read_input(World& world, const std::string filename, const std::string tag) {
-
-	std::string filecontents, line;
-    std::string errmsg;
-    // 0: no error, 1: throw invalid_argument, 2: throw runtime_error. Only rank
-    // 0 reads the file, so both the message and its type have to be broadcast --
-    // see the collective throw at the end of this function.
-    int errtype=0;
-	if (world.rank()==0) {
+void QCCalculationParametersBase::read_collectively(World& world, const std::function<void()>& reader) {
+    std::string message;
+    int error = 0; // 1: invalid_argument, 2: runtime_error
+    if (world.rank() == 0) {
+        const auto previous = parameters;
         try {
-            std::ifstream f(filename.c_str());
-            while (std::getline(f, line)) filecontents += line + "\n";
-            read_internal(world, filecontents, tag);
-        } catch (std::invalid_argument& e) {
-            errmsg=e.what();
-            errtype=1;
-        } catch (std::exception& e) {
-            const bool is_missing_group = is_missing_datagroup_exception(e);
-            if (is_missing_group && !throw_if_datagroup_not_found) {
-                // Missing groups are optional for multi-workflow inputs.
-                // Keep defaults silently unless this parameter group is required.
-            } else if (is_missing_group) {
-                std::stringstream ss;
-                ss << "could not read data group >>" << tag << "<< in file " << filename;
-                errmsg=ss.str();
-                errtype=2;
-            } else {
-                std::stringstream ss;
-                ss << "error while reading data group >>" << tag << "<< in file "
-                   << filename << ": " << e.what();
-                errmsg=ss.str();
-                errtype=2;
-            }
+            reader();
+        } catch (const std::invalid_argument& e) {
+            message = e.what();
+            error = 1;
+        } catch (const std::exception& e) {
+            message = e.what();
+            error = 2;
         }
+        if (error) parameters = previous;
     }
-	world.gop.broadcast_serializable(*this, 0);
-    // throw on *every* rank, with the same message and the same type. Throwing
-    // on rank 0 only would unwind one rank out of the application while the
-    // others keep computing.
-    world.gop.broadcast_serializable(errmsg, 0);
-    world.gop.broadcast(errtype, 0);
-    if (errtype==1) throw std::invalid_argument(errmsg);
-    if (errtype==2) throw std::runtime_error(errmsg);
+    world.gop.broadcast(error, 0);
+    world.gop.broadcast_serializable(message, 0);
+    if (error == 1) throw std::invalid_argument(message);
+    if (error == 2) throw std::runtime_error(message);
+    world.gop.broadcast_serializable(*this, 0);
 }
 
-/// read the parameters from the command line and broadcast
+void QCCalculationParametersBase::read_input_and_commandline_options(
+        World& world, const commandlineparser& parser,
+        const std::string tag) { // NOLINT(performance-unnecessary-value-param): preserve the existing signature.
+    read_collectively(world, [&] {
+        const auto filename = parser.value_raw("input");
+        if (parser.key_exists("user_defined_input_file") && !std::ifstream(filename).is_open())
+            throw std::invalid_argument("could not find user-defined input file: " + filename + "\n");
+        read_input_on_root(world, filename, tag);
+        read_commandline_on_root(world, parser, commandlineparser::tolower(tag));
+    });
+}
 
-/// syntax is: qcprogram --mp2='maxiter 10; freeze 1' --dft:maxiter=20 --Xmpi:debug=true
-/// the argument in quotes is the value of the parser keys
+void QCCalculationParametersBase::read_input_on_root(
+        World& world, const std::string& filename, const std::string& tag) {
+    try {
+        std::string contents, line;
+        std::ifstream file(filename);
+        while (std::getline(file, line)) contents += line + "\n";
+        read_internal(world, contents, tag);
+    } catch (const std::invalid_argument&) {
+        throw;
+    } catch (const std::exception& e) {
+        if (is_missing_datagroup_exception(e)) {
+            if (!throw_if_datagroup_not_found) return;
+            throw std::runtime_error("could not read data group >>" + tag + "<< in file " + filename);
+        }
+        throw std::runtime_error("error while reading data group >>" + tag + "<< in file "
+                                 + filename + ": " + e.what());
+    }
+}
+
+void QCCalculationParametersBase::validate_commandline_occurrence(
+        World& world, std::string contents, const std::string& tag) const {
+    // Do not temporarily mutate the owning application: it may have state in
+    // addition to the parameter map. A probe copies registrations and policies.
+    struct Probe : QCCalculationParametersBase {
+        const QCCalculationParametersBase& owner;
+        explicit Probe(const QCCalculationParametersBase& source)
+            : QCCalculationParametersBase(source), owner(source) {}
+        [[nodiscard]] std::string get_tag() const override { return owner.get_tag(); }
+        [[nodiscard]] std::set<std::string> case_sensitive_keys() const override { return owner.case_sensitive_keys(); }
+        [[nodiscard]] std::set<std::string> full_precision_keys() const override { return owner.full_precision_keys(); }
+        void validate_input_value(const std::string& key, const std::string& value) const override {
+            owner.validate_input_value(key, value);
+        }
+    } probe(*this);
+    probe.read_internal(world, contents, tag);
+}
+
+/// Apply only the last whole CLI group, after validating all original groups.
 void QCCalculationParametersBase::read_commandline_options(World& world, const commandlineparser& parser,
-														   const std::string tag) {
-	if (not parser.key_exists(tag)) return;
-	std::string value=parser.value(tag);
-	// turn this into a fake input file
-	if (world.rank()==0) {
-        std::string q="'";
-		std::replace_copy(value.begin(), value.end(), value.begin(), q.c_str()[0] , ' ');
-		std::replace_copy(value.begin(), value.end(), value.begin(), ';', '\n');
-		value=tag+"\n"+value+"\nend";
-//        print("value",value);
-		read_internal(world, value,tag);
-	}
-	world.gop.broadcast_serializable(*this, 0);
+                                                         const std::string tag) { // NOLINT(performance-unnecessary-value-param): preserve the public signature.
+    const auto group = commandlineparser::tolower(tag);
+    bool present = false;
+    if (world.rank() == 0) {
+        present = parser.key_exists(group);
+        for (const auto& argument : parser.original_arguments())
+            present = present || argument.key == group;
+    }
+    world.gop.broadcast(present, 0);
+    if (!present) return;
+    read_collectively(world, [&] { read_commandline_on_root(world, parser, group); });
 }
 
+void QCCalculationParametersBase::read_commandline_on_root(
+        World& world, const commandlineparser& parser, const std::string& group) {
+    const auto as_input = [&](std::string value) {
+        std::replace(value.begin(), value.end(), '\'', ' ');
+        std::replace(value.begin(), value.end(), ';', '\n');
+        return group + "\n" + value + "\nend";
+    };
+    for (const auto& argument : parser.original_arguments()) {
+        if (argument.key == group)
+            validate_commandline_occurrence(world, as_input(argument.value), group);
+    }
+    if (parser.key_exists(group)) {
+        auto contents = as_input(parser.value_raw(group));
+        read_internal(world, contents, group);
+    }
+}
 
 
 /// read the stream, starting from tag
@@ -216,6 +306,7 @@ void QCCalculationParametersBase::read_internal(World& world, std::string& filec
 		// check which type to expect from the given key
 		bool success=false;
 		try {
+			validate_input_value(key, line1);
 			success = try_setting_any<all_parameter_types>(key, line1);
         } catch (std::invalid_argument& e) {
             throw;

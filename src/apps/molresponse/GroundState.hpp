@@ -28,7 +28,9 @@ public:
     /// with matching parameters, then delegates to SCF::load_mos().
     static GroundState from_archive(World& world,
                                      const std::string& archive_path,
-                                     const Molecule& molecule);
+                                     const Molecule& molecule,
+                                     const CalculationParameters* verified_parameters = nullptr,
+                                     const PCMParameters* verified_pcm = nullptr);
 
     // -----------------------------------------------------------------
     // Delegated accessors — no local copies, all point to scf_->

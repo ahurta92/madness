@@ -422,8 +422,7 @@ int main(int argc, char **argv) {
         // ExecutorSettings (R0a split). The ctx.<knob> setters below still work
         // (inherited members). FUTURE (R0b): build the Input + call run_response.
         ExecutorContext ctx(world, gs, header.L, fock_json,
-                            ExecutorSettings{/*checkpoint_observer=*/{}, policy,
-                                             print_level, calc_dir, max_iters});
+                            [&] { ExecutorSettings settings; settings.policy=policy; settings.print_level=print_level; settings.calc_dir=calc_dir; settings.max_iters=max_iters; return settings; }());
         if (parser.key_exists("es-seed"))
           ctx.seed_derived_from_es_root = true;
         if (parser.key_exists("no-es-seed"))

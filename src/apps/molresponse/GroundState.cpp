@@ -34,7 +34,9 @@ GroundState::GroundState(World& world, std::shared_ptr<SCF> scf)
 
 GroundState GroundState::from_archive(World& world,
                                        const std::string& archive_path,
-                                       const Molecule& molecule) {
+                                       const Molecule& molecule,
+                                       const CalculationParameters* verified_parameters,
+                                       const PCMParameters* verified_pcm) {
     // Step 1: Read archive header to get L, xc, nmo_alpha, spin_restricted
     auto header = read_archive_header(world, archive_path);
 
@@ -43,6 +45,7 @@ GroundState GroundState::from_archive(World& world,
     // SCF constructor calls set_derived_values(molecule) which computes
     // nalpha/nbeta from nuclear charge + nopen.
     CalculationParameters params;
+    if (verified_parameters) params = *verified_parameters;
     params.set_user_defined_value("l", header.L);
     params.set_user_defined_value("xc", header.xc);
 
@@ -73,7 +76,23 @@ GroundState GroundState::from_archive(World& world,
     // knows the truth: closed shell nelec = 2*nmo_alpha exactly; open shell
     // takes nalpha/nbeta from the moldft calc_info.json sibling.
     const double Z = molecule.total_nuclear_charge();
-    if (header.spin_restricted) {
+    if (verified_parameters) {
+        MADNESS_CHECK_THROW(header.spin_restricted == params.spin_restricted() &&
+            header.nmo_alpha == static_cast<unsigned int>(params.nmo_alpha()) &&
+            header.L == verified_parameters->L() && header.xc == verified_parameters->xc(),
+            "response archive does not match its qualified SCF parameters");
+        MADNESS_CHECK_THROW(molecule.n_core_orb_all() == 0 ||
+            (header.nmo_alpha == static_cast<unsigned int>(params.nalpha()) &&
+             (!params.have_beta() || params.nmo_beta() == params.nbeta())),
+            "native core-orbital trimming is not supported for a response reference with virtuals");
+        // Response equations use the occupied prefix, not the number of
+        // functions in a bundle that may also contain prepared virtuals.
+        params.set_user_defined_value("nmo_alpha", params.nalpha());
+        params.set_user_defined_value("nmo_beta", params.nbeta());
+        params.set_user_defined_value("nvalpha", 0);
+        params.set_user_defined_value("nvbeta", 0);
+        params.set_user_defined_value("freeze_occupied", false);
+    } else if (header.spin_restricted) {
         const double charge = Z - 2.0 * static_cast<double>(header.nmo_alpha);
         params.set_user_defined_value("charge", charge);
         if (world.rank() == 0 && std::abs(charge) > 1e-6)
@@ -121,7 +140,8 @@ GroundState GroundState::from_archive(World& world,
     }
 
     // Step 3: Construct SCF (calls set_derived_values internally)
-    auto scf = std::make_shared<SCF>(world, params, molecule);
+    auto scf = std::make_shared<SCF>(world, params, molecule,
+                                    verified_pcm ? *verified_pcm : PCMParameters{});
 
     // Step 4+5: Build GroundState, then load the orbitals through the family-
     // aware loader (native SCF::load_mos, or the HDF5 blob).
@@ -163,7 +183,7 @@ GroundState::read_archive_header(World& world,
 #endif
     } else {
         archive::ParallelInputArchive<archive::BinaryFstreamInputArchive>
-            ar(world, archive_path.c_str());
+            ar(world, native_archive_name(archive_path));
         try {
             meta.read(ar);
         } catch (const std::exception& e) {

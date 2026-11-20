@@ -6,8 +6,11 @@
 # Run:   ./run.sh          (or: madqc --wf=response response_h2_es_rpa.in)
 
 dft
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 0.0005
+    convergence.density_change 0.0001
+    convergence.energy_change 1e-05
     xc        hf
-    dconv     1e-4
     k         6
     protocol  [1e-4]
     l         100.0
@@ -19,12 +22,14 @@ response
     dipole                 true
     dipole.directions      z
     dipole.frequencies     [0.0]
-    dconv                  1e-4
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 0.0005
+    convergence.density_change 0.0005
+    convergence.energy_change 0.0005
     excited.enable         true
     excited.num_states     1
     excited.tda            false
-    excited.guess_max_iter 1
-    excited.maxiter        20
+    maxiter        20
     excited.maxsub         4
     print_level            1
 end

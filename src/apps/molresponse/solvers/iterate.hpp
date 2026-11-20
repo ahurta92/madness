@@ -27,8 +27,48 @@
 // =========================================================================
 
 #include <stdexcept>
+#include <functional>
+#include <madness/chem/IterationOutput.h>
+#include <madness/chem/ConvergenceSettings.h>
 
 namespace molresponse_v3::solvers {
+
+// Adopted solvers own their state and cached equation work. The observer sees
+// exactly the evaluated functions, before any update can mutate them.
+template <class Solver, class Observer>
+madness::iteration::Decision iterate_shared(
+    Solver& solver, typename Solver::State& state,
+    const madness::iteration::ResolvedSettings& settings,
+    const madness::iteration::ExpectedTask& expected,
+    madness::iteration::IterationInfo info, std::size_t previous_updates,
+    const Observer& observe,
+    const std::function<void(const madness::iteration::IterationInfo&,
+                            const madness::iteration::IterationTiming&)>& observe_timing = {}) {
+  namespace it = madness::iteration;
+  solver.reset_shared();
+  it::Progress progress{0, previous_updates, true};
+  for (;;) {
+    it::ElapsedTimer<> timer;
+    it::IterationTiming timing;
+    info.iteration = progress.main_updates;
+    const auto metrics = solver.evaluate(state, info);
+    timing.steps.emplace_back("evaluate", timer.lap());
+    progress.state_valid = !state.diverged;
+    const auto decision = it::decide(settings, expected, progress, metrics);
+    timing.steps.emplace_back("decide", timer.lap());
+    observe(state, metrics, decision, progress);
+    timing.steps.emplace_back("checkpoint/report", timer.lap());
+    if (decision.action == it::Action::update) {
+      solver.advance(state);
+      timing.steps.emplace_back("advance", timer.lap());
+      ++progress.main_updates;
+      ++progress.updates_at_protocol;
+    }
+    timing.seconds = timer.seconds();
+    if (observe_timing) observe_timing(info, timing);
+    if (decision.action != it::Action::update) return decision;
+  }
+}
 
 struct IteratePolicy {
   int max_iters = 25;

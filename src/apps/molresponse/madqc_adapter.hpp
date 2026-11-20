@@ -1,6 +1,7 @@
 #ifndef MOLRESPONSE_V3_MADQC_ADAPTER_HPP
 #define MOLRESPONSE_V3_MADQC_ADAPTER_HPP
 
+#include "solvers/shared_response_input.hpp"
 #include "solvers/fd_explicit_accuracy.hpp"
 
 // -----------------------------------------------------------------------------
@@ -36,6 +37,7 @@
 #include <madness/chem/ParameterManager.hpp>   // Params
 #include <madness/chem/ResponseParameters.hpp>
 #include <madness/chem/SCF.h>
+#include <madness/chem/SCFRun.h>
 #include <nlohmann/json.hpp>
 #include <madness/world/worldprofile.h>
 
@@ -209,13 +211,23 @@ struct molresponse_v3_lib {
                const std::filesystem::path &reference_prefix = {},
                const std::function<void(madness::World&, const nlohmann::json&)>
                    &checkpoint_observer = {}) {
-    const auto source_prefix
+    const bool shared = reference_prefix.empty() && scf_calc->param.scf_input_owner;
+    auto source_prefix
         = reference_prefix.empty()
               ? std::filesystem::proximate(scf_calc->work_dir, outdir)
                     / params.get<CalculationParameters>().prefix()
               : reference_prefix;
+    if (shared) {
+      MADNESS_CHECK_THROW(scf_calc->last_calculation_outcome && scf_calc->last_calculation_outcome->complete,
+                         "response requires a qualified SCF reference");
+      source_prefix = scf_checkpoint_archive(world, *scf_calc);
+      source_prefix.replace_extension(); // the native loader appends .restartdata
+    }
     return run_response_on_reference(world, params, scf_calc->molecule, outdir,
-                                     source_prefix, checkpoint_observer);
+                                     source_prefix, checkpoint_observer, {},
+                                     shared ? &scf_calc->param : nullptr,
+                                     shared ? &scf_calc->pcm_param : nullptr,
+                                     shared ? std::optional<molresponse_v3::response_shared::GroundSource>({scf_checkpoint_directory(*scf_calc), *scf_calc->last_checkpoint}) : std::nullopt);
   }
 
   /// DESIGN A1: the response on a saved reference alone: its orbital archive
@@ -230,33 +242,73 @@ struct molresponse_v3_lib {
       const std::function<void(madness::World&, const nlohmann::json&)>&
           checkpoint_observer
       = {},
-      const molresponse_v3::StatePlans& state_plans = {}) {
+      const molresponse_v3::StatePlans& state_plans = {},
+      const madness::CalculationParameters* verified_reference = nullptr,
+      const madness::PCMParameters* verified_pcm = nullptr,
+      const std::optional<molresponse_v3::response_shared::GroundSource>& shared_source = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
     const auto &cp = params.get<CalculationParameters>();
     const auto &rp = params.get<ResponseParameters>();
+    madness::iteration::TimingCollector<> response_timing;
+    response_timing.begin("run",{{"clock_scope","driver_rank"}});
+    response_timing.begin("response",{{"calculation_id","response"}});
+    response_timing.begin("reference_and_input_setup");
+    const auto shared_request = shared_response_request(rp);
     std::vector<double> protocol = cp.protocol();
     MADNESS_CHECK(!protocol.empty());
 
-    // Deck `seed.start_rung fine` — a dalton.dir-seeded run skips straight to
-    // the FINEST rung (W6 between-pole finding: the coarse rung hits maxiter
-    // unconverged and launders away the seed's head start). Must happen
-    // BEFORE set_response_protocol / gs.prepare / run_dalton_import below so
-    // the seed projection lands at the fine rung's (k, thresh). Default
-    // 'coarse' = full ladder, unchanged. Shared helper with the standalone
-    // driver (apply_seed_start_rung), so the two surfaces agree.
+    // Explicit imported guesses use the user-requested protocol ladder.
     const std::string dalton_dir = effective_dalton_dir(params);
-    if (apply_seed_start_rung(protocol, rp.seed_start_rung(),
-                              !dalton_dir.empty())) {
-
-      if (world.rank() == 0)
-        print("response: seed.start_rung=fine — dalton.dir seed starts the "
-              "ladder at thresh", protocol.front());
-    } else if (rp.seed_start_rung() == "fine" && dalton_dir.empty() &&
-               world.rank() == 0) {
-      print("response: seed.start_rung=fine ignored — no dalton.dir seed "
-            "configured (full ladder runs)");
+    if (shared_request) {
+      // Check the written request before the planner can filter unknown values
+      // and before loading/preparing any response reference or operators.
+      const auto directions=rp.dipole_directions();
+      const auto frequencies=rp.dipole_frequencies();
+      const auto properties=rp.requested_properties();
+      MADNESS_CHECK_THROW(std::all_of(properties.begin(),properties.end(),[](const auto& property){
+            return property=="polarizability" || property=="hyperpolarizability" || property=="raman";}) &&
+          !directions.empty() && directions.find_first_not_of("xyzXYZ")==std::string::npos &&
+          !frequencies.empty() &&
+          shared_source &&
+          verified_reference,
+          "shared response requires supported properties, valid dipole directions and frequencies");
+      MADNESS_CHECK_THROW(!rp.excited_enable() || (verified_reference->spin_restricted() && rp.excited_num_states()>0),
+          "shared excited response requires a closed-shell reference and positive root count");
+      MADNESS_CHECK_THROW(!effective_hdf5(params),
+          "shared response restart uses native checkpoints; HDF5 restart is not supported");
+      std::set<std::string> frequency_keys,protocol_keys;
+      for (double frequency:frequencies)
+        MADNESS_CHECK_THROW(std::isfinite(frequency) &&
+            frequency_keys.insert(ResponseMetadata::freq_key(frequency)).second,
+            "shared response frequencies must be finite and have distinct checkpoint identities");
+      if (rp.nuclear()) {
+        const auto nuclear_directions=rp.nuclear_directions();
+        const auto nuclear_frequencies=rp.nuclear_frequencies();
+        MADNESS_CHECK_THROW(verified_reference->spin_restricted(),
+            "open-shell nuclear response source is not implemented");
+        MADNESS_CHECK_THROW(!nuclear_directions.empty() &&
+            nuclear_directions.find_first_not_of("xyzXYZ")==std::string::npos && !nuclear_frequencies.empty(),
+            "nuclear response requires Cartesian directions and frequencies");
+        std::set<std::string> nuclear_keys;
+        for (double frequency:nuclear_frequencies)
+          MADNESS_CHECK_THROW(std::isfinite(frequency) &&
+              nuclear_keys.insert(ResponseMetadata::freq_key(frequency)).second,
+              "nuclear response frequencies must be finite and have distinct checkpoint identities");
+      }
+      double previous=std::numeric_limits<double>::infinity();
+      for (double threshold:protocol) {
+        const int order=default_k_for_thresh(threshold);
+        MADNESS_CHECK_THROW(std::isfinite(threshold) && threshold>0 && threshold<previous &&
+            protocol_keys.insert(protocol_key(threshold,order)).second,
+            "shared response protocols must be positive, strictly decreasing and have distinct checkpoint identities");
+        MADNESS_CHECK_THROW(cp.k()==-1 || cp.k()==order,
+            "shared response fixed order differs from its scheduler representation");
+        previous=threshold;
+      }
+      (void)madness::iteration::resolve(*shared_request,response_shared::model(),
+          {protocol.back(),default_k_for_thresh(protocol.back())},true);
     }
 
     // 1. Ground state from the moldft ARCHIVE (not the in-memory SCF). On a
@@ -281,7 +333,7 @@ struct molresponse_v3_lib {
     const std::string archive = source_prefix.string() + ".restartdata";
     const std::string fock_json = source_prefix.string() + ".fock.json";
     GroundState gs
-        = GroundState::from_archive(world, archive, reference_molecule);
+        = GroundState::from_archive(world, archive, reference_molecule, verified_reference, verified_pcm);
     const double thresh = FunctionDefaults<3>::get_thresh();
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
@@ -304,7 +356,9 @@ struct molresponse_v3_lib {
 
     std::vector<ResponsePlan> plans;
     auto add = [&](ResponsePropertyRequest r) {
-      r.axes = axes;
+      // The 2PA tensor needs all three half-frequency dipole legs, even when
+      // the separately requested polarizability selects only one direction.
+      r.axes = r.tpa ? std::vector<char>{'x', 'y', 'z'} : axes;
       r.protocol_thresholds = protocol;
       plans.push_back(plan_one(r));
     };
@@ -453,6 +507,21 @@ struct molresponse_v3_lib {
     in.archive_file = archive;
     in.protocols = protocol;
     in.plan = merge_plans(plans);
+    if (rp.nuclear()) {
+      ResponsePlan nuclear_plan;
+      for (char direction:rp.nuclear_directions()) {
+        const char axis=static_cast<char>(std::tolower(static_cast<unsigned char>(direction)));
+        MADNESS_CHECK_THROW(axis>='x' && axis<='z',"invalid nuclear response direction");
+        for (double frequency:rp.nuclear_frequencies()) {
+          MADNESS_CHECK_THROW(std::isfinite(frequency),"nuclear response frequency must be finite");
+          // The all-atoms sentinel is the planner's full-Raman request. These
+          // are independent nuclear states, without an implied mode analysis.
+          for(int atom=0;atom<gs.molecule().natom();++atom)
+            nuclear_plan.nuclear_fd.push_back({Perturbation::nuclear(atom,axis-'x'),frequency,protocol});
+        }
+      }
+      in.plan=merge_plans({in.plan,nuclear_plan});
+    }
     // excited.tda=false → Full (X,Y) ES bundle (default TDA).
     if (rp.excited_enable() && !rp.excited_tda())
       for (auto &e : in.plan.es) e.tda = false;
@@ -501,33 +570,6 @@ struct molresponse_v3_lib {
               "sidesteps the question entirely on multi-node runs.");
     }
     in.settings.policy.dconv_user = rp.dconv();
-    // Written targets and who decides belong to named stages (DESIGN B8); the
-    // unnamed path keeps its engine-only behavior.
-    const bool named_controls
-        = rp.is_user_defined("accuracy.bsh_residual")
-          || rp.is_user_defined("accuracy.kinetic_trace_change")
-          || rp.is_user_defined("progress.window")
-          || !rp.get<bool>(madness::convergence::use_default_criteria_key);
-    MADNESS_CHECK_THROW(!named_controls || bool(checkpoint_observer),
-                        "response accuracy, progress and convergence controls "
-                        "currently require "
-                        "a named molresponse stage");
-    if (checkpoint_observer) {
-      in.settings.policy.explicit_accuracy_targets
-          = fd_requested_accuracy_targets(rp);
-      in.settings.policy.explicit_progress_configuration
-          = fd_requested_progress(rp);
-      if (!in.settings.policy.explicit_progress_configuration.empty())
-        in.settings.policy.explicit_progress_configuration["protocol"]
-            = protocol;
-      in.settings.policy.decider
-          = rp.get<bool>(madness::convergence::use_default_criteria_key)
-                ? madness::convergence::Decider::engine_check
-                : madness::convergence::Decider::requested_criteria;
-    }
-    const int diagnostic_iterations = rp.get<int>("diagnostic.iterations_per_rung");
-    MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
-    in.settings.policy.diagnostic_iterations_per_rung = diagnostic_iterations;
     // Deck overrides for the iteration policy (2026-09-10), applied only when
     // the deck SETS them: the deck default kain=false predates the solvers'
     // KAIN-on default, so honouring it unconditionally would switch KAIN off
@@ -541,13 +583,6 @@ struct molresponse_v3_lib {
       in.settings.policy.kain_min_residual = rp.kain_min_residual();
       in.settings.es_kain_min_residual_written = true;  // D-122: it wins
     }
-    // Plateau detector (D-133): off by default; a written stall.window
-    // switches on the excited-state bundle's only (es_iteration_policies).
-    // The driven legs' policy keeps stall_window 0.
-    if (rp.is_user_defined("stall.window"))
-      in.settings.es_stall_window = rp.stall_window();
-    if (rp.is_user_defined("stall.ratio"))
-      in.settings.es_stall_ratio = rp.stall_ratio();
     in.settings.print_level = engine_print_level(rp.print_level());
     // ES initial-guess knobs (deck: response { excited.guess virtual_ao,
     // excited.guess_basis aug-cc-pvtz }). Deck default (solid_harmonics /
@@ -597,13 +632,67 @@ struct molresponse_v3_lib {
     }
 #endif
 
+    if (shared_request) {
+      MADNESS_CHECK_THROW(shared_source &&
+          (!in.plan.fd.empty() || !in.plan.es.empty()),
+          "shared response supports independent driven states");
+      std::vector<madness::iteration::Protocol> ladder;
+      for (double threshold:protocol) ladder.push_back({threshold,default_k_for_thresh(threshold)});
+      std::vector<response_shared::TaskSpec> definitions;
+      const auto add_definition=[&](const Perturbation& perturbation,double frequency) {
+        MADNESS_CHECK_THROW(perturbation.kind==Perturbation::Kind::Dipole ||
+            (perturbation.kind==Perturbation::Kind::NuclearDisplacement && gs.is_spin_restricted()),
+            "response source is not implemented for this perturbation and spin layout");
+        definitions.push_back({fd_node_id(perturbation,frequency),nlohmann::json{
+          {"perturbation",perturbation.description()},{"frequency",frequency},
+          {"layout",std::string(gs.is_spin_restricted() ? "closed_shell_" : "open_shell_") +
+              (detail_exec::is_static_freq(frequency) ? "static" : "full")},
+          {"exchange_tensor",in.settings.policy.exchange_tensor}}});
+      };
+      for (const auto& leg:in.plan.fd) add_definition(leg.pert,leg.freq);
+      for (const auto& leg:in.plan.nuclear_fd) {
+        if (leg.pert.is_all_atoms())
+          for (int atom=0;atom<gs.molecule().natom();++atom)
+            add_definition(Perturbation::nuclear(atom,leg.pert.axis),leg.freq);
+        else add_definition(leg.pert,leg.freq);
+      }
+      for(const auto& bundle:in.plan.es) {
+        const std::string model=bundle.tda?"tda":"full";
+        definitions.push_back({es_node_id(bundle.tda,bundle.n_roots),
+          {{"excited_model",model},{"layout","closed_shell_"+model},{"n_roots",bundle.n_roots}},
+          response_shared::excited_task(bundle.n_roots),"es:"+model});
+      }
+      in.settings.shared_response=std::make_shared<response_shared::Session>(world,*shared_source,
+          *shared_request,ladder,definitions,in.settings.calc_dir,std::move(response_timing));
+      // Direct sources run once at the final protocol, after B/C qualify.
+      // The binding then checks exact inputs instead of legacy convergence flags.
+      for(const auto& request:expand_vbc_requests(in.plan.vbc,static_cast<int>(gs.molecule().natom()))) {
+        StatePlan entry;entry.kind=StatePlan::Kind::fresh;
+        entry.start_thresh=protocol.back();entry.controller_owned=true;
+        in.settings.state_plans[vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c)]=entry;
+      }
+      for (const auto& [id,binding]:in.settings.shared_response->states) {
+        StatePlan entry;
+        entry.kind=binding->reusable() ? StatePlan::Kind::load :
+            binding->has_saved() ? StatePlan::Kind::resume : StatePlan::Kind::fresh;
+        const auto start=ladder.at(binding->plan().start_protocol);
+        entry.start_thresh=start.thresh;entry.controller_owned=true;
+        if (binding->reusable()) {entry.met=true;entry.loaded_key=protocol_key(start.thresh,start.k);}
+        in.settings.state_plans[id]=entry;
+      }
+    }
+
     // Deck `dalton.dir <path>` — the seed-from-directory import contract
     // (showcase W3; import-only, madness never invokes DALTON). Runs BEFORE
     // the workflow so reconcile sees the seed bundles as restart sources.
     // The GS is prepared at protocol.front() above (the documented
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
-    if (!dalton_dir.empty()) {
+    const bool need_response_import=!in.settings.shared_response ||
+        std::any_of(in.settings.shared_response->states.begin(),in.settings.shared_response->states.end(),
+          [](const auto& entry){return !entry.second->has_saved();});
+    if (!dalton_dir.empty() && need_response_import) {
+      if(in.settings.shared_response) in.settings.shared_response->timing().begin("import_guesses");
       // D-120: the import writes its seeds into the calc dir, so the
       // ground-state stamp comes first (the same gate the workflow runs): a
       // fresh dir is stamped before any state is written there, and one
@@ -627,6 +716,7 @@ struct molresponse_v3_lib {
         meta.save();
       }
       world.gop.fence();
+      if(in.settings.shared_response) in.settings.shared_response->timing().end();
     }
 
     // Pass the RESOLVED fock path through (review finding: "" here made every

@@ -595,6 +595,34 @@ void test_full_precision_lists(World& world) {
     test_same(scalar.econv(), 0.12346); // scalars: as before
 }
 
+void test_parameter_columns(World& world) {
+    struct DisplayParameters : Parameters {
+        DisplayParameters() {
+            initialize<double>("convergence.density_change.relative", 1e-5,
+                "Optional relative tolerance for the change in density between iterations.");
+        }
+    };
+    DisplayParameters parameters;
+    parameters.set_user_defined_value("econv", 1e-5);
+    const auto text = parameters.print_to_string();
+    auto line_with = [&](const std::string& key) {
+        const auto start = text.find(key + " ");
+        const auto begin = text.rfind('\n', start);
+        return text.substr(begin == std::string::npos ? 0 : begin + 1,
+            text.find('\n', start) - (begin == std::string::npos ? 0 : begin + 1));
+    };
+    const auto short_line = line_with("econv");
+    const auto long_line = line_with("convergence.density_change.relative");
+    test_same(short_line.rfind('#'), long_line.rfind('#'));
+    test_same(short_line.find("1.0000e-05"), long_line.find("1.0000e-05"));
+    // Long free-form values stay parseable; explanations wrap as comments.
+    parameters.set_user_defined_value("xc", std::string("gga_x_pbe 0.75 gga_c_pbe 1.0 hf_x 0.25"));
+    DisplayParameters restored;
+    restored.read_text(world, "mp3\n" + parameters.print_to_string() + "\nend\n");
+    test_same(restored.xc(), parameters.xc());
+    test_same(restored.get<double>("convergence.density_change.relative"), 1e-5);
+}
+
 int main(int argc, char** argv) {
 	initialize(argc, argv);
 	World world(SafeMPI::COMM_WORLD);
@@ -603,6 +631,7 @@ int main(int argc, char** argv) {
 
 	int success=0;
 	try {
+        test_parameter_columns(world);
         test_full_precision_controls(world);
         test_full_precision_lists(world);
 		test_serialize(world);

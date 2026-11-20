@@ -215,6 +215,9 @@ struct RestartPlan {
     /// rung, and its eprec, xc and nuclear correlation factor agree with this run's
     bool archive_converged = false;
     bool archive_same_hamiltonian = false;
+    /// Source occupied-orbital precision retained through virtual-only work.
+    /// This plan field is broadcast, not an addition to the native archive.
+    double archive_converged_for_thresh = 1.e10;
 
     /// true if orbitals have to be read from disk before anything else happens
     bool needs_load() const { return source != RestartSource::initial_guess; }
@@ -233,7 +236,7 @@ struct RestartPlan {
         int m = static_cast<int>(mode);
         int s = static_cast<int>(source);
         ar & m & s & iterate & protocol_start & stale_energy & warn & why & archive_nmo_alpha
-           & archive_converged & archive_same_hamiltonian;
+           & archive_converged & archive_same_hamiltonian & archive_converged_for_thresh;
         mode = static_cast<RestartMode>(m);
         source = static_cast<RestartSource>(s);
     }
@@ -342,7 +345,9 @@ inline RestartPlan plan_restart(const RestartMode mode, const RestartSources& di
     // ---- use restartdata, iterating from wherever it left off --------------
     // what the archive's header says about the orbitals it holds
     auto describe_archive = [&](const RestartMetadata& meta) {
-        plan.archive_converged = meta.converged_for_thresh < 1.0;
+        plan.archive_converged = std::isfinite(meta.converged_for_thresh)
+            && meta.converged_for_thresh > 0.0 && meta.converged_for_thresh < 1.0;
+        plan.archive_converged_for_thresh = meta.converged_for_thresh;
         plan.archive_same_hamiltonian = hamiltonian_mismatch(meta).empty();
     };
 

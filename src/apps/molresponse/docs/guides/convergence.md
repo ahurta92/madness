@@ -1,5 +1,14 @@
 # Convergence: gates, floors, the plateau detector, and what a residual buys
 
+These are legacy solver and experimental-method notes. The current shared SCF
+and driven-alpha input/output contract is documented in
+[the madqc README](../../../madqc/README.md). Public `stall.*`, `progress.*`,
+`accuracy.*`, and diagnostic stage-iteration overrides have been retired; the
+internal algorithms described below are not additional accepted madqc inputs.
+
+For a dated source audit, exact relative gates, and mapping to the shared
+four-metric interface, see the [legacy convergence record](../../../../../docs/design/madqc-legacy-convergence.md).
+
 How a molresponse solve decides it is done, what the reported residual means for
 the property, and the knobs that control it. Companion to
 [`polarizability.md`](polarizability.md) and [`excited_states.md`](excited_states.md);
@@ -16,11 +25,15 @@ dconv          = max(thresh, dconv_user)
 bsh_target     = 5 * dconv        # FD: ||x_new - x_old|| per channel
 density_target = 5 * dconv        # FD and ES: ||rho_new - rho_old||
 omega_target   = 5 * dconv        # ES: |omega_new - omega_old| per root
+rtol           = 5 * dconv        # FD: relative coefficient, also protocol-floored
 ```
 
-FD converges when every channel's BSH residual and density change are below
-target. ES converges when every active root's density change **and** eigenvalue
-step are below target — the amplitude residual is printed but not gated, because
+FD requires at least two steps and, for every channel,
+`bsh <= bsh_target + rtol * response_norm` and
+`density_change <= density_target + rtol * density_norm`. The response norm is
+the combined norm after KAIN; the density norm belongs to the step's input.
+ES requires at least two steps, with every root's density change **and** eigenvalue
+step below target — the amplitude residual is printed but not gated, because
 it jitters in near-degenerate directions long after ω (a second-order quantity)
 has settled.
 
@@ -49,13 +62,12 @@ not a derived law. The experiment that isolates the mechanism (thresh sweep at
 fixed k, k sweep at fixed thresh, tightened operator/product tolerances) is
 described in the report.
 
-## Plateau (stall) detector
+## Plateau detector (retired public controls)
 
-`stall.window` (default 0: off) and `stall.ratio` (default 0.1), deck block `response`.
-Since D-133 the detector is off by default: a solve that does not converge runs
-to maxiter and is reported unconverged. A written `stall.window` switches on the
-excited-state bundle's detector only; the driven (FD) legs have none, though the
-FD test below is kept in the code. While it is on, each iteration appends the
+The dormant implementation retains a zero `stall.window` and a `stall.ratio`
+of 0.1 internally. Neither is an accepted response input. In the earlier
+experiment, a nonzero window enabled the excited-state detector; driven legs
+had none. When enabled programmatically, each iteration appended the
 normalised gate distance
 
 ```

@@ -8,7 +8,28 @@ struct ResponseParameters : public QCCalculationParametersBase {
     static constexpr char const* tag = "response";
     [[nodiscard]] std::set<std::string> full_precision_keys() const override {
         return {"accuracy.bsh_residual", "accuracy.kinetic_trace_change",
-                "progress.minimum_relative_improvement"};
+                "progress.minimum_relative_improvement",
+                "convergence.bsh_residual", "convergence.bsh_residual.relative",
+                "convergence.density_change", "convergence.density_change.relative",
+                "convergence.energy_change", "convergence.energy_change.relative",
+                "convergence.kinetic_change", "convergence.kinetic_change.relative"};
+    }
+    static bool retired_input(const std::string& key) {
+        return key.starts_with("accuracy.") || key.starts_with("progress.") || key.starts_with("stall.") ||
+            key == "convergence.use_default_criteria" || key == "diagnostic.iterations_per_rung" ||
+            key == "dconv" || key == "excited.guess_max_iter" || key == "seed.start_rung" || key == "seed.es_warmup" || key == "excited.maxiter";
+    }
+    bool visible_input(const std::string& key) const override { return !retired_input(key); }
+    void validate_input_value(const std::string& key, const std::string& value) const override {
+        if (retired_input(key)) throw std::invalid_argument("unknown input: " + key);
+        if (key == "checkpoint.every_iterations" || key == "maxiter" ||
+            key.starts_with("convergence.bsh_residual") || key.starts_with("convergence.density_change") ||
+            key.starts_with("convergence.energy_change") || key.starts_with("convergence.kinetic_change")) {
+            std::size_t used=0;
+            const double number=std::stod(value,&used);
+            if (!std::isfinite(number) || number<0.0 || value.find_first_not_of(" \t",used)!=std::string::npos)
+                throw std::invalid_argument("invalid nonnegative input: "+key);
+        }
     }
     ResponseParameters(const ResponseParameters& other) = default;
     ResponseParameters(World& world, const commandlineparser& parser) : ResponseParameters() {
@@ -21,6 +42,15 @@ struct ResponseParameters : public QCCalculationParametersBase {
         validate_user_specified_properties();
     }
     ResponseParameters() {
+        ignore_unknown_keys = false;
+        initialize<std::vector<std::string>>("convergence.criteria", {}, "Convergence metrics; default: BSH residual, density and applicable energy change");
+        for (const auto* metric : {"bsh_residual", "density_change", "energy_change", "kinetic_change"}) {
+            initialize<double>(std::string("convergence.")+metric,
+                std::string(metric)=="kinetic_change" ? -1.0 : 5e-4,
+                std::string(metric)=="kinetic_change" ? "Absolute tolerance; set explicitly if selected" : "Absolute convergence tolerance");
+            initialize<double>(std::string("convergence.")+metric+".relative", 0.0, "Optional relative tolerance");
+        }
+        initialize<int>("checkpoint.every_iterations", 0, "Shared checkpoint interval; zero saves endpoints only");
         initialize<std::string>("prefix", "response", "prefixes your output/restart/json/plot/etc files");
         initialize<std::string>("fock_json_file", "moldft.fock.json", "data file for fock matrix");
         initialize<std::string>("archive", "../moldft.restartdata", "file to read ground parameters from");

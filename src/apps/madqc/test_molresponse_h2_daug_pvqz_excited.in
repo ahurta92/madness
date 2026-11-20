@@ -1,5 +1,8 @@
 dft
-    dconv 1e-5
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 5e-05
+    convergence.density_change 1e-05
+    convergence.energy_change 1e-05
     l 100.0
     localize "canon"
     maxiter 60
@@ -14,8 +17,7 @@ response
     excited.enable true
     excited.num_states 32
     excited.tda false
-    excited.guess_max_iter 2
-    excited.maxiter 80
+    maxiter 80
     excited.maxsub 8
     print_level 2
 end

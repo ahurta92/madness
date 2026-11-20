@@ -9,6 +9,7 @@ set(MADCHEM_HEADERS
     basis.h
     BSHApply.h
     CalculationParameters.h
+    CalculationOutcome.h
     CC2.h
     mp3.h
     ccpairfunction.h
@@ -62,7 +63,13 @@ set(MADCHEM_HEADERS
     ResponseParameters.hpp
     Restart.h
     StageCheckpoint.h
+    CheckpointRecords.h
+    CheckpointStore.h
     CheckpointRetention.h
+    IterationMetrics.h
+    IterationOutput.h
+    TimingRecords.h
+    MetricHelpers.h
     ConvergenceSettings.h
     LadderPlanner.h
     ScfContinuation.h
@@ -80,6 +87,11 @@ set(MADCHEM_HEADERS
     QCPropertyInterface.h
     SAP.h
     SCF.h
+    SCFCheckpoint.h
+    SCFScientificSettings.h
+    SCFInput.h
+    SCFRun.h
+    SCFEvaluationPolicy.h
     SCFOperators.h
     SCFProtocol.h
     TDHF.h
@@ -90,6 +102,9 @@ set(MADCHEM_HEADERS
     znemo.h
 )
 set(MADCHEM_SOURCES
+    SCFCheckpoint.cc
+    SCFScientificSettings.cc
+    SCFRun.cc
     AC.cc
     atomutil.cc
     CC2.cc
@@ -206,7 +221,7 @@ if(BUILD_TESTING)
   test_results_summary.cc
   test_exchange_owner_assign.cc test_exchange_batch_cache.cc test_restart.cc
   test_population.cc)
-  set(CHEM_TEST_SOURCES_LONG test_localizer.cc test_ccpairfunction.cc test_low_rank_function.cc)
+  set(CHEM_TEST_SOURCES_LONG test_localizer.cc test_ccpairfunction.cc test_low_rank_function.cc test_scf_evaluation.cc test_scf_iteration.cc test_scf_defaults.cc test_scf_frozen_iteration.cc test_scf_checkpoint.cc)
   if (TARGET Libxc::xc)
     list(APPEND CHEM_TEST_SOURCES_SHORT test_dft.cc )
     list(APPEND CHEM_TEST_SOURCES_LONG test_SCFOperators.cc)
@@ -230,15 +245,84 @@ if(BUILD_TESTING)
     add_mpi_tests(chem test_stage_checkpoint "2" "MADworld" "unittests;short")
     set_tests_properties(madness/test/chem/test_stage_checkpoint_mpi2/run PROPERTIES TIMEOUT 60)
   endif()
+  add_unittests(chem "test_checkpoint_store.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  set_tests_properties(madness/test/chem/test_checkpoint_store/run PROPERTIES TIMEOUT 60)
+  if(ENABLE_MPI)
+    add_mpi_tests(chem test_checkpoint_store "2" "MADworld" "unittests;short")
+    set_tests_properties(madness/test/chem/test_checkpoint_store_mpi2/run PROPERTIES TIMEOUT 60)
+  endif()
   # The planner, plan_ladder (DESIGN B6, D7): pure, a table of cases.
   add_unittests(chem "test_plan_ladder.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Who decides convergence and the settings table (DESIGN B8, B9): pure.
   add_unittests(chem "test_convergence_settings.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  # Measurement-based shared policy; pure scalar fixtures, no numerical solve.
+  add_unittests(chem "test_iteration_metrics.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  add_unittests(chem "test_metric_helpers.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  add_unittests(chem "test_optimizer_settings.cc" "MADchem" "unittests;short")
+  add_unittests(chem "test_timing_records.cc" "MADchem" "unittests;short")
+  add_unittests(chem "test_scf_settings.cc" "MADchem" "unittests;short")
+add_unittests(chem "test_scf_inputs.cc" "MADchem" "unittests;short")
+add_unittests(chem "test_scf_run.cc" "MADchem" "unittests;long")
+  add_unittests(chem "test_iteration_restart.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  add_unittests(chem "test_scf_evaluation_policy.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Checkpoint cadence and retention decisions (DESIGN A3): pure.
   add_unittests(chem "test_checkpoint_retention.cc" "MADworld" "unittests;short")
   # the rotating operand only moves between ranks, so the distributed path needs more than one
   add_mpi_tests(chem test_exchange_asymmetric "2" "MADchem;MADgtest" "unittests;short")
   add_unittests(chem "${CHEM_TEST_SOURCES_LONG}" "MADchem;MADgtest" "unittests;long")
+  set_tests_properties(madness/test/chem/test_scf_evaluation/run PROPERTIES TIMEOUT 600)
+  set_tests_properties(madness/test/chem/test_scf_iteration/run PROPERTIES TIMEOUT 600)
+  set_tests_properties(madness/test/chem/test_scf_defaults/run PROPERTIES TIMEOUT 600)
+  set_tests_properties(madness/test/chem/test_scf_frozen_iteration/run PROPERTIES TIMEOUT 600)
+  set_tests_properties(madness/test/chem/test_scf_checkpoint/run PROPERTIES
+    LABELS "unittests;medium" TIMEOUT 600)
+  foreach(regression IN ITEMS frozen empty occupations lifetime)
+    add_test(NAME madness/test/chem/test_scf_frozen_${regression}/run
+      COMMAND $<TARGET_FILE:test_scf_frozen_iteration> --review ${regression})
+    set_tests_properties(madness/test/chem/test_scf_frozen_${regression}/run PROPERTIES
+      LABELS "unittests;short" TIMEOUT 120)
+  endforeach()
+  # Curated scientific controls use unchanged QC decks/references. Coarse Li is
+  # intentionally incomplete; refining the representation must meet the request.
+  foreach(variant IN ITEMS hybrid water coarse refined kinetic invalid_stage)
+    if(NOT TARGET Libxc::xc AND variant MATCHES "^(hybrid|coarse|refined)$")
+      continue()
+    endif()
+    if(variant STREQUAL "hybrid")
+      set(default_args --case=scf_he_pbe0)
+    elseif(variant STREQUAL "water")
+      set(default_args --case=scf_h2o_hf)
+    elseif(variant STREQUAL "coarse")
+      set(default_args --case=scf_li_tpss --expect-limit=true)
+    elseif(variant STREQUAL "refined")
+      set(default_args --case=scf_li_tpss --protocol=1e-6)
+    elseif(variant STREQUAL "kinetic")
+      set(default_args --case=scf_he_hf --kinetic-required=true)
+    else()
+      set(default_args --case=scf_he_hf --invalid-stage=true)
+    endif()
+    add_test(NAME madness/test/chem/test_scf_defaults_${variant}/run
+      COMMAND $<TARGET_FILE:test_scf_defaults> ${default_args})
+    set_tests_properties(madness/test/chem/test_scf_defaults_${variant}/run PROPERTIES
+      LABELS "unittests;verylong" TIMEOUT 600)
+  endforeach()
+  if(ENABLE_MPI)
+    add_mpi_tests(chem test_scf_evaluation "2" "MADchem;MADgtest" "unittests;verylong")
+    add_mpi_tests(chem test_scf_iteration "2" "MADchem;MADgtest" "unittests;verylong")
+    add_mpi_tests(chem test_scf_run "2" "MADchem" "unittests;long")
+    set_tests_properties(madness/test/chem/test_scf_run_mpi2/run PROPERTIES
+      TIMEOUT 600 ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
+    add_mpi_tests(chem test_scf_checkpoint "2" "MADchem;MADgtest" "unittests;long")
+    set_tests_properties(madness/test/chem/test_scf_checkpoint_mpi2/run PROPERTIES
+      TIMEOUT 600 ENVIRONMENT "MAD_NUM_THREADS=2;OMPI_MCA_hwloc_base_binding_policy=none")
+    add_mpi_tests(chem test_scf_frozen_iteration "2" "MADchem;MADgtest" "unittests;long")
+    set_tests_properties(madness/test/chem/test_scf_frozen_iteration_mpi2/run PROPERTIES
+      TIMEOUT 600 ENVIRONMENT "MAD_NUM_THREADS=2;OMPI_MCA_hwloc_base_binding_policy=none")
+    set_tests_properties(madness/test/chem/test_scf_iteration_mpi2/run PROPERTIES
+      TIMEOUT 600 ENVIRONMENT "MAD_NUM_THREADS=2;OMPI_MCA_hwloc_base_binding_policy=none")
+    set_tests_properties(madness/test/chem/test_scf_evaluation_mpi2/run PROPERTIES
+      TIMEOUT 600 ENVIRONMENT "MAD_NUM_THREADS=2;OMPI_MCA_hwloc_base_binding_policy=none")
+  endif()
 
   # Create other test executables not included in the unit tests ... consider these executables (unlike unit tests)
   if (NOT MADNESS_BUILD_LIBRARIES_ONLY)

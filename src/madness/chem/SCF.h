@@ -40,7 +40,10 @@
 #ifndef MADNESS_CHEM_SCF_H__INCLUDED
 #define MADNESS_CHEM_SCF_H__INCLUDED
 
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/FunctionResidual.h>
+#include <madness/chem/CalculationOutcome.h>
+#include <madness/chem/CheckpointRetention.h>
 #include <memory>
 
 #include<madness/chem/molecular_functors.h>
@@ -206,6 +209,8 @@ public:
 class SCF {
 public:
     std::filesystem::path work_dir;
+    /// Shared records may live above engine diagnostics. Empty uses work_dir.
+    std::filesystem::path checkpoint_root;
     std::shared_ptr<PotentialManager> potentialmanager;
     std::shared_ptr<GTHPseudopotential<double> > gthpseudopotential;
     Molecule molecule;
@@ -254,6 +259,12 @@ public:
     double converged_for_dconv=1.e10;    ///< mos are converged for this density
     double converged_for_tconv=1.e10;    ///< derivatives of mos are converged for this threshold
 
+    /// Actual solve or reuse outcome in this invocation. Workflow handoff only;
+    /// not serialized or used as restart evidence.
+    std::optional<CalculationOutcome> last_calculation_outcome;
+    std::optional<checkpoint::GenerationRef> last_checkpoint;
+    bool last_load_padded = false;
+
     /// what amo/bmo actually hold, recorded in the restartdata header
     ///
     /// Representation::mo for moldft's orbitals. Nemo drives an SCF rather than
@@ -299,10 +310,9 @@ public:
         print("You can perform a simple calculation by running\n");
         print("moldft --geometry=h2o.xyz\n");
         print("provided you have an xyz file in your directory.\n\n");
-        print("To see what a restart archive holds -- geometry, k, the precision it");
-        print("converged to, whether it is moldft or nemo orbitals -- without starting");
-        print("a calculation:\n");
-        print("moldft --restart_info=<prefix>\n");
+        print("To inspect a shared SCF checkpoint and its measured metrics");
+        print("without starting a calculation:\n");
+        print("moldft --restart_info=<application-directory>\n");
 
     }
 
@@ -364,7 +374,7 @@ public:
         mask = functionT(factoryT(world).f(mask3).initial_level(4).norefine());
         if (world.rank() == 0 and param.print_level() > 1) {
             print("\nSolving NDIM=", NDIM, " with thresh", thresh, "    k",
-                  FunctionDefaults<NDIM>::get_k(), "   conv", std::max(thresh, param.dconv()), "\n");
+                  FunctionDefaults<NDIM>::get_k(), "\n");
         }
     }
 
@@ -426,17 +436,18 @@ public:
 
     struct IterationCheckpoint {
         int iteration;
-        double threshold, input_energy, density_alpha, density_beta, previous_bsh_residual;
+        double threshold, input_energy, density_alpha, density_beta, bsh_residual;
         bool has_previous, final_rotation;
         // Consecutive evaluation samples within this solve/protocol rung only.
         // Diagnostic evidence; these do not add energy or kinetic stopping gates.
         double input_kinetic, energy_change, kinetic_change;
-        // A genuine iteration-input comparison, before any final rotation.
+        // The preceding comparable evaluated state, retained through endpoint
+        // preparation rather than replaced by the pre-rotation state.
         // Densities are independent functions and remain immutable here.
         functionT comparison_alpha, comparison_beta;
         double comparison_energy, comparison_kinetic;
         int comparison_iteration;
-        FunctionResidualBlocks previous_function_residuals;
+        FunctionResidualBlocks function_residuals;
         // Diagnostic charge/spin field differences between consecutive inputs.
         // Available only with has_previous; they do not change the SCF gates.
         double density_charge = 0.0, density_spin = 0.0;
@@ -457,10 +468,59 @@ public:
     /// Evaluate current closed-shell, all-electron HF orbitals without an update.
     /// This diagnostic does not touch acceleration history or convergence flags.
     RestrictedHFEvaluation evaluate_restricted_hf(World& world);
-    /// Optional collective observer. Called after an update or final rotation;
-    /// energy/density evidence describes the iteration input, not the saved output.
-    /// Installing it changes neither the solver equations nor its stopping test.
+    /// Numerical work owned by SCF, measured on its current prepared orbitals.
+    /// Potential products are scratch consumed by evaluate_residual; the Fock
+    /// matrices remain available for endpoint preparation and analysis.
+    struct OrbitalEvaluation {
+        functionT alpha_density, beta_density;
+        vecfuncT potential_alpha, potential_beta;
+        tensorT fock_alpha, fock_beta;
+        double energy = 0.0, kinetic = 0.0;
+        std::map<std::string, double> energies;
+        FunctionResidualBlocks kinetic_diagonal;
+    };
+    struct OrbitalResidual {
+        vecfuncT functions;
+        double maximum = 0.0;
+        FunctionResidualBlocks components;
+    };
+    OrbitalEvaluation evaluate_orbitals(World& world, bool kinetic_diagonal = false);
+    OrbitalResidual evaluate_residual(World& world, OrbitalEvaluation& evaluation);
+    /// Final rotations only; callers must rebuild measurements afterward.
+    void prepare_final_orbitals(World& world, const OrbitalEvaluation& evaluation);
+    /// Optional collective observer, before advancement or after final preparation.
+    /// Every measurement describes the current functions, which may be archived.
+    /// iteration counts completed main updates; zero is the prepared initial state.
     std::function<void(World&, const SCF&, const IterationCheckpoint&)> checkpoint_observer;
+
+    /// App-owned preceding physical state. A new solve/protocol starts without
+    /// this history; no distributed functions enter the shared controller.
+    struct OrbitalComparison {
+        iteration::IterationInfo info;
+        functionT alpha_density, beta_density;
+        double energy = 0.0, kinetic = 0.0;
+    };
+    struct IterationControl {
+        iteration::ResolvedSettings settings;
+        iteration::ExpectedTask task;
+        std::string attempt_id;
+        std::size_t previous_updates = 0; // previous attempts at this protocol, cadence only
+        /// Collective, after the definitive evaluation, before advancement.
+        /// It may publish a native archive when decision.checkpoint is true.
+        std::function<void(World&, const SCF&, const iteration::IterationMetrics&,
+                           const iteration::Decision&, const iteration::Progress&)> observer;
+        bool preparing_virtuals = false; // extra membership, separate nv_its allowance
+        /// Existing measured intervals, including any update, independent of print level.
+        std::function<void(const iteration::IterationInfo&, const iteration::IterationTiming&)> timing_observer;
+    };
+    /// SCF model for the active solve. Frozen occupied changes are inapplicable.
+    /// Explicit requests override defaults; only intermediate protocols have floors.
+    iteration::ModelMetrics iteration_model() const;
+    static std::map<iteration::Metric, std::string> iteration_metric_set();
+    static nlohmann::json iteration_metric_definitions();
+    iteration::IterationMetrics measure_iteration(World& world, const OrbitalEvaluation& state,
+        const OrbitalResidual& residual, const iteration::IterationInfo& info,
+        const std::optional<OrbitalComparison>& previous = std::nullopt) const;
 
     /// @param[in]	allow_fewer	pad the virtuals from the atomic guess when the archive
     ///							holds fewer orbitals than requested; otherwise that throws
@@ -524,6 +584,11 @@ public:
     /// this object at every call. Each spin's virtual block is canonicalized,
     /// BSH-updated with KAIN, and re-orthogonalized against its occupieds.
     void solve_virtuals(World& world);
+    /// Shared virtual-task assessment. The caller must first qualify the fixed
+    /// occupied reference and include its exact source in checkpoint inputs.
+    /// One "virtuals" subject covers both active spin blocks; occupied energy
+    /// remains a quantity of that reference, not evidence from this solve.
+    iteration::Decision solve_virtuals(World& world, const IterationControl& control);
 
     /// KAIN: append (vm, rm) to the subspace and return the mixing coefficients
     ///
@@ -660,6 +725,7 @@ public:
 
     /// canonicalize the virtual orbitals: diagonalize the virtual-virtual Fock
     /// block and rotate psi, Vpsi and the occupied-virtual coupling in phase.
+    /// Vpsi may be empty when the caller will rebuild products after preparation.
     /// Occupied orbitals are untouched. No-op when there are no virtuals or,
     /// unless forced, when the rotation is near-identity.
     /// @param[in]	nocc	number of occupied orbitals; the block [nocc, nmo) is canonicalized
@@ -679,12 +745,10 @@ public:
     void rotate_subspace(World& world, const distmatT& U, subspaceT& subspace,
                          int lo, int nfunc, double trantol) const;
 
-    void update_subspace(World& world,
-                         vecfuncT& Vpsia, vecfuncT& Vpsib,
-                         tensorT& focka, tensorT& fockb,
-                         subspaceT& subspace, tensorT& Q,
-                         double& bsh_residual, double& update_residual,
-                         FunctionResidualBlocks* components = nullptr);
+    /// Advance using the raw residual already evaluated on these orbitals.
+    /// No BSH application, convergence decision or publication occurs here.
+    void update_subspace(World& world, const OrbitalResidual& residual,
+                         subspaceT& subspace, tensorT& Q);
 
     /// perform step restriction following the KAIN solver
 
@@ -711,11 +775,21 @@ public:
     /// rung's maxiter from a per-rung list (named stages, DESIGN B5);
     /// otherwise maxiter applies. Either way it counts this run only.
     void solve(World& world, std::optional<int> iteration_cap = std::nullopt);
+    /// Additive shared-controller entry point. The caller validates scientific
+    /// context, prepares orbitals/operators and resolves settings for this rung.
+    /// No legacy stopping gate or checkpoint observer runs on this path.
+    iteration::Decision solve(World& world, const IterationControl& control);
 
     void output_calc_info_schema() const;
 
     void output_scf_info_schema(const std::map<std::string, double> &vals,
                                 const tensorT &dipole_T) const;
+
+private:
+    void validate_iteration_control(const IterationControl& control, const std::string& subject) const;
+    std::optional<iteration::Decision> solve_virtuals_impl(World& world, const IterationControl* control);
+    std::optional<iteration::Decision> solve_impl(World& world, std::optional<int> iteration_cap,
+                                                 const IterationControl* control);
 
 };
 
@@ -748,7 +822,11 @@ public:
                                          proto);
     }
 
-    double value(const Tensor<double>& x) {
+    double value(const Tensor<double>& x) override;
+
+    // Kept for the separate named-stage implementation until its agreed
+    // retirement. Public workflow and standalone paths use the shared session.
+    double legacy_value(const Tensor<double>& x) {
         for (const auto* metric : {"bsh_residual", "kinetic_trace_change"})
             MADNESS_CHECK_THROW(!calc.param.is_user_defined(std::string("accuracy.") + metric) ||
                                 bool(calc.checkpoint_observer),
@@ -851,6 +929,11 @@ public:
         calc.ao = calc.project_ao_basis(world, calc.aobasis);
 
         if (not plan.iterate) {
+            const bool qualified = plan.archive_same_hamiltonian
+                && calc.orbital_metadata().is_converged_to(target_thresh, target_dconv);
+            calc.last_calculation_outcome = CalculationOutcome{
+                qualified, !plan.archive_same_hamiltonian ? "reference_settings_changed"
+                           : qualified ? "saved_criteria_met" : "criteria_unmet"};
             if (world.rank() == 0) print("not solving the SCF equations:", plan.why);
             calc.make_nuclear_potential(world);
             // The energy is the archive's, taken from its header. Not
@@ -931,6 +1014,9 @@ public:
                     // current_energy when it reprojects (a plan starting below the
                     // archive's rung), so take the header value the plan kept.
                     calc.current_energy = plan.stale_energy;
+                    // The occupied source stays fixed even when load/project
+                    // invalidates the combined occupied+virtual completion.
+                    calc.converged_for_thresh = plan.archive_converged_for_thresh;
                     calc.solve_virtuals(world);
                 } else if (const auto cap = named_rung_cap(proto))
                     calc.solve(world, cap);
@@ -949,6 +1035,7 @@ public:
 
     madness::Tensor<double> gradient(const Tensor<double>& x) {
         value(x); // Ensures DFT equations are solved at this geometry
+        MADNESS_CHECK_THROW(last_complete(), "gradient requires converged SCF orbitals");
 
         functionT rho = calc.make_density(world, calc.aocc, calc.amo);
         functionT brho = rho;
@@ -962,6 +1049,7 @@ public:
 
     void energy_and_gradient(const Molecule& molecule, double& energy, Tensor<double>& gradient) {
         value(molecule.get_all_coords().flat()); // Ensures DFT equations are solved at this geometry
+        MADNESS_CHECK_THROW(last_complete(), "gradient requires converged SCF orbitals");
 
         functionT rho = calc.make_density(world, calc.aocc, calc.amo);
         functionT brho = rho;
@@ -971,6 +1059,10 @@ public:
 
         energy = calc.current_energy;
         gradient = calc.derivatives(world, rho);
+    }
+
+    bool last_complete() const {
+        return calc.last_calculation_outcome && calc.last_calculation_outcome->complete;
     }
 
     void output_calc_info_schema() {

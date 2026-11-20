@@ -10,6 +10,7 @@
 $$\begin{pmatrix} V + J - K & c\, \boldsymbol{\sigma} \cdot \mathbf{p} \\ c\, \boldsymbol{\sigma} \cdot \mathbf{p} & V + J - K - 2mc^2 \end{pmatrix} \begin{pmatrix} \psi^L \\ \psi^S \end{pmatrix} = \varepsilon \begin{pmatrix} \psi^L \\ \psi^S \end{pmatrix}$$
 
 Key features:
+
 - **Initial Guess from `moldft`**: Initializes 4-component spinors from a converged non-relativistic ground-state calculation in `moldft` via the kinetic balance condition:
   $$\psi^L = \phi_{\text{NR}}, \quad \psi^S \approx \frac{-i}{2c} (\boldsymbol{\sigma} \cdot \boldsymbol{\nabla}) \phi_{\text{NR}}$$
 - **BSH Integral Operator Formulation**: Employs the bound-state Helmholtz (BSH) integral representation to solve for orbital updates without finite-difference grid artifacts.
@@ -83,7 +84,7 @@ MAD_NUM_THREADS=20 ./src/apps/dirac/DFdriver
 
 By default, `DFdriver` reads `input` in the current working directory. You can specify a different input file via:
 ```bash
-MAD_NUM_THREADS=20 ./src/apps/dirac/DFdriver -input my_input
+MAD_NUM_THREADS=20 ./src/apps/dirac/DFdriver --input=my_input
 ```
 
 ---
@@ -111,7 +112,7 @@ All parameters are specified within the `DiracFock ... end` block. Lines startin
 | `restart` | flag | `false` | Resume from a previous `DFdriver` run rather than from `moldft`. |
 | `savefile <file>`| `string` | `DFrestartdata`| Name of the archive to write restart data to. |
 | `no_save` | flag | `false` | Disable saving restart data at the end of each iteration. |
-| `lb_iter <n>` | `int` | `20` | Interval (in iterations) between adaptive load balancing passes. |
+| `lb_iter <n>` | `int` | `20` | Number of initial unconverged SCF iterations during which load balancing runs (iteration_number <= lb_iter). |
 | `speed_of_light`| `double` | `137.035999...`| Speed of light in atomic units (CODATA 2022). |
 | `bohr_rad <val>` | `double` | `52917.72...`  | Bohr radius in fm (CODATA 2022). |
 | `Krestricted` | flag | `false` | Enforce time-reversal symmetry (Kramers pairs) for closed-shell systems. Recommended for closed shells. |
@@ -143,7 +144,8 @@ continued with `restart` and a larger `max_iter` rather than started over.
 In relativistic electronic structure, time-reversal symmetry ($\mathcal{K}$) plays the role of spin-degeneracy in non-relativistic closed-shell systems. Each spatial orbital splits into a Kramers doublet $(\psi, \bar{\psi})$, where the time-reversed partner is:
 $$\bar{\psi} = \mathcal{K} \psi = \begin{pmatrix} -\psi_1^* \\ \psi_0^* \\ -\psi_3^* \\ \psi_2^* \end{pmatrix}$$
 
-By specifying `Krestricted` in the input deck, `DFdriver`:
+The performance observations below are historical benchmarks; they depend on the system, numerical settings, and execution environment and were not remeasured during this documentation bootstrap. By specifying `Krestricted` in the input deck, `DFdriver`:
+
 - **Reduces computational cost significantly**: Solves and iterates over only $N_{\text{pairs}}$ independent 4-spinors (half the total electrons). This yields ~2× fewer 3D Poisson solves in exchange ($N(N+1)$ vs $2N^2+N$), an exact 2× reduction in BSH operator applications, and 50% lower memory usage compared to an unrestricted calculation.
 - **Generates time-reversed partners algebraically**: $\bar{\psi}$ is constructed on the fly without numerical integration, and the quaternionic Fock matrix is formed and diagonalized directly.
 - **Preserves Kramers degeneracies**: Exact partner degeneracy ($\varepsilon_i = \varepsilon_{\bar{i}}$) is maintained to $< 10^{-6}$ Ha.
@@ -221,3 +223,59 @@ DiracFock
   savefile my_df_checkpoint
 end
 ```
+
+<!-- EGM architecture contract: begin -->
+
+## Architecture overview
+
+Active four-component Dirac–Fock application with versioned restart/convergence helpers and dormant Douglas–Kroll research code.
+
+## Interface
+
+- DFdriver builds DFdriver.cc, DF.cc, fcwf.cc and links MADchem; DF::solve dispatches job=0 occupied solve. [CMakeLists.txt:add_mad_executable](./CMakeLists.txt) [DF.cc:DF::solve](./DF.cc)
+- DFParameters reads DiracFock block; InitParameters reads moldft or DF archive; Fcwf supplies four-component arithmetic, density, KramersPair, transform and KAIN allocator. [DFParameters.h:DFParameters](./DFParameters.h) [InitParameters.h:InitParameters](./InitParameters.h) [fcwf.h:Fcwf](./fcwf.h)
+- DKops.h,relops.cc,rk.cc are dormant experimental relativistic operator/fitting/driver sources, excluded from DFdriver. [CMakeLists.txt:add_mad_executable](./CMakeLists.txt) [DKops.h:Ebar](./DKops.h) [relops.cc:bshrel_fit](./relops.cc) [rk.cc:main](./rk.cc)
+
+## Invariants
+
+- DF construction is collective; min_iter<=max_iter always checked; dconv and thresh_mul inherit final thresh unless explicitly set. [DF.cc:DF::DF](./DF.cc) [DFParameters.h:DFParameters::read](./DFParameters.h)
+- Fcwf stores small components multiplied by c, so norms/inner products/densities divide their contribution by c²; assignment is shallow and copy(Fcwf) is explicit deep copy. [fcwf.cc:Fcwf::norm2](./fcwf.cc) [fcwf.cc:Fcwf::operator=](./fcwf.cc) [fcwf.cc:copy](./fcwf.cc)
+- DF restart version=1 required; rank zero probes then broadcasts version so all ranks reject together; stored Kramers restriction must match request; moldft archives representing nemo/znemo are rejected. [DFRestart.h:DF_RESTART_VERSION](./DFRestart.h) [InitParameters.h:InitParameters::read](./InitParameters.h)
+- bsh_residual requires max residual<=thresh; combined criterion additionally requires relative energy change<=thresh and density change<=dconv*nelec, with residual<=100*thresh; max_iter exit is explicitly unconverged. [DFConvergence.h:df_iteration_converged](./DFConvergence.h) [DF.cc:DF::solve_occupied](./DF.cc)
+
+## Side Effects
+
+- Reads input and orbital archives, sets FunctionDefaults and reprojects to requested k, balances orbital/potential trees, saves DFrestartdata (or savefile) each iteration unless no_save. [DF.cc:DF::DF](./DF.cc) [DF.cc:DF::saveDF](./DF.cc) [DF.cc:DF::solve_occupied](./DF.cc)
+- Prints orbital residuals, energies/components, radial expectation, coefficient counts/depth and timing; lineplot writes large_component_lineplots and small_component_lineplots. [DF.cc:DF::iterate](./DF.cc) [DF.cc:DF::solve](./DF.cc)
+- Dormant DKops factories read absolute /gpfs/home/jscanderson/DKproject CSV paths and exit on missing data; relops includes external ../../../../mpfrc++-3/mpreal.h; rk writes logarithmic plots. [DKops.h:Pbar](./DKops.h) [relops.cc:bshrel_omega](./relops.cc) [rk.cc:logplot](./rk.cc)
+
+## Source files
+
+| File | Role |
+| --- | --- |
+| [DF.h](./DF.h) | DF solver API. |
+| [DFConvergence.h](./DFConvergence.h) | Pure criterion/termination reporting. |
+| [DFParameters.h](./DFParameters.h) | Input parsing and normalization. |
+| [DFRestart.h](./DFRestart.h) | Restart format validation. |
+| [InitParameters.h](./InitParameters.h) | Archive import/kinetic-balance initial spinors; readnw explicitly marked obsolete. |
+| [DFdriver.cc](./DFdriver.cc) | Active CLI. |
+| [DF.cc](./DF.cc) | SCF algorithm, energies, restart and plot effects. |
+| [fcwf.h](./fcwf.h) | Spinor and allocator declarations. |
+| [fcwf.cc](./fcwf.cc) | Scaled-small-component spinor operations. |
+| [DKops.h](./DKops.h) | Dormant hard-coded CSV operator factories. |
+| [relops.cc](./relops.cc) | Dormant Gaussian expansion fitting using MPFR. |
+| [rk.cc](./rk.cc) | Dormant one-electron relativistic kinetic/DK prototype. |
+
+## Verification
+
+Commands are run from the repository root against an existing configured build. Replace `<build-dir>` with that build directory.
+
+```sh
+cmake --build <build-dir> --target DFdriver test_dirac
+```
+
+```sh
+ctest --test-dir <build-dir> -R "madness/test/dirac/test_dirac/run"
+```
+
+<!-- EGM architecture contract: end -->

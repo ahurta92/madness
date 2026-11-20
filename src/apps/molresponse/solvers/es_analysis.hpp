@@ -52,6 +52,8 @@ namespace molresponse_v3 {
 /// Per-root transition properties (closed-shell). Mirrors the data the
 /// legacy TDDFT::analysis printed for one excited-state root.
 struct ESRootAnalysis {
+  bool dipole_available = false;
+  bool quadrupole_available = false;
   double                                omega = 0.0;
   std::array<double, 3>                 dipole{{0.0, 0.0, 0.0}};
   double                                oscillator = 0.0;
@@ -151,6 +153,7 @@ analyze_es_bundle(madness::World &world,
                    (a.dipole[0] * a.dipole[0] + a.dipole[1] * a.dipole[1] +
                     a.dipole[2] * a.dipole[2]) *
                    a.omega;
+    a.dipole_available = true;
   }
   if (probe <= 3) return out;
 
@@ -172,6 +175,7 @@ analyze_es_bundle(madness::World &world,
     }
     for (auto &row : a.quadrupole)
       for (auto &q : row) q *= std::sqrt(2.0);
+    a.quadrupole_available = true;
   }
   return out;
 }
@@ -196,12 +200,16 @@ print_es_analysis(madness::World &world,
            a.omega * 27.2114);
     print("\n   --------------------------------------------");
 
+    if (a.dipole_available) {
     print("\n   Transition Dipole Moments (a.u., e a0)");
     printf("   X: %7.8f   Y: %7.8f   Z: %7.8f\n", a.dipole[0], a.dipole[1],
            a.dipole[2]);
 
     printf("\n   Dipole Oscillator Strength: %7.8f\n", a.oscillator);
 
+    } else print("   Transition dipole/oscillator strength: unavailable (analysis diagnostic)");
+
+    if (a.quadrupole_available) {
     print("\n   Transition Quadrupole Moments (a.u., e a0^2; Cartesian r_a r_b, "
           "not traceless)");
     printf("   %16s %16s %16s\n", "X", "Y", "Z");
@@ -211,6 +219,8 @@ print_es_analysis(madness::World &world,
            a.quadrupole[1][2]);
     printf("   Z %16.8f %16.8f %16.8f\n", a.quadrupole[2][0], a.quadrupole[2][1],
            a.quadrupole[2][2]);
+
+    } else print("   Transition quadrupole: unavailable (analysis diagnostic)");
 
     // Dominant contributions: top 5 occupied orbitals by |x_j| (legacy order).
     std::vector<size_t> order(n);
@@ -312,12 +322,16 @@ es_analysis_to_json(const std::vector<ESRootAnalysis> &an, bool tda,
     }
     r["omega"]                 = a.omega;
     r["omega_ev"]              = a.omega * 27.2114;
+    if (a.dipole_available) {
     r["transition_dipole"]     = {a.dipole[0], a.dipole[1], a.dipole[2]};
     r["oscillator_strength"]   = a.oscillator;
+    } else r["availability"]["transition_dipole_and_strength"] = "analysis diagnostic";
+    if (a.quadrupole_available) {
     r["transition_quadrupole"] = {
         {a.quadrupole[0][0], a.quadrupole[0][1], a.quadrupole[0][2]},
         {a.quadrupole[1][0], a.quadrupole[1][1], a.quadrupole[1][2]},
         {a.quadrupole[2][0], a.quadrupole[2][1], a.quadrupole[2][2]}};
+    } else r["availability"]["transition_quadrupole"] = "analysis diagnostic";
     r["occupied_weights_x"]    = a.orbital_norms;
     if (!tda && i < y_norms.size()) r["occupied_weights_y"] = y_norms[i];
     roots.push_back(r);

@@ -7,6 +7,9 @@
 // Pure: no World, MPI, archives or files. The adapter reads the manifests and
 // the storage layer deletes; these functions only decide.
 
+#include <compare>
+#include <map>
+#include <stdexcept>
 #include <set>
 #include <string>
 #include <vector>
@@ -49,6 +52,36 @@ generations_to_delete(const std::vector<std::string>& generations,
     if (generation != latest && !referenced.contains(generation))
       doomed.push_back(generation);
   return doomed;
+}
+
+} // namespace madness::checkpoint
+
+namespace madness::checkpoint {
+
+struct GenerationRef {
+    std::string calculation_id, task_id, generation;
+    auto operator<=>(const GenerationRef&) const = default;
+};
+using DependencyGraph = std::map<GenerationRef, std::vector<GenerationRef>>;
+
+/// Only supplied live roots keep archives. A complete, acyclic dependency graph
+/// must be established before any deletion starts. Historical source maps are
+/// deliberately not roots. No filesystem mutations occur in this operation.
+inline std::set<GenerationRef> retained_generations(const std::set<GenerationRef>& roots,
+                                                   const DependencyGraph& graph) {
+    std::set<GenerationRef> retained, visiting;
+    // NOLINTNEXTLINE(misc-no-recursion) -- visited set bounds traversal and detects cycles
+    const auto visit = [&](const auto& self, const GenerationRef& ref) -> void {
+        if (retained.contains(ref)) return;
+        if (!visiting.insert(ref).second) throw std::runtime_error("checkpoint: cyclic live dependency");
+        const auto entry = graph.find(ref);
+        if (entry == graph.end()) throw std::runtime_error("checkpoint: missing live dependency");
+        for (const auto& dependency : entry->second) self(self, dependency);
+        visiting.erase(ref);
+        retained.insert(ref);
+    };
+    for (const auto& root : roots) visit(visit, root);
+    return retained;
 }
 
 } // namespace madness::checkpoint

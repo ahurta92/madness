@@ -36,6 +36,7 @@
 
 
 #include <madness/chem/DensityChanges.h>
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/ExplicitCriteria.h>
 #include <madness/chem/FunctionMetricSummary.h>
 #include <madness/chem/FunctionResidualReport.h>
@@ -45,6 +46,9 @@
 #include <madness/world/ranks_and_hosts.h>
 #include <madness.h>
 #include <madness/chem/SCF.h>
+#include <madness/chem/SCFEvaluationPolicy.h>
+#include <madness/chem/MetricHelpers.h>
+#include <limits>
 #include <madness/chem/KineticEnergy.h>
 #include <madness/chem/Restart.h>
 #include <madness/chem/StageCheckpoint.h>
@@ -325,7 +329,7 @@ RestartMetadata SCF::orbital_metadata() const {
 
 std::string SCF::write_mos(World& world, const std::string& basename,
                            const RestartMetadata& meta) const {
-    archive::ParallelOutputArchive<> ar(world, basename, param.get<int>("nio"));
+    archive::ParallelOutputArchive<> ar(world, native_archive_name(basename), param.get<int>("nio"));
     meta.write(ar);
     ar & static_cast<unsigned int>(amo.size());
     ar & aeps & aocc & aset;
@@ -361,6 +365,7 @@ void SCF::save_mos(World& world) {
 }
 
 void SCF::load_mos(World& world, const bool allow_fewer) {
+    last_load_padded = false;
     PROFILE_MEMBER_FUNC(SCF);
     //        const double trantol = vtol / std::min(30.0, double(param.nalpha));
 
@@ -369,7 +374,7 @@ void SCF::load_mos(World& world, const bool allow_fewer) {
     amo.clear();
     bmo.clear();
 
-    archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(world, param.prefix()+".restartdata");
+    archive::ParallelInputArchive<archive::BinaryFstreamInputArchive> ar(world, native_archive_name(param.prefix()+".restartdata"));
 
     // The header, then one block of orbitals per spin. RestartMetadata::read
     // accepts version 4 and 5, so archives written before the header carried a
@@ -472,6 +477,7 @@ void SCF::load_mos(World& world, const bool allow_fewer) {
     // convergence claim no longer describes what we hold; the energy still does,
     // it belongs to the occupied orbitals alone
     const bool padded = pad_virtuals_from_guess(world);
+    last_load_padded = padded;
 
     // if everything worked out, set convergence parameters
     if (needs_redo) {
@@ -1385,16 +1391,23 @@ bool SCF::pad_virtuals_from_guess(World& world) {
     initial_guess_ao_eigenvectors(world, c, e);
     const size_t ncore = (molecule.parameters.core_type() != "none") ? molecule.n_core_orb_all() : 0;
 
-    // Append the guess eigenvectors above the loaded block and orthogonalize them
-    // against the loaded orbitals, which orthonormalize(nocc) leaves untouched.
+    // Append guess eigenvectors above the loaded block. Frozen references must
+    // retain their exact functions: orthonormalize also normalizes its inputs.
     auto pad = [&](vecfuncT& mo, tensorT& eps, tensorT& occ, std::vector<int>& set, const size_t nmo) {
         const size_t nload = mo.size();
         if (nload >= nmo) return;
         MADNESS_CHECK_THROW(ncore + nmo <= ao.size(), "too few AO basis functions for the requested number of orbitals");
         MADNESS_CHECK_THROW(size_t(eps.size()) >= nload && size_t(occ.size()) >= nload, "restart archive eps/occ shorter than its orbitals");
         vecfuncT guess = transform(world, ao, c(_, Slice(ncore + nload, ncore + nmo - 1)), vtol, true);
-        mo.insert(mo.end(), guess.begin(), guess.end());
-        orthonormalize(world, mo, int(nload));
+        if (param.freeze_occupied()) {
+            auto work = copy(world, mo);
+            work.insert(work.end(), guess.begin(), guess.end());
+            orthonormalize(world, work, int(nload));
+            mo.insert(mo.end(), work.begin() + static_cast<vecfuncT::difference_type>(nload), work.end());
+        } else {
+            mo.insert(mo.end(), guess.begin(), guess.end());
+            orthonormalize(world, mo, int(nload));
+        }
         const long n = long(nmo);
         tensorT eps_new(n), occ_new(n);
         for (size_t j = 0; j < nload; ++j) { eps_new[j] = eps[j]; occ_new[j] = occ[j]; }
@@ -1995,6 +2008,122 @@ vecfuncT SCF::apply_bsh_plain(World& world, vecfuncT& Vpsi, const tensorT& eps,
     return new_psi;
 }
 
+SCF::OrbitalEvaluation SCF::evaluate_orbitals(World& world, bool kinetic_diagonal) {
+    OrbitalEvaluation result;
+    START_TIMER(world);
+    result.alpha_density = make_density(world, aocc, amo);
+    result.beta_density = param.nbeta()
+        ? (param.spin_restricted() ? result.alpha_density : make_density(world, bocc, bmo))
+        : functionT(world);
+    END_TIMER(world, "Make densities");
+    START_TIMER(world);
+    auto rho = result.alpha_density + result.beta_density;
+    rho.truncate();
+    functionT vnuc;
+    if (molecule.parameters.psp_calc()) vnuc = gthpseudopotential->vlocalpot();
+    else if (molecule.parameters.pure_ae()) vnuc = potentialmanager->vnuclear();
+    else vnuc = potentialmanager->vnuclear() + gthpseudopotential->vlocalpot();
+    const double enuclear = inner(rho, vnuc);
+    END_TIMER(world, "Nuclear energy");
+    START_TIMER(world);
+    auto vcoul = apply(*coulop, rho);
+    END_TIMER(world, "Coulomb");
+    const double ecoulomb = 0.5 * inner(rho, vcoul);
+    rho.clear(false);
+    auto vlocal = vcoul + vnuc;
+    double epcm = 0.0;
+    if (param.pcm_data() != "none") {
+        START_TIMER(world);
+        vlocal += pcm.compute_pcm_potential(vcoul);
+        epcm = pcm.compute_pcm_energy();
+        END_TIMER(world, "PCM");
+    }
+    vcoul.clear(false);
+    vlocal.truncate();
+    double exca = 0.0, excb = 0.0, enla = 0.0, enlb = 0.0;
+    result.potential_alpha = apply_potential(world, aocc, amo, vlocal, exca, enla, 0);
+    if (param.have_beta())
+        result.potential_beta = apply_potential(world, bocc, bmo, vlocal, excb, enlb, 1);
+    else if (param.nbeta()) enlb = enla;
+    double ekina = 0.0, ekinb = 0.0;
+    result.fock_alpha = make_fock_matrix(world, amo, result.potential_alpha, aocc, ekina);
+    if (param.have_beta())
+        result.fock_beta = make_fock_matrix(world, bmo, result.potential_beta, bocc, ekinb);
+    else if (param.nbeta()) ekinb = ekina;
+    if (kinetic_diagonal) {
+        result.kinetic_diagonal["alpha"] = kinetic_energy_diagonal(world, amo, gradop);
+        if (param.have_beta())
+            result.kinetic_diagonal["beta"] = kinetic_energy_diagonal(world, bmo, gradop);
+    }
+    result.kinetic = ekina + ekinb;
+    const double enrep = molecule.nuclear_repulsion_energy();
+    const double edisp = dispersion.energy(world, molecule);
+    result.energy = result.kinetic + enuclear + ecoulomb + exca + excb +
+                    enrep + enla + enlb + epcm + edisp;
+    result.energies = {{"e_kinetic", result.kinetic}, {"e_local", enla + enlb},
+                      {"e_nuclear", enuclear}, {"e_coulomb", ecoulomb},
+                      {"e_pcm", epcm}, {"e_disp", edisp}, {"e_xc", exca + excb},
+                      {"e_nrep", enrep}, {"e_tot", result.energy}};
+    return result;
+}
+
+SCF::OrbitalResidual SCF::evaluate_residual(World& world, OrbitalEvaluation& evaluation) {
+    OrbitalResidual result;
+    auto block = [&](tensorT& occ, const tensorT& matrix, const vecfuncT& psi,
+                     vecfuncT& potential, const char* spin) {
+        // Preserve the physical Fock matrix for final preparation/analysis.
+        // Only occupied/virtual coupling is removed from the fixed-point equation.
+        auto fock = copy(matrix);
+        for (long i = 0; i < occ.size(); ++i)
+            for (long j = 0; j < i; ++j)
+                if ((occ[i] == 1.0) != (occ[j] == 1.0)) fock(i, j) = fock(j, i) = 0.0;
+        double maximum = 0.0;
+        auto residual = compute_residual(world, occ, fock, psi, potential, maximum,
+                                         &result.components[spin]);
+        result.maximum = std::max(result.maximum, maximum);
+        result.functions.insert(result.functions.end(), residual.begin(), residual.end());
+    };
+    block(aocc, evaluation.fock_alpha, amo, evaluation.potential_alpha, "alpha");
+    if (param.have_beta())
+        block(bocc, evaluation.fock_beta, bmo, evaluation.potential_beta, "beta");
+    world.gop.broadcast(result.maximum, 0);
+    return result;
+}
+
+void SCF::prepare_final_orbitals(World& world, const OrbitalEvaluation& evaluation) {
+    const double trantol = vtol / std::min(30.0, double(amo.size()));
+    auto prepare = [&](vecfuncT& mo, tensorT& eps, const tensorT& matrix, int nocc, const char* spin) {
+        iteration::ElapsedTimer<> timer;
+        std::vector<std::pair<std::string, double>> times;
+        auto fock = copy(matrix);
+        if (param.do_localize()) {
+            vecfuncT unused_potential; // products will be rebuilt after preparation
+            canonicalize_virtuals(world, fock, mo, unused_potential, nocc, true);
+            // Initial alpha/beta energies can be overlapping views of the AO
+            // guess spectrum. Each spin needs its own final expectations.
+            eps = tensorT(fock.dim(0));
+            for (long i = 0; i < eps.size(); ++i) eps[i] = fock(i, i);
+            times.emplace_back("Prepare localized orbitals", timer.lap());
+        } else {
+            tensorT rotation;
+            auto overlap = matrix_inner(world, mo, mo, true);
+            times.emplace_back("Overlap", timer.lap());
+            sygvp(world, fock, overlap, 1, rotation, eps);
+            times.emplace_back("Fock eigensolve", timer.lap());
+            mo = transform(world, mo, rotation, trantol, true);
+            truncate(world, mo);
+            normalize(world, mo);
+            times.emplace_back("Transform orbitals", timer.lap());
+        }
+        if (world.rank() == 0 && param.print_level() > 2)
+            iteration::write_value_table(std::cout, std::string("Final orbital preparation: ") + spin +
+                " (wall seconds, driver rank)", times);
+    };
+    prepare(amo, aeps, evaluation.fock_alpha, param.nalpha(), "alpha");
+    if (param.have_beta()) prepare(bmo, beps, evaluation.fock_beta, param.nbeta(), "beta");
+    else if (param.nbeta()) bmo = amo;
+}
+
 SCF::RestrictedHFEvaluation SCF::evaluate_restricted_hf(World& world) {
     MADNESS_CHECK_THROW(param.spin_restricted() && param.nalpha() == param.nbeta()
                        && molecule.parameters.pure_ae() && !xc.is_dft(),
@@ -2110,6 +2239,9 @@ vecfuncT SCF::compute_residual(World& world, tensorT& occ, tensorT& fock,
     START_TIMER(world);
     vecfuncT r = sub(world, psi, new_psi);
     std::vector<double> rnorm = function_residual_norms(world, r);
+    MADNESS_CHECK_THROW(std::all_of(rnorm.begin(), rnorm.end(), [](double value) {
+        return std::isfinite(value) && value >= 0.0;
+    }), "invalid SCF function residual");
     if (component_norms) *component_norms = rnorm;
     if (world.rank() == 0 and (param.print_level() > 1))
         print("residuals", rnorm);
@@ -2319,16 +2451,21 @@ bool SCF::canonicalize_virtuals(World& world, tensorT& fock, vecfuncT& psi,
     // Rotating Vpsi with the same U is exact only because the exchange operator
     // sums over occupied orbitals: a rotation within the virtual space leaves it
     // unchanged.
-    vecfuncT vVpsi(Vpsi.begin() + nocc, Vpsi.end());
+    MADNESS_CHECK_THROW(Vpsi.empty() || Vpsi.size() == psi.size(),
+                       "virtual preparation: inconsistent potential products");
+    vecfuncT vVpsi;
     const double scale = std::min(30.0, double(nmo));
-    vVpsi = transform(world, vVpsi, U, vtol / scale, false);
+    if (!Vpsi.empty()) {
+        vVpsi.assign(Vpsi.begin() + nocc, Vpsi.end());
+        vVpsi = transform(world, vVpsi, U, vtol / scale, false);
+        truncate(world, vVpsi, vtol, false);
+    }
     vmo = transform(world, vmo, U, FunctionDefaults<3>::get_thresh() / scale, true);
-    truncate(world, vVpsi, vtol, false);
     truncate(world, vmo);
     normalize(world, vmo);
     for (int k = 0; k < nv; ++k) {
         psi[nocc + k] = vmo[k];
-        Vpsi[nocc + k] = vVpsi[k];
+        if (!Vpsi.empty()) Vpsi[nocc + k] = vVpsi[k];
     }
 
     // rotate the occupied-virtual coupling along: the final diagonalization
@@ -2417,6 +2554,36 @@ void SCF::rotate_subspace(World& world, const distmatT& dUT, subspaceT& subspace
 
 void SCF::solve_virtuals(World& world) {
     PROFILE_MEMBER_FUNC(SCF);
+    solve_virtuals_impl(world, nullptr);
+}
+
+iteration::Decision SCF::solve_virtuals(World& world, const IterationControl& control) {
+    PROFILE_MEMBER_FUNC(SCF);
+    MADNESS_CHECK_THROW(param.freeze_occupied(), "shared virtual solve requires freeze_occupied");
+    validate_iteration_control(control, "virtuals");
+    MADNESS_CHECK_THROW(amo.size() == std::size_t(param.nmo_alpha()) &&
+                       aeps.size() == static_cast<long>(amo.size()) &&
+                       aocc.size() == static_cast<long>(amo.size()) &&
+                       (!param.have_beta() || (bmo.size() == std::size_t(param.nmo_beta()) &&
+                                              beps.size() == static_cast<long>(bmo.size()) &&
+                                              bocc.size() == static_cast<long>(bmo.size()))),
+                       "shared virtual solve requires complete spin membership, energies and occupations");
+    MADNESS_CHECK_THROW(param.nalpha() >= 0 && amo.size() >= std::size_t(param.nalpha()) &&
+                       (!param.have_beta() || (param.nbeta() >= 0 && bmo.size() >= std::size_t(param.nbeta()))) &&
+                       (amo.size() > std::size_t(param.nalpha()) ||
+                        (param.have_beta() && bmo.size() > std::size_t(param.nbeta()))),
+                       "shared virtual solve requires a nonempty active virtual span");
+    return solve_virtuals_impl(world, &control).value();
+}
+
+std::optional<iteration::Decision> SCF::solve_virtuals_impl(World& world, const IterationControl* control) {
+    MADNESS_CHECK_THROW(control || param.maxiter() >= 0, "SCF maxiter must be nonnegative");
+    last_calculation_outcome = CalculationOutcome{false, "iteration_limit"};
+    // Keep the fixed occupied source's threshold for the existing frozen-
+    // occupied prerequisite. Invalid dconv prevents the combined bundle from
+    // claiming completion until every virtual has passed. No archive fields
+    // are added; final qualification always requires both stamps.
+    converged_for_dconv = 1.e10;
     const double dconv = std::max(FunctionDefaults<3>::get_thresh(), param.dconv());
     const int nocca = param.nalpha(), noccb = param.nbeta();
     const int nva = int(amo.size()) - nocca;
@@ -2454,56 +2621,131 @@ void SCF::solve_virtuals(World& world) {
     vlocal.truncate();
     END_TIMER(world, "frozen potential");
 
-    bool converged_all = true;
-    auto iterate_block = [&](vecfuncT& mo, tensorT& eps, const int nocc, const int nv,
-                             const int ispin, const char* spin) {
-        if (nv <= 0) return;
+    struct VirtualBlock {
+        vecfuncT& mo;
+        tensorT& eps;
+        int nocc, ispin;
+        const char* spin;
         subspaceT subspace;
         tensorT Q;
-        tensorT occ_v(nv);   // spectators: zero occupation
-        bool converged = false;
-        for (int iter = 0; iter < param.maxiter(); ++iter) {
-            vecfuncT vmo(mo.begin() + nocc, mo.end());
-            double exc = 0.0, enl = 0.0, ekin = 0.0, err = 0.0;
-            vecfuncT Vv = apply_potential(world, occ_v, vmo, vlocal, exc, enl, ispin);
-            tensorT fock = make_fock_matrix(world, vmo, Vv, occ_v, ekin);
-            canonicalize_virtuals(world, fock, vmo, Vv, 0);
-            for (int i = 0; i < nv; ++i) {
-                mo[nocc + i] = vmo[i];
-                eps[nocc + i] = fock(i, i);
-            }
-            vecfuncT rv = compute_residual(world, occ_v, fock, vmo, Vv, err);
-            world.gop.broadcast(err, 0);
-            if (world.rank() == 0 and param.print_level() > 1)
-                printf("  %s virtuals iteration %d: max residual %.2e\n", spin, iter, err);
-            if (err < 5.0 * dconv) {
-                converged = true;
-                break;
-            }
-            // no update after the last evaluation, as in solve()
-            if (iter == param.maxiter() - 1) break;
-            compress(world, vmo, false);
-            compress(world, rv, false);
-            world.gop.fence();
-            const tensorT c = kain_solve(world, vmo, rv, subspace, Q);
-            vecfuncT vnew = kain_combine(world, subspace, c, 0, nv);
-            kain_trim(subspace, Q);
-            do_step_restriction(world, vmo, vnew, spin);
-            // orthogonal to the fixed occupieds, which orthonormalize(nocc) leaves untouched
-            vecfuncT all(mo.begin(), mo.begin() + nocc);
-            all.insert(all.end(), vnew.begin(), vnew.end());
-            orthonormalize(world, all, nocc);
-            for (int i = 0; i < nv; ++i) mo[nocc + i] = all[nocc + i];
-        }
-        converged_all = converged_all and converged;
+        vecfuncT functions, residual;
+        std::vector<double> residual_norms;
+        double maximum = 0.0;
     };
-    iterate_block(amo, aeps, nocca, nva, 0, "alpha");
-    if (param.have_beta()) iterate_block(bmo, beps, noccb, nvb, 1, "beta");
-    else if (param.nbeta() > 0) bmo = amo;
+    std::vector<VirtualBlock> blocks;
+    if (nva > 0) blocks.push_back({amo, aeps, nocca, 0, "alpha", {}, {}, {}, {}, {}, 0.0});
+    if (nvb > 0) blocks.push_back({bmo, beps, noccb, 1, "beta", {}, {}, {}, {}, {}, 0.0});
+    // Native/guess spectra can be overlapping tensor views. Never let writing
+    // one spin's virtual expectations overwrite the other spin or source.
+    for (auto& block : blocks) block.eps = copy(block.eps);
+    auto evaluate = [&](VirtualBlock& block, int iter) {
+        const int nv = int(block.mo.size()) - block.nocc;
+        tensorT occ_v(nv); // zero occupation: fixed occupieds define the field
+        block.functions = vecfuncT(block.mo.begin() + block.nocc, block.mo.end());
+        double exc = 0.0, enl = 0.0, ekin = 0.0;
+        vecfuncT potential = apply_potential(world, occ_v, block.functions, vlocal, exc, enl, block.ispin);
+        tensorT fock = make_fock_matrix(world, block.functions, potential, occ_v, ekin);
+        if (canonicalize_virtuals(world, fock, block.functions, potential, 0)) {
+            // Rotation truncates and normalizes; assess the resulting functions.
+            potential = apply_potential(world, occ_v, block.functions, vlocal, exc, enl, block.ispin);
+            fock = make_fock_matrix(world, block.functions, potential, occ_v, ekin);
+        }
+        for (int i = 0; i < nv; ++i) {
+            block.mo[block.nocc + i] = block.functions[i];
+            block.eps[block.nocc + i] = fock(i, i);
+        }
+        block.residual = compute_residual(world, occ_v, fock, block.functions, potential,
+                                         block.maximum, control ? &block.residual_norms : nullptr);
+        world.gop.broadcast(block.maximum, 0);
+        if (world.rank() == 0 && param.print_level() > 1)
+            printf("  %s virtuals iteration %d: max residual %.2e\n", block.spin, iter, block.maximum);
+    };
+    auto update = [&](VirtualBlock& block) {
+        const int nv = int(block.functions.size());
+        compress(world, block.functions, false);
+        compress(world, block.residual, false);
+        world.gop.fence();
+        const tensorT c = kain_solve(world, block.functions, block.residual, block.subspace, block.Q);
+        vecfuncT next = kain_combine(world, block.subspace, c, 0, nv);
+        kain_trim(block.subspace, block.Q);
+        do_step_restriction(world, block.functions, next, block.spin);
+        // Normalization inside orthonormalize mutates Function implementations.
+        // Detach this workspace so the fixed mean field keeps its exact source.
+        vecfuncT all = copy(world, vecfuncT(block.mo.begin(), block.mo.begin() + block.nocc));
+        all.insert(all.end(), next.begin(), next.end());
+        orthonormalize(world, all, block.nocc);
+        for (int i = 0; i < nv; ++i) block.mo[block.nocc + i] = all[block.nocc + i];
+    };
 
-    if (converged_all) {
-        converged_for_thresh = FunctionDefaults<3>::get_thresh();
-        converged_for_dconv = dconv;
+    bool converged_all = true;
+    std::optional<iteration::Decision> decision;
+    if (control) {
+        for (int iter = 0; ; ++iter) {
+            iteration::ElapsedTimer<> iteration_timer;
+            iteration::IterationTiming timing;
+            std::vector<iteration::ComponentEvidence> components;
+            for (auto& block : blocks) {
+                evaluate(block, iter);
+                const auto norms = norm2s(world, block.functions);
+                MADNESS_CHECK_THROW(norms.size() == block.residual_norms.size(), "virtual residual membership mismatch");
+                for (std::size_t i = 0; i < norms.size(); ++i)
+                    components.push_back({std::string(block.spin) + "/" + std::to_string(block.nocc + i),
+                                          block.residual_norms[i], norms[i]});
+            }
+            if (!param.have_beta() && param.nbeta() > 0) bmo = amo;
+            iteration::StateMetrics state{"virtuals", {}, {}};
+            state.metrics[iteration::Metric::bsh_residual] = iteration::maximum_residual(std::move(components));
+            for (const auto metric : {iteration::Metric::density_change, iteration::Metric::energy_change,
+                                      iteration::Metric::kinetic_change})
+                state.metrics[metric] = iteration::MetricValue::not_applicable("fixed_occupied_reference");
+            const bool valid = state.metrics.at(iteration::Metric::bsh_residual).status == iteration::Availability::measured;
+            MADNESS_CHECK_THROW(valid, "invalid shared SCF virtual measurement");
+            const iteration::IterationMetrics metrics{{control->task.task_id, control->attempt_id,
+                control->settings.protocol, std::size_t(iter), control->task.context_id}, {std::move(state)}};
+            const iteration::Progress progress{std::size_t(iter), control->previous_updates + std::size_t(iter), valid};
+            decision = iteration::decide(control->settings, control->task, progress, metrics);
+            if (decision->action != iteration::Action::update)
+                last_calculation_outcome = CalculationOutcome{decision->action == iteration::Action::complete, decision->reason};
+            timing.steps.emplace_back("prepare/evaluate/decide", iteration_timer.lap());
+            if (control->observer) control->observer(world, *this, metrics, *decision, progress);
+            timing.steps.emplace_back("checkpoint/report", iteration_timer.lap());
+            if (decision->action == iteration::Action::update) {
+                for (auto& block : blocks) update(block);
+                timing.steps.emplace_back("advance", iteration_timer.lap());
+            }
+            timing.seconds = iteration_timer.seconds();
+            if (control->timing_observer) control->timing_observer(metrics.info, timing);
+            if (world.rank() == 0 && param.print_level() > 0)
+                iteration::write_iteration_timing(std::cout, "SCF", metrics.info, timing);
+            if (decision->action != iteration::Action::update) break;
+        }
+        converged_all = decision->reason == "final_criteria_met" || decision->reason == "intermediate_criteria_met";
+    } else {
+        // Preserve the public legacy schedule until the coordinated input and
+        // native-restart cutover. Both schedules use the same numerical work.
+        for (auto& block : blocks) {
+            bool converged = false;
+            for (int iter = 0; iter <= param.maxiter(); ++iter) {
+                evaluate(block, iter);
+                if (block.maximum < 5.0 * dconv) { converged = true; break; }
+                if (iter == param.maxiter()) break;
+                update(block);
+            }
+            converged_all = converged_all && converged;
+            // The legacy schedule solves one spin at a time. Its completed
+            // KAIN history must not remain resident during the next spin.
+            block.subspace.clear();
+            block.Q = tensorT();
+            block.functions.clear();
+            block.residual.clear();
+            block.residual_norms.clear();
+        }
+        if (!param.have_beta() && param.nbeta() > 0) bmo = amo;
+        if (converged_all) {
+            last_calculation_outcome = CalculationOutcome{true, "converged"};
+            converged_for_thresh = FunctionDefaults<3>::get_thresh();
+            converged_for_dconv = dconv;
+        }
     }
     if (world.rank() == 0 and param.print_level() > 1) {
         if (converged_all) print("\nConverged!\n");
@@ -2518,6 +2760,7 @@ void SCF::solve_virtuals(World& world) {
         }
         if (current_energy < 1.e9) printf("\ntotal energy of the occupied orbitals (from the archive) %20.12f\n", current_energy);
     }
+    return decision;
 }
 
 
@@ -2606,61 +2849,15 @@ void SCF::kain_trim(subspaceT& subspace, tensorT& Q) const {
 }
 
 
-void SCF::update_subspace(World& world, vecfuncT& Vpsia, vecfuncT& Vpsib,
-                          tensorT& focka, tensorT& fockb, subspaceT& subspace, tensorT& Q,
-                          double& bsh_residual, double& update_residual,
-                          FunctionResidualBlocks* components) {
+void SCF::update_subspace(World& world, const OrbitalResidual& residual,
+                          subspaceT& subspace, tensorT& Q) {
     PROFILE_MEMBER_FUNC(SCF);
-    double aerr = 0.0, berr = 0.0;
-
-    // Canonicalize the virtuals before the KAIN snapshot below, so the stored
-    // orbitals and their residual share one gauge.
-    if (param.do_localize()) {
-        canonicalize_virtuals(world, focka, amo, Vpsia, param.nalpha());
-        if (param.nbeta() != 0 && !param.spin_restricted())
-            canonicalize_virtuals(world, fockb, bmo, Vpsib, param.nbeta());
-    }
-
     vecfuncT vm = amo;
-
-    // Decouple the occupied and non-occupied blocks: zero the Fock coupling
-    // between orbitals of different occupation, but KEEP the off-diagonal
-    // Lagrange terms inside each block. Occupieds converge in a localized
-    // (non-eigen) gauge precisely because those terms stay in the residual;
-    // a virtual needs the same treatment, or once it drifts into a mixture of
-    // eigenstates with different eigenvalues it has no BSH fixed point and
-    // its residual floors at the mixing scale.
-    for (int i = 0; i < param.nmo_alpha(); i++) {
-        for (int j = 0; j < i; j++) {
-            if ((aocc[i] == 1.0) != (aocc[j] == 1.0)) {
-                focka(i, j) = 0.0;
-                focka(j, i) = 0.0;
-            }
-        }
-    }
-
-    if (components) components->clear();
-    vecfuncT rm = compute_residual(world, aocc, focka, amo, Vpsia, aerr,
-                                  components ? &(*components)["alpha"] : nullptr);
-    if (param.nbeta() != 0 && !param.spin_restricted()) {
-        for (int i = 0; i < param.nmo_beta(); i++) {
-            for (int j = 0; j < i; j++) {
-                if ((bocc[i] == 1.0) != (bocc[j] == 1.0)) {
-                    fockb(i, j) = 0.0;
-                    fockb(j, i) = 0.0;
-                }
-            }
-        }
-
-        vecfuncT br = compute_residual(world, bocc, fockb, bmo, Vpsib, berr,
-                                      components ? &(*components)["beta"] : nullptr);
-        vm.insert(vm.end(), bmo.begin(), bmo.end());
-        rm.insert(rm.end(), br.begin(), br.end());
-    }
-
+    if (param.have_beta()) vm.insert(vm.end(), bmo.begin(), bmo.end());
+    MADNESS_CHECK_THROW(residual.functions.size() == vm.size(),
+                       "SCF advancement requires the current orbital residual");
+    vecfuncT rm = residual.functions;
     START_TIMER(world);
-    bsh_residual = std::max(aerr, berr);
-    world.gop.broadcast(bsh_residual, 0);
     compress(world, vm, false);
     compress(world, rm, false);
     world.gop.fence();
@@ -2794,6 +2991,105 @@ void SCF::orthonormalize(World& world, vecfuncT& amo_new) const {
 }
 
 
+iteration::ModelMetrics SCF::iteration_model() const {
+    using namespace iteration;
+    MADNESS_CHECK_THROW(restart_representation == Representation::mo,
+                       "shared SCF metrics do not describe a regularized solve");
+    const double threshold = FunctionDefaults<3>::get_thresh();
+    const double atoms = std::max(5.0, double(molecule.natom()));
+    if (param.freeze_occupied())
+        return {{Metric::bsh_residual, {Support::supported, 1e-4,
+                    LegacyFloor{5.0 * threshold, "5 * threshold", {{"threshold", threshold}}}}},
+                {Metric::density_change, {Support::not_applicable, {}, {}}},
+                {Metric::energy_change, {Support::not_applicable, {}, {}}},
+                {Metric::kinetic_change, {Support::not_applicable, {}, {}}}};
+    // Only the threshold-dependent parts of engine_check_limits apply here.
+    // User tolerances are resolved separately; no legacy dconv factor transfers
+    // to the final request, energy change or physical kinetic change.
+    // Initial defaults calibrated with curated HF, hybrid and open-shell
+    // meta-GGA cases; see docs/design/madqc-metric-validation.md. A coarse final
+    // representation may still fail these requests; no final floor is applied.
+    return {{Metric::bsh_residual, {Support::supported, 1e-4,
+                LegacyFloor{5.0 * threshold, "5 * threshold", {{"threshold", threshold}}}}},
+            {Metric::density_change, {Support::supported, 1e-4,
+                LegacyFloor{atoms * threshold, "max(5, natom) * threshold",
+                            {{"threshold", threshold}, {"natom", double(molecule.natom())}}}}},
+            {Metric::energy_change, {Support::supported, 1e-5, {}}},
+            {Metric::kinetic_change, {Support::supported, 1e-5, {}}}};
+}
+
+std::map<iteration::Metric, std::string> SCF::iteration_metric_set() {
+    using iteration::Metric;
+    return {{Metric::bsh_residual, "scf.bsh.v1"}, {Metric::density_change, "scf.density.v1"},
+            {Metric::energy_change, "scf.energy.v1"}, {Metric::kinetic_change, "scf.kinetic.v1"}};
+}
+
+nlohmann::json SCF::iteration_metric_definitions() {
+    using iteration::Metric;
+    json definitions;
+    for (const auto& [metric, id] : iteration_metric_set()) {
+        const bool residual = metric == Metric::bsh_residual;
+        const bool density = metric == Metric::density_change;
+        const bool kinetic = metric == Metric::kinetic_change;
+        definitions[id] = {
+            {"metric", iteration::metric_name(metric)},
+            {"meaning", residual ? "raw orbital fixed-point residual before KAIN and restriction"
+                : density ? "L2 change of each physical spin density"
+                : kinetic ? "absolute change of physical occupied kinetic energy"
+                          : "absolute change of total electronic plus nuclear energy"},
+            {"units", residual ? "dimensionless" : density ? "a0^(-3/2)" : "hartree"},
+            {"fields", residual ? json{"all iterated alpha and beta orbitals; excludes fixed occupied orbitals"}
+                : density ? json{"physical alpha density", "physical beta density"}
+                : kinetic ? json{"occupied orbitals, both spins"} : json{"SCF total energy"}},
+            {"weights", residual ? "none" : "physical occupations and spin multiplicities"},
+            {"normalization", "none"},
+            {"reduction", residual || density ? "maximum" : "absolute scalar difference"},
+            {"comparison", residual ? "none" : "preceding comparable prepared iteration"},
+            {"scale", residual ? "maximum current orbital L2 norm"
+                : density ? "maximum spin-density L2 norm across current and previous states"
+                          : "maximum absolute physical quantity across current and previous states"}};
+    }
+    return definitions;
+}
+
+iteration::IterationMetrics SCF::measure_iteration(World& world, const OrbitalEvaluation& state,
+    const OrbitalResidual& residual, const iteration::IterationInfo& info,
+    const std::optional<OrbitalComparison>& previous) const {
+    using namespace iteration;
+    StateMetrics ground;
+    ground.id = "ground";
+    std::vector<ComponentEvidence> components;
+    auto block = [&](const char* spin, const vecfuncT& functions) {
+        const auto norms = norm2s(world, functions);
+        const auto& residuals = residual.components.at(spin);
+        MADNESS_CHECK_THROW(norms.size() == residuals.size(), "SCF residual block does not match orbitals");
+        for (std::size_t i = 0; i < norms.size(); ++i)
+            components.push_back({std::string(spin) + "/" + std::to_string(i), residuals[i], norms[i]});
+    };
+    block("alpha", amo);
+    if (param.have_beta()) block("beta", bmo);
+    ground.metrics[Metric::bsh_residual] = maximum_residual(std::move(components));
+    const bool comparable = previous && previous->info.task_id == info.task_id &&
+        previous->info.context_id == info.context_id && previous->info.protocol == info.protocol &&
+        (previous->info.attempt_id != info.attempt_id || previous->info.iteration < info.iteration);
+    std::optional<Comparison> comparison;
+    if (comparable) comparison = Comparison{previous->info.task_id, previous->info.attempt_id,
+                                           previous->info.protocol, previous->info.iteration, "ground"};
+    auto field = [&](const functionT& current, const functionT* old) {
+        FieldNorms value{current.norm2(), {}, {}};
+        if (old) { value.previous = old->norm2(); value.change = (current - *old).norm2(); }
+        return value;
+    };
+    ground.metrics[Metric::density_change] = maximum_field_change({
+        field(state.alpha_density, comparable ? &previous->alpha_density : nullptr),
+        field(state.beta_density, comparable ? &previous->beta_density : nullptr)}, comparison);
+    ground.metrics[Metric::energy_change] = scalar_change(state.energy,
+        comparable ? std::optional<double>(previous->energy) : std::nullopt, comparison);
+    ground.metrics[Metric::kinetic_change] = scalar_change(state.kinetic,
+        comparable ? std::optional<double>(previous->kinetic) : std::nullopt, comparison);
+    return {info, {std::move(ground)}};
+}
+
 void SCF::validate_progress_controls() const {
     const auto targets = requested_targets(param);
     validate_progress_configuration(param.get<int>("progress.window"),
@@ -2804,76 +3100,91 @@ void SCF::validate_progress_controls() const {
 // For given protocol, solve the DFT/HF/response equations
 void SCF::solve(World& world, std::optional<int> iteration_cap) {
     PROFILE_MEMBER_FUNC(SCF);
-    // Loading can restore a prior convergence claim even when the restart plan
-    // requires iteration. Once we change the orbitals, that claim is stale.
-    converged_for_thresh = 1.e10;
-    converged_for_dconv = 1.e10;
-    functionT arho_old, brho_old;
-    const double dconv = std::max(FunctionDefaults<3>::get_thresh(),
-                                  param.dconv());
+    solve_impl(world, iteration_cap, nullptr);
+}
+
+iteration::Decision SCF::solve(World& world, const IterationControl& control) {
+    PROFILE_MEMBER_FUNC(SCF);
+    MADNESS_CHECK_THROW(!param.freeze_occupied(), "use solve_virtuals for shared frozen-occupied SCF");
+    validate_iteration_control(control, "ground");
+    return solve_impl(world, {}, &control).value();
+}
+
+void SCF::validate_iteration_control(const IterationControl& control, const std::string& subject) const {
+    const auto protocol = iteration::Protocol{FunctionDefaults<3>::get_thresh(), FunctionDefaults<3>::get_k()};
+    const auto requested = param.protocol();
+    const bool extra_virtuals = param.nmo_alpha() > param.nalpha() + param.nvalpha() ||
+        (param.have_beta() && param.nmo_beta() > param.nbeta() + param.nvbeta());
+    MADNESS_CHECK_THROW(!control.preparing_virtuals || (extra_virtuals && !control.settings.final_protocol),
+                       "SCF preparation requires an extra virtual bundle and intermediate control");
+    MADNESS_CHECK_THROW(!requested.empty() &&
+                       std::find(requested.begin(), requested.end(), protocol.thresh) != requested.end() &&
+                       control.settings.protocol == protocol &&
+                       control.settings.final_protocol == (protocol.thresh == requested.back() && !control.preparing_virtuals),
+                       "SCF shared settings do not match the current or final requested protocol");
+    MADNESS_CHECK_THROW(!checkpoint_observer, "SCF shared and legacy checkpoint observers cannot coexist");
+    MADNESS_CHECK_THROW(control.task.states == std::vector<std::string>{subject},
+                       "SCF shared task has the wrong subject");
+    MADNESS_CHECK_THROW(control.settings.max_updates < std::size_t(std::numeric_limits<int>::max()) &&
+                       control.previous_updates <= std::numeric_limits<std::size_t>::max() - control.settings.max_updates,
+                       "SCF iteration allowance or accumulated count exceeds supported range");
+    // Validate caller-resolved settings before numerical work. No defaults or
+    // legacy criterion selection may silently replace this explicit contract.
+    const auto model = iteration_model();
+    for (const auto& criterion : control.settings.criteria) {
+        MADNESS_CHECK_THROW(model.contains(criterion.metric) &&
+                           model.at(criterion.metric).support != iteration::Support::unsupported &&
+                           criterion.applicable == (model.at(criterion.metric).support == iteration::Support::supported) &&
+                           iteration::finite_nonnegative(criterion.absolute) &&
+                           iteration::finite_nonnegative(criterion.relative), "invalid shared SCF criterion");
+    }
+    const iteration::IterationMetrics initial{{control.task.task_id, control.attempt_id,
+        protocol, 0, control.task.context_id}, {{subject, {}, {}}}};
+    MADNESS_CHECK_THROW(iteration::assess(control.settings, control.task, initial).valid,
+                       "invalid shared SCF iteration identity");
+}
+
+std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<int> iteration_cap,
+                                                 const IterationControl* control) {
+    last_calculation_outcome = CalculationOutcome{false, "iteration_limit"};
+    converged_for_thresh = converged_for_dconv = 1.e10;
+    apply_explicit_occupations(world);
+    const double dconv = std::max(FunctionDefaults<3>::get_thresh(), param.dconv());
     const double trantol = vtol / std::min(30.0, double(amo.size()));
-    //const double tolloc = 1e-6; // was std::min(1e-6,0.01*dconv) but now trying to avoid unnecessary change // moved to localizer.h
-    double update_residual = 0.0, bsh_residual = 0.0;
-    FunctionResidualBlocks function_residuals; // reset at each protocol rung
+    functionT arho_old, brho_old;
     double previous_energy = 0.0, previous_kinetic = 0.0;
     FunctionResidualBlocks previous_kinetic_diagonal;
     subspaceT subspace;
-    tensorT Q;
-    bool do_this_iter = true;
-    bool converged = false;
-
-    // Every orbital source (guess, restart, NWChem, the virtual step-down) rebuilds
-    // aocc/bocc as 1 below nalpha/nbeta and 0 above; the input list overrides that here.
-    apply_explicit_occupations(world);
-
-    // Shrink subspace until stop localizing/canonicalizing--- probably not a good idea
-    // int maxsub_save = param.maxsub;
-    // param.maxsub = 2;
-    
-
-    // Fock matrix for storing the results
-    tensorT focka_json(param.nmo_alpha(), param.nmo_alpha());
-    tensorT fockb_json(param.nmo_beta(), param.nmo_beta());
-
-    // Written targets belong to named stages (DESIGN B8); the unnamed path
-    // keeps its engine-only behavior, without their extra measurements.
-    const auto explicit_targets = checkpoint_observer
-                                      ? requested_targets(param)
-                                      : nlohmann::json::object();
-    // B8: both groups are evaluated every iteration; the switch says which one
-    // stops the run.
+    tensorT Q, focka_json, fockb_json;
+    const auto explicit_targets = checkpoint_observer ? requested_targets(param) : json::object();
+    const bool collect_kinetic = checkpoint_observer || explicit_targets.contains("absolute_kinetic_trace_change");
     const auto decider = param.get<bool>(convergence::use_default_criteria_key)
-                             ? convergence::Decider::engine_check
-                             : convergence::Decider::requested_criteria;
+        ? convergence::Decider::engine_check : convergence::Decider::requested_criteria;
+    if (!control) validate_progress_controls();
     const int progress_window = param.get<int>("progress.window");
     const double progress_improvement = param.get<double>("progress.minimum_relative_improvement");
-    validate_progress_controls();
     const auto supplied_protocol = param.protocol();
     const auto rung = std::find(supplied_protocol.begin(), supplied_protocol.end(), FunctionDefaults<3>::get_thresh());
     const bool has_next_supplied_rung = rung != supplied_protocol.end() && std::next(rung) != supplied_protocol.end();
     json progress_history = json::array();
-    const int diagnostic_iterations = param.get<int>("diagnostic.iterations_per_rung");
-    MADNESS_CHECK_THROW(diagnostic_iterations >= 0, "diagnostic.iterations_per_rung must be nonnegative");
-    // Named stages pass this rung's maxiter from a per-rung list (B5: per
-    // run, D-007); otherwise maxiter.
-    MADNESS_CHECK_THROW(
-        !iteration_cap || *iteration_cap > 0,
-        "SCF::solve: the iteration cap for this rung must be positive");
-    const int iteration_limit = diagnostic_iterations ? diagnostic_iterations
-                                : iteration_cap       ? *iteration_cap
-                                                      : param.maxiter();
-    if (diagnostic_iterations) {
-        converged_for_thresh = 1.e10;
-        converged_for_dconv = 1.e10;
-    }
-    for (int iter = 0; iter < iteration_limit; ++iter) {
-        if (world.rank() == 0 and (param.print_level() > 1))
-            printf("\nIteration %d at time %.1fs\n\n", iter, wall_time());
+    const int diagnostic_iterations = control ? 0 : param.get<int>("diagnostic.iterations_per_rung");
+    MADNESS_CHECK_THROW(diagnostic_iterations >= 0 && (!iteration_cap || *iteration_cap >= 0),
+                       "SCF iteration allowances must be nonnegative");
+    const int iteration_limit = control ? static_cast<int>(control->settings.max_updates)
+        : diagnostic_iterations ? diagnostic_iterations : iteration_cap.value_or(param.maxiter());
+    MADNESS_CHECK_THROW(iteration_limit >= 0, "SCF maxiter must be nonnegative");
+    std::optional<OrbitalComparison> previous;
+    iteration::IterationMetrics metrics;
+    std::optional<iteration::Decision> decision;
+    iteration::Progress shared_progress;
 
-        // if (iter > 0 && update_residual < 0.1) {
-        //     //do_this_iter = false;
-        //     param.maxsub = maxsub_save;
-        // }
+    // Iteration is the number of completed main updates. The final produced
+    // state is evaluated even when the allowance is zero or exhausted.
+    for (int iter = 0; iter <= iteration_limit; ++iter) {
+        iteration::ElapsedTimer<> iteration_timer;
+        iteration::IterationTiming timing;
+        if (world.rank() == 0 && param.print_level() > 1)
+            printf("\nIteration %d at time %.1fs\n\n", iter, wall_time());
         // Tiling the transform bounds the transient memory of the rotated orbitals, which only
         // threatens at high precision. Below that it only buys an extra truncation per tile.
         // Take the untiled path except at the tight protocols.
@@ -2914,7 +3225,7 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         };
         const double localize_skip_tol = 0.01;
 
-        if (param.do_localize() && do_this_iter) {
+        if (param.do_localize()) {
             START_TIMER(world);
             Localizer localizer(world, aobasis, molecule, ao);
             localizer.set_method(param.localize_method());
@@ -2969,414 +3280,214 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
             END_TIMER(world, "localize");
         }
 
-        START_TIMER(world);
-        functionT arho = make_density(world, aocc, amo), brho;
-
-        if (param.nbeta()) {
-            if (param.spin_restricted()) {
-                brho = arho;
-            } else {
-                brho = make_density(world, bocc, bmo);
-            }
-        } else {
-            brho = functionT(world); // zero
-        }
-        END_TIMER(world, "Make densities");
-        print_meminfo(world.rank(), "Make densities");
-
-        if (iter < 2 || (iter % 10) == 0) {
+        if (iter < 2 || iter % 10 == 0) {
+            auto arho = make_density(world, aocc, amo);
+            auto brho = param.nbeta() ? (param.spin_restricted() ? arho : make_density(world, bocc, bmo)) : functionT(world);
             START_TIMER(world);
             loadbal(world, arho, brho, arho_old, brho_old, subspace);
             END_TIMER(world, "Load balancing");
-            print_meminfo(world.rank(), "Load balancing");
         }
-        double da = 0.0, db = 0.0;
-        DensityChanges density_changes;
-        if (iter > 0) {
-            da = (arho - arho_old).norm2();
-            db = (brho - brho_old).norm2();
-            // Only observers request these diagnostics; the existing spin
-            // gates below continue to use da/db and their original limits.
-            if (checkpoint_observer || explicit_targets.contains("charge_density_change"))
-                density_changes = density_change_norms(world, arho, brho, arho_old, brho_old);
-            if (world.rank() == 0 and (param.print_level() > 2))
-                print("delta rho", da, db, "residuals", bsh_residual,
-                      update_residual);
-
-        }
-
-        START_TIMER(world);
-        // Preserve the preceding input: comparing only a final rotation would
-        // produce a misleading near-zero density/energy change.
-        const auto comparison_alpha = arho_old, comparison_beta = brho_old;
-        arho_old = arho;
-        brho_old = brho;
-        functionT rho = arho + brho;
-        rho.truncate();
-
-        real_function_3d vnuc;
-        if (molecule.parameters.psp_calc()) {
-            vnuc = gthpseudopotential->vlocalpot();
-        } else if (molecule.parameters.pure_ae()) {
-            vnuc = potentialmanager->vnuclear();
+        if (world.rank() == 0 && param.print_level() > 2) print("Initial orbital evaluation");
+        auto evaluation = evaluate_orbitals(world, collect_kinetic);
+        bool rotated = false;
+        if (!param.do_localize()) {
+            diag_fock_matrix(world, evaluation.fock_alpha, amo, evaluation.potential_alpha,
+                             aeps, aocc, FunctionDefaults<3>::get_thresh());
+            if (param.have_beta())
+                diag_fock_matrix(world, evaluation.fock_beta, bmo, evaluation.potential_beta,
+                                 beps, bocc, FunctionDefaults<3>::get_thresh());
+            rotated = true;
         } else {
-            vnuc = potentialmanager->vnuclear();
-            vnuc = vnuc + gthpseudopotential->vlocalpot();
+            rotated = canonicalize_virtuals(world, evaluation.fock_alpha, amo,
+                                             evaluation.potential_alpha, param.nalpha());
+            if (param.have_beta())
+                rotated = canonicalize_virtuals(world, evaluation.fock_beta, bmo,
+                                                 evaluation.potential_beta, param.nbeta()) || rotated;
         }
-        double enuclear = inner(rho, vnuc);
-        END_TIMER(world, "Nuclear energy");
-
-        START_TIMER(world);
-        functionT vcoul = apply(*coulop, rho);
-        functionT vlocal;
-        END_TIMER(world, "Coulomb");
-        print_meminfo(world.rank(), "Coulomb");
-
-        double ecoulomb = 0.5 * inner(rho, vcoul);
-        rho.clear(false);
-        vlocal = vcoul + vnuc;
-
-        // compute the contribution of the solvent to the local potential
-        double epcm = 0.0;
-        if (param.pcm_data() != "none") {
-            START_TIMER(world);
-            functionT vpcm = pcm.compute_pcm_potential(vcoul);
-            vlocal += vpcm;
-            epcm = pcm.compute_pcm_energy();
-            END_TIMER(world, "PCM");
-            print_meminfo(world.rank(), "PCM");
+        // Truncation/normalization during preparation can change the physical
+        // state. Rebuild its measurements before applying BSH, not afterward.
+        if (rotated) {
+            if (world.rank() == 0 && param.print_level() > 2) print("Prepared orbital reevaluation");
+            evaluation = OrbitalEvaluation{};
+            evaluation = evaluate_orbitals(world, collect_kinetic);
         }
+        auto residual = evaluate_residual(world, evaluation);
 
-        vcoul.clear(false);
-        vlocal.truncate();
-        double exca = 0.0, excb = 0.0;
-
-        double enla = 0.0, enlb = 0.0;
-        vecfuncT Vpsia = apply_potential(world, aocc, amo, vlocal, exca, enla, 0);
-        vecfuncT Vpsib;
-        if (!param.spin_restricted() && param.nbeta()) {
-            Vpsib = apply_potential(world, bocc, bmo, vlocal, excb, enlb, 1);
-        } else if (param.nbeta() != 0) {
-            enlb = enla;
-        }
-
-        FunctionResidualBlocks input_kinetic_diagonal;
-        if (checkpoint_observer || explicit_targets.contains("absolute_kinetic_trace_change")) {
-            input_kinetic_diagonal["alpha"] = kinetic_energy_diagonal(world, amo, gradop);
-            if (!param.spin_restricted() && !bmo.empty())
-                input_kinetic_diagonal["beta"] = kinetic_energy_diagonal(world, bmo, gradop);
-        }
-        const auto comparison_kinetic_diagonal = previous_kinetic_diagonal;
-        previous_kinetic_diagonal = input_kinetic_diagonal;
-        double ekina = 0.0, ekinb = 0.0;
-        tensorT focka = make_fock_matrix(world, amo, Vpsia, aocc, ekina);
-        tensorT fockb = focka;
-
-        if (!param.spin_restricted() && param.nbeta() != 0)
-            fockb = make_fock_matrix(world, bmo, Vpsib, bocc, ekinb);
-        else if (param.nbeta() != 0) {
-            ekinb = ekina;
-        }
-
-        if (!param.do_localize() && do_this_iter) {
-            tensorT U = diag_fock_matrix(world, focka, amo, Vpsia, aeps, aocc,
-                                         FunctionDefaults<3>::get_thresh());
-            //rotate_subspace(world, U, subspace, 0, amo.size(), trantol); ??
-            if (!param.spin_restricted() && param.nbeta() != 0) {
-                U = diag_fock_matrix(world, fockb, bmo, Vpsib, beps, bocc,
-                                     FunctionDefaults<3>::get_thresh());
-                //rotate_subspace(world, U, subspace, amo.size(), bmo.size(),trantol);
+        auto assess = [&](const OrbitalEvaluation& state, const OrbitalResidual& raw) {
+            if (control) {
+                metrics = measure_iteration(world, state, raw,
+                    {control->task.task_id, control->attempt_id, control->settings.protocol,
+                     std::size_t(iter), control->task.context_id}, previous);
+                bool valid = true;
+                for (const auto& [metric, value] : metrics.states[0].metrics)
+                    valid = valid && value.status != iteration::Availability::invalid;
+                shared_progress = {std::size_t(iter), control->previous_updates + std::size_t(iter), valid};
+                decision = iteration::decide(control->settings, control->task, shared_progress, metrics);
+                MADNESS_CHECK_THROW(valid, "invalid shared SCF measurement");
+                IterationCheckpoint step{};
+                step.iteration = iter;
+                step.threshold = FunctionDefaults<3>::get_thresh();
+                step.bsh_residual = raw.maximum;
+                return step;
             }
-        }
-
-        double enrep = molecule.nuclear_repulsion_energy();
-        double edisp = dispersion.energy(world, molecule);
-        double ekinetic = ekina + ekinb;
-        double enonlocal = enla + enlb;
-        double exc = exca + excb;
-        double etot = ekinetic + enuclear + ecoulomb + exc + enrep + enonlocal + epcm + edisp;
-        if (diagnostic_iterations || checkpoint_observer || !explicit_targets.empty())
-            MADNESS_CHECK_THROW(std::isfinite(etot) && std::isfinite(ekinetic) &&
-                std::isfinite(da) && std::isfinite(db) && std::isfinite(bsh_residual),
-                "invalid SCF state during checkpointed or explicitly controlled iteration");
-        current_energy = etot;
-        const double energy_change = std::abs(etot - previous_energy);
-        const double kinetic_change = std::abs(ekinetic - previous_kinetic);
-        const double comparison_energy = previous_energy;
-        const double comparison_kinetic = previous_kinetic;
-        previous_energy = etot;
-        previous_kinetic = ekinetic;
-        //esol = etot;
-
-        if (world.rank() == 0 and (param.print_level() > 1)) {
-            //lots of dps for testing Exc stuff
-            /*printf("\n              kinetic %32.24f\n", ekinetic);
-                printf("         nonlocal psp %32.24f\n", enonlocal);
-                printf("   nuclear attraction %32.24f\n", enuclear);
-                printf("              coulomb %32.24f\n", ecoulomb);
-                printf(" exchange-correlation %32.24f\n", exc);
-                printf("    nuclear-repulsion %32.24f\n", enrep);
-                printf("                total %32.24f\n\n", etot);*/
-
-            printf("\n              kinetic %16.8f\n", ekinetic);
-            printf("         nonlocal psp %16.8f\n", enonlocal);
-            printf("   nuclear attraction %16.8f\n", enuclear);
-            printf("              coulomb %16.8f\n", ecoulomb);
-            printf("                  PCM %16.8f\n", epcm);
-            printf(" exchange-correlation %16.8f\n", exc);
-            printf("    nuclear-repulsion %16.8f\n", enrep);
-            if (dispersion.active())
-                printf("      dispersion (D3) %16.8f\n", edisp);
-            printf("                total %16.8f\n\n", etot);
-        }
-        e_data.add_data({{"e_kinetic", ekinetic},
-                         {"e_local",   enonlocal},
-                         {"e_nuclear", enuclear},
-                         {"e_coulomb", ecoulomb},
-                         {"e_pcm",     epcm},
-                         {"e_disp",    edisp},
-                         {"e_xc",      exc},
-                         {"e_nrep",    enrep},
-                         {"e_tot",     etot}});
-        focka_json = focka;
-        if (!param.spin_restricted() && param.nbeta() != 0) {
-            fockb_json = fockb;
-        }
-
-
-        json explicit_measurements = json::object();
-        const auto accuracy_sample = [&](double value, const char* units) {
-            return json{{"value", iter > 0 && std::isfinite(value) ? json(value) : json(nullptr)},
-                {"availability", iter == 0 ? "unavailable" : std::isfinite(value) ? "measured" : "invalid"},
-                {"units", units}};
+            const bool comparable = iter > 0;
+            const double da = comparable ? (state.alpha_density - arho_old).norm2() : 0.0;
+            const double db = comparable ? (state.beta_density - brho_old).norm2() : 0.0;
+            const auto density = comparable && checkpoint_observer
+                ? density_change_norms(world, state.alpha_density, state.beta_density, arho_old, brho_old)
+                : DensityChanges{};
+            const double de = comparable ? std::abs(state.energy - previous_energy) : 0.0;
+            const double dt = comparable ? std::abs(state.kinetic - previous_kinetic) : 0.0;
+            MADNESS_CHECK_THROW(std::isfinite(state.energy) && std::isfinite(state.kinetic) &&
+                               std::isfinite(da) && std::isfinite(db) && std::isfinite(raw.maximum),
+                               "invalid SCF measurement");
+            auto measurement = [](double value, bool available, const char* units) {
+                return json{{"value", available ? json(value) : json(nullptr)},
+                            {"availability", available ? "measured" : "unavailable"}, {"units", units}};
+            };
+            json measured = {{"bsh_residual", measurement(raw.maximum, true, "dimensionless")},
+                             {"charge_density_change", measurement(density.charge, comparable, "a0^(-3/2)")},
+                             {"energy_change", measurement(de, comparable, "hartree")}};
+            if (explicit_targets.contains("absolute_kinetic_trace_change")) {
+                auto trace = function_metric_trace_change(function_residual_record(state.kinetic_diagonal).at("blocks"),
+                                                         function_residual_record(previous_kinetic_diagonal).at("blocks"));
+                trace["units"] = "hartree";
+                trace["quantity"] = "absolute_kinetic_trace_change";
+                measured["absolute_kinetic_trace_change"] = trace;
+            }
+            const auto accuracy = evaluate_explicit_criteria(measured, explicit_targets);
+            MADNESS_CHECK_THROW(accuracy.at("status") != "invalid", "invalid explicitly requested SCF accuracy measurement");
+            // Endpoint reevaluation replaces the pending sample: it does not
+            // append an extra progress/history entry or create a new baseline.
+            auto history = progress_history;
+            history.push_back(accuracy.at("criteria"));
+            auto progress = progress_window > 0
+                ? explicit_progress(history, progress_window, progress_improvement, has_next_supplied_rung, false)
+                : json{{"status", "disabled"}, {"action", "continue"}};
+            MADNESS_CHECK_THROW(progress.at("action") != "stop_invalid", "invalid configured SCF progress evidence");
+            const bool stalled = progress.at("status") == "stalled" && diagnostic_iterations == 0;
+            progress["has_next_supplied_rung"] = has_next_supplied_rung;
+            progress["action_applied"] = stalled;
+            if (checkpoint_observer && has_next_supplied_rung) {
+                progress["fixed_intermediate_work"] = true;
+                progress["action_applied"] = false;
+            }
+            const auto limits = engine_check_limits(param.dconv(), FunctionDefaults<3>::get_thresh(),
+                                                     molecule.natom(), param.get<bool>("conv_only_dens"));
+            const bool engine_passed = comparable && da < limits.density && db < limits.density &&
+                                       (!limits.bsh_checked || raw.maximum < limits.bsh);
+            const bool criteria_met = !explicit_targets.empty() && accuracy.at("status") == "satisfied";
+            const auto stop = convergence::rung_exit({decider, engine_passed, criteria_met, stalled, iter,
+                iteration_limit, diagnostic_iterations, !checkpoint_observer || !has_next_supplied_rung});
+            return IterationCheckpoint{iter, FunctionDefaults<3>::get_thresh(), state.energy, da, db,
+                raw.maximum, comparable, false, state.kinetic, de, dt, arho_old, brho_old,
+                previous_energy, previous_kinetic, iter - 1, raw.components, density.charge, density.spin,
+                state.kinetic_diagonal, previous_kinetic_diagonal, accuracy, progress, stop, engine_passed};
         };
-        explicit_measurements["charge_density_change"] = accuracy_sample(density_changes.charge, "a0^(-3/2)");
-        explicit_measurements["bsh_residual"] = accuracy_sample(bsh_residual, "dimensionless");
-        explicit_measurements["energy_change"] = accuracy_sample(energy_change, "hartree");
-        if (explicit_targets.contains("absolute_kinetic_trace_change")) {
-            auto trace_change = function_metric_trace_change(
-                function_residual_record(input_kinetic_diagonal).at("blocks"),
-                function_residual_record(comparison_kinetic_diagonal).at("blocks"));
-            trace_change["units"] = "hartree";
-            trace_change["quantity"] = "absolute_kinetic_trace_change";
-            explicit_measurements["absolute_kinetic_trace_change"] = trace_change;
+        auto is_endpoint = [&](const IterationCheckpoint& step) {
+            return control ? decision->action != iteration::Action::update
+                           : step.rung_stop != convergence::StopReason::in_progress;
+        };
+        auto step = scf_continuation::assess_prepared_endpoint(
+            [&] { return assess(evaluation, residual); }, [&] {
+            prepare_final_orbitals(world, evaluation);
+            if (world.rank() == 0 && param.print_level() > 2) print("Final orbital reevaluation");
+            // The old accelerator history no longer describes this orbital basis.
+            subspace.clear();
+            Q = tensorT();
+            residual = OrbitalResidual{};
+            evaluation = OrbitalEvaluation{};
+            evaluation = evaluate_orbitals(world, collect_kinetic);
+            residual = evaluate_residual(world, evaluation);
+        }, is_endpoint);
+        const bool stopped = is_endpoint(step);
+        step.final_rotation = stopped;
+        current_energy = evaluation.energy;
+        e_data.add_data(evaluation.energies);
+        focka_json = evaluation.fock_alpha;
+        fockb_json = evaluation.fock_beta;
+        if (!control) progress_history.push_back(step.explicit_accuracy.at("criteria"));
+        if (world.rank() == 0 && param.print_level() > 1) {
+            std::vector<std::pair<std::string, double>> energies;
+            for (const auto& term : std::vector<std::pair<const char*, const char*>>{
+                    {"Kinetic", "e_kinetic"}, {"Nonlocal pseudopotential", "e_local"},
+                    {"Nuclear attraction", "e_nuclear"}, {"Coulomb", "e_coulomb"},
+                    {"PCM", "e_pcm"}, {"Exchange-correlation", "e_xc"},
+                    {"Nuclear repulsion", "e_nrep"}})
+                energies.emplace_back(term.first, evaluation.energies.at(term.second));
+            if (dispersion.active()) energies.emplace_back("Dispersion (D3)", evaluation.energies.at("e_disp"));
+            energies.emplace_back("Total", evaluation.energy);
+            iteration::write_value_table(std::cout, "Energy breakdown (hartree)", energies, 8);
+            if (!control) print("density changes", step.density_alpha, step.density_beta, "BSH residual", step.bsh_residual);
         }
-        const auto explicit_accuracy = evaluate_explicit_criteria(explicit_measurements, explicit_targets);
-        MADNESS_CHECK_THROW(explicit_accuracy.at("status") != "invalid", "invalid explicitly requested SCF accuracy measurement");
-
-        progress_history.push_back(explicit_accuracy.at("criteria"));
-        auto configured_progress = progress_window > 0
-            ? explicit_progress(progress_history, progress_window, progress_improvement, has_next_supplied_rung, false)
-            : json{{"status", "disabled"}, {"action", "continue"}};
-        MADNESS_CHECK_THROW(configured_progress.at("action") != "stop_invalid", "invalid configured SCF progress evidence");
-        const bool stalled = configured_progress.at("status") == "stalled" && diagnostic_iterations == 0;
-        configured_progress["has_next_supplied_rung"] = has_next_supplied_rung;
-        configured_progress["action_applied"] = stalled;
-        if (checkpoint_observer && has_next_supplied_rung) {
-            configured_progress["fixed_intermediate_work"] = true;
-            configured_progress["action_applied"] = false;
-        }
-
-        bool engine_check_passed = false;
-        if (iter > 0) {
-            // The engine check, with the limits the settings table shows (B9).
-            const auto limits = engine_check_limits(
-                param.dconv(), FunctionDefaults<3>::get_thresh(),
-                molecule.natom(), param.get<bool>("conv_only_dens"));
-            engine_check_passed
-                = da < limits.density && db < limits.density
-                  && (!limits.bsh_checked || bsh_residual < limits.bsh);
-            const bool criteria_met
-                = !explicit_targets.empty()
-                  && explicit_accuracy.at("status") == "satisfied";
-            // B5: the shared rule orders the exits (converged, cap, stall)
-            // and applies forced iterations; this engine only supplies the
-            // verdicts it computed above. The cap is what this run may take.
-            const auto rung_stop = convergence::rung_exit(
-                {decider, engine_check_passed, criteria_met, stalled, iter + 1,
-                 iteration_limit, diagnostic_iterations,
-                 !checkpoint_observer || !has_next_supplied_rung});
-            converged = rung_stop == convergence::StopReason::converged;
-            // previous conv was too tight for small systems
-            // if (da < dconv * molecule.natom() && db < dconv * molecule.natom()
-            //     && (param.conv_only_dens || bsh_residual < 5.0 * dconv)) converged=true;
-
-            // do diagonalization etc if this is the last iteration, even if the calculation didn't converge
-            if (rung_stop != convergence::StopReason::in_progress) {
-                // record what we converged *to*, on every rank and independent
-                // of the print level: the restart logic keys off these two
-                // fields. The values are the thresholds of this protocol level,
-                // not param.econv()/param.dconv() -- at a loose level the
-                // latter over-claims, at the final level it under-claims. The
-                // engine's restart claim records its own check only, so a stop
-                // decided by the written targets never fakes it (Q6).
-                if (converged && engine_check_passed) {
-                    converged_for_thresh=FunctionDefaults<3>::get_thresh();
-                    converged_for_dconv=dconv;
-                }
-                if (world.rank() == 0 && converged and (param.print_level() > 1)) {
-                    print("\nConverged!\n");
-                }
-
-                // the virtuals were last canonicalized before the previous
-                // update; rotate them once more for the published vectors
-                if (param.do_localize()) {
-                    canonicalize_virtuals(world, focka, amo, Vpsia, param.nalpha(), true);
-                    if (param.nbeta() != 0 && !param.spin_restricted())
-                        canonicalize_virtuals(world, fockb, bmo, Vpsib, param.nbeta(), true);
-                }
-
-                // Diagonalize to get the eigenvalues and if desired the final eigenvectors
-                tensorT U;
-                START_TIMER(world);
-                tensorT overlap = matrix_inner(world, amo, amo, true);
-                END_TIMER(world, "Overlap");
-
-                START_TIMER(world);
-                sygvp(world, focka, overlap, 1, U, aeps);
-                END_TIMER(world, "focka eigen sol");
-
-                if (!param.do_localize()) {
-                    START_TIMER(world);
-                    amo = transform(world, amo, U, trantol, true);
-                    truncate(world, amo);
-                    normalize(world, amo);
-                    END_TIMER(world, "Transform MOs");
-                }
-                if (param.nbeta() != 0 && !param.spin_restricted()) {
-
-                    START_TIMER(world);
-                    overlap = matrix_inner(world, bmo, bmo, true);
-                    END_TIMER(world, "Overlap");
-
-                    START_TIMER(world);
-                    sygvp(world, fockb, overlap, 1, U, beps);
-                    END_TIMER(world, "fockb eigen sol");
-
-                    if (!param.do_localize()) {
-                        START_TIMER(world);
-                        bmo = transform(world, bmo, U, trantol, true);
-                        truncate(world, bmo);
-                        normalize(world, bmo);
-                        END_TIMER(world, "Transform MOs");
-                    }
-                }
-
-                if (world.rank() == 0 and (param.print_level() > 1)) {
-                    print(" ");
-                    print("alpha eigenvalues");
-                    print(aeps);
-                    if (param.nbeta() != 0 && !param.spin_restricted()) {
-                        print("beta eigenvalues");
-                        print(beps);
-                    }
-
-
-                    // write eigenvalues etc to a file at the same time for plotting DOS etc.
-                    FILE *f = 0;
-                    if (param.nbeta() != 0 && !param.spin_restricted()) {
-                        std::string name=std::string(param.prefix()+".energies_alpha.dat");
-                        f = fopen(name.c_str(), "w");
-                    } else {
-                        std::string name=param.prefix()+".energies.dat";
-                        f = fopen(name.c_str(), "w");
-                    }
-
-                    long nmo = amo.size();
-                    fprintf(f, "# %8li\n", nmo);
-                    for (long i = 0; i < nmo; ++i) {
-                        fprintf(f, "%13.8f\n", aeps(i));
-                    }
-                    fclose(f);
-
-                    if (param.nbeta() != 0 && !param.spin_restricted()) {
-                        long nmo = bmo.size();
-                        FILE *f = 0;
-                        std::string name=param.prefix()+".energies_beta.dat";
-                        f = fopen(name.c_str(), "w");
-
-                        fprintf(f, "# %8li\n", nmo);
-                        for (long i = 0; i < nmo; ++i) {
-                            fprintf(f, "%13.8f\t", beps(i));
-                        }
-                        fclose(f);
-                    }
-
-                }
-
-                if (param.do_localize()) {
-                    // Restore the diagonal elements for the analysis
-                    for (unsigned int i = 0; i < amo.size(); ++i)
-                        aeps[i] = focka(i, i);
-                    if (param.nbeta() != 0 && !param.spin_restricted())
-                        for (unsigned int i = 0; i < bmo.size(); ++i)
-                            beps[i] = fockb(i, i);
-                }
-
-                if (checkpoint_observer)
-                    checkpoint_observer(world, *this,
-                                        {iter,
-                                         FunctionDefaults<3>::get_thresh(),
-                                         etot,
-                                         da,
-                                         db,
-                                         bsh_residual,
-                                         iter > 0,
-                                         true,
-                                         ekinetic,
-                                         energy_change,
-                                         kinetic_change,
-                                         comparison_alpha,
-                                         comparison_beta,
-                                         comparison_energy,
-                                         comparison_kinetic,
-                                         iter - 1,
-                                         function_residuals,
-                                         density_changes.charge,
-                                         density_changes.spin,
-                                         input_kinetic_diagonal,
-                                         comparison_kinetic_diagonal,
-                                         explicit_accuracy,
-                                         configured_progress,
-                                         rung_stop,
-                                         engine_check_passed});
-                break;
+        if (stopped) {
+            const bool converged = control ? decision->action == iteration::Action::complete
+                                          : step.rung_stop == convergence::StopReason::converged;
+            last_calculation_outcome = CalculationOutcome{converged,
+                control ? decision->reason : convergence::to_string(step.rung_stop)};
+            if (!control && converged && step.engine_check_passed) {
+                converged_for_thresh = FunctionDefaults<3>::get_thresh();
+                converged_for_dconv = dconv;
+            }
+            // Orbital energies must describe the evaluated, published vectors.
+            for (long i = 0; i < aeps.size(); ++i) aeps[i] = evaluation.fock_alpha(i, i);
+            if (param.have_beta())
+                for (long i = 0; i < beps.size(); ++i) beps[i] = evaluation.fock_beta(i, i);
+            // Localized expectation values remain in aeps/beps. The DOS
+            // spectrum is a separate collective calculation on the final state.
+            tensorT spectrum_alpha, spectrum_beta;
+            if (param.print_level() > 1) {
+                auto spectrum = [&](const tensorT& fock, const vecfuncT& mo, const char* spin) {
+                    iteration::ElapsedTimer<> timer;
+                    tensorT rotation, values;
+                    auto overlap = matrix_inner(world, mo, mo, true);
+                    const double overlap_seconds = timer.lap();
+                    sygvp(world, fock, overlap, 1, rotation, values);
+                    const double eigen_seconds = timer.lap();
+                    if (world.rank() == 0 && param.print_level() > 2)
+                        iteration::write_value_table(std::cout, std::string("Final orbital spectrum: ") + spin +
+                            " (wall seconds, driver rank)", {{"Overlap", overlap_seconds}, {"Fock eigensolve", eigen_seconds}});
+                    return values;
+                };
+                spectrum_alpha = spectrum(evaluation.fock_alpha, amo, "alpha");
+                if (param.have_beta()) spectrum_beta = spectrum(evaluation.fock_beta, bmo, "beta");
+            }
+            if (world.rank() == 0 && param.print_level() > 1) {
+                if (converged) print("\nConverged!\n");
+                print("alpha eigenvalues", spectrum_alpha);
+                if (param.have_beta()) print("beta eigenvalues", spectrum_beta);
+                auto write_energies = [&](const std::string& filename, const tensorT& eps) {
+                    std::ofstream output(filename);
+                    output << "# " << std::setw(8) << eps.size() << '\n' << std::fixed << std::setprecision(8);
+                    for (long i = 0; i < eps.size(); ++i) output << std::setw(13) << eps[i] << '\n';
+                };
+                write_energies(param.prefix() + (param.have_beta() ? ".energies_alpha.dat" : ".energies.dat"), spectrum_alpha);
+                if (param.have_beta()) write_energies(param.prefix() + ".energies_beta.dat", spectrum_beta);
             }
         }
-
-        const double previous_bsh_residual = bsh_residual;
-        // The historical aggregate lags this update by one iteration.
-        const auto previous_function_residuals = function_residuals;
-        update_subspace(world, Vpsia, Vpsib, focka, fockb, subspace, Q,
-                        bsh_residual, update_residual,
-                        checkpoint_observer ? &function_residuals : nullptr);
-        if (checkpoint_observer)
-            checkpoint_observer(world, *this,
-                                {iter,
-                                 FunctionDefaults<3>::get_thresh(),
-                                 etot,
-                                 da,
-                                 db,
-                                 previous_bsh_residual,
-                                 iter > 0,
-                                 false,
-                                 ekinetic,
-                                 energy_change,
-                                 kinetic_change,
-                                 arho,
-                                 brho,
-                                 etot,
-                                 ekinetic,
-                                 iter,
-                                 previous_function_residuals,
-                                 density_changes.charge,
-                                 density_changes.spin,
-                                 input_kinetic_diagonal,
-                                 input_kinetic_diagonal,
-                                 explicit_accuracy,
-                                 configured_progress,
-                                 scf_continuation::RungStop::in_progress,
-                                 engine_check_passed});
+        timing.steps.emplace_back("prepare/evaluate/decide", iteration_timer.lap());
+        if (checkpoint_observer) checkpoint_observer(world, *this, step);
+        if (control && control->observer) control->observer(world, *this, metrics, *decision, shared_progress);
+        timing.steps.emplace_back("checkpoint/report", iteration_timer.lap());
+        const auto report_timing = [&] {
+            timing.seconds = iteration_timer.seconds();
+            if (control && control->timing_observer) control->timing_observer(metrics.info, timing);
+            if (control && world.rank() == 0 && param.print_level() > 0)
+                iteration::write_iteration_timing(std::cout, "SCF", metrics.info, timing);
+        };
+        if (stopped) { report_timing(); break; }
+        // Keep the preceding evaluated state for changes, never a pre-rotation
+        // endpoint or an alias of the orbitals about to be updated.
+        arho_old = evaluation.alpha_density;
+        brho_old = evaluation.beta_density;
+        previous_energy = evaluation.energy;
+        previous_kinetic = evaluation.kinetic;
+        previous_kinetic_diagonal = evaluation.kinetic_diagonal;
+        if (control) previous = OrbitalComparison{metrics.info, evaluation.alpha_density,
+            evaluation.beta_density, evaluation.energy, evaluation.kinetic};
+        update_subspace(world, residual, subspace, Q);
+        timing.steps.emplace_back("advance", iteration_timer.lap());
+        report_timing();
     }
     // save the converged fock matix
     //
@@ -3437,6 +3548,7 @@ void SCF::solve(World& world, std::optional<int> iteration_cap) {
         }
     }
 
+    return decision;
 }        // end solve function
 
 } // namespace madness

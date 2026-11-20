@@ -132,6 +132,8 @@ public:
 
     /// return the munging threshold for the density
     double get_rhotol() const {return rhotol;}
+    [[nodiscard]] double get_rhomin() const {return rhomin;}
+    [[nodiscard]] const std::string& specification() const { return specification_; }
 
     /// return the floor for the kinetic energy density
 
@@ -169,6 +171,8 @@ public:
     }
 
 protected:
+
+    std::string specification_;      ///< recipe actually used by initialize()
 
     bool spin_polarized=false;        ///< True if the functional is spin polarized
     double hf_coeff=0.0;              ///< Factor multiplying HF exchange (+1.0 gives HF)

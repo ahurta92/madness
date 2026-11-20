@@ -11,16 +11,19 @@ limit rather than being extrapolated in a Gaussian basis.
 
 | Property | Status | Guide |
 |---|---|---|
-| **Polarizability α** (static + dynamic) | ✅ supported | [guides/polarizability.md](docs/guides/polarizability.md) |
-| **First hyperpolarizability β** (static + SHG) | ✅ supported | [guides/hyperpolarizability.md](docs/guides/hyperpolarizability.md) |
-| **Vibrational Raman** (single component) | ✅ supported | [guides/raman.md](docs/guides/raman.md) |
+| **Polarizability α** (static + dynamic) | ✅ supported (closed shell) | [guides/polarizability.md](docs/guides/polarizability.md) |
+| **First hyperpolarizability β** (static + SHG) | ✅ supported (closed-shell HF) | [guides/hyperpolarizability.md](docs/guides/hyperpolarizability.md) |
+| **Vibrational Raman** (components and full normal-mode analysis) | ✅ supported (closed-shell HF) | [guides/raman.md](docs/guides/raman.md) |
 | **Excited states** (TDA / Full RPA) | ✅ supported (closed shell) | [guides/excited_states.md](docs/guides/excited_states.md) |
 | **Two-photon absorption** | 🟡 preliminary (closed-shell singlets) | [guides/two_photon_absorption.md](docs/guides/two_photon_absorption.md) |
 | **DALTON warm-start** (seed ES/SCF from DALTON) | ✅ supported | [guides/dalton_warm_start.md](docs/guides/dalton_warm_start.md) |
-| Resonance Raman · full-tensor Raman · open-shell | 🔬 future | — |
+| Resonance Raman · open-shell property assembly and excited states | 🔬 future | — |
 
-**Scope:** closed-shell. Open-shell excited states and full-RPA are out of scope
-for this release.
+**Scope:** property assembly and excited-state execution are currently closed-shell.
+Open-shell driven dipole states can be solved and saved, but their property
+assembly is skipped. Quadratic DFT response is rejected because its second XC
+kernel is not implemented. Full Raman analysis requires the complete nuclear
+and derivative state set; partial selections return derivative components.
 
 ## Documentation
 
@@ -80,3 +83,47 @@ reference during development; **it has since been removed** — this engine is n
 the sole response engine and the default for `madqc --wf=response`, and a deck that
 still carries `engine v2` errors out. Migrating a v2 deck is a one-line edit:
 delete the `engine v2` line. See [`MIGRATION_FROM_V2.md`](MIGRATION_FROM_V2.md).
+
+<!-- EGM architecture contract: begin -->
+
+## Architecture and build
+
+The public entry point is `madqc --wf=response`; the standalone `molresponse`
+main and executable are retired. The response engine remains in this directory,
+along with its private numerical tests and import/analysis tools.
+
+[orchestrator/response_workflow.hpp](orchestrator/response_workflow.hpp) defines
+the collective engine input/output seam. [madqc_adapter.hpp](madqc_adapter.hpp)
+constructs requests and loads the exact qualified ground-state checkpoint.
+Property/state dependencies stay in the response planner and calculation manager;
+SCF-to-response dependencies stay in the madqc workflow.
+
+Response runs use the shared lifecycle for driven states, coupled TDA/RPA roots,
+VBC and the supported alpha, beta, Raman and 2PA properties. Applications own
+functions and comparison history; shared controllers consume their measurements.
+The existing DAG owns response dependencies. Native checkpoints record exact
+sources, and properties load only inputs that meet the current request.
+
+One response convergence block applies to driven and excited states. The default
+criteria are maximum per-function BSH residual, density change and energy change
+(where applicable). Provisional absolute defaults are `5e-4`, with relative
+terms zero. Set an explicit tolerance when selecting kinetic change. Final
+protocol requirements are mandatory; intermediate protocols retain the legacy
+threshold floors. These defaults still need the later full accuracy calibration.
+`dconv`, `excited.guess_max_iter`, separate excited-state budgets and experimental stall/seed-stage controls
+are not public inputs. Restart uses saved functions and fresh KAIN/history; exact
+saved evidence can satisfy a tighter request without another evaluation.
+
+Results contain grouped properties and state metrics once; analysis and shared
+steady-clock timing records remain separate. Open-shell HF driven states have
+native metrics/restart, but their property contractions and excited-state theory
+remain unavailable. Quadratic XC and meta-GGA response limitations are unchanged.
+Full Raman and 2PA retain their documented preliminary scientific status.
+
+Build `madqc` for application runs. CMake continues to build the response
+private test targets and analysis/import tools, including `dump_mra_trees`,
+`seed_from_dalton`, `seed_moldft_from_dalton` and `tpa_from_dalton`. Existing
+optional HDF5 utilities remain supported; shared HDF5 restart is deferred.
+
+Run `ctest -R madness/test/molresponse` for engine tests and the `response_*`
+[qctest cases](../../examples/qc/README.md) for scientific workflow checks.

@@ -1,5 +1,10 @@
 # DALTON warm-start
 
+Current madqc uses native shared restart archives. Set the desired starting
+precision explicitly in `dft.protocol`; `seed.start_rung` and `seed.es_warmup`
+are retired inputs. Historical HDF5/archive details below describe the older
+import path, not the shared-checkpoint interface.
+
 Seed a MADNESS calculation from a converged DALTON calculation: project DALTON's
 orbitals or response vectors onto the multiresolution grid and start the MADNESS
 solve from there instead of from a cold guess.
@@ -140,18 +145,15 @@ deck (`io.dalton.dir`), without running the projection tools by hand:
 
 ```
 dft
-  protocol [1e-6]        # one fine rung: the seed is basis-set quality; no econv/dconv (the
-end                      # protocol is the knob — SCF::solve floors dconv at the threshold)
+  protocol [1e-6]        # request a single fine stage explicitly
+end
 io
-  backend    hdf5                          # run-wide archive backend (GS and response)
+  backend    native                        # shared restart archives
   dalton.dir /path/to/dalton/seed          # run-wide seed: loose RSPVEC + molden.inp, or a unique *.tar.gz
 end
 response
-  protocol        [1e-6]
-  seed.start_rung fine                      # moot with a single rung; kept for ladders
   seed.freq_tol   0.01                      # nearest DALTON N(ω) for legs not in the RSPVEC
   seed.es_y       zero                      # zero | dalton: write the DALTON Y block into the ES seed?
-  seed.es_warmup  false                     # false: the Full solve starts from the seed directly
 end
 ```
 

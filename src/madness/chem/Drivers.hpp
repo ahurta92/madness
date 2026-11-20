@@ -19,6 +19,11 @@
 
 namespace qcapp {
 
+/// A controlled incomplete execution, reported without losing its results.
+struct WorkflowStopped : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 /**
  * @brief Abstract base class for all drivers that encapsulate one or more
  * Applications.
@@ -63,9 +68,15 @@ class SinglePointDriver : public Driver {
 
     // Read upstream artifacts (no-op unless the app overrides), run, then
     // publish this step's artifacts for downstream steps.
+    app_->set_shared_run_root(ctx.shared_run_root);
     app_->consume_context(ctx);
     app_->run(workdir);
     result_ = app_->results();
+    if (const auto outcome = app_->outcome()) {
+      result_["outcome"] = {{"complete", outcome->complete}, {"reason", outcome->reason}};
+      if (!outcome->complete)
+        throw WorkflowStopped("Calculation stopped incomplete: " + outcome->reason);
+    }
     app_->publish_to_context(ctx);
   }
 
@@ -112,7 +123,7 @@ public:
    * @param topDir Root directory for the entire workflow.
    * @param outputfile Name of the output file to write the aggregated results.
    */
-  void run(const std::string prefix) {
+  void run(const std::string prefix, bool shared_output = false) {
     std::filesystem::path topDir = prefix;
     std::filesystem::create_directories(topDir);
     all_ = nlohmann::json::object();
@@ -122,11 +133,17 @@ public:
     // One StepContext threaded through the whole chain: each driver reads what
     // upstream steps published and publishes its own artifacts (roadmap 1).
     madness::StepContext ctx;
+    if (shared_output) ctx.shared_run_root = std::filesystem::absolute(topDir);
 
     for (size_t i = 0; i < drivers_.size(); ++i) {
-      auto taskDir = topDir / ("task_" + std::to_string(i));
+      auto taskDir = shared_output ? topDir / "analysis"
+                                  : topDir / ("task_" + std::to_string(i));
       try {
         drivers_[i]->execute(taskDir, ctx);
+      } catch (const WorkflowStopped &) {
+        append_summary(drivers_[i]->summary());
+        write_calc_info(prefix);
+        throw;
       } catch (...) {
         // A failing task must still leave a complete, diagnosable
         // calc_info.json: record the failure as a task entry, persist, and
@@ -145,17 +162,7 @@ public:
         write_calc_info(prefix);
         throw;
       }
-      auto current_output = drivers_[i]->summary();
-
-      /// append current output to all
-      if (current_output.is_array()) {
-        for (const auto &item : current_output) {
-          all_["tasks"].push_back(item);
-        }
-      } else {
-        all_["tasks"].push_back(current_output);
-      }
-
+      append_summary(drivers_[i]->summary());
       write_calc_info(prefix);
     }
   }
@@ -164,6 +171,14 @@ public:
   const nlohmann::json &results() const { return all_; }
 
 private:
+  void append_summary(const nlohmann::json &output) {
+    if (output.is_array()) {
+      for (const auto &item : output) all_["tasks"].push_back(item);
+    } else {
+      all_["tasks"].push_back(output);
+    }
+  }
+
   /// Rank-0-only, ATOMIC (tmp+rename) aggregate write. Every rank used to
   /// stream the file directly — N concurrent writers to one path on a shared
   /// FS, and a crash mid-write truncated it.
@@ -178,31 +193,27 @@ private:
   ///      rank throws together (or none does).
   void write_calc_info(const std::string &prefix) const {
     auto &world = madness::World::get_default();
-    int ok = 1;
+    std::string error;
     if (world.rank() == 0) {
       const std::string outputfile = prefix + ".calc_info.json";
       const std::string tmpfile = outputfile + ".tmp";
-      {
+      try {
         std::ofstream ofs(tmpfile);
+        ofs.exceptions(std::ios::failbit | std::ios::badbit);
         ofs << std::setw(4) << all_;
-        ofs.flush();
-        if (!ofs) ok = 0;
-      }
-      if (ok) {
-        std::error_code ec;
-        std::filesystem::rename(tmpfile, outputfile, ec);
-        if (ec) ok = 0;
-      }
-      if (!ok) {
+        ofs.close();
+        std::filesystem::rename(tmpfile, outputfile);
+      } catch (const std::exception &exception) {
+        error = exception.what();
         std::error_code ec;
         std::filesystem::remove(tmpfile, ec);
       }
     }
-    world.gop.broadcast(&ok, 1, 0);
-    if (!ok)
+    world.gop.broadcast_serializable(error, 0);
+    if (!error.empty())
       throw std::runtime_error(
           "write_calc_info: failed to persist " + prefix +
-          ".calc_info.json (disk full or filesystem error)");
+          ".calc_info.json: " + error);
   }
 
   std::vector<std::unique_ptr<Driver>> drivers_;
@@ -264,41 +275,12 @@ public:
         madness::print("Running geometry optimization on", Library::label(), "in",
                        pm.dir().string());
 
-      // What the optimizer may demand, given how accurate the energy and the
-      // gradient actually are. These are the `optimization` group's knobs and
-      // nothing else -- the `dft` group's gtol/gval/gprec belong to the in-SCF
-      // optimizer and are not consulted here. Set as *derived* values, so
-      // anything the deck puts in the `optimization` group still wins.
-      //
-      // The split that matters: the ENERGY is bounded by the wavefunction
-      // threshold, the GRADIENT is not. The gradient is a functional of the
-      // density, so `dconv` bounds it; on top of that the raw derivatives carry
-      // a spurious net force (~1e-3 on water, and it does NOT shrink with
-      // `eprec`) which the projector removes only down to a residual of the
-      // same order as `dconv`.
-      //
-      // Deriving gtol from protocol().back() asked for 1e-5 on a gradient good
-      // to ~1e-5, and the optimizer ground against its own noise: H2O/LDA took
-      // seven geometries of non-monotonic wandering instead of four. Worse,
-      // MolOpt's escape hatch ("insufficient precision in gradient -- forcing
-      // convergence") is armed by gradient_precision, so setting that below the
-      // true precision disables the one mechanism that would have stopped it.
+      // Keep the existing protocol-derived energy and step defaults. Gradient
+      // defaults are independent of SCF's density tolerance; user overrides
+      // still win and MolOpt retains its precision clamp.
       auto &op = params_.get<OptimizationParameters>();
       const auto &cp = params_.get<CalculationParameters>();
-      const double wf_thresh = cp.protocol().back();
-      const double dconv = cp.dconv();
-      op.set_derived_value("etol", std::max(1.0e-6, 2.0 * wf_thresh));
-      op.set_derived_value("gtol", std::max(1.0e-4, dconv));
-      op.set_derived_value("xtol", 1.0e-3);
-      op.set_derived_value("value_precision", std::max(1.0e-6, wf_thresh));
-      // NOT dconv itself: the density error largely cancels in the gradient.
-      // Measured on H2O, the projected gradient's noise floor is ~1e-5 at the
-      // default dconv of 1e-4, and stays there when eprec is tightened by 100x.
-      // This number is load-bearing in two places -- it arms the "insufficient
-      // precision, force convergence" escape, and it clamps gtol from below
-      // (MolOpt's ctor) -- so setting it at dconv made the optimizer bail while
-      // the geometry was still moving by 1e-2 bohr.
-      op.set_derived_value("gradient_precision", std::max(1.0e-6, 0.1 * dconv));
+      op.set_protocol_defaults(cp.protocol().back());
 
       MADNESS_CHECK_THROW(
           !op.get_initial_hessian(),

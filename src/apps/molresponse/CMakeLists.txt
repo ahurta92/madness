@@ -16,7 +16,6 @@ if(MADNESS_ENABLE_VTK)
   endif()
 endif()
 
-add_mad_executable(molresponse "main.cpp;GroundState.cpp" "MADchem")
 # Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
 # along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
 # core is covered by test_calc_manager_run / test_run_response / test_v3_*_skeleton.
@@ -199,7 +198,7 @@ if(MADNESS_ENABLE_HDF5)
   # dump_mra_trees joins the list so its --coeffs native-coefficient export can call
   # save_function_hdf5 (the structured /meta+/keys+/coeffs writer in
   # solvers/function_hdf5_io.hpp); guarded by MADNESS_HAS_HDF5 in the source.
-  foreach(_hdf5_tgt molresponse test_calc_manager_run dump_mra_trees)
+  foreach(_hdf5_tgt test_calc_manager_run dump_mra_trees)
     if(TARGET ${_hdf5_tgt})
       target_include_directories(${_hdf5_tgt} PRIVATE ${HDF5_INCLUDE_DIRS})
       target_link_libraries(${_hdf5_tgt} PRIVATE ${HDF5_LIBRARIES})
@@ -245,10 +244,7 @@ endif()
 # of seed_from_dalton; moldft --restart resumes from it (SCF::load_mos).
 add_mad_executable(seed_moldft_from_dalton "tools/seed_moldft_from_dalton.cpp;GroundState.cpp" "MADchem")
 
-add_dependencies(applications-madness molresponse)
 
-install(TARGETS molresponse
-        DESTINATION "${MADNESS_INSTALL_BINDIR}")
 
 # --- CTest registration (M3): tiered so a bare `ctest` is fast and green on ---
 # --- any machine, and heavier tiers are opt-in by label / cache variable. ----
@@ -342,6 +338,54 @@ if(BUILD_TESTING)
   add_test(NAME madness/test/molresponse/test_fd_explicit_accuracy/run COMMAND test_fd_explicit_accuracy)
   set_tests_properties(madness/test/molresponse/test_fd_explicit_accuracy/run
     PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+
+  add_mad_executable(test_shared_iteration "tests/test_shared_iteration.cpp" "MADworld;nlohmann_json::nlohmann_json")
+  add_mad_executable(test_shared_es_iteration "tests/test_shared_es_iteration.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_shared_es_iteration/run COMMAND test_shared_es_iteration)
+  set_tests_properties(madness/test/molresponse/test_shared_es_iteration/run PROPERTIES LABELS "unit;response;long" TIMEOUT 240)
+  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+    add_test(NAME madness/test/molresponse/test_shared_es_iteration/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+        $<TARGET_FILE:test_shared_es_iteration> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(madness/test/molresponse/test_shared_es_iteration/mpi2 PROPERTIES LABELS "unit;response;long" TIMEOUT 240)
+  endif()
+  add_mad_executable(test_es_comparison "tests/test_es_comparison.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_es_comparison/run COMMAND test_es_comparison)
+  set_tests_properties(madness/test/molresponse/test_es_comparison/run PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+  add_mad_executable(test_shared_response_review "tests/test_shared_response_review.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_shared_response_review/run COMMAND test_shared_response_review)
+  set_tests_properties(madness/test/molresponse/test_shared_response_review/run PROPERTIES LABELS "unit;response;short" TIMEOUT 60)
+  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+    add_test(NAME madness/test/molresponse/test_shared_response_review/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} -n 2 $<TARGET_FILE:test_shared_response_review>)
+    set_tests_properties(madness/test/molresponse/test_shared_response_review/mpi2 PROPERTIES
+      LABELS "unit;response;short" TIMEOUT 60 ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
+  endif()
+  add_mad_executable(test_shared_response_records "tests/test_shared_response_records.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_shared_response_records/run COMMAND test_shared_response_records)
+  set_tests_properties(madness/test/molresponse/test_shared_response_records/run PROPERTIES LABELS "unit;response;short" TIMEOUT 60)
+  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+    add_test(NAME madness/test/molresponse/test_shared_response_records/mpi2
+      COMMAND ${MPIEXEC_EXECUTABLE} -n 2 $<TARGET_FILE:test_shared_response_records>)
+    set_tests_properties(madness/test/molresponse/test_shared_response_records/mpi2 PROPERTIES
+      LABELS "unit;response;short" TIMEOUT 60 ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
+  endif()
+  add_mad_executable(test_shared_fd_planning "tests/test_shared_fd_planning.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_shared_fd_planning/run COMMAND test_shared_fd_planning)
+  set_tests_properties(madness/test/molresponse/test_shared_fd_planning/run PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+  add_test(NAME madness/test/molresponse/test_shared_iteration/run COMMAND test_shared_iteration)
+  set_tests_properties(madness/test/molresponse/test_shared_iteration/run PROPERTIES LABELS "unit;molresponse;short" TIMEOUT 30)
+  add_mad_executable(test_response_property_metadata "tests/test_response_property_metadata.cpp" "MADworld;nlohmann_json::nlohmann_json")
+  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+    foreach(mode read write)
+      add_test(NAME madness/test/molresponse/test_response_property_metadata/${mode}_mpi2
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+          $<TARGET_FILE:test_response_property_metadata> ${mode} ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(madness/test/molresponse/test_response_property_metadata/${mode}_mpi2 PROPERTIES
+        LABELS "unit;response;short" TIMEOUT 15
+        ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
+    endforeach()
+  endif()
 
   add_mad_executable(test_iteration_protocol "tests/test_iteration_protocol.cpp" "MADworld;nlohmann_json::nlohmann_json")
   add_test(NAME madness/test/molresponse/test_iteration_protocol/run COMMAND test_iteration_protocol)

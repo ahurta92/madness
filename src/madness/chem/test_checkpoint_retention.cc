@@ -82,6 +82,23 @@ int main() {
   check(generations_to_delete({}, "g-1").empty(),
         "generations_to_delete: an empty store");
 
+  // Live roots protect their full dependency closure, not historical maps.
+  const GenerationRef a{"ground", "state", "a"}, b{"ground", "state", "b"};
+  const GenerationRef v{"response", "vbc", "v"}, p{"response", "property", "p"};
+  const DependencyGraph graph{{a, {}}, {b, {}}, {v, {a}}, {p, {v}}};
+  check(retained_generations({b,p}, graph) == std::set<GenerationRef>{a,b,v,p},
+        "current result dependencies are protected transitively");
+  check(retained_generations({b}, graph) == std::set<GenerationRef>{b},
+        "historical maps do not remain roots after current result replacement");
+  bool missing = false;
+  try { retained_generations({p}, DependencyGraph{{p,{v}}}); }
+  catch (const std::exception&) { missing = true; }
+  check(missing, "missing required dependency prevents retention planning");
+  bool cycle = false;
+  try { retained_generations({p}, DependencyGraph{{p,{v}}, {v,{p}}}); }
+  catch (const std::exception&) { cycle = true; }
+  check(cycle, "cyclic required dependency is invalid rather than a cleanup guess");
+
   std::cout << "checkpoint retention failures: " << failures << '\n';
   return failures ? 1 : 0;
 }

@@ -1,9 +1,12 @@
 #pragma once
 
+#include <madness/chem/CalculationOutcome.h>
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/InputWriter.hpp>
 #include <madness/chem/ParameterManager.hpp>
 #include <madness/chem/PathManager.hpp>
 #include <madness/chem/Results.h>
+#include <madness/chem/SCFRun.h>
 #include <madness/chem/molopt.h>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +35,8 @@ class SCF; // forward decl for StepContext::reference
 /// consume_context(). Everything is optional: an unset field means "no upstream
 /// value — fall back to the build-time / input value".
 struct StepContext {
+  /// Absolute shared store root for adopted single-point workflows.
+  std::filesystem::path shared_run_root;
   /// The molecule the next step should use (possibly optimized/displaced).
   std::optional<Molecule> molecule;
   /// Live ground-state reference engine, if an upstream SCF step exposed one.
@@ -173,6 +178,8 @@ public:
 
   virtual ~Application() = default;
 
+  void set_shared_run_root(const std::filesystem::path& root) { shared_run_root_ = root; }
+
   // run: write all outputs under the given directory
   virtual void run(const std::filesystem::path &workdir) = 0;
 
@@ -187,6 +194,12 @@ public:
 
   // optional hook to return a JSON fragment of this app's main results
   [[nodiscard]] virtual nlohmann::json results() const = 0;
+
+  /// Engines adopt this handoff alongside their convergence layer. Absence
+  /// retains an unadopted engine's existing path; it is not a convergence claim.
+  [[nodiscard]] virtual std::optional<CalculationOutcome> outcome() const {
+    return std::nullopt;
+  }
 
   virtual void print_parameters(World &world) const = 0;
 
@@ -238,6 +251,7 @@ public:
   }
 
 protected:
+  std::filesystem::path shared_run_root_;
   Params params_;
   nlohmann::json results_;
 };
@@ -288,9 +302,11 @@ public:
 
   // sets the calc working directory and runs the calculation
   void run(const std::filesystem::path &workdir) override {
+    outcome_ = {};
+    iteration::ElapsedTimer<> run_timer;
     // 1) set up a namedspaced directory for this run
     std::string label = Library::label();
-    PathManager pm(workdir, label);
+    PathManager pm(workdir, shared_run_root_.empty() ? label : "ground_state");
     pm.create();
     {
       world_.gop.fence();
@@ -302,7 +318,8 @@ public:
       auto ckpt = label + ".calc_info.json";
       SCFResultsTuple empty_results;
       nlohmann::json j;
-      NextAction action;
+      NextAction action = madness::NextAction::Redo;
+      if constexpr (!std::is_same_v<Calc, SCF>) {
       if (has_results(ckpt)) {
         try {
           // Parse INSIDE the try: a truncated/corrupt checkpoint (e.g. a
@@ -350,6 +367,7 @@ public:
         scf_results = empty_results;
         action = madness::NextAction::Redo;
       }
+      } // SCF uses shared native evidence, never an analysis report.
       // NB: nothing needs to be pushed into params_ for a restart. The engine
       // decides for itself where its orbitals come from (plan_restart, called
       // from MolecularEnergy::value and Nemo::value), reading the archive's
@@ -359,6 +377,16 @@ public:
       // therefore gone along with the boolean it set.
       world_.gop.fence();
       set_calc_workdir(pm.dir());
+      const auto reference = [this]() {
+        if constexpr (std::is_same_v<Calc, SCF>) return calc();
+        else return calc()->get_calc();
+      }();
+      if constexpr (std::is_same_v<Calc, SCF>)
+        reference->checkpoint_root = shared_run_root_;
+      reference->last_calculation_outcome.reset();
+      const auto &requested = params_.get<CalculationParameters>();
+      const double threshold = requested.protocol().back();
+      const double density_limit = std::max(threshold, requested.dconv());
       auto params_copy = params_;
 
       // if okay and optimize we have to set Molecule to new geometry
@@ -371,7 +399,7 @@ public:
           action == madness::NextAction::ReloadOnly ||
           action == madness::NextAction::Restart) {
         if (world_.rank() == 0) {
-          print("SCF results are valid, no need to rerun");
+          print("Saved SCF results found; the engine validates native state before reuse");
           print("Ensure we are running on the correct molecule geometry");
         }
 
@@ -389,38 +417,28 @@ public:
         print("Next action is ", static_cast<int>(action),
               " (0=Ok,1=ReloadOnly,2=Restart,3=Redo)");
 
-      if (pre_run_hook_ && (action == madness::NextAction::Restart ||
+      bool needs_seed = true;
+      if constexpr (std::is_same_v<Calc, SCF>) {
+        needs_seed = reference->param.restart() == "none" ||
+            !std::filesystem::exists(scf_checkpoint_directory(*reference) / "checkpoints" / "run.json");
+      }
+      if (pre_run_hook_ && needs_seed && (action == madness::NextAction::Restart ||
                             action == madness::NextAction::Redo)) {
         pre_run_hook_(world_, params_, pm.dir());
         world_.gop.fence();
       }
       if (action == madness::NextAction::Restart ||
-          action == madness::NextAction::Redo) {
-        // Both actions mean the same thing here -- run the engine. Restart vs
-        // Redo used to select where the orbitals came from; that is now the
+          action == madness::NextAction::Redo || action == madness::NextAction::Ok) {
+        // Native-state actions run the engine. Restart vs Redo used to select
+        // where the orbitals came from; that is now the
         // engine's own decision (plan_restart, from the archive header), so the
         // distinction survives only as a diagnostic. The action is still passed
         // through for the log rather than hardcoding one.
         scf_results = lib_.run(world_, params_, action);
-      } else if (action == madness::NextAction::Ok) {
-        // Results stand as checkpointed -- but the engine must not be left as a
-        // bare construction: a downstream cc2/cis/oep step needs a reference with
-        // orbitals. Ok implies the restartdata archive exists (see valid()), so
-        // the MOs can be reloaded from it.
-        //
-        // NOTE: Ok is currently UNREACHABLE, for a different reason on each path,
-        // so this branch is correct-but-dormant rather than exercised:
-        //  - nemo: valid() tests at_protocol as
-        //    `converged_for_thresh == protocol().back()`, but Nemo::value drives
-        //    its SCFProtocol from econv, so converged_for_thresh never equals the
-        //    final protocol rung -> must_redo stays true -> Restart.
-        //  - moldft: valid() looks for `params.prefix() + ".restartdata.00000"`,
-        //    while the engine is constructed from the mad.in written by
-        //    moldft_lib::initialize_ and so writes `mad.restartdata.00000`
-        //    -> archive_exists is always false -> Redo.
-        // Both are recorded in ARCHITECTURE_ROADMAP.md. Reuse still works today
-        // via Restart (which reloads the MOs), it just costs the archive read.
-        lib_.reload(world_, params_);
+        // Ok also goes through the native restart planner. A saved JSON report
+        // cannot qualify reprojected/padded functions or a different operator.
+        // The engine reuses a qualified archive without solving; otherwise it
+        // resumes under its existing restart rules.
       } else {
         // ReloadOnly: results stand, and there is no archive to reload from, so
         // the engine has no orbitals. Harmless for a standalone scf/nemo run;
@@ -455,33 +473,52 @@ public:
       if (results_["scf"].contains("scf_fock_b"))
         results_["scf_fock_b"] = results_["scf"]["scf_fock_b"];
       results_["convergence_info"] = results_["convergence"];
-      results_["metadata"] = {{"mpi_size", world_.size()}};
+      results_["metadata"] = {{"mpi_size", world_.size()},
+          {"nthreads", ThreadPool::size() + 1}, {"clock_scope", "driver_rank"},
+          {"elapsed_time", run_timer.seconds()}};
+      if constexpr (std::is_same_v<Calc, SCF>)
+        results_["protocol"] = {{"threshold", FunctionDefaults<3>::get_thresh()},
+                                 {"k", FunctionDefaults<3>::get_k()}};
+
+      // Transitional handoff from the existing engines. Do not infer a stop
+      // from legacy threshold stamps when moldft used explicit criteria.
+      auto &cr = std::get<2>(scf_results);
+      if (!reference->amo.empty()) {
+        cr.set_converged_thresh(reference->converged_for_thresh);
+        cr.set_converged_dconv(reference->converged_for_dconv);
+        results_["convergence"] = cr.to_json();
+        results_["convergence_info"] = results_["convergence"];
+      }
+      RestartMetadata precision;
+      precision.converged_for_thresh = cr.converged_for_thresh;
+      precision.converged_for_dconv = cr.converged_for_dconv;
+      const bool qualified = precision.is_converged_to(threshold, density_limit);
+      outcome_ = {qualified, qualified ? "converged" : "criteria_unmet"};
+      if (reference->last_calculation_outcome)
+        outcome_ = *reference->last_calculation_outcome;
+      results_["outcome"] = {{"complete", outcome_.complete}, {"reason", outcome_.reason}};
 
       // write the checkpoint file atomically (tmp write + rename) so a crash
       // or ENOSPC mid-write cannot truncate a previously-good checkpoint and
       // brick the next restart. See defect-1 in the raman thread brief.
+      std::string write_error;
       if (world_.rank() == 0) {
         const std::string tmp = ckpt + ".tmp";
-        bool ok = true;
-        {
+        try {
           std::ofstream ofs(tmp);
+          ofs.exceptions(std::ios::failbit | std::ios::badbit);
           ofs << results_.dump(4);
-          ofs.flush();
-          ok = static_cast<bool>(ofs);
-        }
-        if (ok) {
-          std::error_code ec;
-          std::filesystem::rename(tmp, ckpt, ec);
-          if (ec) ok = false;
-        }
-        if (ok) {
+          ofs.close();
+          std::filesystem::rename(tmp, ckpt);
           print("Written checkpoint file: ", ckpt);
-        } else {
+        } catch (const std::exception &error) {
           std::error_code ec;
           std::filesystem::remove(tmp, ec);
-          print("ERROR: failed to write checkpoint file (disk full?): ", ckpt);
+          write_error = "Failed to write SCF checkpoint report " + ckpt + ": " + error.what();
         }
       }
+      world_.gop.broadcast_serializable(write_error, 0);
+      if (!write_error.empty()) throw std::runtime_error(write_error);
     }
   }
 
@@ -527,13 +564,18 @@ public:
       const std::filesystem::path dir =
           calc()->work_dir.empty() ? std::filesystem::current_path()
                                     : std::filesystem::path(calc()->work_dir);
-      ctx.archives["restartdata"] = dir / (cp.prefix() + ".restartdata");
+      if constexpr (std::is_same_v<Calc, SCF>)
+        ctx.archives["restartdata"] = scf_checkpoint_archive(world_, *calc());
+      else
+        ctx.archives["restartdata"] = dir / (cp.prefix() + ".restartdata");
     } catch (...) {
       // best-effort; absence just means downstream restart discovery falls back
     }
   }
 
-  nlohmann::json results() const override { return results_; }
+  [[nodiscard]] nlohmann::json results() const override { return results_; }
+
+  [[nodiscard]] std::optional<CalculationOutcome> outcome() const override { return outcome_; }
 
 private:
   // Returns true iff the checkpoint's stored geometry matches the requested
@@ -607,6 +649,7 @@ private:
   PreRunHook pre_run_hook_;
   Library lib_; // owns shared_ptr<Engine>
   SCFResultsTuple scf_results;
+  CalculationOutcome outcome_;
 };
 
 
@@ -648,8 +691,9 @@ public:
    * @brief Execute response + property workflow, writing into workdir/response
    */
   void run(const std::filesystem::path &workdir) override {
+    iteration::ElapsedTimer<> run_timer;
     // create a namespaced subdirectory for response outputs
-    PathManager pm(workdir, Library::label());
+    PathManager pm(workdir, shared_run_root_.empty() ? Library::label() : "response");
     pm.create();
     {
       ScopedCWD scwd(pm.dir());
@@ -657,6 +701,10 @@ public:
       auto res = Library::run_response(world_, params_, reference_, pm.dir());
 
       metadata_ = std::move(res.metadata);
+      metadata_["elapsed_time"] = run_timer.seconds();
+      metadata_["mpi_size"] = world_.size();
+      metadata_["nthreads"] = ThreadPool::size() + 1;
+      metadata_["clock_scope"] = "driver_rank";
       properties_["response_properties"] = std::move(res.properties);
       properties_["vibrational_analysis"] = std::move(res.vibrational_analysis);
       properties_["raman_spectra"] = std::move(res.raman_spectra);
@@ -1048,13 +1096,11 @@ struct moldft_lib {
       : input_path_(std::move(input_path)) {}
 
   vector<double> protocol;
-  SCFResultsTuple last_results_;
 
   using Calc = SCF;
 
   NextAction valid(World &world, const SCFResultsTuple &results,
                    const Params &params) {
-    last_results_ = results;
     return ::valid(world, results, params.get<CalculationParameters>());
   }
 
@@ -1080,7 +1126,7 @@ struct moldft_lib {
 
   // params get's changed by SCF constructor
   SCFResultsTuple run(World &world, const Params &params,
-                      const NextAction next_action_) {
+                      const NextAction /*next_action*/) {
     const auto &molecule = params.get<Molecule>();
     const auto &params_copy = params;
 
@@ -1088,12 +1134,6 @@ struct moldft_lib {
     auto &scf_res = std::get<0>(results);
     auto &prop_res = std::get<1>(results);
     auto &conv_res = std::get<2>(results);
-
-    if (next_action_ == NextAction::Ok ||
-        next_action_ == NextAction::ReloadOnly) {
-      // nothing to do
-      return last_results_;
-    }
 
     // NOTE: NextAction::Restart needs nothing done here. The engine reads the
     // restartdata header itself and decides whether to load, iterate or skip
@@ -1138,10 +1178,15 @@ struct moldft_lib {
     // scf_res.is_opt stays false; the field and the OptimizationResults slot in
     // SCFResultsTuple remain because the driver fills them.
     MolecularEnergy E(world, *scf);
+    scf->last_calculation_outcome.reset();
     scf_res.scf_molecule = molecule;
 
     energy = E.value(scf->molecule.get_all_coords().flat());
-    if (world.rank() == 0 && scf->param.print_level() > 0)
+    // The application owns moldft.calc_info.json and replaces it atomically.
+    // An auxiliary engine report must not truncate that same file first.
+    const auto engine_report = std::filesystem::absolute(scf->param.prefix() + ".calc_info.json").lexically_normal();
+    const auto application_report = std::filesystem::absolute("moldft.calc_info.json").lexically_normal();
+    if (world.rank() == 0 && scf->param.print_level() > 0 && engine_report != application_report)
       E.output_calc_info_schema();
 
     // total density: 2*rho_alpha when restricted, rho_alpha + rho_beta otherwise
@@ -1154,18 +1199,19 @@ struct moldft_lib {
 
     // optionally compute gradient, dipole, etc.
     Tensor<double> grad;
-    if (scf->param.derivatives()) {
+    const bool complete = scf->last_calculation_outcome && scf->last_calculation_outcome->complete;
+    if (complete && scf->param.derivatives()) {
       grad = scf->derivatives(world, rho);
       scf->e_data.add_gradient(grad);
       scf_res.properties.gradient = grad;
     }
 
     tensorT dip;
-    if (scf->param.dipole())
+    if (complete && scf->param.dipole())
       dip = scf->dipole(world, rho);
 
     // atomic charges by the schemes of the population key (none: empty)
-    const nlohmann::json pop = scf->population_analysis(world);
+    const nlohmann::json pop = complete ? scf->population_analysis(world) : nlohmann::json{};
     if (not pop.empty())
       prop_res.populations = pop;
 
@@ -1249,7 +1295,8 @@ private:
 
     FunctionDefaults<3>::set_pmap(pmapT(new LevelPmap<Key<3>>(world)));
     std::cout.precision(6);
-    calc_ = std::make_shared<SCF>(world, parser);
+    calc_ = std::make_shared<SCF>(world, read_scf_parameters(world, parser),
+                                 Molecule(world, parser), PCMParameters(world, parser));
   }
 
   std::string input_path_;
@@ -1294,6 +1341,7 @@ struct nemo_lib {
     auto nm = calc(world, params);
     nm->get_calc()->work_dir = std::filesystem::current_path();
 
+    nm->reset_calculation_cache();
     nm->value();
     PropertyResults pr = nm->analyze();
     // compute the hessian

@@ -93,8 +93,8 @@ MARKER = ".qctest_workdir"
 def clean_workdir(case, workdir, force=False):
     """Empty the working directory before staging.
 
-    madqc leaves its per-task scratch behind -- <case>/task_0/<calc>/mad.restartdata.*
-    among others -- and restarts from it on the next run. A repeated qctest then
+    madqc leaves shared checkpoints behind under <case>/checkpoints/
+    and restarts from them on the next run. A repeated qctest then
     converges onto the *previous* run's orbitals instead of solving the deck, which
     makes the case pass or fail according to what ran there last. That has already
     masked a real regression, so every run starts from an empty directory.

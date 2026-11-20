@@ -333,3 +333,106 @@ coarser_seed(const std::vector<SavedState>& same_state, const Rung& rung) {
 }
 
 } // namespace madness::planning
+
+namespace madness::iteration {
+
+enum class SavedEvidenceUse : std::uint8_t { compatible, guess_only, invalid };
+struct SavedTask {
+    IterationMetrics metrics;
+    bool protocol_complete = false;
+    std::size_t updates_at_protocol = 0;
+    // The application classifies archive integrity, numerical validity and
+    // scientific compatibility before calling. guess_only permits loading
+    // functions but discards metric/comparison/completed-stage claims.
+    SavedEvidenceUse use = SavedEvidenceUse::compatible;
+    bool conversion_supported = false;
+    bool bundle_expanded = false;
+};
+enum class RestartAction : std::uint8_t { fresh, guess, resume, reuse };
+struct RestartPlan {
+    RestartAction action = RestartAction::fresh;
+    std::size_t start_protocol = 0;
+    std::size_t main_updates = 0; // deliberately never initialized from history
+    std::size_t max_updates = 0;
+    std::size_t updates_at_protocol = 0;
+    bool reset_comparisons = true; // scalar evidence does not restore history
+    std::optional<Decision> completion;
+    std::string reason;
+};
+
+// One task or coupled bundle per call. Seeds for other tasks never confer
+// progress. Restart always reconstructs raw equation work before advancement;
+// neither this planner nor saved scalar measurements restores KAIN.
+inline RestartPlan plan_restart(const std::vector<Protocol>& protocols,
+                                const Request& request, const ModelMetrics& model,
+                                const ExpectedTask& expected,
+                                const std::optional<SavedTask>& saved) {
+    if (protocols.empty()) throw std::invalid_argument("empty protocol sequence");
+    for (auto position = protocols.begin(); position != protocols.end(); ++position) {
+        const auto& protocol = *position;
+        if (!std::isfinite(protocol.thresh) || protocol.thresh <= 0.0 || protocol.k <= 0)
+            throw std::invalid_argument("invalid protocol representation");
+        if (std::find(protocols.begin(), position, protocol) != position)
+            throw std::invalid_argument("duplicate protocol representation");
+    }
+    const auto final_settings = resolve(request, model, protocols.back(), true);
+    RestartPlan plan;
+    plan.max_updates = request.max_updates;
+    plan.reason = "new_task";
+    if (!saved) return plan;
+    if (saved->use == SavedEvidenceUse::invalid)
+        throw std::invalid_argument("invalid selected checkpoint");
+
+    const auto& metrics = saved->metrics;
+    ExpectedTask stored_expected = expected;
+    if (saved->use == SavedEvidenceUse::guess_only)
+        stored_expected.context_id = metrics.info.context_id;
+    if (saved->bundle_expanded) {
+        const std::set<std::string> wanted(expected.states.begin(), expected.states.end());
+        if (wanted.size() != expected.states.size() || wanted.contains("")
+            || metrics.states.empty() || metrics.states.size() >= wanted.size())
+            throw std::invalid_argument("invalid expanded bundle membership");
+        stored_expected.states.clear();
+        for (const auto& subject : metrics.states) {
+            if (!wanted.contains(subject.id)) throw std::invalid_argument("saved subject absent from expanded bundle");
+            stored_expected.states.push_back(subject.id);
+        }
+    }
+    // Validate the saved frame independently of whether its metrics pass today's
+    // limits. Final settings avoid applying a model floor for the wrong rung.
+    auto saved_settings = final_settings;
+    saved_settings.protocol = metrics.info.protocol;
+    if (!std::isfinite(saved_settings.protocol.thresh) || saved_settings.protocol.thresh <= 0.0
+        || saved_settings.protocol.k <= 0
+        || !assess(saved_settings, stored_expected, metrics).valid)
+        throw std::invalid_argument("invalid or mismatched saved metrics");
+
+    const auto position = std::find(protocols.begin(), protocols.end(), metrics.info.protocol);
+    if (position == protocols.end()) {
+        if (!saved->conversion_supported)
+            throw std::invalid_argument("checkpoint representation conversion is unsupported");
+        plan.action = RestartAction::guess;
+        plan.reason = "saved_protocol_not_requested";
+        return plan;
+    }
+    plan.start_protocol = static_cast<std::size_t>(position - protocols.begin());
+    plan.updates_at_protocol = saved->updates_at_protocol;
+    plan.action = RestartAction::resume;
+    plan.reason = "fresh_evaluation_required";
+    if (saved->use == SavedEvidenceUse::guess_only || saved->bundle_expanded)
+        return plan;
+    if (plan.start_protocol + 1 == protocols.size()) {
+        plan.completion = saved_completion(final_settings, expected, metrics);
+        if (plan.completion) {
+            plan.action = RestartAction::reuse;
+            plan.reason = "saved_metrics_satisfy_request";
+        }
+    } else if (saved->protocol_complete) {
+        ++plan.start_protocol;
+        plan.updates_at_protocol = 0;
+        plan.reason = "completed_intermediate_protocol";
+    }
+    return plan;
+}
+
+} // namespace madness::iteration

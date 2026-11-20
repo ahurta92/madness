@@ -28,8 +28,8 @@ detail is in the [feature guides](guides/).
 | Protocol ladder (honest-climb) | ✅ Stable | automatic | Coarse rungs seed finer ones even when unconverged; properties carry per-row accuracy of the states that built them | [excited_states](guides/excited_states.md) |
 | State-parallel FD | ✅ Stable | `--fd-subworlds=P` (per node; 0 = single-world) | Faster + much less per-rank memory via node-aligned subworlds | [parallelism](guides/parallelism.md) |
 | FD exchange tensor | ✅ Stable (opt-in) | `--fd-tensor` (FD), `--es-tensor` (ES γ) | Shared convolution tensors + per-protocol g0 cache + tiling (bounds n² memory; required at n≳34) | [parallelism](guides/parallelism.md), [formalism](guides/formalism.md) |
-| DALTON warm-start | ✅ Stable | `seed_from_dalton` / `seed_moldft_from_dalton` tools | Seed the excited-state solve (and SCF) from a DALTON calculation — fewer iterations and correct root selection; can skip the coarse protocol rung | [DALTON warm-start](guides/dalton_warm_start.md) |
-| HDF5 restart / I/O | 🟡 Experimental (opt-in, closed-shell) | deck `response.hdf5 true` or `io { backend hdf5 }` (build `-DMADNESS_ENABLE_HDF5=ON`) | Interop/inspection with HDF5 tooling; auto-detecting readers; backend stamped per entry in metadata | [`madqc/HDF5_IO.md`](../../madqc/HDF5_IO.md) |
+| DALTON warm-start | ✅ Stable | `seed_from_dalton` / `seed_moldft_from_dalton` tools | Seed the excited-state solve (and SCF) from a DALTON calculation — fewer iterations and correct root selection; uses the explicitly requested protocol ladder | [DALTON warm-start](guides/dalton_warm_start.md) |
+| HDF5 analysis utilities | Separate optional tools; shared restart deferred | deck `response.hdf5 true` or `io { backend hdf5 }` (build `-DMADNESS_ENABLE_HDF5=ON`) | Interop/inspection with HDF5 tooling; auto-detecting readers; backend stamped per entry in metadata | [`madqc/HDF5_IO.md`](../../madqc/HDF5_IO.md) |
 | MRA visualization export | ✅ Stable (NP=1) | build `-DMADNESS_ENABLE_VTK`; `dump_mra_trees --htg/--amr/--coeffs` | Inspect trees + response orbitals/ρ⁽¹⁾ in ParaView; native `.mad.h5` coefficient archive | — |
 
 ## Response properties
@@ -43,12 +43,12 @@ detail is in the [feature guides](guides/).
 | Two-photon absorption (2PA) | 🟡 Preliminary (closed-shell singlets) | single-residue tensor + Monson–McClain observables; working equations being finalized ([guide](guides/two_photon_absorption.md)) |
 | Full-tensor Raman + normal-mode spectrum | 🟡 Preliminary (closed shell) | `raman.nuc_atom -1`: all 3N coordinates, Hessian from the nuclear response states, frequencies, activities and depolarization ratios under `properties.vibrational_analysis` / `raman_spectra`; qctest `response_lih_raman_full`; read against the archived v2 LiH numbers, no independent reference yet ([guide](guides/raman.md)) |
 | Resonance Raman | 🔬 In development | gated on the excited-state/response path |
-| Open-shell response | 🔬 Out of scope | closed-shell only in this release |
+| Open-shell HF driven states | Shared lifecycle integrated | Alpha/beta and nuclear contractions, open-shell excited states and non-HF response kernels remain unavailable. |
 
 ## Known limits (release notes)
 
-- **HDF5**: closed-shell response states only; the restart backend gathers at
-  nio=1 (no parallel HDF5 yet — see roadmap).
+- **Shared restart uses native archives.** Optional HDF5 tools are separate; the
+  madqc shared response path rejects HDF5 restart.
 - **Large-molecule dynamics on small subworlds**: 20+-occupied Full solves at k8+
   can exceed the hang-watchdog on 2-rank subworlds (`MAD_WAIT_TIMEOUT` raises it);
   prefer more ranks per subworld or the single-world path for the finest rung.
@@ -60,4 +60,4 @@ From the architecture review ([`madqc/ARCHITECTURE_ROADMAP.md`](../../madqc/ARCH
 StepContext dataflow (typed task-to-task handoff — also the path to close CC2/OEP
 chaining), a first-class `optimize` workflow, properties at every optimization
 step, finite-difference higher-order properties, and parallel HDF5. Also tracked:
-state-parallel auto-selection, ES state-parallel, and full-tensor Raman.
+state-parallel auto-selection, ES state-parallel, and further full-Raman validation.

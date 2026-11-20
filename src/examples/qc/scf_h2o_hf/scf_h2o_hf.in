@@ -9,7 +9,7 @@
 dft
     xc          hf
     protocol    [1e-4, 1e-6]
-    dconv       1e-4
+    convergence.criteria [bsh_residual, density_change, energy_change]
 end
 
 molecule

@@ -1,0 +1,13 @@
+# Configure-time build contract, independent of the selected generator.
+function(madness_check_madqc_targets)
+  foreach(retired moldft nemo molresponse cis oep cc2)
+    if(TARGET ${retired})
+      message(FATAL_ERROR "Duplicate chemistry executable target remains: ${retired}")
+    endif()
+  endforeach()
+  foreach(retained madqc mp2 pno znemo zcis DFdriver testperiodicdft tdse tdse4 dump_mra_trees)
+    if(NOT TARGET ${retained})
+      message(FATAL_ERROR "Required chemistry engine/tool target was lost: ${retained}")
+    endif()
+  endforeach()
+endfunction()

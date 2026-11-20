@@ -233,6 +233,14 @@ public:
     arr.push_back(record);
   }
 
+  /// Replace one property type with the current request's qualified records.
+  /// Shared results must not export old protocols, frequencies or failed rows.
+  void replace_property(const std::string& name,const std::string& protocol_key,
+                        const nlohmann::json& records) {
+    if (!records.is_array()) throw std::invalid_argument("property records must be an array");
+    j_["properties"][name]=nlohmann::json{{protocol_key,records}};
+  }
+
   /// The identity fields of a property record: alpha rows key on
   /// (omega, directions); beta/raman rows on (A, B, C, freq_b, freq_c);
   /// ES-derived rows on (es_root_id, fd_freq). Doubles round-trip exactly

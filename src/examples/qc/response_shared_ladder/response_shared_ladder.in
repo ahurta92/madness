@@ -1,0 +1,28 @@
+# Helium HF: alpha_zz at zero and nonzero frequency, across three MRA protocols.
+# The ground state finishes its full protocol before response begins.
+dft
+    xc hf
+    localize canon
+    protocol [1e-4, 1e-5, 1e-6]
+    maxiter 30
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 1e-5
+    convergence.density_change 1e-6
+    convergence.energy_change 1e-7
+    print_level 0
+end
+response
+    dipole.directions z
+    dipole.frequencies [0.0, 0.05]
+    kain true
+    maxiter 30
+    convergence.criteria [bsh_residual, density_change, kinetic_change]
+    convergence.bsh_residual 1e-5
+    convergence.density_change 1e-5
+    convergence.kinetic_change 1e-5
+    print_level 1
+end
+molecule
+    units atomic
+    He 0 0 0
+end

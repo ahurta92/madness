@@ -51,12 +51,45 @@ namespace madness {
 
 struct CalculationParameters : public QCCalculationParametersBase {
   static constexpr char const* tag = "dft";
+  bool scf_input_owner = false;
+  void enable_scf_inputs() { scf_input_owner = true; ignore_unknown_keys = false; }
+  static bool retired_scf_input(const std::string& key) {
+      for (const auto* old : {"dconv", "econv", "save", "convergence_criteria", "conv_only_dens",
+               "accuracy.bsh_residual", "accuracy.kinetic_trace_change", "convergence.use_default_criteria",
+               "progress.window", "progress.minimum_relative_improvement", "diagnostic.iterations_per_rung",
+               "maxiter_per_rung", "restart.start_rung", "checkpoint.keep_all"})
+          if (key == old) return true;
+      return false;
+  }
+  bool visible_input(const std::string& key) const override {
+      if (key == "restartao" || key == "no_compute") return false;
+      if (scf_input_owner) return !retired_scf_input(key);
+      return key != "checkpoint.every_iterations" && !key.starts_with("convergence.");
+  }
+  void validate_input_value(const std::string& key, const std::string& value) const override {
+      const bool shared = key == "convergence.criteria" || key == "checkpoint.every_iterations" ||
+          key.starts_with("convergence.bsh_residual") || key.starts_with("convergence.density_change") ||
+          key.starts_with("convergence.energy_change") || key.starts_with("convergence.kinetic_change");
+      if (shared && !scf_input_owner) throw std::invalid_argument("unknown input for this engine: " + key);
+      if (scf_input_owner) {
+          if (retired_scf_input(key)) throw std::invalid_argument("unknown input: " + key);
+          if ((shared && key != "convergence.criteria") || key == "maxiter" || key == "nv_its") {
+              std::size_t used = 0;
+              const double number = std::stod(value, &used);
+              if (!std::isfinite(number) || number < 0.0 || value.find_first_not_of(" \t", used) != std::string::npos)
+                  throw std::invalid_argument("invalid nonnegative input: " + key);
+          }
+      }
+  }
 
   // A prefix may include an explicit output directory on a case-sensitive filesystem.
   std::set<std::string> case_sensitive_keys() const override { return {"prefix"}; }
   std::set<std::string> full_precision_keys() const override {
-      return {"accuracy.bsh_residual", "accuracy.kinetic_trace_change",
-              "progress.minimum_relative_improvement"};
+      return {"accuracy.bsh_residual", "accuracy.kinetic_trace_change", "progress.minimum_relative_improvement",
+              "convergence.bsh_residual", "convergence.bsh_residual.relative",
+              "convergence.density_change", "convergence.density_change.relative",
+              "convergence.energy_change", "convergence.energy_change.relative",
+              "convergence.kinetic_change", "convergence.kinetic_change.relative"};
   }
 
 	CalculationParameters(const CalculationParameters& other) = default;
@@ -73,6 +106,12 @@ struct CalculationParameters : public QCCalculationParametersBase {
 
 	/// ctor reading out the input file
 	CalculationParameters() {
+        initialize<std::vector<std::string>>("convergence.criteria", {}, "SCF convergence metrics; empty selects model defaults");
+        for (const auto* metric : {"bsh_residual", "density_change", "energy_change", "kinetic_change"}) {
+            initialize<double>(std::string("convergence.") + metric, -1.0, "SCF absolute tolerance; omitted uses the model default");
+            initialize<double>(std::string("convergence.") + metric + ".relative", 0.0, "SCF relative tolerance");
+        }
+        initialize<int>("checkpoint.every_iterations", 0, "SCF interior checkpoint cadence; zero saves only endpoints");
 		initialize<std::string>("prefix","mad","prefixes your output/restart/json/plot/etc files");
 		initialize<double>("charge",0.0,"total molecular charge");
 		initialize<std::string> ("xc","hf","XC input line");

@@ -32,6 +32,8 @@
 // save_fd_state.
 // ===========================================================================
 
+#include "../solvers/shared_response_session.hpp"
+#include "../solvers/response_property_metadata.hpp"
 #include "calc_manager.hpp"
 
 #include "../GroundState.hpp"
@@ -99,12 +101,11 @@ inline EsSeedReference make_es_seed_reference(madness::World &world,
 
 namespace molresponse_v3 {
 
-/// Plain, World-free executor settings — everything the *caller* specifies
-/// (convergence policy, ES/seed/accept knobs). Carried by value in
-/// `ResponseWorkflowInput` (R0a) so the public contract holds no World-bound
-/// state. `ExecutorContext` inherits these, so every `ctx.<knob>` access in this
-/// file resolves to an inherited member and is unchanged by the split.
+/// Executor configuration carried by ResponseWorkflowInput. The optional shared
+/// checkpoint binding is World-bound; its initial adapter forbids subworlds.
 struct ExecutorSettings {
+  std::shared_ptr<response_shared::Session> shared_response;
+
   // Named stages publish a consistent snapshot after a complete FD protocol step.
   // Empty for legacy callers; this does not change solver steps or stopping tests.
   std::function<void(madness::World&, const nlohmann::json&)> checkpoint_observer;
@@ -517,6 +518,12 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
   const double step_w0 = madness::wall_time();   // R1b: point-solve wall timer
+  if (ctx.shared_response) {
+    auto& timing=ctx.shared_response->timing();
+    timing.begin("protocol",{{"protocol",checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})}});
+    timing.begin("task",{{"task_id",fd_node_id(pert,freq)}});
+    timing.begin("prepare");
+  }
 
   // Bring FunctionDefaults<3> + the ground state to this protocol so the
   // source builders and try_load (which keys on protocol_key()) are correct.
@@ -561,6 +568,79 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     madness::scale(world, zflat, 0.0);
     s0.responses[0].from_flat(zflat);           // independent zeros
   }
+  if (ctx.shared_response) {
+    namespace it=madness::iteration;
+    auto& binding=ctx.shared_response->at(fd_node_id(pert,freq));
+    ctx.shared_response->timing().end();
+    binding.activate({t0,FunctionDefaults<3>::get_k()});
+    // Suppress the legacy stopping table; report the shared controller's checks.
+    Solver solver(world,std::move(tgt),ctx.policy,PrintLevel::Silent,ctx.log_prefix);
+    solver.set_print_level(ctx.print_level);
+    if (binding.has_saved()) {
+      it::ElapsedTimer<> load_timer;
+      s0.responses.front()=binding.template load<typename Solver::Storage>();
+      const double load_seconds=load_timer.seconds();
+      ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
+      if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+        const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+        it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
+            it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());
+        it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
+      }
+    }
+    if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
+      auto& timing=ctx.shared_response->timing();timing.begin("imported_guess");
+      bool imported=false;
+      if(auto loaded=try_load_fd_state<Type,Shell>(world,ctx.calc_dir,pert,freq)) {
+        s0=std::move(loaded->state);s0.iter=0;imported=true;
+      }
+      if constexpr(std::is_same_v<Type,Full> && std::is_same_v<Shell,ClosedShell>) {
+        if(!imported && ctx.seed_freq_tol>0.0 && pert.kind==Perturbation::Kind::Dipole)
+          if(auto guess=dalton_fd_guess(world,gs,ctx.dalton_dir,ctx.calc_dir,pert.axis,freq,ctx.seed_freq_tol)) {
+            s0.responses.front()=std::move(*guess);imported=true;
+          }
+      }
+      if(imported) {
+        binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
+        if(world.rank()==0) print("response: imported driven guess; fresh convergence checks");
+      }
+      timing.end();
+    }
+    std::size_t evaluations=0;
+    if (!binding.reusable()) {
+      const auto observe=[&](const typename Solver::State& state,const it::IterationMetrics& metrics,
+                             const it::Decision& decision,const it::Progress& progress) {
+        ++evaluations;
+        if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+          it::write_iteration_metrics(std::cout,"response",metrics,decision,
+              response_shared::metric_labels(),binding.controls().final_protocol);
+        binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
+          MADNESS_CHECK_THROW(state.responses.size()==1,"driven task must contain one response state");
+          state.responses.front().save(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
+          checkpoint::Payload payload;
+          if (world.rank()==0) payload.archives.push_back(checkpoint::inspect_archive(directory,"functions","response",{},1));
+          return payload;
+        });
+        if (decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+          it::write_checkpoint_saved(std::cout,decision);
+        ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids);
+      };
+      const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.expected(),
+          binding.info(),binding.previous_updates(),observe,
+          [&](const it::IterationInfo& info,const it::IterationTiming& timing) {
+            ctx.shared_response->record_iteration(info,timing);
+            if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+              it::write_iteration_timing(std::cout,"response",info,timing);
+          });
+      MADNESS_CHECK_THROW(decision.checkpoint,"driven response stopped without a valid current checkpoint");
+    }
+    ctx.shared_response->record_summary(binding,evaluations);
+    ctx.shared_response->timing().end();
+    ctx.shared_response->timing().end();
+    ctx.shared_response->publish_timings();
+    return {binding.complete(),protocol_key(),{}};
+  }
+
   const char *seed_kind = "zero";
   double seed_wall_s = -1.0; // D-118: set when the Dalton seed is tried
 
@@ -879,6 +959,182 @@ bool analyze_loaded_es_bundle(ExecutorContext& ctx, int n_roots,
 /// works; the converged excitation energies are persisted to
 /// response_metadata.json (excited_states/<key>/roots[].omega), which is what
 /// DerivedFD expansion (expand_converged_es) reads — making expansion restart-safe.
+// Shared ES binding; the existing task DAG still schedules the whole bundle.
+template<class Type>
+NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
+  using namespace madness;
+  namespace it=madness::iteration;
+  using Solver=ESSolver<Type,ClosedShell>;
+  auto& world=ctx.world;auto& gs=ctx.gs;auto& session=*ctx.shared_response;
+  auto& binding=session.at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
+  auto& timing=session.timing();
+  timing.begin("protocol",{{"protocol",checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})}});
+  timing.begin("task",{{"task_id",binding.info().task_id}});timing.begin("prepare");
+  set_response_protocol(world,ctx.L,thresh);
+  binding.activate({thresh,FunctionDefaults<3>::get_k()});
+  auto coulop=poperatorT(CoulombOperatorPtr(world,gs.params().lo(),0.001*thresh));
+  gs.prepare(world,0.001*thresh,coulop,ctx.fock_json);
+  ESProblem<Type,ClosedShell> problem{detail_exec::build_gs<ClosedShell>(world,gs),n_roots};
+  auto policy=detail_exec::es_iteration_policies(ctx,!binding.has_saved()).main;
+  policy.lock_converged=false;policy.tda_warmup_iters=0;
+  Solver solver(world,std::move(problem),policy,PrintLevel::Silent);
+  solver.set_print_level(ctx.print_level);solver.set_gamma_tensor(ctx.es_gamma_tensor);
+  typename Solver::State state;
+  timing.end();
+  if(binding.has_saved()) {
+    timing.begin("load");
+    state=binding.load([&](const auto& directory,const auto& manifest) {
+      return response_shared::load_excited_functions<Type,ClosedShell>(world,directory,manifest,binding.controls().protocol);
+    });
+    timing.end();
+    if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+      const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+      it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
+          it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::excited_metric_labels());
+    }
+  }
+  std::optional<EsSeedReference> imported_seed;
+  if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
+    timing.begin("imported_guess");
+    if(auto loaded=try_load_es_bundle<Type,ClosedShell>(world,ctx.calc_dir,n_roots)) {
+      imported_seed=make_es_seed_reference(world,ctx.calc_dir,loaded->bundle_dir,loaded->source_protocol_key);
+      state=std::move(loaded->state);state.iter=0;
+      binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
+      if(world.rank()==0) print("response: imported excited bundle; fresh convergence checks");
+    }
+    timing.end();
+  }
+  if(state.roots.size()<static_cast<std::size_t>(n_roots)) {
+    timing.begin("guess");
+    // Preserve the legacy candidate space, but select its lowest Ritz roots
+    // without the retired warmup updates. A single raw solid-harmonic trial
+    // can otherwise pin a higher symmetry sector (e.g. transverse H2).
+    const int trials=std::max(n_roots,static_cast<int>(std::ceil(ctx.es_warmup_oversample*n_roots)));
+    auto tda=build_initial_guess_tda_closed_shell(world,gs,trials,ctx.es_guess,ctx.es_guess_basis);
+    ESSolver<TDA,ClosedShell> guess_solver(world,
+        build_es_problem_tda<ClosedShell>(world,gs,trials,gs.hf_exchange_coefficient(),gs.params().lo()),
+        policy,PrintLevel::Silent);
+    guess_solver.set_gamma_tensor(ctx.es_gamma_tensor);
+    tda=guess_solver.prepare_initial_guess(std::move(tda));
+    tda=slice_state_lowest<ClosedShell>(tda,n_roots);
+    if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+      print("response: selected",n_roots,"initial roots from",trials,"trials; no warmup updates");
+    typename Solver::State guess;
+    if constexpr(std::is_same_v<Type,TDA>) guess=std::move(tda);
+    else guess=promote_tda_to_full_closed_shell(world,tda);
+    // Retain every saved root; append only the newly requested guess functions.
+    for(std::size_t i=0;i<state.roots.size();++i) guess.roots.at(i)=std::move(state.roots[i]);
+    guess.stable_index=state.stable_index;
+    for(std::size_t i=guess.stable_index.size();i<guess.roots.size();++i)
+      guess.stable_index.push_back(static_cast<int>(i));
+    state=std::move(guess);timing.end();
+  }
+  std::size_t evaluations=0;
+  if(!binding.reusable()) {
+    const auto observer=[&](const auto& current,const it::IterationMetrics& metrics,const it::Decision& decision,const it::Progress& progress) {
+      ++evaluations;
+      if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+        it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.controls().final_protocol);
+      binding.publish(metrics,decision,progress,[&](const auto& directory) {
+        return response_shared::save_excited_functions(world,current,directory);
+      });
+      if(decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+        it::write_checkpoint_saved(std::cout,decision);
+      session.record_evaluation(metrics,decision,binding.definition().metric_ids);
+    };
+    const auto decision=solvers::iterate_shared(solver,state,binding.controls(),binding.expected(),binding.info(),binding.previous_updates(),observer,
+      [&](const it::IterationInfo& info,const it::IterationTiming& measured) {
+        session.record_iteration(info,measured);
+        if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal) it::write_iteration_timing(std::cout,"response",info,measured);
+      });
+    MADNESS_CHECK_THROW(decision.checkpoint,"excited bundle stopped without a valid current checkpoint");
+  }
+  if(imported_seed) {
+    it::ElapsedTimer<> guard_timer;
+    const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,state,binding.complete(),*imported_seed);
+    const auto seconds=guard_timer.seconds();
+    print_es_seed_guard(world,guard);
+    record_es_seed_guard(world,ctx.calc_dir,protocol_key(),guard,seconds);
+    timing.append({{"name","seed_comparison"},{"seconds",seconds}});
+  }
+  session.record_summary(binding,evaluations);
+  timing.end();timing.end();session.publish_timings();
+  return {binding.complete(),protocol_key(),{}};
+}
+
+template<class Type>
+void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
+  using namespace madness;
+  using json=nlohmann::json;
+  auto& session=*ctx.shared_response;
+  auto& binding=session.at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
+  json energies={{"units","hartree"},{"components",json::object()},{"availability",json::object()}};
+  json strengths={{"units","dimensionless"},{"components",json::object()},{"availability",json::object()}};
+  json dipoles={{"units","atomic_units"},{"values",json::array()}};
+  json quadrupoles={{"units","atomic_units"},{"definition","nontraceless second moment"},{"values",json::array()}};
+  if(binding.complete()) {
+    session.timing().begin("excited_properties",{{"task_id",binding.info().task_id}});
+    set_response_protocol(ctx.world,ctx.L,thresh);
+    auto coulop=poperatorT(CoulombOperatorPtr(ctx.world,ctx.gs.params().lo(),0.001*thresh));
+    ctx.gs.prepare(ctx.world,0.001*thresh,coulop,ctx.fock_json);
+    session.timing().begin("load");
+    const auto state=binding.load([&](const auto& directory,const auto& manifest) {
+      return response_shared::load_excited_functions<Type,ClosedShell>(ctx.world,directory,manifest,binding.controls().protocol);
+    },true);
+    session.timing().end();session.timing().begin("transition_properties");
+    const auto analysis=analyze_es_bundle<Type,ClosedShell>(ctx.world,ctx.gs.orbitals_alpha(),state);
+    std::vector<std::vector<double>> y_norms;
+    if constexpr(std::is_same_v<Type,Full>) {
+      for(std::size_t i=0;i<state.roots.size();++i) {
+        if(!analysis[i].dipole_available) {y_norms.emplace_back();continue;}
+        const auto& root=state.roots[i];
+        std::vector<double> norms;norms.reserve(root.y_alpha.size());
+        for(const auto& function:root.y_alpha) norms.push_back(function.norm2());
+        y_norms.push_back(std::move(norms));
+      }
+    }
+    if(ctx.print_level>=PrintLevel::Normal) print_es_analysis(ctx.world,analysis,std::is_same_v<Type,TDA>,y_norms);
+    checkpoint::detail::on_root(ctx.world,[&] {
+      std::ofstream output(ctx.calc_dir+"/es_analysis__"+protocol_key()+".json");
+      output.exceptions(std::ios::failbit|std::ios::badbit);
+      output<<es_analysis_to_json(analysis,std::is_same_v<Type,TDA>,y_norms,state.stable_index).dump(2)<<'\n';
+      output.close();return std::string{};
+    });
+    for(std::size_t i=0;i<state.roots.size();++i) {
+      const auto id=make_root_id(state.stable_index[i]);
+      json components=json::object(), missing=json::object();
+      for(std::size_t a=0;a<3;++a) for(std::size_t b=0;b<3;++b) {
+        const auto key=std::string(1,"xyz"[a])+"xyz"[b];
+        if(analysis[i].quadrupole_available) components[key]=analysis[i].quadrupole[a][b];
+        else missing[key]="not computed by analysis diagnostic";
+      }
+      quadrupoles["values"].push_back({{"state",id},{"components",components},{"availability",missing}});
+      energies["components"][id]=analysis[i].omega;
+      if(analysis[i].dipole_available) strengths["components"][id]=analysis[i].oscillator;
+      else strengths["availability"][id]="not computed by analysis diagnostic";
+      components=json::object();missing=json::object();
+      for(std::size_t a=0;a<3;++a) {
+        const auto key=std::string(1,"xyz"[a]);
+        if(analysis[i].dipole_available) components[key]=analysis[i].dipole[a];
+        else missing[key]="not computed by analysis diagnostic";
+      }
+      dipoles["values"].push_back({{"state",id},{"components",components},{"availability",missing}});
+    }
+    session.timing().end();session.timing().end();
+  } else {
+    for(const auto& id:binding.expected().states) {
+      json missing=json::object();
+      for(char a:std::string("xyz")) for(char b:std::string("xyz")) missing[std::string(1,a)+b]="excited bundle incomplete";
+      quadrupoles["values"].push_back({{"state",id},{"components",json::object()},{"availability",missing}});
+      energies["availability"][id]="excited bundle has not met the requested criteria";
+      strengths["availability"][id]="excited bundle has not met the requested criteria";
+      dipoles["values"].push_back({{"state",id},{"components",json::object()},
+        {"availability",{{"x","excited bundle incomplete"},{"y","excited bundle incomplete"},{"z","excited bundle incomplete"}}}});
+    }
+  }
+  session.set_properties({{"excitation_energy",energies},{"oscillator_strength",strengths},{"transition_dipole",dipoles},{"transition_quadrupole",quadrupoles}});
+}
+
 inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
                                             double thresh, NodeAction action) {
   using namespace madness;
@@ -1315,11 +1571,68 @@ inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
 // two converged first-order states at this protocol, build the source, save.
 // ---------------------------------------------------------------------------
 
+namespace detail_exec {
+// Exact qualified checkpoints only. Property readers never fall back to guesses.
+inline std::optional<ResponseStateXY<ClosedShell>> qualified_fd_as_xy(
+    ExecutorContext& ctx,const Perturbation& perturbation,double frequency) {
+  auto& session=*ctx.shared_response;
+  const auto found=session.states.find(fd_node_id(perturbation,frequency));
+  if(found==session.states.end() || !found->second->complete()) return std::nullopt;
+  auto& binding=*found->second;
+  madness::checkpoint::records::require(binding.scientific_settings().at("frequency")==frequency &&
+      binding.scientific_settings().at("perturbation")==perturbation.description(),
+      "distinct requested frequencies share a response task identity");
+  session.timing().begin("load",{{"task_id",binding.info().task_id}});
+  ResponseStateXY<ClosedShell> functions;
+  if(is_static_freq(frequency)) {
+    auto x=binding.load<ResponseStateX<ClosedShell>>(true);
+    functions.x_alpha=std::move(x.x_alpha);functions.y_alpha=functions.x_alpha;
+  } else functions=binding.load<ResponseStateXY<ClosedShell>>(true);
+  session.timing().end();return functions;
+}
+inline ResponseStateXY<ClosedShell> load_shared_vbc(ExecutorContext& ctx,
+    response_shared::DirectCheckpoint& binding) {
+  auto& timing=ctx.shared_response->timing();
+  timing.begin("load",{{"task_id",binding.source_record().at("task_id")}});
+  auto source=binding.load([&](const auto& directory,const auto& manifest) {
+    const madness::iteration::Protocol current{madness::FunctionDefaults<3>::get_thresh(),madness::FunctionDefaults<3>::get_k()};
+    madness::checkpoint::records::require(
+        madness::checkpoint::records::read_protocol(manifest.record.at("task").at("definition").at("protocol"))==current &&
+        manifest.archives.size()==1 && manifest.archives.front().basename=="response" &&
+        manifest.archives.front().role=="functions", "VBC checkpoint representation or payload differs");
+    return ResponseStateXY<ClosedShell>::load(ctx.world,
+        madness::native_archive_name((directory/"response").string()),IoBackend::Native);
+  });
+  timing.end();return source;
+}
+} // namespace detail_exec
+
 inline NodeResult
 solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh) {
   using namespace madness;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
+
+  response_shared::DirectCheckpoint* shared=nullptr;
+  if(ctx.shared_response) {
+    auto& session=*ctx.shared_response;
+    session.timing().begin("vbc",{{"task_id",node.id}});
+    auto& B=session.at(fd_node_id(node.pert,node.freq));
+    auto& C=session.at(fd_node_id(node.pert_c,node.freq_c));
+    if(!B.complete() || !C.complete()) {
+      session.timing().end();return {false,"",{}};
+    }
+    const nlohmann::json definition{{"kind","VBC"},{"binding_version",1},
+        {"protocol",madness::checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})},
+        {"source",ctx.beta_pq_source ? "pq" : "vbc"}};
+    shared=&session.bind_direct(node.id,definition,
+        nlohmann::json::array({B.qualified_input("B"),C.qualified_input("C")}));
+    if(shared->reusable()) {
+      session.record_direct(node.id,*shared);session.timing().end();
+      return {true,protocol_key(thresh,default_k_for_thresh(thresh)),{}};
+    }
+    session.timing().begin("prepare");
+  }
 
   const bool gs_verbose = ctx.log_prefix.empty();  // F2d-ii: quiet in subworlds
   set_response_protocol(world, ctx.L, thresh, /*override_k=*/-1, gs_verbose);
@@ -1332,8 +1645,10 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
 
   // The two converged first-order states (X,Y) at this protocol. The
   // prerequisites_converged gate guarantees they are converged before we run.
-  auto B = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, node.pert,   node.freq);
-  auto C = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, node.pert_c, node.freq_c);
+  auto B = shared ? detail_exec::qualified_fd_as_xy(ctx,node.pert,node.freq)
+      : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,node.pert,node.freq);
+  auto C = shared ? detail_exec::qualified_fd_as_xy(ctx,node.pert_c,node.freq_c)
+      : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,node.pert_c,node.freq_c);
   if (!B || !C) {
     if (world.rank() == 0)
       madness::print("[CALC] solve_vbc:", node.id,
@@ -1341,6 +1656,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
     return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
   }
 
+  if(shared) {ctx.shared_response->timing().end();ctx.shared_response->timing().begin("build_source");}
   const double step_w0 = madness::wall_time();   // R1b: VBC build wall timer
   const double c_xc = gs.hf_exchange_coefficient();
   const double lo   = gs.params().lo();
@@ -1362,11 +1678,24 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
                    ctx.beta_pq_source ? "tpa::quadratic_source (P,Q)"
                                       : "vbc::compute_vbc (spec build, same source)");
   const double wall_s = madness::wall_time() - step_w0;   // R1b
+  if(shared) {
+    auto& session=*ctx.shared_response;
+    session.timing().end();session.timing().begin("checkpoint");
+    shared->publish([&](const std::filesystem::path& directory) {
+      vbc_src.save(world,native_archive_name((directory/"response").string()),IoBackend::Native);
+      checkpoint::Payload payload;
+      if(world.rank()==0) payload.archives.push_back(checkpoint::inspect_archive(directory,"functions","response",{},1));
+      return payload;
+    });
+    session.record_direct(node.id,*shared);
+    session.timing().end();session.timing().end();session.publish_timings();
+  } else {
   save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id,
                               /*converged=*/true, /*wall_s=*/wall_s,
                               /*metadata_shard=*/ctx.metadata_shard,  // F2g
                               /*log_prefix=*/ctx.log_prefix,          // F2d
                               /*log_group=*/ctx.log_group);           // F2d
+  }
 
   if (world.rank() == 0) {
     if (ctx.log_prefix.empty())
@@ -1389,6 +1718,7 @@ public:
   // D-089: closed shell only, as the solvers.
   bool analyze_loaded_bundle(const CalcNode &n, int n_roots,
                              double thresh) override {
+    if(ctx_.shared_response) return true; // exact native load in shared property assembly
     if (!ctx_.gs.is_spin_restricted())
       return false;
     if (n.tda)
@@ -1405,6 +1735,9 @@ public:
         [&](double threshold) { return threshold < item.thresh; });
 
     if (node.kind == CalcKind::ES) {
+      if(ctx_.shared_response)
+        return node.tda ? solve_shared_excited<TDA>(ctx_,node.n_roots,item.thresh) :
+                          solve_shared_excited<Full>(ctx_,node.n_roots,item.thresh);
       const bool restricted = ctx_.gs.is_spin_restricted();
       if (restricted) {
         if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
@@ -1487,6 +1820,10 @@ private:
 /// complete type when used as a `= {}` default argument inside CalcManager.
 enum class SeedStrategy { NearestConverged };
 struct CalcManagerPolicy {
+  std::function<StatePlan(const CalcNode&)> plan_derived;
+  std::function<void()> collect_subworlds;
+  std::function<bool(const CalcNode&)> dependencies_ready;
+  std::function<bool(const std::string&)> qualified_bundle;
   SeedStrategy seed = SeedStrategy::NearestConverged;
   int          max_iters_per_step = 25;
   int          es_max_iters_per_step = 0;   // ES budget; 0 = max_iters_per_step
@@ -1614,6 +1951,12 @@ public:
       auto waves = schedule(dag_, ramp, meta_json, policy_.max_iters_per_step,
                             policy_.es_max_iters_per_step,
                             policy_.state_plans, solved_);
+      // Native shared completion is judged against this invocation's request.
+      // Legacy analysis flags can describe an earlier, looser request.
+      if(policy_.dependencies_ready) for(auto& wave:waves)
+        wave.erase(std::remove_if(wave.begin(),wave.end(),[&](const WorkItem& item) {
+          return !policy_.dependencies_ready(*item.node);
+        }),wave.end());
       // Review fix (confirmed HIGH — front-wave starvation): quarantine nodes
       // that stopped making progress instead of halting the WHOLE run. Only
       // the front wave ever executes, so a deterministically-stuck node (e.g.
@@ -1936,6 +2279,7 @@ public:
             MADNESS_EXCEPTION("per-wave shard merge failed on rank 0 "
                               "(see [SHARD-MERGE-ERROR])", 0);
           world.gop.fence();
+          if(policy_.collect_subworlds) policy_.collect_subworlds();
         } else if ((policy_.fd_subworlds > 0 || policy_.fd_subworld_ranks > 0) && !rest.empty() &&
                    world.rank() == 0) {
           // Review MED: this wave is ES-only (ES is deliberately excluded from
@@ -1994,8 +2338,9 @@ private:
   /// dag_ in, same nodes appended in the same order.
   void expand_converged_es(madness::World &world, const nlohmann::json &meta) {
     if (!meta.contains("excited_states")) return;
-    std::set<std::string> have;
-    for (const auto &n : dag_) have.insert(n.id);
+    std::map<std::string,std::pair<double,std::string>> have;
+    for(const auto& n:dag_) if(n.kind==CalcKind::FD)
+      have.emplace(n.id,std::make_pair(n.freq,n.pert.description()));
 
     std::vector<CalcNode> additions;
     for (const auto &sym : dag_) {
@@ -2007,6 +2352,7 @@ private:
       const CalcNode *es = nullptr;
       for (const auto &n : dag_) if (n.id == es_id) { es = &n; break; }
       if (!es || es->protocols.empty()) continue;
+      if(policy_.qualified_bundle && !policy_.qualified_bundle(es_id)) continue;
       const std::string es_key = protocol_key_at(es->protocols.back());
       if (!meta["excited_states"].contains(es_key)) continue;
       const auto &b = meta["excited_states"][es_key];
@@ -2028,10 +2374,18 @@ private:
         c.pert       = sym.pert;
         c.freq       = fd_freq;
         c.protocols  = sym.protocols;
-        c.es_root_id = make_es_root_label(static_cast<int>(i));  // provenance
+        c.es_root_id = b["roots"][i].value("root_id",make_es_root_label(static_cast<int>(i)));
+        c.es_freq_factor=sym.es_freq_factor;
+        c.prerequisites={es_id};
         c.id         = fd_node_id(c.pert, fd_freq);  // id keys on the node's TRUE freq (ωₙ/2), not ωₙ
-        if (have.count(c.id)) continue;                  // dedup -> idempotent
-        have.insert(c.id);
+        const auto physical=std::make_pair(c.freq,c.pert.description());
+        if(const auto existing=have.find(c.id);existing!=have.end()) {
+          madness::checkpoint::records::require(existing->second==physical,
+              "distinct requested frequencies share a response task identity");
+          continue;
+        }
+        if(policy_.plan_derived) policy_.state_plans[c.id]=policy_.plan_derived(c);
+        have.emplace(c.id,physical);
         additions.push_back(std::move(c));
       }
     }
@@ -2064,12 +2418,113 @@ private:
 
 inline char beta_axis_name(int a) { return a == 0 ? 'x' : a == 1 ? 'y' : 'z'; }
 
+// Shared publication uses the same source/contraction kernels as the legacy
+// analysis path, but only exact checkpoints qualified for this request.
+inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,double thresh) {
+  using namespace madness;
+  using json=nlohmann::json;
+  auto& session=*ctx.shared_response;
+  auto& world=ctx.world;auto& gs=ctx.gs;
+  session.timing().begin("quadratic_properties");
+  const bool supported=gs.is_spin_restricted();
+  std::optional<ResponseGroundState> ground;
+  if(supported) {
+    session.timing().begin("prepare");
+    set_response_protocol(world,ctx.L,thresh);
+    auto coulop=poperatorT(CoulombOperatorPtr(world,gs.params().lo(),0.001*thresh));
+    gs.prepare(world,0.001*thresh,coulop,ctx.fock_json);
+    ground=build_response_ground_state_closed_shell(world,gs,gs.hf_exchange_coefficient(),gs.params().lo());
+    session.timing().end();
+  }
+  std::map<std::string,json> beta_tensors,raman_tensors;
+  json beta_rows=json::array(),raman_rows=json::array();
+  for(const auto& request:expand_vbc_requests(plan.vbc,static_cast<int>(gs.molecule().natom()))) {
+    const auto id=vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c);
+    const bool nuclear=request.pert_c.kind==Perturbation::Kind::NuclearDisplacement;
+    const auto tensor_key=json::array({request.freq_b,request.freq_c,
+        nuclear ? request.pert_c.description() : ""}).dump();
+    auto& tensor=(nuclear ? raman_tensors : beta_tensors)[tensor_key];
+    if(tensor.is_null()) {
+      tensor={{"frequency_b",request.freq_b},{"frequency_c",request.freq_c},
+              {"components",json::object()},{"availability",json::object()}};
+      if(nuclear) tensor["coordinate"]=request.pert_c.description();
+    }
+    std::optional<ResponseStateXY<ClosedShell>> source,B,C,alternate;
+    const auto selected=session.direct.find(id);
+    if(supported && selected!=session.direct.end() && selected->second->reusable()) {
+      B=detail_exec::qualified_fd_as_xy(ctx,request.pert_b,request.freq_b);
+      C=detail_exec::qualified_fd_as_xy(ctx,request.pert_c,request.freq_c);
+      if(B && C) {
+        source=detail_exec::load_shared_vbc(ctx,*selected->second);
+        if(ctx.beta_compare_sources) {
+          session.timing().begin("compare_source");
+          auto VB=perturbation_operator(world,gs,request.pert_b);
+          auto VC=perturbation_operator(world,gs,request.pert_c);
+          alternate=ctx.beta_pq_source ? vbc::compute_vbc<ClosedShell>(world,*ground,*B,*C,VB,VC)
+              : tpa::quadratic_source(world,*ground,*B,*C,VB,VC);
+          session.timing().end();
+        }
+      }
+    }
+    for(int axis=0;axis<3;++axis) {
+      const auto A_id=fd_node_id(Perturbation::dipole(axis),request.freq_b+request.freq_c);
+      if(!session.states.contains(A_id)) continue;
+      std::string component=std::string(1,"xyz"[axis])+"xyz"[request.pert_b.axis];
+      if(!nuclear) component+="xyz"[request.pert_c.axis];
+      if(!source || !B || !C || !session.at(A_id).complete()) {
+        tensor["availability"][component]=supported ? "required response state or VBC has not met the final request"
+            : "open-shell quadratic source and contraction are not implemented";
+        continue;
+      }
+      auto A=detail_exec::qualified_fd_as_xy(ctx,Perturbation::dipole(axis),request.freq_b+request.freq_c);
+      session.timing().begin("contraction",{{"task_id",id},{"component",component}});
+      auto VA=dipole_operator(world,axis);
+      const double value=beta::beta_abc<ClosedShell>(world,*ground,*A,*source,*B,*C,VA);
+      if(alternate) {
+        const double other=beta::beta_abc<ClosedShell>(world,*ground,*A,*alternate,*B,*C,VA);
+        if(world.rank()==0) print("[BETA-COMPARE]",component,"saved",value,"other",other,"difference",other-value);
+      }
+      session.timing().end();
+      tensor["components"][component]=value;
+      if(world.rank()==0) print(nuclear ? "[RAMAN]" : "[BETA]",component,
+          "fB=",request.freq_b,"fC=",request.freq_c,"value=",value);
+      // Preserve the analysis mirror consumed by the existing Raman analysis.
+      double residual=0.0;
+      for(const auto& state_id:{A_id,fd_node_id(request.pert_b,request.freq_b),fd_node_id(request.pert_c,request.freq_c)})
+        residual=std::max(residual,session.at(state_id).measured_values().at("values").at("bsh_residual").get<double>());
+      (nuclear ? raman_rows : beta_rows).push_back({{"A",std::string(1,"xyz"[axis])},
+          {"B",request.pert_b.description()},{"C",request.pert_c.description()},
+          {"freq_b",request.freq_b},{"freq_c",request.freq_c},{"beta",value},
+          {"converged",true},{"max_bsh_residual",residual}});
+    }
+  }
+  auto publish=[&](const char* name,const char* units,auto& tensors) {
+    if(tensors.empty()) return;
+    json values=json::array();
+    for(auto& [key,tensor]:tensors) {
+      tensor["status"]=tensor.at("availability").empty() ? "complete" : tensor.at("components").empty() ? "unavailable" : "partial";
+      values.push_back(std::move(tensor));
+    }
+    session.set_properties({{name,{{"units",units},{"value_type","real"},{"values",values}}}});
+  };
+  publish("hyperpolarizability","atomic_units",beta_tensors);
+  publish("polarizability_gradient","atomic_units",raman_tensors);
+  checkpoint::detail::on_root(world,[&] {
+    auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
+    const auto key=protocol_key(thresh,default_k_for_thresh(thresh));
+    meta.replace_property("beta",key,beta_rows);meta.replace_property("raman",key,raman_rows);
+    meta.save();return std::string{};
+  });
+  session.timing().end();
+}
+
 inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
                           double thresh) {
   using namespace madness;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
   if (plan.vbc.empty()) return;
+  if(ctx.shared_response) {assemble_shared_beta(ctx,plan,thresh);return;}
   // Same ClosedShell-only reader constraint as assemble_alpha — refuse loudly.
   if (!gs.is_spin_restricted()) {
     if (world.rank() == 0)
@@ -2103,9 +2558,7 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
   // alpha's row_accuracy; madqc review R4). Uses the SAME source-selection
   // helper the loader uses, so reported accuracy == the state actually loaded.
   nlohmann::json acc_meta;
-  if (world.rank() == 0)
-    acc_meta = ResponseMetadata::load_or_create(
-                   ctx.calc_dir + "/response_metadata.json").json();
+  acc_meta=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
   const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
   const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   auto fd_acc = [&](const Perturbation &p, double f) -> nlohmann::json {
@@ -2255,13 +2708,24 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
 template <typename EsType>
 inline bool load_tpa_es_xy(madness::World &world, const std::string &calc_dir,
                            std::vector<double> &omega_out,
-                           std::vector<ResponseStateXY<ClosedShell>> &Xf_out) {
-  auto es = try_load_es_bundle<EsType, ClosedShell>(world, calc_dir);
-  if (!es) return false;
-  auto &state = es->state;
+                           std::vector<ResponseStateXY<ClosedShell>> &Xf_out,
+                           response_shared::Checkpoint* binding=nullptr,
+                           std::vector<std::string>* root_ids=nullptr) {
+  typename ESSolver<EsType,ClosedShell>::State state;
+  if(binding) {
+    if(!binding->complete()) return false;
+    state=binding->load([&](const auto& directory,const auto& manifest) {
+      return response_shared::load_excited_functions<EsType,ClosedShell>(world,directory,manifest,binding->controls().protocol);
+    },true);
+  } else {
+    auto es=try_load_es_bundle<EsType,ClosedShell>(world,calc_dir);
+    if(!es) return false;
+    state=std::move(es->state);
+  }
   const long nr = state.omega.dim(0);
   for (long f = 0; f < nr; ++f) {
     omega_out.push_back(state.omega(f));
+    if(root_ids) root_ids->push_back(make_root_id(state.stable_index[f]));
     ResponseStateXY<ClosedShell> Xf;
     Xf.x_alpha = state.roots[f].x_alpha;
     if constexpr (std::is_same_v<EsType, Full>) {
@@ -2287,6 +2751,30 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     return;
   }
 
+  response_shared::Checkpoint* shared_bundle=nullptr;
+  nlohmann::json shared_values=nlohmann::json::array();
+  auto finish_shared=[&] {
+    if(!ctx.shared_response) return;
+    ctx.shared_response->set_properties({{"two_photon_absorption",{
+        {"value_type","real"},{"scientific_status","preliminary"},
+        {"units",{{"transition_tensor","atomic_units"},{"energy","hartree"},
+            {"sigma_linear_gm","GM"},{"sigma_circular_gm","GM"}}},
+        {"values",shared_values}}}});
+    ctx.shared_response->timing().end();
+  };
+  auto unavailable=[&](const std::string& id,const std::string& reason) {
+    shared_values.push_back({{"state",id},{"status","unavailable"},
+        {"components",nlohmann::json::object()},{"availability",{{"two_photon_absorption",reason}}}});
+  };
+  if(ctx.shared_response) {
+    ctx.shared_response->timing().begin("two_photon_properties");
+    const auto& request=plan.es.front();
+    shared_bundle=&ctx.shared_response->at(es_node_id(request.tda,request.n_roots));
+    if(!shared_bundle->complete()) {
+      for(const auto& id:shared_bundle->expected().states) unavailable(id,"excited bundle has not met the final request");
+      finish_shared();return;
+    }
+  }
   set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
   {
@@ -2301,22 +2789,19 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
 
   // Dispatch on the ES method recorded in the bundle metadata (tda vs full/RPA).
   // Dalton's TPA reference is full RPA; --es-full gives the matching v3 bundle.
-  int es_full = 0;
-  if (world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(
-        ctx.calc_dir + "/response_metadata.json");
-    const auto &j = meta.json();
-    if (j.contains("excited_states") && j["excited_states"].contains(key))
-      es_full = (j["excited_states"][key].value("type", "tda") == "full") ? 1 : 0;
+  int es_full=plan.es.front().tda ? 0 : 1;
+  if(!shared_bundle) {
+    const auto metadata=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
+    if(metadata.contains("excited_states") && metadata["excited_states"].contains(key))
+      es_full=metadata["excited_states"][key].value("type","tda")=="full" ? 1 : 0;
   }
-  world.gop.broadcast(es_full, 0);
-
+  std::vector<std::string> root_ids;
   std::vector<double> omegas;
   std::vector<ResponseStateXY<ClosedShell>> Xfs;
   const double t_es0 = madness::wall_time();
   const bool loaded =
-      es_full ? load_tpa_es_xy<Full>(world, ctx.calc_dir, omegas, Xfs)
-              : load_tpa_es_xy<TDA>(world, ctx.calc_dir, omegas, Xfs);
+      es_full ? load_tpa_es_xy<Full>(world, ctx.calc_dir, omegas, Xfs,shared_bundle,&root_ids)
+              : load_tpa_es_xy<TDA>(world, ctx.calc_dir, omegas, Xfs,shared_bundle,&root_ids);
   if (world.rank() == 0) {
     printf("[TPA timing] ES bundle load: %.1f s\n", madness::wall_time() - t_es0);
     fflush(stdout);
@@ -2324,7 +2809,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   if (!loaded) {
     if (world.rank() == 0)
       print("[TPA] no ES bundle under", ctx.calc_dir, "— SKIPPED");
-    return;
+    finish_shared();return;
   }
   const long nroots = static_cast<long>(omegas.size());
   if (world.rank() == 0)
@@ -2342,9 +2827,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   // same discipline as alpha/beta (review finding C9): a 2PA row built on an
   // unconverged or accepted-at-maxiter leg says so.
   nlohmann::json acc_meta;
-  if (world.rank() == 0)
-    acc_meta = ResponseMetadata::load_or_create(
-                   ctx.calc_dir + "/response_metadata.json").json();
+  if(!shared_bundle)
+    acc_meta=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
   const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
   const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   // rank-0 table data (S tensor + observables per root) for the Dalton-style print.
@@ -2365,8 +2849,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     bool ok = true;
     const double t_fd0 = madness::wall_time();
     for (int a = 0; a < 3; ++a) {
-      auto r = detail_exec::load_fd_as_xy<ClosedShell>(
-          world, ctx.calc_dir, Perturbation::dipole(a), wf_half);
+      auto r = shared_bundle ? detail_exec::qualified_fd_as_xy(ctx,Perturbation::dipole(a),wf_half)
+          : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,Perturbation::dipole(a),wf_half);
       if (!r) { ok = false; break; }
       mu_resp[a] = std::move(*r);
     }
@@ -2378,6 +2862,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       if (world.rank() == 0)
         print("[TPA] root", f, " omega_f=", wf,
               " — missing dipole FD @", wf_half, " — skip");
+      if(shared_bundle) unavailable(root_ids[f],"required driven response has not met the final request");
       continue;
     }
 
@@ -2421,11 +2906,13 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       }
       if (world.rank() == 0) printf("   (DALTON: QRLRVE <<A;A>> at same w)\n");
     }
+    if(ctx.tpa_diag_only && shared_bundle) unavailable(root_ids[f],"diagnostics requested without contraction");
     if (ctx.tpa_diag_only) continue;   // diagnostics only — no contraction,
                                        // no metadata writes (read-only pass)
 
     madness::Tensor<double> S;
     std::vector<std::string> src_files;
+    if(shared_bundle) ctx.shared_response->timing().begin("contraction",{{"state",root_ids[f]}});
     if (ctx.tpa_residue) {
       // PRODUCTION composition (TPA_SCOPING §5m + §5q, verified 6/6 vs DALTON
       // d-aug-QZ 2026-07-22 via verify_e3_k6.py):
@@ -2539,16 +3026,69 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       // Legacy candidate: build the 3 axis sources (the TPA analogue of beta's
       // VBC quadratic source), SAVE them to disk (mirrors beta/Raman
       // vbc_states — reusable + inspectable/isosurface-able), then contract.
-      auto vbc_b = tpa::tpa_sources(world, g0, Xf, mu_resp, mu_op);
-      for (int b = 0; b < 3; ++b) {
-        const std::string src = ctx.calc_dir + "/tpa_src__root" +
-            std::to_string(f) + "__" + std::string(1, "xyz"[b]) + "__" + key;
-        vbc_b[b].save(world, src);
-        src_files.push_back(std::filesystem::path(src).filename().string());
+      std::array<ResponseStateXY<ClosedShell>,3> vbc_b;
+      if(shared_bundle) {
+        auto& session=*ctx.shared_response;
+        nlohmann::json inputs=nlohmann::json::array({shared_bundle->qualified_input("excited")});
+        for(int axis=0;axis<3;++axis) inputs.push_back(session.at(fd_node_id(Perturbation::dipole(axis),wf_half)).qualified_input(std::string(1,"xyz"[axis])));
+        auto& binding=session.bind_direct("tpa_sources:"+shared_bundle->info().task_id+":"+root_ids[f],
+            {{"kind","tpa_sources"},{"binding_version",1},{"root",root_ids[f]},
+             {"protocol",checkpoint::records::protocol_record(shared_bundle->controls().protocol)}},inputs);
+        if(binding.reusable()) {
+          session.timing().begin("load_sources");
+          vbc_b=binding.load([&](const auto& directory,const auto& manifest) {
+            checkpoint::records::require(manifest.archives.size()==3,"invalid two-photon source payload");
+            std::array<ResponseStateXY<ClosedShell>,3> sources;
+            std::set<int> seen;
+            for(const auto& archive:manifest.archives) {
+              checkpoint::records::require(archive.role=="axis" && archive.indices.size()==1,"invalid two-photon source axis");
+              const int axis=archive.indices.front();
+              checkpoint::records::require(axis>=0 && axis<3 && seen.insert(axis).second && archive.basename==std::string(1,"xyz"[axis]),"invalid two-photon source axis identity");
+              sources[axis]=ResponseStateXY<ClosedShell>::load(world,native_archive_name((directory/archive.basename).string()),IoBackend::Native);
+            }
+            return sources;
+          });
+          session.timing().end();
+        } else {
+          session.timing().begin("build_sources");
+          vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
+          session.timing().end();session.timing().begin("checkpoint");
+          binding.publish([&](const auto& directory) {
+            checkpoint::Payload payload;
+            for(int axis=0;axis<3;++axis) {
+              const std::string basename(1,"xyz"[axis]);
+              vbc_b[axis].save(world,native_archive_name((directory/basename).string()),IoBackend::Native);
+            }
+            // Inspection may fail only after all collective archive saves finish.
+            if(world.rank()==0) for(int axis=0;axis<3;++axis) {
+              const std::string basename(1,"xyz"[axis]);
+              payload.archives.push_back(checkpoint::inspect_archive(directory,"axis",basename,{axis},1));
+            }
+            return payload;
+          });
+          session.timing().end();
+        }
+      } else {
+        vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
+        for(int axis=0;axis<3;++axis) {
+          const std::string path=ctx.calc_dir+"/tpa_src__root"+std::to_string(f)+"__"+std::string(1,"xyz"[axis])+"__"+key;
+          vbc_b[axis].save(world,path);
+          src_files.push_back(std::filesystem::path(path).filename().string());
+        }
       }
       S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
     }
     const auto obs = tpa::observables(S, wf);
+    if(shared_bundle) {
+      ctx.shared_response->timing().end();
+      nlohmann::json components=nlohmann::json::object();
+      for(int a=0;a<3;++a) for(int b=0;b<3;++b) components[std::string(1,"xyz"[a])+"xyz"[b]]=S(a,b);
+      shared_values.push_back({{"state",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
+          {"components",components},{"availability",nlohmann::json::object()},
+          {"observables",{{"Df",obs.Df},{"Dg",obs.Dg},{"D_linear",obs.D_linear},{"D_circular",obs.D_circular},
+              {"R",obs.R},{"sigma_linear_gm",obs.sigma_linear_gm},{"sigma_circular_gm",obs.sigma_circular_gm}}}});
+    }
+
 
     if (world.rank() == 0) {
       nlohmann::json Sj = nlohmann::json::array();
@@ -2573,8 +3113,9 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
         nlohmann::json legs = nlohmann::json::array();
         bool all_conv = true; double max_res = 0.0;
         for (int a = 0; a < 3; ++a) {
-          auto leg = fd_leg_accuracy(acc_meta, Perturbation::dipole(a), wf_half,
-                                     acc_thr, acc_k, key);
+          auto leg = shared_bundle ? nlohmann::json{
+              {"converged",true},{"bsh_residual",ctx.shared_response->at(fd_node_id(Perturbation::dipole(a),wf_half)).measured_values().at("values").at("bsh_residual")}}
+              : fd_leg_accuracy(acc_meta,Perturbation::dipole(a),wf_half,acc_thr,acc_k,key);
           all_conv = all_conv && leg.value("converged", false);
           max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
           legs.push_back(std::move(leg));
@@ -2624,6 +3165,13 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     fflush(stdout);
   }
 
+  if(shared_bundle) {
+    checkpoint::detail::on_root(world,[&] {
+      auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
+      meta.replace_property("tpa",key,rows);meta.save();return std::string{};
+    });
+    finish_shared();return;
+  }
   // Root-filtered runs are read-only (concurrent per-root processes must not
   // race on the metadata file); full runs record properties/tpa as before.
   if (world.rank() == 0 && !rows.empty() && ctx.tpa_roots.empty()) {
@@ -2661,6 +3209,23 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       print("[ASSEMBLE] open-shell property assembly is not implemented yet — "
             "response states are solved and saved, but alpha assembly is "
             "SKIPPED (ClosedShell-only readers; see REVIEW_FINDINGS).");
+    if (ctx.shared_response) {
+      std::set<int> axes;
+      std::set<double> frequencies;
+      for (const auto& request:plan.fd) if (request.pert.kind==Perturbation::Kind::Dipole) {
+        axes.insert(request.pert.axis); frequencies.insert(request.freq);
+      }
+      nlohmann::json tensors=nlohmann::json::array();
+      for (double frequency:frequencies) {
+        nlohmann::json availability=nlohmann::json::object();
+        for (int row:axes) for (int column:axes)
+          availability[std::string{char('x'+row),char('x'+column)}]=
+              "open-shell polarizability contraction is not implemented";
+        tensors.push_back({{"frequency",frequency},{"status","unavailable"},
+            {"components",nlohmann::json::object()},{"availability",availability}});
+      }
+      ctx.shared_response->set_properties({{"polarizability",{{"units","bohr^3"},{"value_type","real"},{"values",tensors}}}});
+    }
     return;
   }
 
@@ -2693,6 +3258,56 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
     madness::print("=== polarizability (alpha) assembly  protocol_key=", key,
                    " ===");
 
+  if (ctx.shared_response) {
+    nlohmann::json tensors=nlohmann::json::array(),qualified=nlohmann::json::array();
+    for (double frequency:fr) {
+      nlohmann::json components=nlohmann::json::object(),availability=nlohmann::json::object();
+      nlohmann::json matrix=nlohmann::json::array();
+      double max_residual=0.0;
+      for (int axis:ax) {
+        auto& binding=ctx.shared_response->at(fd_node_id(Perturbation::dipole(axis),frequency));
+        nlohmann::json row=nlohmann::json::array();
+        if (!binding.complete()) {
+          for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]="response state has not met the final request";
+          continue;
+        }
+        iteration::ElapsedTimer<> load_timer;
+        ResponseStateXY<ClosedShell> functions;
+        if (detail_exec::is_static_freq(frequency)) {
+          auto x=binding.load<ResponseStateX<ClosedShell>>(true);
+          functions.x_alpha=std::move(x.x_alpha);functions.y_alpha=functions.x_alpha;
+        } else functions=binding.load<ResponseStateXY<ClosedShell>>(true);
+        const double load_seconds=load_timer.seconds();
+        ctx.shared_response->timing().append({{"name","load"},{"task_id",binding.info().task_id},{"seconds",load_seconds}});
+        const auto frame=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+        if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+          // Reusable states bypass the solver node and first load here.
+          if (binding.reusable())
+            iteration::write_restart_summary(std::cout,"response",frame,binding.controls().protocol,
+                iteration::assess(binding.controls(),binding.expected(),frame),true,response_shared::metric_labels());
+          iteration::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
+        }
+        max_residual=std::max(max_residual,*frame.states.front().metrics.at(iteration::Metric::bsh_residual).value);
+        for (int column:ax) {
+          const double value=-2.0*(inner(functions.x_alpha,v[column])+inner(functions.y_alpha,v[column]));
+          components[std::string{char('x'+axis),char('x'+column)}]=value;row.push_back(value);
+        }
+        matrix.push_back(row);
+      }
+      tensors.push_back({{"frequency",frequency},{"status",availability.empty() ? "complete" : components.empty() ? "unavailable" : "partial"},
+                         {"components",components},{"availability",availability}});
+      // Keep the legacy analysis mirror for qualified tensors only.
+      if (availability.empty()) {
+        std::string directions;for (int axis:ax) directions+=char('x'+axis);
+        qualified.push_back(
+            {{"omega",frequency},{"directions",directions},{"alpha",matrix},{"converged",true},{"max_bsh_residual",max_residual}});
+      }
+    }
+    replace_alpha_properties(world,ctx.calc_dir+"/response_metadata.json",key,qualified);
+    ctx.shared_response->set_properties({{"polarizability",{{"units","bohr^3"},{"value_type","real"},{"values",tensors}}}});
+    return;
+  }
+
   const int k_now = madness::FunctionDefaults<3>::get_k();
 
   for (double w : fr) {
@@ -2714,23 +3329,14 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       // read its honest accuracy, so the reported accuracy matches the state that
       // actually builds the row. Rank 0 decides; broadcasts keep the collective
       // load + reproject below in lockstep across ranks.
-      std::string sk; int cv = 0, ac = 0, mt = 0; double rs = 0.0;
-      if (world.rank() == 0) {
-        auto meta = ResponseMetadata::load_or_create(
-            ctx.calc_dir + "/response_metadata.json");
-        const auto a = fd_leg_accuracy(meta.json(), Perturbation::dipole(ax[i]), w,
+      const auto metadata=read_response_property_metadata(world,ctx.calc_dir+"/response_metadata.json");
+      const auto a = fd_leg_accuracy(metadata, Perturbation::dipole(ax[i]), w,
                                        thresh, k_now, key, ctx.state_plans);
-        sk = a.value("source_protocol_key", std::string{});
-        cv = a.value("converged", false) ? 1 : 0;
-        ac = a.value("accepted", false) ? 1 : 0;
-        mt = a.value("met", false) ? 1 : 0;
-        rs = a.value("bsh_residual", 0.0);
-      }
-      world.gop.broadcast_serializable(sk, 0);
-      world.gop.broadcast(cv, 0);
-      world.gop.broadcast(ac, 0);
-      world.gop.broadcast(mt, 0);
-      world.gop.broadcast(rs, 0);
+      const auto sk = a.value("source_protocol_key", std::string{});
+      const int cv = a.value("converged", false) ? 1 : 0;
+      const int ac = a.value("accepted", false) ? 1 : 0;
+      const int mt = a.value("met", false) ? 1 : 0;
+      const double rs = a.value("bsh_residual", 0.0);
 
       if (sk.empty()) {   // no usable state at all -> cannot form this row
         if (world.rank() == 0)
@@ -2742,7 +3348,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       src_key[i] = sk; row_conv[i] = cv; row_acc[i] = ac; row_res[i] = rs;
       row_met[i] = mt;
 
-      auto Xi = detail_exec::load_fd_as_xy<ClosedShell>(
+      auto Xi=detail_exec::load_fd_as_xy<ClosedShell>(
           world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
       if (!Xi) { present = false; break; }   // metadata usable but archive gone
 
@@ -2764,6 +3370,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       if (row_res[i] > max_res) max_res = row_res[i];
     }
 
+    nlohmann::json row;
     if (world.rank() == 0) {
       madness::print("[ALPHA] omega=", w, "  directions=",
                      [&]{ std::string d; for (int a : ax) d += beta_axis_name(a); return d; }(),
@@ -2782,9 +3389,6 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       }
       madness::print("[ALPHA] tensor(omega=", w, ") =\n", alpha);
 
-      auto meta = ResponseMetadata::load_or_create(
-          ctx.calc_dir + "/response_metadata.json");
-      nlohmann::json row;
       row["omega"] = w;
       std::string dirs; for (int a : ax) dirs += beta_axis_name(a);
       row["directions"] = dirs;
@@ -2818,9 +3422,8 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
                       [](int met) { return met != 0; }))
         row["decided_by"] = "planner";
       row["max_bsh_residual"] = max_res;
-      meta.add_property("alpha", key, row);
-      meta.save();
     }
+    save_alpha_property(world,ctx.calc_dir+"/response_metadata.json",key,row);
     world.gop.fence();
   }
 }

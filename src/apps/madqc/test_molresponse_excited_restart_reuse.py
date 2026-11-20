@@ -47,7 +47,7 @@ if __name__ == "__main__":
     outputfile = prefix + ".calc_info.json"
     protocol_key = f"{1.0e-2:.0e}"
     response_metadata_file = os.path.join(
-        prefix, "task_1", "molresponse", "response_metadata.json"
+        prefix, "analysis", "response", "response_metadata.json"
     )
 
     cleanup(prefix)
@@ -65,7 +65,7 @@ if __name__ == "__main__":
         "--dft=k=6;maxiter=1;econv=1e-3;dconv=1e-2;protocol=[1e-2];localize=canon",
         "--response=dipole=true;dipole.directions=z;dipole.frequencies=[0.0];"
         "excited.enable=true;excited.tda=true;excited.num_states=1;"
-        "excited.guess_max_iter=1;excited.maxiter=2;excited.maxsub=4;"
+        "excited.guess_max_iter=1;maxiter=2;excited.maxsub=4;"
         "print_level=2",
     ]
 
@@ -119,7 +119,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     restart_pattern = os.path.join(
-        prefix, "task_1", "molresponse", "*.excited_bundle.*.restartdata"
+        prefix, "analysis", "response", "*.excited_bundle.*.restartdata"
     )
     restart_files = sorted(glob.glob(restart_pattern))
     if not restart_files:

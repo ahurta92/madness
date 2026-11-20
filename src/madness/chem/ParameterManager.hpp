@@ -1,6 +1,7 @@
 #pragma once
 #include <madness/chem/CCParameters.h>
 #include <madness/chem/CalculationParameters.h>
+#include <madness/chem/SCFInput.h>
 #include <algorithm>
 #include <madness/chem/ResponseParameters.hpp>
 #include <madness/chem/TDHF.h>
@@ -32,17 +33,21 @@ struct OptimizationParameters : public QCCalculationParametersBase {
                             {"bfgs", "sr1"});
     initialize<double>("maxstep", 0.1,
                        "maximum step in any cartesian coordinate (a.u.)");
-    // Convergence thresholds and assumed precisions. The defaults below are
-    // only fallbacks: OptimizeDriver derives all five from the wavefunction
-    // threshold (protocol().back()) with set_derived_value, which beats a default
-    // but yields to anything the deck sets -- so a deck can tighten or loosen any
-    // one of them, and otherwise they track the accuracy of the calculation.
+    // Gradient tolerances are independent of electronic density convergence.
+    // The driver derives the energy/step defaults from the protocol; explicit
+    // input values always take precedence.
     initialize<double>("etol", 1.e-5, "convergence: energy change");
     initialize<double>("gtol", 1.e-4, "convergence: maximum gradient element");
     initialize<double>("xtol", 1.e-4, "convergence: maximum cartesian step");
     initialize<double>("value_precision", 1.e-5, "assumed precision of the energy");
-    initialize<double>("gradient_precision", 1.e-4,
+    initialize<double>("gradient_precision", 1.e-5,
                        "assumed precision of the gradient");
+  }
+
+  void set_protocol_defaults(double threshold) {
+    set_derived_value("etol", std::max(1.0e-6, 2.0 * threshold));
+    set_derived_value("xtol", 1.0e-3);
+    set_derived_value("value_precision", std::max(1.0e-6, threshold));
   }
 
   std::string get_tag() const override { return std::string(tag); }
@@ -158,9 +163,15 @@ public:
 
     const path &filename = parser_.value("input");
 
-    if (is_json_file(filename)) {
-      auto j = read_json_file(filename);
-      initFromJson(j);
+    std::string json_text;
+    if (world_.rank() == 0) {
+      std::ifstream input(filename);
+      std::ostringstream contents; contents << input.rdbuf();
+      if (json::accept(contents.str())) json_text = contents.str();
+    }
+    world_.gop.broadcast_serializable(json_text, 0);
+    if (!json_text.empty()) {
+      initFromJson(json::parse(json_text));
       // invoke each group’s JSON parser:
     } else {
       // plain-text file
@@ -177,7 +188,7 @@ public:
     // separate member shadowed the deck value.
     auto &cparam = get<CalculationParameters>();
     if (user_defined_prefix) {
-      cparam.set_user_defined_value("prefix", parser_.value("prefix"));
+      cparam.set_user_defined_value("prefix", parser_.value_raw("prefix"));
     } else if (prefix_from_input != "input") {
       cparam.set_derived_value("prefix", prefix_from_input);
     }
@@ -231,11 +242,41 @@ public:
   void print_all() const { (print_group_if_defined<Groups>(), ...); }
 
 private:
+  [[nodiscard]] bool shared_scf_owner() const {
+    const auto workflow = parser_.key_exists("workflow") ? parser_.value("workflow") :
+        parser_.key_exists("wf") ? parser_.value("wf") :
+        parser_.key_exists("w") ? parser_.value("w") : "scf";
+    return workflow == "scf" || workflow == "response";
+  }
+  template <class G> G read_group() {
+    if constexpr (std::is_same_v<G, CalculationParameters>) {
+      if (shared_scf_owner()) return read_scf_parameters(world_, parser_);
+    }
+    return G(world_, parser_);
+  }
   void initFromJson(const nlohmann::json &j) {
     (
         [&] {
+          std::string input_error;
+          try {
+          if constexpr (std::is_same_v<Groups, CalculationParameters> ||
+                        std::is_same_v<Groups, ResponseParameters>) {
+            auto &group = std::get<Groups>(groups_);
+            if constexpr (std::is_same_v<Groups, CalculationParameters>)
+              if (shared_scf_owner()) group.enable_scf_inputs();
+            if (j.contains(Groups::tag))
+              for (const auto &[key, value] : j.at(Groups::tag).items())
+                group.validate_input_value(key, value.is_string() ? value.template get<std::string>() : value.dump());
+          }
           if (j.contains(Groups::tag)) {
             std::get<Groups>(groups_).from_json(j.at(Groups::tag));
+          }
+          } catch (const std::exception& error) { input_error = error.what(); }
+          int failing_rank = input_error.empty() ? world_.size() : world_.rank();
+          world_.gop.min(failing_rank);
+          if (failing_rank != world_.size()) {
+            world_.gop.broadcast_serializable(input_error, failing_rank);
+            throw std::runtime_error(input_error);
           }
           // Layer command-line overrides (--group=key=val) ON TOP of the JSON,
           // exactly as initFromText gets them through the file+CLI parser.
@@ -247,6 +288,14 @@ private:
           if constexpr (std::is_base_of_v<QCCalculationParametersBase, Groups>) {
             std::get<Groups>(groups_).read_commandline_options(world_, parser_,
                                                                Groups::tag);
+          } else if constexpr (std::is_same_v<Groups, Molecule>) {
+            // Geometry convenience options override JSON just as they override
+            // text decks. Molecule is not a parameter group, so it needs its
+            // own collective reader rather than read_commandline_options.
+            if (parser_.key_exists("geometry") || parser_.key_exists("molecule"))
+              std::get<Groups>(groups_) = Molecule(world_, parser_);
+            else if (!j.contains(Groups::tag))
+              throw std::runtime_error("missing molecular geometry in JSON input");
           }
         }(),
         ...);
@@ -257,7 +306,7 @@ private:
   void initFromText(const path &filename) {
     // parser_.set_keyval("input", filename);
     // invoke each group’s file+CLI parser:
-    ((void)(std::get<Groups>(groups_) = Groups(world_, parser_)), ...);
+    ((void)(std::get<Groups>(groups_) = read_group<Groups>()), ...);
 
     // collect JSON for any defined keys:
     ((void)addGroupJson<Groups>(), ...);

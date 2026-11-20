@@ -230,18 +230,24 @@ inline void write_scf_section(std::ostream &os, const nlohmann::json &t) {
   print_eps("Orbital eps (a)", "scf_eigenvalues_a");
   print_eps("Orbital eps (b)", "scf_eigenvalues_b");
 
-  // Convergence + metadata.
-  if (t.contains("convergence_info")) {
-    const auto &c = t["convergence_info"];
-    os << "    Converged        :  thresh = " << c.value("converged_for_thresh", 0.0)
-       << "  dconv = " << c.value("converged_for_dconv", 0.0) << "\n";
+  // Shared outcomes are authoritative; legacy stamps intentionally remain
+  // invalid on shared solves and must never be presented as tolerances.
+  if (t.contains("outcome")) {
+    const auto& outcome = t["outcome"];
+    os << "    Convergence      :  "
+       << (outcome.value("complete", false) ? "Converged" : "NOT converged")
+       << " (" << outcome.value("reason", std::string("unavailable")) << ")\n";
+  } else if (t.contains("convergence_info")) {
+    const auto& c = t["convergence_info"];
+    if (c.contains("converged_for_thresh") && c.contains("converged_for_dconv"))
+      os << "    Legacy convergence: thresh = " << c["converged_for_thresh"]
+         << "  dconv = " << c["converged_for_dconv"] << "\n";
   }
-  if (t.contains("metadata")) {
-    const auto &m = t["metadata"];
-    os << "    Wall time        :  " << std::fixed << std::setprecision(1)
-       << m.value("elapsed_time", 0.0) << " s   (" << m.value("mpi_size", 1)
-       << " MPI x " << m.value("nthreads", 1) << " threads)\n"
-       << std::defaultfloat;
+  if (t.contains("protocol")) {
+    const auto& p = t["protocol"];
+    os << "    Representation   :  threshold = " << std::scientific << std::setprecision(1)
+       << p.at("threshold").get<double>() << "  k = " << p.at("k").get<int>()
+       << "\n" << std::defaultfloat;
   }
 }
 
@@ -417,6 +423,35 @@ inline void write_optimization_section(std::ostream &os,
   }
 }
 
+// Current invocation timings, never historical solver work from a reused
+// checkpoint. Missing measurements/execution metadata remain absent.
+inline void write_timing_section(std::ostream& os, const nlohmann::json& task) {
+  if (!task.contains("metadata")) return;
+  const auto& m = task["metadata"];
+  std::ostringstream line;
+  line << std::fixed << std::setprecision(3);
+  if (m.contains("elapsed_time") && m["elapsed_time"].is_number()) {
+    line << "    Wall time        :  " << m["elapsed_time"].get<double>()
+         << " s (this invocation; driver rank)";
+    if (m.contains("mpi_size") && m.contains("nthreads"))
+      line << "  (" << m["mpi_size"].get<int>() << " MPI x "
+           << m["nthreads"].get<int>() << " threads)";
+    line << "\n";
+  }
+  if (m.contains("v3_timing") && m["v3_timing"].is_object()) {
+    bool first = true;
+    for (const auto* phase : {"plan_build", "solve", "assemble"}) {
+      const auto& times = m["v3_timing"];
+      if (!times.contains(phase) || !times[phase].contains("wall_s")) continue;
+      line << (first ? "    Response steps   :  " : ", ") << phase << " "
+           << times[phase]["wall_s"].get<double>() << " s";
+      first = false;
+    }
+    if (!first) line << "\n";
+  }
+  os << line.str();
+}
+
 inline void write_results_summary(std::ostream &os,
                                   const nlohmann::json &calc_info) {
   using namespace summary_detail;
@@ -481,6 +516,7 @@ inline void write_results_summary(std::ostream &os,
       if (t.contains("excitations"))
         write_excitations_section(os, t);
     }
+    write_timing_section(os, t);
   }
   write_citations_section(os, citation_flags);
   os << "\n" << rule('=') << "\n\n";

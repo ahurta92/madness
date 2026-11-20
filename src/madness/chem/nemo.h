@@ -464,6 +464,13 @@ public:
     	return (xsq == coords_sum);
 	}
 
+    /// A new workflow invocation must consult restart/settings again. Internal
+    /// optimizer value/gradient calls keep their existing geometry cache.
+    void reset_calculation_cache() {
+        invalidate_factors_and_potentials();
+        coords_sum = -1.0;
+    }
+
 	virtual double value() {return value(calc->molecule.get_all_coords());}
 
 	virtual double value(const Tensor<double>& x);

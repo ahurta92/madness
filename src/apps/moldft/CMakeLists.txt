@@ -1,21 +1,4 @@
-# src/apps/moldft
-
-add_mad_executable(moldft moldft.cc MADchem)
-add_dependencies(applications-madness moldft)
-
-# removed mcpfit since it is likely only of historic interest
-#add_mad_executable(mcpfit mcpfit.cc MADchem)
-#add_mad_executable(preal preal.cc MADchem)
-
+# SCF is exposed through madqc. Keep private symmetry and unsupported periodic
+# DFT programs; removing the molecular executable must not drop these builds.
 add_mad_executable(testpg testpg.cc MADchem)
-
 add_mad_executable(testperiodicdft testperiodicdft.cc MADchem)
-
-if(BUILD_TESTING)
-#  add_scripted_tests(../madqc/test_energy.py moldft "short;applications")
-#  add_scripted_tests(../madqc/test_energy_mpi_parallel.py moldft "short;applications")
-endif()
-
-
-# removed mcpfit since it is likely only of historic interest
-install(TARGETS moldft DESTINATION "${MADNESS_INSTALL_BINDIR}")

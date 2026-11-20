@@ -148,15 +148,16 @@ MPI variant:
 MAD_NUM_THREADS=2 mpiexec -np 2 ./src/madness/mra/testsuite
 ```
 
-### moldft smoke
+### madqc SCF smoke
 
 ```
-ninja moldft
-./src/apps/moldft/moldft --geometry=water --dft="xc=lda"
+ninja madqc
+./src/apps/madqc/madqc --wf=scf --geometry=he --dft="xc=lda"
 ```
 
 Exit code 0 on success. Reference inputs for regression checks are in
-`src/apps/moldft/tests/*.in`.
+`src/examples/qc/scf_*/*.in`. Supported molecular engines run through `madqc`;
+separate executables remain for engines not yet represented by its workflows.
 
 ## Project-specific gotchas
 

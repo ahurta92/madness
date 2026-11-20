@@ -85,7 +85,8 @@ compute_vibrational_analysis(ExecutorContext &ctx) {
   for (long a = 0; a < natom; ++a)
     for (int ax = 0; ax < 3; ++ax) {
       const Perturbation p = Perturbation::nuclear(static_cast<int>(a), ax);
-      auto st = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, p, 0.0);
+      auto st = ctx.shared_response ? detail_exec::qualified_fd_as_xy(ctx,p,0.0)
+          : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,p,0.0);
       if (!st) { out.missing_legs.push_back(p.description()); continue; }
       auto xphi = mul(world, st->x_alpha, phi0, true);
       real_function_3d r = sum(world, xphi, true);
@@ -205,8 +206,15 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
 
   auto vib = compute_vibrational_analysis(ctx);
   world.gop.fence();
-  if (!vib) return;
-  if (world.rank() != 0) return;   // the rest is rank-0 tensor algebra + JSON
+  if(!vib) {
+    if(ctx.shared_response) ctx.shared_response->set_properties({
+        {"vibrational_analysis",{{"values",nlohmann::json::object()},{"availability",{{"hessian","nuclear response inputs have not met the final request"}}}}},
+        {"raman_spectrum",{{"values",nlohmann::json::object()},{"availability",{{"spectrum","qualified Hessian and derivatives are required"}}}}}});
+    return;
+  }
+  response_shared::update_response_metadata(world,ctx.calc_dir+"/response_metadata.json",[&](ResponseMetadata& meta) {
+  // The remaining local tensor algebra and JSON publication run on rank zero;
+  // every rank receives any failure before returning to the workflow.
 
   const Molecule &mol = gs.molecule();
   const long natom = static_cast<long>(mol.natom());
@@ -214,7 +222,6 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   constexpr double tr_cutoff_cm1 = 1.0;
   const auto modes = raman::vibrational_modes(vib->frequencies, tr_cutoff_cm1);
 
-  auto meta = ResponseMetadata::load_or_create(ctx.calc_dir + "/response_metadata.json");
   const auto &j = meta.json();
 
   // --- vibrational_analysis section --------------------------------------
@@ -340,9 +347,36 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   rs["raman_spectra"] = spectra;
   rs["completeness"] = complete;
 
+  if(ctx.shared_response) {
+    // Public results are numeric vectors/matrices; keep the existing tensor
+    // metadata wrapper only in the application analysis file.
+    const auto numeric_values=[](const Tensor<double>& tensor) {
+      auto values=nlohmann::json::array();
+      MADNESS_CHECK(tensor.ndim()==1 || tensor.ndim()==2);
+      for(long i=0;i<tensor.dim(0);++i) {
+        if(tensor.ndim()==1) values.push_back(tensor(i));
+        else {
+          auto row=nlohmann::json::array();
+          for(long j=0;j<tensor.dim(1);++j) row.push_back(tensor(i,j));
+          values.push_back(std::move(row));
+        }
+      }
+      return values;
+    };
+    nlohmann::json availability=nlohmann::json::object();
+    for(const auto& [frequency,verdict]:complete.items())
+      if(verdict.at("rows_found")!=verdict.at("rows_expected") || !verdict.at("all_rows_converged").get<bool>())
+        availability[frequency]="polarizability derivatives are incomplete";
+    ctx.shared_response->set_properties({
+        {"vibrational_analysis",{{"units",va.at("units")},
+          {"values",{{"hessian",numeric_values(vib->hessian)},{"frequencies",numeric_values(vib->frequencies)},
+            {"normal_modes",numeric_values(vib->normalmodes)},{"reduced_mass",numeric_values(vib->reducedmass)}}},
+          {"availability",nlohmann::json::object()}}},
+        {"raman_spectrum",{{"units",rs.at("units")},{"values",spectra},{"availability",availability}}}});
+  }
   meta.set_section("vibrational_analysis", va);
   meta.set_section("raman_spectra", rs);
-  meta.save();
+  });
 }
 
 } // namespace molresponse_v3

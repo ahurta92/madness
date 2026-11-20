@@ -16,10 +16,12 @@
 #        NP=4 MAD_NUM_THREADS=2 ./run.sh
 
 dft
+    convergence.criteria [bsh_residual, density_change, energy_change]
+    convergence.bsh_residual 0.005
+    convergence.density_change 0.001
+    convergence.energy_change 0.0001
     xc       hf
     maxiter  10
-    econv    1e-4
-    dconv    1e-3
 end
 
 molecule

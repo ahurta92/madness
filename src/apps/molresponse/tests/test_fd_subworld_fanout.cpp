@@ -180,7 +180,7 @@ int main(int argc, char **argv) {
     gs_u.prepare(universe, 0.001 * t0, cop, fj);
   }
   ExecutorContext ctx_ref(universe, gs_u, L, fj,
-                          ExecutorSettings{policy, PrintLevel::Normal, dir_ref, max_iters});
+                          [&] { ExecutorSettings settings; settings.policy=policy; settings.print_level=PrintLevel::Normal; settings.calc_dir=dir_ref; settings.max_iters=max_iters; return settings; }());
   for (int ax = 0; ax < 3; ++ax)
     solve_fd_protocol<Static, ClosedShell>(ctx_ref, Perturbation::dipole(ax),
                                            0.0, thresh, NodeAction::Fresh);
@@ -213,7 +213,7 @@ int main(int argc, char **argv) {
       gs_s.prepare(*sub, 0.001 * t0, cop, fj);
     }
     ExecutorContext ctx_sub(*sub, gs_s, L, fj,
-                            ExecutorSettings{policy, PrintLevel::Normal, dir_sub, max_iters});
+                            [&] { ExecutorSettings settings; settings.policy=policy; settings.print_level=PrintLevel::Normal; settings.calc_dir=dir_sub; settings.max_iters=max_iters; return settings; }());
 
     for (int ax = 0; ax < 3; ++ax)
       if (ax % G == nid)                                        // round-robin partition
@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
   // which re-reads those archives (← np-robustness, write-then-read).
   set_response_protocol(universe, L, thresh);
   ExecutorContext ctx_gather(universe, gs_u, L, fj,
-                             ExecutorSettings{policy, PrintLevel::Normal, dir_sub, max_iters});
+                             [&] { ExecutorSettings settings; settings.policy=policy; settings.print_level=PrintLevel::Normal; settings.calc_dir=dir_sub; settings.max_iters=max_iters; return settings; }());
   assemble_alpha(ctx_gather, dipole_plan(thresh), thresh);      // → dir_sub metadata
   const Tensor<double> alpha_sub = read_alpha(dir_sub, key);
   universe.gop.fence();

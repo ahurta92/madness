@@ -12,6 +12,18 @@ The ground state must satisfy the final request before dependent calculations. I
 
 Retain only the latest usable numerical checkpoints, preserving the prior checkpoint until its replacement is successfully published. Keep lightweight iteration, timing and metric histories across stages and runs. Disabling restart means fresh initialization, with checkpoint writing still enabled.
 
+## Compatibility and release direction — November 7, 2026
+
+The user prioritizes a simple design, preservation of scientific capabilities, and a formal chemistry release. Broad backward compatibility is not a requirement. This permits retiring obsolete policy choices and interfaces where they complicate the design; it does not authorize dropping scientific methods or deleting saved calculation data. The exact input and checkpoint compatibility boundary remains to be specified.
+
+The named-stage interface currently has a narrower supported scope than the broader chemistry driver: `src/apps/madqc/named-stages.md` documents closed-shell ground states and `xc hf`, while `src/apps/madqc/README.md` and `src/examples/qc/README.md` also cover DFT, open-shell cases, Nemo, geometry optimization, CIS, OEP, MP2 and CC2. Preserve working scientific workflows during consolidation. An old entry point may need to remain until its scientific capabilities have a supported replacement; that does not require preserving competing convergence policies in the new layer.
+
+The proposed cleanup is one resolved set of convergence criteria, one intermediate/final iteration policy, and one restart-validity policy shared by the supported solvers. Remove engine-versus-requested stopping selection, plateau-driven exits, and root freezing from that policy. Keep solver-specific equations, metric definitions, KAIN, starting guesses, property calculations, parallel execution, and the records needed for convergence studies. Safe checkpoint replacement and prerequisite ordering remain required.
+
+For release preparation, use the maintained QC example decks as the initial inventory of supported calculations and numerical regression cases, supplemented with the new iteration/restart scenarios. The ten checks for the first slice are not a chemistry release certification. Document which workflows implement the unified restart contract, the accepted input and checkpoint formats, and existing scientific limitations. A proposed format policy is to version the supported format and explicitly reject unsupported older formats, adding conversion only for an identified scientific need. No format break or compatibility removal is implemented by this note.
+
+The next design step is to specify the common convergence evaluation and the coupled excited-state loop, then remove the redundant policy paths as their replacements are validated. Broader workflow integration and the first release's required method coverage need an explicit scope before removing existing entry points.
+
 ## First implementation slice
 
 This slice implements fixed intermediate iteration counts and removes the final-stall refusal to resume. The shared exit policy receives an explicit final-protocol flag. Intermediate stages ignore convergence and plateau exits until their configured count, unless the engine declares divergence. At completion they report the actual existing convergence verdict or iteration limit. The diagnostic count, when explicitly supplied, retains precedence.

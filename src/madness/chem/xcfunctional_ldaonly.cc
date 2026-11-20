@@ -20,6 +20,7 @@ void XCfunctional::initialize(const std::string& input_line, bool polarized,
         World& world, bool verbose) {
 
     reset_screening_defaults();
+    specification_ = input_line;
 
     spin_polarized = polarized;
 

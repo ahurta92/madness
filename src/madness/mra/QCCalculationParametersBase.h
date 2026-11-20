@@ -19,6 +19,7 @@
 #include <map>
 #include <set>
 #include <fstream>
+#include <functional>
 #include <typeinfo>
 // #include <madness/external/gtest/include/gtest/internal/gtest-type-util.h>
 
@@ -176,63 +177,8 @@ namespace madness {
 
         int get_print_order() const { return print_order; }
 
-        std::string print_line(const std::string& key) const {
-            auto fill_left = [](const int size, const std::string word) {
-                int nspaces = std::max(int(0), size - int(word.length()));
-                return std::string(nspaces, ' ') + word;
-            };
-            auto fill_right = [](const int size, const std::string word) {
-                int nspaces = std::max(int(0), size - int(word.length()));
-                return word + std::string(nspaces, ' ');
-            };
-
-            // key-value block
-            std::string keyval = fill_left(20, key) + "  " + fill_right(10, get_value()) + " # " + fill_right(
-                10, print_precedence());
-            std::string empty_keyval(keyval.size(), ' ');
-            empty_keyval[33] = '#';
-
-            std::string allowed_val;
-            if (allowed_values.size() > 0) {
-                using madness::operators::operator<<;
-                std::stringstream ss;
-                ss << allowed_values;
-                allowed_val += ss.str();
-            }
-
-            // split comment into several lines: split onto words and add linebreak
-            bool leave_space_for_allowed_values = (allowed_val.size() > 0);
-
-            // first line breaks after 80 characters, all other lines after 120 (leave space f
-            long keyvalsize = keyval.size(); // length of key, value, precedence
-            std::string comment1 = get_comment();
-            auto commentwords = commandlineparser::split(comment1, " ");
-            std::vector<std::string> commentlines(1);
-            long nchar = 0;
-            for (auto word : commentwords) {
-                bool is_first_line = commentlines.size() == 1;
-                long thislinebreak = 120;
-                if (is_first_line and leave_space_for_allowed_values) thislinebreak = 80;
-                long commentsize = thislinebreak - keyvalsize;
-
-                nchar += word.size() + 1;
-                if (nchar > commentsize) { // start newline
-                    commentlines.push_back("");
-                    nchar = word.size() + 1;
-                }
-                commentlines.back() += word + " ";
-            }
-
-            std::string result;
-            for (size_t i = 0; i < commentlines.size(); ++i) {
-                if (i == 0) result = keyval + fill_right(40, commentlines[i]) + allowed_val;
-                else result += "\n" + empty_keyval + commentlines[i];
-            }
-
-            // trim result
-            std::size_t last = result.find_last_not_of(' ');
-            return result.substr(0, last + 1);
-        }
+        std::string print_line(const std::string& key, int key_width = 20,
+                               int value_width = 12) const;
 
         template <typename Archive>
         void serialize(Archive& ar) {
@@ -310,6 +256,10 @@ namespace madness {
 
         virtual std::string get_tag() const = 0;
 
+        /// Hide retired or engine-inapplicable keys from human-readable decks.
+        /// Storage remains available to engines that have not migrated yet.
+        virtual bool visible_input(const std::string&) const { return true; }
+
         std::string print_to_string(const std::list<std::string> precedences={"all"}) const;
 
         template <typename T>
@@ -339,26 +289,10 @@ namespace madness {
         typedef std::map<std::string, QCParameter> ParameterContainerT;
         ParameterContainerT parameters;
 
-        void read_input_and_commandline_options(World& world,
-                                                        const commandlineparser& parser,
-                                                        const std::string tag) {
-            // check that user-defined input files actually exist
-            bool file_ok = true;
-            if (parser.key_exists("user_defined_input_file")) file_ok = file_exists(world, parser.value("input"));
-            if (not file_ok) {
-                std::string msg = "could not find user-defined input file: " + parser.value("input") + "\n";
-                throw std::invalid_argument(msg);
-            }
-            // Errors from read_input propagate. They used to be printed and then
-            // swallowed, which turned a rejected keyval into a silent fallback to
-            // the default -- a deck asking for a DFT functional the parser choked
-            // on computed Hartree-Fock instead, and said so only in one line of
-            // output above thousands. A missing data group is not an error and
-            // does not throw (see read_input), so decks that only set some of the
-            // groups are unaffected.
-            read_input(world, parser.value("input"), tag);
-            read_commandline_options(world, parser, tag);
-        }
+        /// Rank zero selects and validates the input source; the file and CLI
+        /// overrides form one collective transaction.
+        void read_input_and_commandline_options(World& world, const commandlineparser& parser,
+                                                const std::string tag); // NOLINT(readability-avoid-const-params-in-decls): retain the existing interface spelling.
 
     public:
         bool file_exists(World& world, std::string filename) const;
@@ -370,11 +304,13 @@ namespace madness {
         void read_commandline_options(World& world, const commandlineparser& parser, const std::string tag);
 
     private:
-        /// read the parameters from file
+        // These helpers perform no collectives. Only read_collectively's
+        // rank-zero callback may call them.
+        void read_input_on_root(World& world, const std::string& filename, const std::string& tag);
+        void read_commandline_on_root(World& world, const commandlineparser& parser, const std::string& group);
 
-        /// only world.rank()==0 reads the input file and broadcasts to all other nodes,
-        /// so we don't need to serialize the ParameterMap
-        void read_input(World& world, const std::string filename, const std::string tag);
+        /// Run a rank-zero reader and propagate its result or error collectively.
+        void read_collectively(World& world, const std::function<void()>& reader);
 
     protected:
         bool print_debug = false;
@@ -388,7 +324,10 @@ namespace madness {
         /// copy ctor
         QCCalculationParametersBase(const QCCalculationParametersBase& other)
             : parameters(other.parameters)
-              , print_debug(other.print_debug) {}
+              , print_debug(other.print_debug)
+              , ignore_unknown_keys(other.ignore_unknown_keys)
+              , ignore_unknown_keys_silently(other.ignore_unknown_keys_silently)
+              , throw_if_datagroup_not_found(other.throw_if_datagroup_not_found) {}
 
         /// destructor
         virtual ~QCCalculationParametersBase() {}
@@ -433,6 +372,17 @@ namespace madness {
         /// Supplied floating-point controls that require lossless storage.
         /// Other parameters retain their historical formatting convention.
         virtual std::set<std::string> full_precision_keys() const { return {}; }
+
+        /// Validate one supplied value independently of other settings. Called
+        /// before text assignment, including discarded CLI occurrences. Cross-
+        /// setting constraints belong after the winning values have resolved.
+        virtual void validate_input_value(const std::string& key, const std::string& value) const {}
+
+        /// Validate a CLI group without applying it to this object. Readers with
+        /// custom syntax may override this; ordinary groups use their registered
+        /// types, allowed values, case policy and per-value hook on a private copy.
+        virtual void validate_commandline_occurrence(World& world, std::string contents,
+                                                     const std::string& tag) const;
 
         bool keeps_case(const std::string& key) const {
             const auto keys = case_sensitive_keys();

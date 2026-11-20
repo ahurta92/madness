@@ -156,6 +156,15 @@ void PCMParameters::set_derived_values(const CalculationParameters& cparam) {
         MADNESS_EXCEPTION("the pcm `correction` keyword applies to solver_type cpcm only",1);
 }
 
+nlohmann::json PCM::model_settings(const Molecule& mol, const PCMParameters& param) {
+    auto parameters = param.to_json().at("parameters");
+    if (param.cavity_type() != "restart") parameters.erase("restart_name");
+    auto nuclei = nlohmann::json::array();
+    for (const auto& atom : mol.get_atoms())
+        nuclei.push_back({{"charge", atom.q}, {"coordinates", {atom.x, atom.y, atom.z}}});
+    return {{"parameters", parameters}, {"reader_own", param.reader_own()}, {"nuclei", nuclei}};
+}
+
 } /* namespace madness */
 
 
@@ -232,7 +241,7 @@ void host_writer(const char * message) {
 }
 
 PCM::PCM(World& world, const Molecule& mol, const PCMParameters& param,
-        const bool verbose) : mep_lbl("TotMEP"), asc_lbl("totASC") {
+        const bool verbose) : model_settings_(model_settings(mol, param)), mep_lbl("TotMEP"), asc_lbl("totASC") {
     if (!pcmsolver_is_compatible_library()) {
         fprintf(stderr, "%s\n", "PCMSolver library not compatible");
         exit(EXIT_FAILURE);

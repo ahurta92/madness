@@ -60,7 +60,7 @@ if __name__ == "__main__":
         "--dft=k=6;maxiter=1;econv=1e-3;dconv=1e-2;protocol=[1e-1,1e-4];localize=canon",
         "--response=dipole=true;dipole.directions=z;dipole.frequencies=[0.0];"
         "excited.enable=true;excited.num_states=2;excited.guess_max_iter=1;"
-        "excited.maxiter=2;excited.maxsub=4;print_level=2",
+        "maxiter=2;excited.maxsub=4;print_level=2",
     ]
     run, stdout, stderr = run_cmd(cmd, env=env)
     if run.returncode != 0:
@@ -79,7 +79,7 @@ if __name__ == "__main__":
     with open(outputfile, "r", encoding="utf-8") as f:
         got = json.load(f)
     response_metadata_file = os.path.join(
-        prefix, "task_1", "molresponse", "response_metadata.json"
+        prefix, "analysis", "response", "response_metadata.json"
     )
     if not os.path.exists(response_metadata_file):
         print("Expected response_metadata.json at", response_metadata_file)

@@ -39,10 +39,22 @@
 #include <madness/mra/mra.h>
 
 #include <iomanip>
+#include <cmath>
+#include <filesystem>
 #include <optional>
 #include <string>
 
 namespace madness {
+/// Keep the same file while avoiding the native API's short filename buffer
+/// when an application already runs inside its deeply nested output directory.
+inline std::string native_archive_name(const std::string& filename) {
+    const std::filesystem::path path(filename);
+    if (path.is_absolute()) {
+        const auto relative = path.lexically_relative(std::filesystem::current_path()).string();
+        if (!relative.empty() && relative.size() < filename.size()) return relative;
+    }
+    return filename;
+}
 
 /// what the functions in a restartdata archive actually ARE
 ///
@@ -184,7 +196,9 @@ struct RestartMetadata {
 
     /// true if these orbitals are at least as converged as the request
     bool is_converged_to(const double thresh, const double dconv) const {
-        return converged_for_thresh <= thresh and converged_for_dconv <= dconv;
+        return std::isfinite(converged_for_thresh) && converged_for_thresh > 0.0
+            && std::isfinite(converged_for_dconv) && converged_for_dconv > 0.0
+            && converged_for_thresh <= thresh && converged_for_dconv <= dconv;
     }
 
     /// true if the stored functions are what the asking engine expects
@@ -223,7 +237,7 @@ inline std::optional<RestartMetadata>
 peek_restartdata(World& world, const std::string& filename) {
     try {
         archive::ParallelInputArchive<archive::BinaryFstreamInputArchive>
-            ar(world, filename.c_str());
+            ar(world, native_archive_name(filename));
         RestartMetadata meta;
         meta.read(ar);
         return meta;
@@ -260,7 +274,7 @@ inline std::optional<RestartSummary>
 peek_restartdata_summary(World& world, const std::string& filename) {
     try {
         archive::ParallelInputArchive<archive::BinaryFstreamInputArchive>
-            ar(world, filename.c_str());
+            ar(world, native_archive_name(filename));
         RestartSummary s;
         s.meta.read(ar);
         unsigned int nmo = 0;

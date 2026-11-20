@@ -1,5 +1,11 @@
 # Quantum-chemistry example decks (`qctest`)
 
+**Driver migration (2026-11-19):** these cases run through `madqc`. SCF blocks
+for `scf`/`response` now use explicit metric names; response and Nemo controls
+remain engine-specific pending adoption. Numerical references and comparison
+tolerances are unchanged. See the
+[test migration index](../../../docs/design/madqc-driver-test-migration.md).
+
 Every directory here is a **complete, CI-verified `madqc` calculation**: an input
 deck, the one-liner that runs it, the results it must produce, and a reference
 run. They serve three purposes at once, which is the point — a deck that is
@@ -12,6 +18,11 @@ documentation but not a test rots, and a test that is not a deck teaches nobody.
 3. **Ground truth for agents.** When asked "what does a CIS input look like",
    the answer is a file in this directory that provably ran, not prose that may
    describe knobs which no longer exist.
+
+The [madqc migration test index](../../../docs/design/madqc-test-index.md)
+records stable test intent, numerical-reference provenance and assertion mappings.
+Its first curated cases are helium HF and DALTON-reference water LDA alpha;
+the wider response coverage matrix remains an acceptance requirement.
 
 ## Running a case
 
@@ -250,6 +261,10 @@ scripted tests compare precisely that. A dark state's `1e-26` oscillator strengt
 checked to `1e-3` is just as empty. Compare a key that carries a value, or set
 `"allow_zero": true` where the near-zero is the physics (a symmetry-vanishing
 dipole component, a gradient at a stationary point).
+
+The [shared response ladder example](response_shared_ladder/README.md) exercises
+per-state restart through `madqc`'s chained regression harness, including tighter
+tolerances and added frequencies. It uses the unchanged helium alpha reference.
 
 ## Response cases
 

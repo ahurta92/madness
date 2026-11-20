@@ -145,6 +145,10 @@ public:
     PCM(World& world, const Molecule& mol, const PCMParameters& param,
             const bool verbose);
 
+    /// Effective inputs used to construct this solver; empty for an unprepared PCM.
+    [[nodiscard]] const nlohmann::json& model_settings() const { return model_settings_; }
+    [[nodiscard]] static nlohmann::json model_settings(const Molecule& mol, const PCMParameters& param);
+
     /// compute the potential induced by the surrounding solvent
 
     /// @param[in]  coulomb_potential   the (positive) potential caused by the electron density
@@ -157,6 +161,7 @@ public:
     double compute_pcm_energy() const;
 
 private:
+    nlohmann::json model_settings_ = nlohmann::json::object();
 #ifdef MADNESS_HAS_PCM
     /// the main pcmsolver object
     std::shared_ptr<pcmsolver_context_t> pcm_context;
