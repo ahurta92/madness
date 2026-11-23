@@ -69,6 +69,10 @@ struct ResponseParameters : public QCCalculationParametersBase {
                            "residual is below this (plain BSH steps above it; a DALTON-seeded "
                            "ES start at 20-25% residual otherwise derails on KAIN's first "
                            "extrapolation). 0 disables.");
+        initialize<bool>("diagnostics.properties", false,
+                         "Add cheap property values (polarizability rows of dipole states, excitation "
+                         "energies) to each per-update history row, marked as diagnostics. Never a result, "
+                         "and never starts a second-order (beta, Raman, 2PA) step.");
         initialize<int>("diagnostic.iterations_per_rung", 0,
                         "Explicit diagnostic iteration count per supplied rung; 0 disables. Invalid states still stop.");
         // Written targets of a named stage (DESIGN B8): dconv is the
@@ -431,6 +435,7 @@ public:
     [[nodiscard]] std::vector<double> dipole_frequencies() const {
         return get<std::vector<double>>("dipole.frequencies");
     }
+    [[nodiscard]] bool diagnostic_properties() const { return get<bool>("diagnostics.properties"); }
     [[nodiscard]] std::string dipole_directions() const {
         return get<std::string>("dipole.directions");
     }

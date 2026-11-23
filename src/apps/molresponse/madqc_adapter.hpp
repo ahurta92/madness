@@ -548,6 +548,10 @@ struct molresponse_v3_lib {
     in.settings.dalton_dir    = dalton_dir;
     in.settings.seed_freq_tol = rp.seed_freq_tol();
     in.settings.es_seed_warmup = rp.seed_es_warmup();
+    in.settings.diagnostic_properties = rp.diagnostic_properties();
+    if (rp.diagnostic_properties())
+      for (char axis : rp.dipole_directions())
+        if (axis >= 'x' && axis <= 'z') in.settings.diagnostic_dipole_axes.push_back(axis - 'x');
     if (world.rank() == 0 && in.settings.fd_subworlds > 0) {
       print("response: deck subworlds =", in.settings.fd_subworlds,
             "(F2 state-parallel fan-out requested)");

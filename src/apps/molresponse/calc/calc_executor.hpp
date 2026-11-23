@@ -135,6 +135,11 @@ struct ExecutorSettings {
   // warmup at all); true = KAIN-free TDA warmup from the seed's X block, then
   // promote to Full. Diagnostic only; deck `seed.es_warmup`, --seed-es-warmup.
   bool              es_seed_warmup        = false;
+  // Deck `diagnostics.properties`: cheap property values in each history row
+  // (polarizability rows of dipole states against these axes, excitation
+  // energies). Information only; never a result, never a second-order step.
+  bool              diagnostic_properties = false;
+  std::vector<int>  diagnostic_dipole_axes;
   // Excited-state (Full / TDA-warmup) solve settings — defaults for the Full
   // closed-shell path (random guess, 10 warmup iters, oversampled warmup, KAIN).
   ESGuessMode       es_guess              = ESGuessMode::SolidHarmonics;  // sweep-validated default
@@ -608,9 +613,25 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     }
     std::size_t evaluations=0;
     if (!binding.reusable()) {
+      // Diagnostic polarizability row: the assembly's own inner products, at
+      // this protocol, from the state just updated. One per requested axis.
+      std::map<int,vector_real_function_3d> dipoles;
+      if constexpr (std::is_same_v<Shell,ClosedShell>)
+        if (ctx.diagnostic_properties && pert.kind==Perturbation::Kind::Dipole)
+          for (int column:ctx.diagnostic_dipole_axes) dipoles[column]=dipole_perturbation(world,gs,column);
       const auto observe=[&](const typename Solver::State& state,const it::IterationMetrics& metrics,
                              const it::Decision& decision,const it::Progress& progress) {
         ++evaluations;
+        std::vector<it::Diagnostic> diagnostics;
+        if constexpr (std::is_same_v<Shell,ClosedShell>)
+          for (const auto& [column,v]:dipoles) {
+            const auto& x=state.responses.front();
+            double value=0.0;
+            if constexpr (requires {x.y_alpha;}) value=-2.0*(inner(x.x_alpha,v)+inner(x.y_alpha,v));
+            else value=-2.0*(inner(x.x_alpha,v)+inner(x.x_alpha,v));
+            diagnostics.push_back({"polarizability",metrics.states.front().id,
+                                   std::string{char('x'+pert.axis),char('x'+column)},value});
+          }
         if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
           it::write_iteration_metrics(std::cout,"response",metrics,decision,
               response_shared::metric_labels(),binding.final_level());
@@ -623,7 +644,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         });
         if (decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
           it::write_checkpoint_saved(std::cout,decision);
-        ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids);
+        ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
+        if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit")
+          it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::metric_labels());
       };
       const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.final_level(),binding.expected(),
           binding.info(),binding.previous_updates(),observe,
@@ -1046,7 +1069,16 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       });
       if(decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
         it::write_checkpoint_saved(std::cout,decision);
-      session.record_evaluation(metrics,decision,binding.definition().metric_ids);
+      // Diagnostic excitation energies: already measured, nothing computed.
+      std::vector<it::Diagnostic> diagnostics;
+      if(ctx.diagnostic_properties)
+        for(const auto& root:metrics.states)
+          if(const auto found=root.metrics.find(it::Metric::energy_change);
+             found!=root.metrics.end() && found->second.evidence.current)
+            diagnostics.push_back({"excitation_energy",root.id,"",*found->second.evidence.current});
+      session.record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
+      if(world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit")
+        it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::excited_metric_labels());
     };
     const auto decision=solvers::iterate_shared(solver,state,binding.controls(),binding.final_level(),binding.expected(),binding.info(),binding.previous_updates(),observer,
       [&](const it::IterationInfo& info,const it::IterationTiming& measured) {

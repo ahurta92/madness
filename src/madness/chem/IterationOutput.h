@@ -3,6 +3,7 @@
 // Shared presentation and driver-rank elapsed intervals. This adds no fences
 // or numerical work; broad steps include their existing completion boundaries.
 #include <madness/chem/ConvergenceDecision.h>
+#include <madness/chem/IterationHistory.h>
 #include <madness/chem/IterationMetrics.h>
 #include <algorithm>
 #include <chrono>
@@ -205,6 +206,38 @@ inline void write_targets_below_floor(std::ostream& os, const std::string& appli
            << output_detail::number(criterion.floor, 4, true) << '\n';
     }
     if (any) os << "  The requested targets are used; this protocol may not reach them. A finer final level would.\n";
+}
+
+// A run that ends at its iteration limit with diagnostic values: each value is
+// marked NOT CONVERGED, followed by every check of the state it came from.
+inline void write_unconverged_diagnostics(std::ostream& os, const IterationMetrics& metrics,
+                                          const Decision& decision, const std::vector<Diagnostic>& diagnostics,
+                                          const MetricLabels& labels = {}) {
+    for (const auto& diagnostic : diagnostics) {
+        std::ostringstream value;
+        value << std::setprecision(10) << diagnostic.value;
+        os << "Diagnostic value, NOT CONVERGED: " << output_detail::words(diagnostic.name)
+           << (diagnostic.component.empty() ? "" : " " + diagnostic.component) << " = " << value.str() << '\n'
+           << "  task " << metrics.info.task_id << ", state " << diagnostic.subject << ", protocol "
+           << output_detail::number(metrics.info.protocol.thresh, 0, true) << ", after "
+           << metrics.info.iteration << " updates (" << output_detail::words(decision.reason) << ")\n";
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& check : decision.checks) {
+            if (check.subject != diagnostic.subject || check.result == CheckResult::not_applicable) continue;
+            const auto state = std::find_if(metrics.states.begin(), metrics.states.end(),
+                                            [&](const auto& s) { return s.id == check.subject; });
+            std::string measured = "-";
+            if (state != metrics.states.end())
+                if (const auto found = state->metrics.find(check.metric);
+                    found != state->metrics.end() && found->second.value)
+                    measured = output_detail::number(*found->second.value, 1, true);
+            rows.push_back({"  " + output_detail::label(check.metric, labels), measured,
+                            "limit " + (check.limit ? output_detail::number(*check.limit, 1, true) : std::string("-")),
+                            check.result == CheckResult::met ? "met" : check.result == CheckResult::unmet
+                                ? "NOT MET" : output_detail::words(check_result_name(check.result))});
+        }
+        output_detail::table(os, rows, {16, 7, 13, 7}, {false, true, false, false});
+    }
 }
 
 // Call only after successful publication, never merely from a checkpoint request.
