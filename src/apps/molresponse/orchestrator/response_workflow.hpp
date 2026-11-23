@@ -283,13 +283,12 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     mgr_policy.collect_subworlds=[session]{session->collect_subworlds();};
     mgr_policy.dependencies_ready=[session](const CalcNode& node) {
       return std::all_of(node.prerequisites.begin(),node.prerequisites.end(),[&](const auto& id) {
-        const auto found=session->states.find(id);
-        return found!=session->states.end() && found->second->complete();
+        return session->complete(id);
       });
     };
-    mgr_policy.qualified_bundle=[session](const std::string& id){return session->at(id).complete();};
+    mgr_policy.qualified_bundle=[session](const std::string& id){return session->excited_at(id).complete();};
     mgr_policy.plan_derived=[session,&in](const CalcNode& node) {
-      const auto& bundle=session->at(node.prerequisites.front());
+      const auto& bundle=session->excited_at(node.prerequisites.front());
       auto& binding=session->bind_derived(node.id,{
           {"frequency",node.freq},{"perturbation",node.pert.description()},
           {"layout",detail_exec::is_static_freq(node.freq)?"closed_shell_static":"closed_shell_full"},

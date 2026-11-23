@@ -993,7 +993,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
   namespace it=madness::iteration;
   using Solver=ESSolver<Type,ClosedShell>;
   auto& world=ctx.world;auto& gs=ctx.gs;auto& session=*ctx.shared_response;
-  auto& binding=session.at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
+  auto& binding=session.excited_at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
   auto& timing=session.timing();
   timing.begin("protocol",{{"protocol",checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})}});
   timing.begin("task",{{"task_id",binding.info().task_id}});timing.begin("prepare");
@@ -1010,12 +1010,12 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
   timing.end();
   if(binding.has_saved()) {
     timing.begin("load");
-    state=binding.load([&](const auto& directory,const auto& manifest) {
-      return response_shared::load_excited_functions<Type,ClosedShell>(world,directory,manifest,binding.controls().protocol);
+    state=binding.load([&](const auto& directory,const auto& description) {
+      return response_shared::load_excited_functions<Type,ClosedShell>(world,directory,description,binding.controls().protocol);
     });
     timing.end();
     if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
-      const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+      const auto saved=binding.saved_metrics();
       it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
           it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::excited_metric_labels());
     }
@@ -1068,11 +1068,6 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       ++evaluations;
       if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
         it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.final_level());
-      binding.publish(metrics,decision,progress,[&](const auto& directory) {
-        return response_shared::save_excited_functions(world,current,directory);
-      });
-      if(decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
-        it::write_checkpoint_saved(std::cout,decision);
       // Diagnostic excitation energies: already measured, nothing computed.
       std::vector<it::Diagnostic> diagnostics;
       if(ctx.diagnostic_properties)
@@ -1080,7 +1075,13 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
           if(const auto found=root.metrics.find(it::Metric::energy_change);
              found!=root.metrics.end() && found->second.evidence.current)
             diagnostics.push_back({"excitation_energy",root.id,"",*found->second.evidence.current});
-      session.record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
+      // One row in the node's history per decision, before any save can fail.
+      binding.record_evaluation(metrics,decision,diagnostics);
+      binding.publish(metrics,decision,progress,current.stable_index,[&](const auto& directory) {
+        response_shared::save_excited_functions(world,current,directory);
+      });
+      if(decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
+        it::write_checkpoint_saved(std::cout,decision);
       if(world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
          it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
         it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::excited_metric_labels());
@@ -1110,7 +1111,7 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
   using namespace madness;
   using json=nlohmann::json;
   auto& session=*ctx.shared_response;
-  auto& binding=session.at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
+  auto& binding=session.excited_at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
   json energies={{"units","hartree"},{"components",json::object()},{"availability",json::object()}};
   json strengths={{"units","dimensionless"},{"components",json::object()},{"availability",json::object()}};
   json dipoles={{"units","atomic_units"},{"values",json::array()}};
@@ -1121,8 +1122,8 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
     auto coulop=poperatorT(CoulombOperatorPtr(ctx.world,ctx.gs.params().lo(),0.001*thresh));
     ctx.gs.prepare(ctx.world,0.001*thresh,coulop,ctx.fock_json);
     session.timing().begin("load");
-    const auto state=binding.load([&](const auto& directory,const auto& manifest) {
-      return response_shared::load_excited_functions<Type,ClosedShell>(ctx.world,directory,manifest,binding.controls().protocol);
+    const auto state=binding.load([&](const auto& directory,const auto& description) {
+      return response_shared::load_excited_functions<Type,ClosedShell>(ctx.world,directory,description,binding.controls().protocol);
     },true);
     session.timing().end();session.timing().begin("transition_properties");
     const auto analysis=analyze_es_bundle<Type,ClosedShell>(ctx.world,ctx.gs.orbitals_alpha(),state);
@@ -2748,13 +2749,13 @@ template <typename EsType>
 inline bool load_tpa_es_xy(madness::World &world, const std::string &calc_dir,
                            std::vector<double> &omega_out,
                            std::vector<ResponseStateXY<ClosedShell>> &Xf_out,
-                           response_shared::Checkpoint* binding=nullptr,
+                           response_shared::ExcitedSet* binding=nullptr,
                            std::vector<std::string>* root_ids=nullptr) {
   typename ESSolver<EsType,ClosedShell>::State state;
   if(binding) {
     if(!binding->complete()) return false;
-    state=binding->load([&](const auto& directory,const auto& manifest) {
-      return response_shared::load_excited_functions<EsType,ClosedShell>(world,directory,manifest,binding->controls().protocol);
+    state=binding->load([&](const auto& directory,const auto& description) {
+      return response_shared::load_excited_functions<EsType,ClosedShell>(world,directory,description,binding->controls().protocol);
     },true);
   } else {
     auto es=try_load_es_bundle<EsType,ClosedShell>(world,calc_dir);
@@ -2790,7 +2791,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     return;
   }
 
-  response_shared::Checkpoint* shared_bundle=nullptr;
+  response_shared::ExcitedSet* shared_bundle=nullptr;
   nlohmann::json shared_values=nlohmann::json::array();
   auto finish_shared=[&] {
     if(!ctx.shared_response) return;
@@ -2808,7 +2809,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   if(ctx.shared_response) {
     ctx.shared_response->timing().begin("two_photon_properties");
     const auto& request=plan.es.front();
-    shared_bundle=&ctx.shared_response->at(es_node_id(request.tda,request.n_roots));
+    shared_bundle=&ctx.shared_response->excited_at(es_node_id(request.tda,request.n_roots));
     if(!shared_bundle->complete()) {
       for(const auto& id:shared_bundle->expected().states) unavailable(id,"excited bundle has not met the final request");
       finish_shared();return;

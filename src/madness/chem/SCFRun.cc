@@ -45,23 +45,6 @@ std::string attempt(World& world) {
     });
 }
 
-// One header row per launch, before its update rows, so a node's history
-// reads as one continuous record across restarts.
-void write_launch_header(World& world, const std::filesystem::path& folder) {
-    cp::detail::on_root(world, [&] {
-        const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::tm utc{};
-        gmtime_r(&now, &utc);
-        char time[32], host[256] = {};
-        std::strftime(time, sizeof time, "%Y-%m-%dT%H:%M:%SZ", &utc);
-        gethostname(host, sizeof host - 1);
-        it::append_history(it::Node(folder).history(), {{"launch", {{"time", time},
-            {"code_version", info::git_commit()}, {"host", host}, {"processes", world.size()},
-            {"threads", ThreadPool::size() + 1}}}});
-        return std::string{};
-    });
-}
-
 void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
     scf.param.set_user_defined_value("nmo_alpha", alpha);
     if (scf.param.have_beta()) scf.param.set_user_defined_value("nmo_beta", beta);

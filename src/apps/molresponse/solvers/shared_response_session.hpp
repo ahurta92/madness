@@ -52,6 +52,8 @@ class Session {
 public:
   std::map<std::string,std::unique_ptr<Checkpoint>> states;
   std::map<std::string,std::unique_ptr<SecondOrderNode>> second_order;
+  // Excited-state sets are nodes, solved on the main World only.
+  std::map<std::string,std::unique_ptr<ExcitedSet>> excited;
   Session(madness::World& world,const std::filesystem::path& root,const GroundSource& ground,const it::Request& request,
           const std::vector<it::Protocol>& protocols,
           const std::vector<TaskSpec>& definitions,
@@ -68,12 +70,19 @@ public:
     });
     if(!scope_.parent_attempt.empty()) owner_=scope_.parent_attempt+"-g"+std::to_string(scope_.subworld_id)+"-"+owner_;
     for (const auto& task : definitions) {
+      cp::records::require(!states.contains(task.id) && !excited.contains(task.id),"ambiguous response task identity");
+      if(task.settings.contains("excited_model")) {
+        cp::records::require(scope_.parent_attempt.empty(),"excited-state sets are not solved in subworlds");
+        excited.emplace(task.id,std::make_unique<ExcitedSet>(world,root_,ground,
+            task.checkpoint_id.empty()?task.id:task.checkpoint_id,task.settings,request,protocols,owner_,task.definition,verbosity_));
+        continue;
+      }
       specifications_[task.id]=task;
-      cp::records::require(!states.contains(task.id),"ambiguous response task identity");
       states.emplace(task.id,std::make_unique<Checkpoint>(world,root_,ground,
           task.checkpoint_id.empty()?task.id:task.checkpoint_id,task.settings,request,protocols,owner_,task.definition,task.guess,scope_.writer_group,verbosity_));
     }
     for (const auto& [id,state] : states) if (state->reusable()) record_summary(*state,0);
+    for (const auto& [id,set] : excited) if (set->reusable()) record_summary(*set,0);
     timing_.end();
   }
   Checkpoint& bind_derived(const std::string& id,json settings) {
@@ -213,8 +222,31 @@ public:
     }
   }
   Checkpoint& at(const std::string& id) const {return *states.at(id);}
+  ExcitedSet& excited_at(const std::string& id) const {return *excited.at(id);}
+  // Whether the named driven state or excited-state set has met the request.
+  bool complete(const std::string& id) const {
+    if(const auto set=excited.find(id);set!=excited.end()) return set->second->complete();
+    const auto state=states.find(id);
+    return state!=states.end() && state->second->complete();
+  }
   bool complete() const {
-    return std::all_of(states.begin(),states.end(),[](const auto& entry){return entry.second->complete();});
+    return std::all_of(states.begin(),states.end(),[](const auto& entry){return entry.second->complete();}) &&
+           std::all_of(excited.begin(),excited.end(),[](const auto& entry){return entry.second->complete();});
+  }
+  void record_summary(const ExcitedSet& set,std::size_t evaluations) const {
+    const auto& d=set.description();
+    const auto& physical=set.scientific_settings();
+    cp::detail::on_root(world_,[&] {
+      auto meta=ResponseMetadata::load_or_create(metadata_path());
+      const auto key=protocol_key(d.protocol.thresh,d.protocol.k);
+      meta.set_protocol(key,d.protocol.thresh,d.protocol.k,0);
+      const auto& roots=d.details.at("roots");
+      meta.set_es_bundle(key,{{"converged",set.complete()},{"diverged",false},{"stalled",false},
+        {"type",physical.at("excited_model")},{"shell","closed_shell"},{"n_roots",roots.size()},
+        {"roots",roots},{"iter",d.updates_at_protocol},{"node",set.folder()},
+        {"shared_evaluations",evaluations},{"shared_reused",set.reusable()}});
+      meta.save();return std::string{};
+    });
   }
   void record_summary(const Checkpoint& state,std::size_t evaluations) const {
     const auto frame=cp::iteration_metrics_from_manifest(state.manifest());
@@ -224,19 +256,7 @@ public:
       const auto protocol=frame.info.protocol;
       const auto key=protocol_key(protocol.thresh,protocol.k);
       meta.set_protocol(key,protocol.thresh,protocol.k,0);
-      if(physical.contains("excited_model")) {
-        json roots=json::array();
-        for(std::size_t slot=0;slot<frame.states.size();++slot) {
-          const auto& root=frame.states[slot];
-          roots.push_back({{"slot",slot},{"root_id",root.id},
-            {"stable_index",std::stoi(root.id.substr(std::string("es_root_").size()))},
-            {"omega",root.metrics.at(it::Metric::energy_change).evidence.current.value()}});
-        }
-        meta.set_es_bundle(key,{{"converged",state.complete()},{"diverged",false},{"stalled",false},
-          {"type",physical.at("excited_model")},{"shell","closed_shell"},{"n_roots",roots.size()},
-          {"roots",roots},{"iter",frame.info.iteration},{"shared_generation",state.manifest().generation},
-          {"shared_evaluations",evaluations},{"shared_reused",state.reusable()}});
-      } else meta.set_fd_state(physical.at("perturbation"),key,ResponseMetadata::freq_key(physical.at("frequency")),
+      meta.set_fd_state(physical.at("perturbation"),key,ResponseMetadata::freq_key(physical.at("frequency")),
           {{"converged",state.complete()},{"frequency",physical.at("frequency")},{"iter",frame.info.iteration},
            {"bsh_residual",frame.states.front().metrics.at(it::Metric::bsh_residual).value.value_or(0.0)},
            {"diverged",false},{"stalled",false},{"shared_generation",state.manifest().generation},
@@ -259,6 +279,15 @@ public:
         group["states"][public_id]=state->measured_values(subject.id);
       }
     }
+    // Excited-state sets are nodes: their measured values are reported from
+    // the node description, and the source map lists no source for them.
+    for (const auto& [id,set] : excited) {
+      if (!set->has_saved()) continue;
+      const auto frame=set->saved_metrics();
+      auto& group=groups[protocol_key(frame.info.protocol.thresh,frame.info.protocol.k)];
+      group["protocol"]=cp::records::protocol_record(frame.info.protocol);
+      for (const auto& subject:frame.states) group["states"][id+":"+subject.id]=measured_values(frame,subject.id);
+    }
     // Second-order intermediates are nodes, not store tasks: the source map
     // lists none (removed in part 4, with the source map).
     store_.publish_source_map({{"version",2},{"calculation_id","response"},{"attempt_id",owner_},
@@ -274,11 +303,15 @@ public:
     json second_order_nodes=json::array();
     for(const auto& [id,binding]:second_order) if(binding->reusable())
       second_order_nodes.push_back({{"id",id},{"node",binding->folder()}});
+    json excited_nodes=json::array();
+    for(const auto& [id,set]:excited) if(set->has_saved())
+      excited_nodes.push_back({{"id",id},{"node",set->folder()}});
     calculations.push_back({{"calculation_id","response"},{"attempt_id",owner_},{"application","molresponse"},
        {"protocol",cp::records::protocol_record(final_)},
        {"properties",properties_},
        {"state_metrics",metrics},
-       {"second_order",second_order_nodes}});
+       {"second_order",second_order_nodes},
+       {"excited",excited_nodes}});
     result["attempt_id"]=owner_;result["calculations"]=std::move(calculations);
     const auto warning=store_.publish_results(result);
     if (!warning.empty() && world_.rank()==0) madness::print(warning);

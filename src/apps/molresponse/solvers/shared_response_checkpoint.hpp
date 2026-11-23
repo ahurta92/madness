@@ -91,7 +91,6 @@ struct TaskDefinition {
   json metric_definitions;
   std::function<it::ModelMetrics(it::Protocol)> model;
   std::function<void(const json&,const json&)> validate_settings;
-  bool allow_subject_expansion=false;
   std::string application="driven response"; // names the solver in input errors
   it::MetricLabels labels=metric_labels();
 };
@@ -167,18 +166,9 @@ public:
       const auto &old = selected_->record;
       cp::records::require(old.at("metric_definitions") == definition_.metric_definitions,
           "unsupported response metric definitions");
-      bool expanded=false;
       const auto& old_definition=old.at("task").at("definition");
-      if(definition_.allow_subject_expansion) {
-        const auto previous=cp::records::subjects(old_definition);
-        const auto wanted=cp::records::subjects(definition_.record);
-        expanded=previous.size()<wanted.size() &&
-            std::includes(wanted.begin(),wanted.end(),previous.begin(),previous.end());
-      }
-      for (const auto& [key,value] : definition_.record.items()) {
-        if(key=="subjects" && expanded) continue;
+      for (const auto& [key,value] : definition_.record.items())
         cp::records::require(old_definition.at(key)==value,"unsupported response task definition");
-      }
       const auto& previous_settings=old.at("task").at("definition").at("settings");
       cp::records::require(madness::scf_model_settings(previous_settings.at("ground_settings")) ==
                               madness::scf_model_settings(settings_.at("ground_settings")),
@@ -190,7 +180,6 @@ public:
       saved->protocol_complete=old.at("task").at("iteration").at("protocol_complete");
       saved->updates_at_protocol=cp::records::count(old.at("task").at("iteration").at("updates_at_protocol"));
       saved->conversion_supported=true;
-      saved->bundle_expanded=expanded;
       if (metrics.info.context_id!=context_ || metrics.info.task_id!=task_)
         saved->use=it::SavedEvidenceUse::guess_only;
       if(old_definition.contains("replaces")) {
@@ -357,22 +346,26 @@ public:
             {"generation",saved.generation},{"protocol",cp::records::protocol_record(frame.info.protocol)},
             {"iteration",frame.info.iteration}};
   }
-  json measured_values(std::string subject = {}) const {
-    const auto frame=cp::iteration_metrics_from_manifest(manifest());
-    if (subject.empty()) {
-      cp::records::require(frame.states.size()==1,"bundle metrics need a subject");
-      subject=frame.states.front().id;
-    }
-    const auto state=std::find_if(frame.states.begin(),frame.states.end(),[&](const auto& s){return s.id==subject;});
-    cp::records::require(state!=frame.states.end(),"unknown response subject");
-    json values=json::object(),availability=json::object();
-    for (const auto& [metric,measurement] : state->metrics) {
-      if (measurement.status==it::Availability::measured) values[it::metric_name(metric)]=*measurement.value;
-      else availability[it::metric_name(metric)]={{"status",measurement.status==it::Availability::not_applicable ? "not_applicable" : "unavailable"},{"reason",measurement.reason}};
-    }
-    return {{"values",values},{"availability",availability}};
-  }
+  json measured_values(std::string subject = {}) const;
 };
+// One subject's measured values and the reasons for the rest, for results.
+inline json measured_values(const it::IterationMetrics& frame,std::string subject = {}) {
+  if (subject.empty()) {
+    cp::records::require(frame.states.size()==1,"bundle metrics need a subject");
+    subject=frame.states.front().id;
+  }
+  const auto state=std::find_if(frame.states.begin(),frame.states.end(),[&](const auto& s){return s.id==subject;});
+  cp::records::require(state!=frame.states.end(),"unknown response subject");
+  json values=json::object(),availability=json::object();
+  for (const auto& [metric,measurement] : state->metrics) {
+    if (measurement.status==it::Availability::measured) values[it::metric_name(metric)]=*measurement.value;
+    else availability[it::metric_name(metric)]={{"status",measurement.status==it::Availability::not_applicable ? "not_applicable" : "unavailable"},{"reason",measurement.reason}};
+  }
+  return {{"values",values},{"availability",availability}};
+}
+inline json Checkpoint::measured_values(std::string subject) const {
+  return response_shared::measured_values(cp::iteration_metrics_from_manifest(manifest()),std::move(subject));
+}
 // A second-order intermediate (VBC sources, two-photon sources) is built once
 // from converged response states and saved in its own node folder,
 // <run>/states/response/<name>/, with no history: it is never iterated.

@@ -669,7 +669,7 @@ struct molresponse_v3_lib {
       for(const auto& bundle:in.plan.es) {
         const std::string model=bundle.tda?"tda":"full";
         definitions.push_back({es_node_id(bundle.tda,bundle.n_roots),
-          {{"excited_model",model},{"layout","closed_shell_"+model},{"n_roots",bundle.n_roots}},
+          {{"excited_model",model},{"layout","closed_shell_"+model}},
           response_shared::excited_task(bundle.n_roots),"es:"+model});
       }
       in.settings.shared_response=std::make_shared<response_shared::Session>(world,shared_root,*shared_source,
@@ -682,15 +682,17 @@ struct molresponse_v3_lib {
         entry.start_thresh=protocol.back();entry.controller_owned=true;
         in.settings.state_plans[vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c)]=entry;
       }
-      for (const auto& [id,binding]:in.settings.shared_response->states) {
+      const auto plan_state=[&](const std::string& id,const auto& binding) {
         StatePlan entry;
-        entry.kind=binding->reusable() ? StatePlan::Kind::load :
-            binding->has_saved() ? StatePlan::Kind::resume : StatePlan::Kind::fresh;
-        const auto start=ladder.at(binding->plan().start_protocol);
+        entry.kind=binding.reusable() ? StatePlan::Kind::load :
+            binding.has_saved() ? StatePlan::Kind::resume : StatePlan::Kind::fresh;
+        const auto start=ladder.at(binding.plan().start_protocol);
         entry.start_thresh=start.thresh;entry.controller_owned=true;
-        if (binding->reusable()) {entry.met=true;entry.loaded_key=protocol_key(start.thresh,start.k);}
+        if (binding.reusable()) {entry.met=true;entry.loaded_key=protocol_key(start.thresh,start.k);}
         in.settings.state_plans[id]=entry;
-      }
+      };
+      for (const auto& [id,binding]:in.settings.shared_response->states) plan_state(id,*binding);
+      for (const auto& [id,binding]:in.settings.shared_response->excited) plan_state(id,*binding);
     }
 
     // Deck `dalton.dir <path>` — the seed-from-directory import contract
@@ -701,6 +703,8 @@ struct molresponse_v3_lib {
     // failing the response task loudly instead of silently solving cold.
     const bool need_response_import=!in.settings.shared_response ||
         std::any_of(in.settings.shared_response->states.begin(),in.settings.shared_response->states.end(),
+          [](const auto& entry){return !entry.second->has_saved();}) ||
+        std::any_of(in.settings.shared_response->excited.begin(),in.settings.shared_response->excited.end(),
           [](const auto& entry){return !entry.second->has_saved();});
     if (!dalton_dir.empty() && need_response_import) {
       if(in.settings.shared_response) in.settings.shared_response->timing().begin("import_guesses");

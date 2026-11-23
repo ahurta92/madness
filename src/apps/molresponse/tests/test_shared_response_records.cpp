@@ -132,16 +132,56 @@ int main(int argc, char** argv) {
                 require(entries==2 && std::filesystem::is_directory(folder/"archive"));
                 return std::string{};
             });
-            auto expanded_task=task;
-            expanded_task.allow_subject_expansion=true;
-            expanded_task.record["subjects"]={"root0","root1","root2"};
-            rs::Checkpoint expanded(world,root,ground,"roots",cp::json::object(),request,ladder,"expanded",expanded_task);
-            require(expanded.has_saved() && !expanded.reusable());
-            require(expanded.plan().action==it::RestartAction::resume && expanded.plan().start_protocol==0);
-            require(expanded.load(read_payload)==123);
-            rejects([&]{expanded.qualified_input("root");});
-            auto replacement=expanded_task;replacement.record["subjects"]={"root0","different","root2"};
-            rejects([&]{rs::Checkpoint invalid(world,root,ground,"roots",cp::json::object(),request,ladder,"replaced",replacement);});
+            // An excited-state set is one node: saved whole, reused from its
+            // stored metrics, resumed with added roots, refused with fewer.
+            auto es_task=task;
+            const auto es_record=[](int n) {
+                cp::json subjects=cp::json::array();
+                for(int r=0;r<n;++r) subjects.push_back(molresponse_v3::make_root_id(r));
+                return cp::json{{"subjects",subjects}};
+            };
+            es_task.record=es_record(2);
+            es_task.validate_settings=rs::excited_task(2).validate_settings;
+            const cp::json es_settings{{"excited_model","tda"},{"layout","closed_shell_tda"}};
+            rs::ExcitedSet es(world,root,ground,"es:tda",es_settings,request,ladder,"es-solve",es_task);
+            require(!es.has_saved() && es.folder()=="states/response/excited-tda");
+            it::IterationMetrics es_metrics; es_metrics.info=es.info();
+            for(int r=0;r<2;++r) {
+                it::StateMetrics state; state.id=molresponse_v3::make_root_id(r);
+                state.metrics[it::Metric::bsh_residual]=it::MetricValue::measured(0.0,1.0);
+                auto energy=it::MetricValue::not_applicable("first update");
+                energy.evidence.current=0.5+r;
+                state.metrics[it::Metric::energy_change]=energy;
+                es_metrics.states.push_back(state);
+            }
+            const auto es_decision=it::decide(es.controls(),es.expected(),progress,es_metrics,es.final_level());
+            es.publish(es_metrics,es_decision,progress,{0,1},[&](const auto& dir) {
+                for(int r=0;r<2;++r) {
+                    archive::ParallelOutputArchive out(world,(dir/("root_"+std::to_string(r))).c_str(),1);
+                    if (out.is_io_node()) out.local_archive() & r;
+                    require(cp::close_archive(out).empty());
+                }
+            });
+            rs::ExcitedSet es_again(world,root,ground,"es:tda",es_settings,request,ladder,"es-again",es_task);
+            require(es_again.reusable() && es_again.description()==es.description());
+            require(es_again.description().details.at("roots")[1].at("omega")==1.5);
+            require(es_again.load([](const auto& dir,const auto&){return std::filesystem::exists(dir/"root_1.00000");}));
+            auto three=es_task;three.record=es_record(3);
+            rs::ExcitedSet es_more(world,root,ground,"es:tda",es_settings,request,ladder,"es-more",three);
+            require(es_more.has_saved() && !es_more.reusable() && es_more.plan().action==it::RestartAction::resume);
+            auto one=es_task;one.record=es_record(1);
+            rejects([&]{rs::ExcitedSet fewer(world,root,ground,"es:tda",es_settings,request,ladder,"es-fewer",one);});
+            auto moved_ground=ground;moved_ground.identity["saved_at"]="2026-11-24T00:00:00Z";
+            rs::ExcitedSet es_guess(world,root,moved_ground,"es:tda",es_settings,request,ladder,"es-guess",es_task);
+            require(es_guess.has_saved() && !es_guess.reusable());
+            cp::detail::on_root(world,[&] {
+                const auto folder=std::filesystem::path(root)/es.folder();
+                std::size_t launches=0;std::string line;
+                std::ifstream history(folder/"history.jsonl");
+                while(std::getline(history,line)) launches+=cp::json::parse(line).contains("launch");
+                require(launches==5 && std::filesystem::is_directory(folder/"archive"));
+                return std::string{};
+            });
             const auto derived_task=rs::derived_task();
             const cp::json origin{{"bundle","es:tda"},{"root","es_root_0000"},{"factor",0.5}};
             const cp::json old_settings{{"frequency",0.1},{"perturbation","dipole_z"},

@@ -16,6 +16,10 @@ std::optional<iteration::NodeDescription> read_node(World& world, const std::fil
 /// its settings, its level and its save time.
 nlohmann::json node_identity(const iteration::NodeDescription& description);
 
+/// Append one launch row (time, code version, host, processes, threads) to a
+/// node's history.jsonl. Collective; rank 0 writes.
+void write_launch_header(World& world, const std::filesystem::path& folder);
+
 /// Application binding of SCF to one node folder (NodeArchive.h): the ground
 /// state, or the virtuals of a frozen-occupied solve, whose lineage is the
 /// ground-state identity. All operations are collective. The binding captures
