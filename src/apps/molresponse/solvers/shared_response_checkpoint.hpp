@@ -13,9 +13,14 @@ namespace molresponse_v3::response_shared {
 namespace cp = madness::checkpoint;
 namespace it = madness::iteration;
 using json = nlohmann::json;
+// The ground state as response sees it: where its orbitals are, the level they
+// were saved at, and an identity (its settings, that level and its save time)
+// that changes whenever the ground state is saved again. Response records the
+// identity in its settings; it never names how the ground state is stored.
 struct GroundSource {
-  std::filesystem::path store;
-  cp::GenerationRef reference;
+  std::filesystem::path archive;
+  it::Protocol protocol;
+  json identity;
 };
 inline std::map<it::Metric, std::string> metric_set() {
   return {{it::Metric::bsh_residual, "fd-bsh-v1"},
@@ -128,29 +133,28 @@ class Checkpoint {
   bool complete_ = false;
   std::size_t publications_ = 0;
   std::optional<cp::GenerationRef> replaces_;
+  std::filesystem::path ground_archive_;
 
 public:
-  Checkpoint(madness::World &world, const GroundSource &ground,
+  Checkpoint(madness::World &world, const std::filesystem::path& root, const GroundSource &ground,
              std::string task, json scientific_settings,
              const it::Request &request, std::vector<it::Protocol> protocols,
              const std::string& attempt, TaskDefinition definition = driven_task(),
              std::optional<cp::GenerationRef> guess = {}, std::string writer_group = {},
              it::Verbosity verbosity = it::Verbosity::detail)
-      : world_(world), root_(std::filesystem::absolute(ground.store)),
+      : world_(world), root_(std::filesystem::absolute(root)),
         store_(world, root_,{},std::move(writer_group)), task_(std::move(task)),
         settings_(std::move(scientific_settings)),
         definition_(std::move(definition)), request_(request), protocols_(std::move(protocols)),
+        ground_archive_(ground.archive),
         settings(it::resolve(request, definition_.model(protocols_.at(0)), protocols_.at(0),
                              protocols_.size() == 1, definition_.application)) {
-    const auto source = store_.read(ground.reference);
-    cp::records::require(source.record.at("stage").at("application") == "scf",
-                         "driven response needs an exact qualified SCF source");
-    inputs_ = json::array({{{"role", "ground_state"},
-                            {"calculation_id", ground.reference.calculation_id},
-                            {"task_id", ground.reference.task_id},
-                            {"generation", ground.reference.generation}}});
-    settings_["ground_settings"] =
-        source.record.at("task").at("definition").at("scientific_settings");
+    // The ground state is not a store input: its identity in the settings
+    // makes a changed ground state turn saved response states into guesses.
+    inputs_ = json::array();
+    settings_["ground_settings"] = ground.identity.at("settings");
+    settings_["ground_saved"] = {{"protocol", ground.identity.at("protocol")},
+                                 {"saved_at", ground.identity.at("saved_at")}};
     context_ = json{{"settings", settings_}, {"inputs", inputs_}}.dump();
     owner_ = attempt;
     store_.initialize(owner_);
@@ -317,6 +321,7 @@ public:
         {"settings", settings_},
         {"requested_properties", json::array()},
         {"inputs", inputs_},
+        {"ground", {{"archive", ground_archive_.string()}}}, // for inspection tools only
         {"outcome", {{"complete", complete_}, {"reason", decision.reason}}}};
     auto definition=definition_.record;
     definition["settings"]=settings_;

@@ -46,7 +46,8 @@ int main(int argc, char** argv) {
             store.publish(cp::direct_manifest("ground_state","initial","ground",stage,"scf",
                 {{"scientific_settings",model}},cp::json::array()),
                 [&](const auto& dir){return payload(world,dir);});
-            const rs::GroundSource ground{root,{"ground_state","scf","ground"}};
+            const rs::GroundSource ground{std::filesystem::path(root)/"ground.restartdata",{1e-4,6},
+                {{"settings",model},{"protocol",{{"threshold",1e-4},{"k",6}}},{"saved_at","2026-11-23T00:00:00Z"}}};
             auto task = rs::driven_task();
             task.record = {{"subjects",{"root0","root1"}},{"binding_version",1}};
             task.validate_settings = [](const cp::json& previous,const cp::json& current) {
@@ -61,7 +62,7 @@ int main(int argc, char** argv) {
             request.targets[it::Metric::bsh_residual] = 0.1;
             request.max_updates = 0;
             const std::vector<it::Protocol> ladder{{1e-4,6}};
-            rs::Checkpoint bundle(world,ground,"roots",cp::json::object(),request,ladder,"solve",task);
+            rs::Checkpoint bundle(world,root,ground,"roots",cp::json::object(),request,ladder,"solve",task);
             it::IterationMetrics metrics; metrics.info=bundle.info();
             for (const auto* id : {"root0","root1"}) {
                 it::StateMetrics state; state.id=id;
@@ -73,7 +74,7 @@ int main(int argc, char** argv) {
             require(decision.action==it::Action::complete);
             bundle.publish(metrics,decision,progress,[&](const auto& dir){return payload(world,dir);});
             require(cp::iteration_metrics_from_manifest(bundle.manifest()).states.size()==2);
-            rs::Checkpoint reused(world,ground,"roots",cp::json::object(),request,ladder,"restart",task);
+            rs::Checkpoint reused(world,root,ground,"roots",cp::json::object(),request,ladder,"restart",task);
             require(reused.reusable());
             const auto read_payload=[&](const auto& directory,const cp::Manifest&) {
                 archive::ParallelInputArchive in(world,(directory/"response").c_str());
@@ -101,7 +102,7 @@ int main(int argc, char** argv) {
             rs::DirectCheckpoint new_a(world,root,"VBC",{{"kind","VBC"}},inputs,"new-A");
             require(new_a.reusable());
             auto tighter=request; tighter.targets[it::Metric::bsh_residual]=0.0;
-            rs::Checkpoint tighter_bundle(world,ground,"roots",cp::json::object(),tighter,ladder,"tighter",task);
+            rs::Checkpoint tighter_bundle(world,root,ground,"roots",cp::json::object(),tighter,ladder,"tighter",task);
             require(tighter_bundle.reusable());
             require(tighter_bundle.qualified_input("B")==reused.qualified_input("B"));
             auto bad=inputs; bad[0]["generation"]="missing";
@@ -119,18 +120,18 @@ int main(int argc, char** argv) {
             auto expanded_task=task;
             expanded_task.allow_subject_expansion=true;
             expanded_task.record["subjects"]={"root0","root1","root2"};
-            rs::Checkpoint expanded(world,ground,"roots",cp::json::object(),request,ladder,"expanded",expanded_task);
+            rs::Checkpoint expanded(world,root,ground,"roots",cp::json::object(),request,ladder,"expanded",expanded_task);
             require(expanded.has_saved() && !expanded.reusable());
             require(expanded.plan().action==it::RestartAction::resume && expanded.plan().start_protocol==0);
             require(expanded.load(read_payload)==123);
             rejects([&]{expanded.qualified_input("root");});
             auto replacement=expanded_task;replacement.record["subjects"]={"root0","different","root2"};
-            rejects([&]{rs::Checkpoint invalid(world,ground,"roots",cp::json::object(),request,ladder,"replaced",replacement);});
+            rejects([&]{rs::Checkpoint invalid(world,root,ground,"roots",cp::json::object(),request,ladder,"replaced",replacement);});
             const auto derived_task=rs::derived_task();
             const cp::json origin{{"bundle","es:tda"},{"root","es_root_0000"},{"factor",0.5}};
             const cp::json old_settings{{"frequency",0.1},{"perturbation","dipole_z"},
                 {"layout","closed_shell_full"},{"derived_from",origin}};
-            rs::Checkpoint old_leg(world,ground,"old-leg",old_settings,request,ladder,"derived-old",derived_task);
+            rs::Checkpoint old_leg(world,root,ground,"old-leg",old_settings,request,ladder,"derived-old",derived_task);
             it::IterationMetrics old_metrics;old_metrics.info=old_leg.info();
             it::StateMetrics leg;leg.id="response";
             leg.metrics[it::Metric::bsh_residual]=it::MetricValue::measured(0.0,1.0);
@@ -147,7 +148,7 @@ int main(int argc, char** argv) {
             old_leg.publish(old_metrics,old_decision,progress,[&](const auto& dir){return payload(world,dir);});
             const cp::GenerationRef previous{"response","old-leg",old_leg.manifest().generation};
             auto refined_settings=old_settings;refined_settings["frequency"]=0.11;
-            rs::Checkpoint refined(world,ground,"new-leg",refined_settings,request,ladder,"derived-new",derived_task,previous);
+            rs::Checkpoint refined(world,root,ground,"new-leg",refined_settings,request,ladder,"derived-new",derived_task,previous);
             require(refined.has_saved() && !refined.reusable() && refined.plan().start_protocol==0);
             require(refined.load(read_payload)==123);
             rejects([&]{refined.qualified_input("B");});
@@ -161,7 +162,7 @@ int main(int argc, char** argv) {
             cp::detail::on_root(world,[&] {std::filesystem::create_directory(root+"/recovery");return std::string{};});
             it::TimingCollector<> recovery_timing;
             recovery_timing.begin("run"); recovery_timing.begin("response"); recovery_timing.begin("setup");
-            rs::Session recovered(world,ground,request,ladder,{},root+"/recovery",std::move(recovery_timing));
+            rs::Session recovered(world,root,ground,request,ladder,{},root+"/recovery",std::move(recovery_timing),it::Verbosity::detail);
             auto& recovered_leg=recovered.bind_derived("new-leg",refined_settings);
             require(recovered_leg.reusable());
             require(recovered_leg.manifest().generation==refined.manifest().generation);
@@ -192,11 +193,11 @@ int main(int argc, char** argv) {
             require(store.read_latest("response","new-leg")->generation==refined.manifest().generation);
             // A changed frequency inside the same rounded ID also invalidates evidence.
             refined_settings["frequency"]=0.11000001;
-            rs::Checkpoint same_id(world,ground,"new-leg",refined_settings,request,ladder,"derived-bin",derived_task);
+            rs::Checkpoint same_id(world,root,ground,"new-leg",refined_settings,request,ladder,"derived-bin",derived_task);
             require(same_id.has_saved() && !same_id.reusable());
             require(same_id.load(read_payload)==123);
             auto wrong_origin=refined_settings;wrong_origin["derived_from"]["root"]="es_root_0001";
-            rejects([&]{rs::Checkpoint wrong(world,ground,"new-leg",wrong_origin,request,ladder,"wrong-root",derived_task);});
+            rejects([&]{rs::Checkpoint wrong(world,root,ground,"new-leg",wrong_origin,request,ladder,"wrong-root",derived_task);});
             rejects([&]{store.read_latest("response","old-leg");});
             require(store.task_inventory("response").is_array());
             const auto timing=cp::json{{"attempt_id","timed"},{"execution",{{"mpi_ranks",world.size()},{"threads_per_rank",2}}},

@@ -893,20 +893,15 @@ void dump_shared_checkpoint(World& world,const commandlineparser& parser) {
   const auto& manifest=*selected;
   const auto& definition=manifest.record.at("task").at("definition");
   const auto protocol=cp::records::read_protocol(definition.at("protocol"));
-  std::optional<cp::Manifest> ground;
-  cp::GenerationRef ground_ref;
-  for(const auto& input:manifest.record.at("task").at("inputs"))
-    if(input.at("role")=="ground" || input.at("role")=="ground_state") {
-      ground_ref=cp::records::reference(input);ground=store.read(ground_ref);break;
-    }
-  MADNESS_CHECK_THROW(ground,"response checkpoint has no ground-state source");
-  const auto orbital=std::find_if(ground->archives.begin(),ground->archives.end(),[](const auto& archive){return archive.role=="orbitals";});
-  MADNESS_CHECK_THROW(orbital!=ground->archives.end(),"ground-state orbital payload is unavailable");
-  const auto ground_directory=store.task_directory(ground_ref.calculation_id,ground_ref.task_id)/ground->generation;
-  const auto header=GroundState::read_archive_header(world,(ground_directory/orbital->basename).string());
+  // The response record names where its ground orbitals were and carries the
+  // ground settings; it does not name how the ground state is stored.
+  const auto& stage=manifest.record.at("stage");
+  MADNESS_CHECK_THROW(stage.contains("ground") && definition.contains("settings") &&
+      definition.at("settings").contains("ground_settings"),"response checkpoint has no ground-state source");
+  const auto header=GroundState::read_archive_header(world,stage.at("ground").at("archive").get<std::string>());
   set_response_protocol(world,header.L,protocol.thresh,protocol.k,false);
   Molecule molecule;
-  for(const auto& atom:ground->record.at("task").at("definition").at("scientific_settings").at("molecule").at("atoms")) {
+  for(const auto& atom:definition.at("settings").at("ground_settings").at("molecule").at("atoms")) {
     const auto& x=atom.at("coordinates");
     molecule.add_atom(x.at(0),x.at(1),x.at(2),atom.at("charge"),atom.at("atomic_number"),atom.at("pseudo_atom"));
   }

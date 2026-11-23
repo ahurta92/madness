@@ -4,6 +4,7 @@
 #include <madness/chem/SCFScientificSettings.h>
 #include <madness/chem/TimingRecords.h>
 #include <chrono>
+#include <ctime>
 #include <exception>
 #include <type_traits>
 
@@ -142,6 +143,29 @@ std::filesystem::path scf_checkpoint_archive(World& world, const SCF& scf) {
     const auto& ref = *scf.last_checkpoint;
     const auto saved = store.read(ref); // exact generation; never follow a newer latest pointer
     return store.task_directory(ref.calculation_id, ref.task_id) / saved.generation / "scf.restartdata";
+}
+
+GroundReference scf_ground_reference(World& world, const SCF& scf) {
+    const auto archive = scf_checkpoint_archive(world, scf);
+    cp::CheckpointStore store(world, scf_checkpoint_directory(scf));
+    const auto saved = store.read(*scf.last_checkpoint);
+    const auto& definition = saved.record.at("task").at("definition");
+    const auto protocol = cp::records::read_protocol(definition.at("protocol"));
+    // The store keeps no save time; the manifest is written once, when the
+    // generation is published, so its modification time is that time.
+    const auto saved_at = cp::detail::on_root(world, [&] {
+        const auto written = std::filesystem::last_write_time(archive.parent_path() / "manifest.json");
+        const auto seconds = std::chrono::system_clock::to_time_t(
+            std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                std::chrono::file_clock::to_sys(written)));
+        std::tm utc{};
+        gmtime_r(&seconds, &utc);
+        char text[32];
+        std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &utc);
+        return std::string(text);
+    });
+    return {archive, protocol, {{"settings", definition.at("scientific_settings")},
+                                {"protocol", cp::records::protocol_record(protocol)}, {"saved_at", saved_at}}};
 }
 
 void require_scf_restart(World& world, const std::filesystem::path& root, bool frozen) {

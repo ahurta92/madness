@@ -52,12 +52,12 @@ class Session {
 public:
   std::map<std::string,std::unique_ptr<Checkpoint>> states;
   std::map<std::string,std::unique_ptr<DirectCheckpoint>> direct;
-  Session(madness::World& world,const GroundSource& ground,const it::Request& request,
+  Session(madness::World& world,const std::filesystem::path& root,const GroundSource& ground,const it::Request& request,
           const std::vector<it::Protocol>& protocols,
           const std::vector<TaskSpec>& definitions,
           std::string analysis_directory, it::TimingCollector<> timing,it::Verbosity verbosity,
           SessionScope scope={})
-      : world_(world),root_(std::filesystem::absolute(ground.store)),store_(world,root_,{},scope.writer_group),ground_(ground),request_(request),protocols_(protocols),scope_(std::move(scope)),
+      : world_(world),root_(std::filesystem::absolute(root)),store_(world,root_,{},scope.writer_group),ground_(ground),request_(request),protocols_(protocols),scope_(std::move(scope)),
         analysis_directory_(std::move(analysis_directory)),final_(protocols.back()),
         timing_(std::move(timing)),verbosity_(verbosity) {
     timing_.end(); // reference/input setup began before loading the ground state
@@ -70,7 +70,7 @@ public:
     for (const auto& task : definitions) {
       specifications_[task.id]=task;
       cp::records::require(!states.contains(task.id),"ambiguous response task identity");
-      states.emplace(task.id,std::make_unique<Checkpoint>(world,ground,
+      states.emplace(task.id,std::make_unique<Checkpoint>(world,root_,ground,
           task.checkpoint_id.empty()?task.id:task.checkpoint_id,task.settings,request,protocols,owner_,task.definition,task.guess,scope_.writer_group,verbosity_));
     }
     for (const auto& [id,state] : states) if (state->reusable()) record_summary(*state,0);
@@ -106,15 +106,14 @@ public:
         guess=cp::GenerationRef{"response",old_id,saved->generation};
       }
     }
-    auto binding=std::make_unique<Checkpoint>(world_,ground_,id,settings,request_,protocols_,owner_,derived_task(),guess,scope_.writer_group,verbosity_);
+    auto binding=std::make_unique<Checkpoint>(world_,root_,ground_,id,settings,request_,protocols_,owner_,derived_task(),guess,scope_.writer_group,verbosity_);
     specifications_[id]={id,settings,derived_task(),{},guess};
     if(guess && guess->task_id!=id) replaced_tasks_[id]=guess->task_id;
     if(binding->reusable()) record_summary(*binding,0);
     auto& result=*binding;states[id]=std::move(binding);return result;
   }
-  DirectCheckpoint& bind_direct(const std::string& id,const json& definition,json inputs) {
-    inputs.push_back({{"role","ground"},{"calculation_id",ground_.reference.calculation_id},
-        {"task_id",ground_.reference.task_id},{"generation",ground_.reference.generation}});
+  // Direct inputs are response states, whose settings carry the ground identity.
+  DirectCheckpoint& bind_direct(const std::string& id,const json& definition,const json& inputs) {
     auto binding=std::make_unique<DirectCheckpoint>(world_,root_,id,definition,inputs,owner_,scope_.writer_group);
     auto& result=*binding;direct[id]=std::move(binding);return result;
   }
@@ -177,7 +176,7 @@ public:
     timing.begin("subworld_work",{{"clock_scope","subworld_driver_rank"},{"subworld_id",group},
         {"mpi_ranks",world.size()},{"threads_per_rank",madness::ThreadPool::size()+1}});
     timing.begin("response");timing.begin("binding_setup");
-    return std::make_shared<Session>(world,ground_,request_,protocols_,definitions,analysis_directory_,std::move(timing),verbosity_,
+    return std::make_shared<Session>(world,root_,ground_,request_,protocols_,definitions,analysis_directory_,std::move(timing),verbosity_,
         SessionScope{owner_,std::to_string(group),owner_,group});
   }
   void collect_subworlds() {

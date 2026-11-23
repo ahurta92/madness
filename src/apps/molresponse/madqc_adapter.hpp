@@ -217,17 +217,21 @@ struct molresponse_v3_lib {
               ? std::filesystem::proximate(scf_calc->work_dir, outdir)
                     / params.get<CalculationParameters>().prefix()
               : reference_prefix;
+    std::optional<molresponse_v3::response_shared::GroundSource> ground;
     if (shared) {
       MADNESS_CHECK_THROW(scf_calc->last_calculation_outcome && scf_calc->last_calculation_outcome->complete,
                          "response requires a qualified SCF reference");
-      source_prefix = scf_checkpoint_archive(world, *scf_calc);
+      const auto reference = scf_ground_reference(world, *scf_calc);
+      ground = molresponse_v3::response_shared::GroundSource{reference.archive, reference.protocol, reference.identity};
+      source_prefix = reference.archive;
       source_prefix.replace_extension(); // the native loader appends .restartdata
     }
     return run_response_on_reference(world, params, scf_calc->molecule, outdir,
                                      source_prefix, checkpoint_observer, {},
                                      shared ? &scf_calc->param : nullptr,
                                      shared ? &scf_calc->pcm_param : nullptr,
-                                     shared ? std::optional<molresponse_v3::response_shared::GroundSource>({scf_checkpoint_directory(*scf_calc), *scf_calc->last_checkpoint}) : std::nullopt);
+                                     ground,
+                                     shared ? scf_checkpoint_directory(*scf_calc) : std::filesystem::path{});
   }
 
   /// DESIGN A1: the response on a saved reference alone: its orbital archive
@@ -245,7 +249,8 @@ struct molresponse_v3_lib {
       const molresponse_v3::StatePlans& state_plans = {},
       const madness::CalculationParameters* verified_reference = nullptr,
       const madness::PCMParameters* verified_pcm = nullptr,
-      const std::optional<molresponse_v3::response_shared::GroundSource>& shared_source = {}) {
+      const std::optional<molresponse_v3::response_shared::GroundSource>& shared_source = {},
+      const std::filesystem::path& shared_root = {}) {
     using namespace madness;
     using namespace molresponse_v3;
 
@@ -271,7 +276,7 @@ struct molresponse_v3_lib {
             return property=="polarizability" || property=="hyperpolarizability" || property=="raman";}) &&
           !directions.empty() && directions.find_first_not_of("xyzXYZ")==std::string::npos &&
           !frequencies.empty() &&
-          shared_source &&
+          shared_source && !shared_root.empty() &&
           verified_reference,
           "shared response requires supported properties, valid dipole directions and frequencies");
       MADNESS_CHECK_THROW(!rp.excited_enable() || (verified_reference->spin_restricted() && rp.excited_num_states()>0),
@@ -667,7 +672,7 @@ struct molresponse_v3_lib {
           {{"excited_model",model},{"layout","closed_shell_"+model},{"n_roots",bundle.n_roots}},
           response_shared::excited_task(bundle.n_roots),"es:"+model});
       }
-      in.settings.shared_response=std::make_shared<response_shared::Session>(world,*shared_source,
+      in.settings.shared_response=std::make_shared<response_shared::Session>(world,shared_root,*shared_source,
           *shared_request,ladder,definitions,in.settings.calc_dir,std::move(response_timing),
           in.settings.verbosity);
       // Direct sources run once at the final protocol, after B/C qualify.
