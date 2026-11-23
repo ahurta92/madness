@@ -382,6 +382,51 @@ slice_state_lowest(const typename ESSolver<TDA, Shell>::State &in,
   return out;
 }
 
+/// Guess for roots added to a bundle that already holds saved roots.
+///
+/// After updates, the saved roots are no longer the fresh trials they started
+/// from, so the next-lowest fresh trial can lie almost inside their span. The
+/// subspace rotation then drops that direction and the added root has zero
+/// norm. Instead, project the saved roots (their x part) out of every trial,
+/// in ascending omega, together with any added root already taken; keep a
+/// trial only if it retains at least `min_fraction` of its norm, and normalize
+/// it. Slots [0, saved.size()) of the result are placeholders for the saved
+/// roots, which the caller puts back.
+inline ESSolver<TDA, ClosedShell>::State
+select_roots_outside_saved(madness::World &world,
+                           const ESSolver<TDA, ClosedShell>::State &trials,
+                           const std::vector<ResponseStateX<ClosedShell>> &saved,
+                           long n_roots, double min_fraction = 0.1) {
+  using Root = ResponseStateX<ClosedShell>;
+  const long kept = static_cast<long>(saved.size());
+  MADNESS_CHECK(kept > 0 && kept < n_roots);
+  auto out = slice_state_lowest<ClosedShell>(trials, n_roots);
+  std::vector<Root> basis(saved.begin(), saved.end());
+  const auto norm = [](const Root &root) {
+    return std::sqrt(std::max(0.0, rs::inner(std::vector<Root>{root}, std::vector<Root>{root})(0, 0)));
+  };
+  long slot = kept;
+  for (std::size_t t = 0; t < trials.roots.size() && slot < n_roots; ++t) {
+    auto candidate = trials.roots[t].copy(world);
+    const double before = norm(candidate);
+    const auto coefficients = madness::inner(madness::inverse(rs::inner(basis, basis)),
+                                             rs::inner(basis, std::vector<Root>{candidate}));
+    for (std::size_t j = 0; j < basis.size(); ++j)
+      candidate.axpy(world, -coefficients(static_cast<long>(j), 0), basis[j]);
+    const double after = norm(candidate);
+    if (!(before > 0.0) || !(after >= min_fraction * before)) continue;
+    candidate.scale(world, 1.0 / after);
+    basis.push_back(candidate);
+    out.roots[slot] = candidate;
+    out.omega(slot) = trials.omega(static_cast<long>(t));
+    ++slot;
+  }
+  MADNESS_CHECK_THROW(slot == n_roots,
+      "added excited roots: too few guess trials lie outside the saved roots; "
+      "raise the guess oversampling");
+  return out;
+}
+
 /// Promote a converged (or warmed-up) TDA-ClosedShell ES state into a
 /// Full-ClosedShell ES state. X is copied; Y is initialized to zero.
 ///

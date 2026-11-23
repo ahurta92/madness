@@ -1016,9 +1016,15 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
         policy,PrintLevel::Silent);
     guess_solver.set_gamma_tensor(ctx.es_gamma_tensor);
     tda=guess_solver.prepare_initial_guess(std::move(tda));
-    tda=slice_state_lowest<ClosedShell>(tda,n_roots);
+    if(state.roots.empty()) tda=slice_state_lowest<ClosedShell>(tda,n_roots);
+    else {
+      // Added roots: take the new guesses from outside the saved roots' span.
+      std::vector<ResponseStateX<ClosedShell>> saved_x(state.roots.size());
+      for(std::size_t i=0;i<state.roots.size();++i) saved_x[i].x_alpha=state.roots[i].x_alpha;
+      tda=select_roots_outside_saved(world,tda,saved_x,n_roots);
+    }
     if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
-      print("response: selected",n_roots,"initial roots from",trials,"trials; no warmup updates");
+      print("response: selected",n_roots-static_cast<int>(state.roots.size()),"initial roots from",trials,"trials; no warmup updates");
     typename Solver::State guess;
     if constexpr(std::is_same_v<Type,TDA>) guess=std::move(tda);
     else guess=promote_tda_to_full_closed_shell(world,tda);
