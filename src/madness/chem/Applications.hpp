@@ -420,7 +420,7 @@ public:
       bool needs_seed = true;
       if constexpr (std::is_same_v<Calc, SCF>) {
         needs_seed = reference->param.restart() == "none" ||
-            !std::filesystem::exists(scf_checkpoint_directory(*reference) / "checkpoints" / "run.json");
+            !has_saved_ground_state(world_, scf_checkpoint_directory(*reference));
       }
       if (pre_run_hook_ && needs_seed && (action == madness::NextAction::Restart ||
                             action == madness::NextAction::Redo)) {

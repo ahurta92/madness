@@ -8,9 +8,10 @@ class SCF;
 std::filesystem::path scf_checkpoint_directory(const SCF& scf);
 /// Shared electronic execution for workflow and standalone SCF callers.
 double run_scf(World& world, SCF& scf);
-/// Inspect saved evidence and optionally plot its native functions. Never solve or publish.
+/// Not available in this version: it returns as a loop over a run's node descriptions.
 void inspect_scf(World& world, const std::filesystem::path& root,
                  const CalculationParameters& plotting);
+/// The orbital archive of a run's saved ground-state (or virtuals) node.
 std::filesystem::path scf_checkpoint_archive(World& world, const std::filesystem::path& root,
                                              bool frozen);
 std::filesystem::path scf_checkpoint_archive(World& world, const SCF& scf);
@@ -23,5 +24,7 @@ struct GroundReference {
     nlohmann::json identity;
 };
 GroundReference scf_ground_reference(World& world, const SCF& scf);
-void require_scf_restart(World& world, const std::filesystem::path& root, bool frozen);
+/// Collective: whether the run holds a saved ground-state node.
+bool has_saved_ground_state(World& world, const std::filesystem::path& root);
+void require_scf_restart(World& world, const std::filesystem::path& root);
 }

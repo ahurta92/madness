@@ -262,7 +262,7 @@ public:
     /// Actual solve or reuse outcome in this invocation. Workflow handoff only;
     /// not serialized or used as restart evidence.
     std::optional<CalculationOutcome> last_calculation_outcome;
-    std::optional<checkpoint::GenerationRef> last_checkpoint;
+    std::optional<std::filesystem::path> last_node; ///< the node folder of the last saved or reused state
     bool last_load_padded = false;
 
     /// what amo/bmo actually hold, recorded in the restartdata header

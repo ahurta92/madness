@@ -81,7 +81,7 @@ inline void run_workflow(madness::World &world,
                         scf_parameters.restart() != "iterate"))
       throw std::runtime_error(
           "--continue requires an SCF workflow with restart auto or iterate");
-    require_scf_restart(world, scf_directory, scf_parameters.freeze_occupied());
+    require_scf_restart(world, scf_directory);
   }
   if (shared_scf && scf_parameters.restart() == "read_only") {
     if (user_workflow != "scf" || parser.key_exists("optimize") ||

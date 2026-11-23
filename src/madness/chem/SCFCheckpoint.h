@@ -1,58 +1,71 @@
 #pragma once
 
-#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/NodeArchive.h>
 #include <madness/chem/SCF.h>
 
 namespace madness {
 
-/// Application binding for shared SCF records and native orbital archives.
-/// All operations are collective. The binding captures SCF's scientific settings;
-/// the workflow owns attempts, protocol scheduling and qualification of occupied sources.
+/// The node folders of a run directory.
+std::filesystem::path ground_state_node(const std::filesystem::path& run);
+std::filesystem::path virtuals_node(const std::filesystem::path& run);
+
+/// Collective read of a node's description; rank 0 alone touches the folder.
+std::optional<iteration::NodeDescription> read_node(World& world, const std::filesystem::path& folder);
+
+/// What later calculations record to know whether a saved node has changed:
+/// its settings, its level and its save time.
+nlohmann::json node_identity(const iteration::NodeDescription& description);
+
+/// Application binding of SCF to one node folder (NodeArchive.h): the ground
+/// state, or the virtuals of a frozen-occupied solve, whose lineage is the
+/// ground-state identity. All operations are collective. The binding captures
+/// SCF's scientific settings; the workflow owns protocol scheduling.
 /// Keep this object alive while using its controls; it owns no orbital history.
 class SCFCheckpoint {
 public:
     struct Identity {
-        std::string calculation_id, task_id, attempt_id, context_id;
+        std::string task_id, attempt_id, context_id;
     };
     struct Restart {
         const iteration::RestartPlan plan;
         const std::vector<iteration::Protocol> protocols;
-        const std::optional<checkpoint::Manifest> checkpoint;
+        const std::optional<iteration::NodeDescription> saved;
 
     private:
         friend class SCFCheckpoint;
         const SCFCheckpoint* binding_;
         const std::optional<iteration::Request> display_request_;
         Restart(iteration::RestartPlan plan, std::vector<iteration::Protocol> protocols,
-                std::optional<checkpoint::Manifest> checkpoint, std::optional<iteration::Request> display_request,
+                std::optional<iteration::NodeDescription> saved, std::optional<iteration::Request> display_request,
                 const SCFCheckpoint* binding)
             : plan(std::move(plan)), protocols(std::move(protocols)),
-              checkpoint(std::move(checkpoint)), binding_(binding), display_request_(std::move(display_request)) {}
+              saved(std::move(saved)), binding_(binding), display_request_(std::move(display_request)) {}
     };
 
     /// Capture effective geometry, model, operator and occupation settings,
-    /// excluding tolerances, budgets and output controls.
-    /// A frozen task requires its already-qualified occupied source in inputs.
-    SCFCheckpoint(World& world, SCF& scf, checkpoint::CheckpointStore& store,
-                  Identity identity,
-                  checkpoint::json inputs = checkpoint::json::array());
+    /// excluding tolerances, budgets and output controls. A frozen solve names
+    /// its qualified ground state in `lineage`.
+    SCFCheckpoint(World& world, SCF& scf, std::filesystem::path folder, Identity identity,
+                  nlohmann::json lineage = nlohmann::json());
     SCFCheckpoint(const SCFCheckpoint&) = delete;
     SCFCheckpoint& operator=(const SCFCheckpoint&) = delete;
+
+    const std::filesystem::path& folder() const { return folder_; }
+    std::optional<iteration::NodeDescription> saved() const { return read_node(world_, folder_); }
 
     Restart plan(const std::vector<iteration::Protocol>& protocols,
                  const iteration::Request& request, bool require_existing = false);
 
-    /// The result is immutable and valid only during this binding's lifetime.
     /// The caller first sets the chosen protocol and rebuilds its operators.
-    /// Reuse loads the exact saved functions without evaluating or publishing.
+    /// Reuse loads the exact saved functions without evaluating or saving.
     /// Resume/guess discards convergence claims and starts fresh comparisons.
-    /// Preparation reporting uses intermediate limits and leaves scheduling
+    /// Step-down reporting uses intermediate limits and leaves scheduling
     /// messages to the workflow. This flag changes no loading/restart decisions.
     void load(const Restart& restart, bool report_preparation = false);
 
-    /// Load verified physical functions as a guess for this task. No saved
-    /// metric or completion claim transfers across task identities.
-    void load_guess(const checkpoint::Manifest& source);
+    /// Load another node's orbitals (the ground state, for a frozen solve) as
+    /// a guess. No saved metric or completion claim transfers.
+    void load_guess(const std::filesystem::path& source);
 
     SCF::IterationControl control(const iteration::Request& request,
                                   iteration::Protocol protocol, bool final_protocol,
@@ -61,18 +74,18 @@ public:
 private:
     World& world_;
     SCF& scf_;
-    checkpoint::CheckpointStore& store_;
+    std::filesystem::path folder_;
     Identity identity_;
-    checkpoint::json settings_, inputs_, layout_;
-    std::size_t publications_ = 0;
+    nlohmann::json settings_, lineage_, layout_;
 
+    [[nodiscard]] std::string kind() const;
     [[nodiscard]] iteration::ExpectedTask expected() const;
-    [[nodiscard]] checkpoint::json layout() const;
-    [[nodiscard]] checkpoint::json capture_settings() const;
+    [[nodiscard]] nlohmann::json layout() const;
+    [[nodiscard]] nlohmann::json capture_settings() const;
     void check_current() const;
-    [[nodiscard]] bool loadable(const checkpoint::json& stored) const;
-    void publish(const iteration::IterationMetrics& metrics,
-                 const iteration::Decision& decision, const iteration::Progress& progress);
+    [[nodiscard]] bool loadable(const nlohmann::json& stored) const;
+    void save(const iteration::IterationMetrics& metrics,
+              const iteration::Decision& decision, const iteration::Progress& progress);
 };
 
 } // namespace madness

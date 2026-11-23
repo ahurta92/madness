@@ -1,8 +1,12 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
+#include <madness/chem/CheckpointStore.h> // removed in 4c: timings and the results stub
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/SCFScientificSettings.h>
 #include <madness/chem/TimingRecords.h>
+#include <madness/chem/IterationHistory.h>
+#include <madness/misc/info.h>
+#include <unistd.h>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -41,35 +45,21 @@ std::string attempt(World& world) {
     });
 }
 
-json read_preparation(World& world, const std::filesystem::path& path) {
-    return json::parse(cp::detail::on_root(world, [&] {
-        if (!std::filesystem::exists(path)) return json().dump();
-        const auto value = cp::detail::read_json(path);
-        cp::records::require(value.at("version") == 1, "unsupported SCF preparation record");
-        return value.dump();
-    }));
-}
-void write_preparation(World& world, const std::filesystem::path& path, const json& record) {
+// One header row per launch, before its update rows, so a node's history
+// reads as one continuous record across restarts.
+void write_launch_header(World& world, const std::filesystem::path& folder) {
     cp::detail::on_root(world, [&] {
-        const auto temporary = path.string() + ".tmp";
-        std::ofstream file(temporary);
-        file.exceptions(std::ios::badbit | std::ios::failbit);
-        file << record.dump(2); file.close();
-        std::filesystem::rename(temporary, path);
+        const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm utc{};
+        gmtime_r(&now, &utc);
+        char time[32], host[256] = {};
+        std::strftime(time, sizeof time, "%Y-%m-%dT%H:%M:%SZ", &utc);
+        gethostname(host, sizeof host - 1);
+        it::append_history(it::Node(folder).history(), {{"launch", {{"time", time},
+            {"code_version", info::git_commit()}, {"host", host}, {"processes", world.size()},
+            {"threads", ThreadPool::size() + 1}}}});
         return std::string{};
     });
-}
-
-void retire_preparation(World& world, cp::CheckpointStore& store, const std::filesystem::path& path,
-                        const std::string& id) {
-    if (id.empty()) return;
-    // The marker makes a crash between inventory retirement and pointer removal
-    // recoverable. Retirement and cleanup are idempotent.
-    write_preparation(world, path, {{"version", 1}, {"calculation_id", id}, {"retiring", true}});
-    store.retire_calculation(id);
-    const auto warning = store.cleanup();
-    if (!warning.empty() && world.rank() == 0) print(warning);
-    write_preparation(world, path, {{"version", 1}});
 }
 
 void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
@@ -86,36 +76,39 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
     scf.pad_virtuals_from_guess(world);
 }
 
-void report(World& world, cp::CheckpointStore& store, const std::string& owner, const std::string& calculation,
-            const cp::Manifest& manifest, const SCF& scf, const std::optional<cp::Manifest>& occupied) {
-    json states = json::object(), metrics = json::object();
-    const auto add = [&](const cp::Manifest& saved) {
-        const auto frame = cp::iteration_metrics_from_manifest(saved);
-        for (const auto& state : frame.states) {
-            states[state.id] = {{"task_id", frame.info.task_id}, {"subject", state.id},
-                {"attempt_id", frame.info.attempt_id}, {"generation", saved.generation},
-                {"protocol", {{"threshold", frame.info.protocol.thresh}, {"k", frame.info.protocol.k}}},
-                {"iteration", frame.info.iteration}};
-            json values = json::object(), unavailable = json::object();
-            for (const auto& [metric, value] : state.metrics) {
-                if (value.status == it::Availability::measured) values[it::metric_name(metric)] = *value.value;
-                else unavailable[it::metric_name(metric)] = {{"status", value.status == it::Availability::not_applicable ?
-                    "not_applicable" : "unavailable"}, {"reason", value.reason}};
-            }
-            metrics[state.id] = {{"values", values}, {"availability", unavailable}};
+json state_metrics(const it::NodeDescription& saved) {
+    json metrics = json::object();
+    for (const auto& state : it::stored_metrics(saved, {"scf", "saved", saved.protocol, 0, "saved"}).states) {
+        json values = json::object(), unavailable = json::object();
+        for (const auto& [metric, value] : state.metrics) {
+            if (value.status == it::Availability::measured) values[it::metric_name(metric)] = *value.value;
+            else unavailable[it::metric_name(metric)] = {{"status", value.status == it::Availability::not_applicable ?
+                "not_applicable" : "unavailable"}, {"reason", value.reason}};
         }
-    };
-    if (occupied) add(*occupied);
-    add(manifest);
-    store.publish_source_map({{"version", 2}, {"calculation_id", calculation}, {"attempt_id", owner},
-        {"states", states}, {"tasks", json::array()}});
+        metrics[state.id] = {{"values", values}, {"availability", unavailable}};
+    }
+    return metrics;
+}
+
+void report(World& world, cp::CheckpointStore& store, const std::string& owner, const std::filesystem::path& root,
+            const std::filesystem::path& folder, const SCF& scf, const std::optional<it::NodeDescription>& occupied) {
+    const auto saved = read_node(world, folder);
+    cp::records::require(saved.has_value(), "SCF ended without a saved state");
+    json metrics = occupied ? state_metrics(*occupied) : json::object();
+    metrics.update(state_metrics(*saved));
+    // Removed in 4c: response's store checks every results entry against a
+    // source map, so the ground state publishes one that lists no sources.
+    store.publish_source_map({{"version", 2}, {"calculation_id", "ground_state"}, {"attempt_id", owner},
+        {"states", json::object()}, {"tasks", json::array()}});
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     json energy{{"units", "hartree"}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
     if (complete) energy["value"] = scf.current_energy;
     else energy["reason"] = "criteria_unmet";
+    // Removed in 4c: the store's results envelope carries the launch identifier.
     const auto warning = store.publish_results({{"version", 2}, {"attempt_id", owner}, {"calculations", json::array({
-        {{"calculation_id", calculation}, {"application", "moldft"}, {"model", scf.param.xc()},
-         {"protocol", manifest.record.at("task").at("definition").at("protocol")},
+        {{"calculation_id", "ground_state"}, {"application", "moldft"}, {"model", scf.param.xc()},
+         {"node", std::filesystem::relative(folder, root).string()},
+         {"protocol", cp::records::protocol_record(saved->protocol)},
          {"properties", {{"total_energy", energy}}},
          {"state_metrics", json::array({{{"states", metrics}}})}}})}});
     if (!warning.empty() && world.rank() == 0) print(warning);
@@ -128,100 +121,56 @@ std::filesystem::path scf_checkpoint_directory(const SCF& scf) {
 }
 
 std::filesystem::path scf_checkpoint_archive(World& world, const std::filesystem::path& root, bool frozen) {
-    cp::CheckpointStore store(world, root);
-    const std::string task = frozen ? "virtuals" : "scf";
-    const auto saved = store.read_latest("ground_state", task);
-    cp::records::require(saved.has_value(), "no selected SCF checkpoint");
-    return store.task_directory("ground_state", task) / saved->generation / "scf.restartdata";
+    const auto folder = frozen ? virtuals_node(root) : ground_state_node(root);
+    cp::records::require(read_node(world, folder).has_value(), "no saved SCF state");
+    return it::Node(folder).archive() / "scf.restartdata";
 }
 
+namespace {
+// The qualified state of a completed SCF, never a step-down state: its bundle
+// is exactly the requested one.
+it::NodeDescription qualified(World& world, const SCF& scf) {
+    cp::records::require(scf.last_node.has_value(), "SCF has no qualified saved state");
+    cp::records::require(scf.last_calculation_outcome && scf.last_calculation_outcome->complete,
+                         "SCF reference is not a completed requested bundle");
+    const auto saved = read_node(world, *scf.last_node);
+    cp::records::require(saved.has_value(), "the qualified SCF state is missing");
+    const auto& orbitals = saved->details.at("orbitals");
+    cp::records::require(orbitals.at("nmo_alpha") == scf.param.nmo_alpha() &&
+        orbitals.at("nmo_beta") == (scf.param.have_beta() ? scf.param.nmo_beta() : 0),
+        "the saved SCF state is not the requested bundle");
+    return *saved;
+}
+} // namespace
+
 std::filesystem::path scf_checkpoint_archive(World& world, const SCF& scf) {
-    cp::records::require(scf.last_checkpoint.has_value(), "SCF has no qualified checkpoint identity");
-    cp::records::require(scf.last_calculation_outcome && scf.last_calculation_outcome->complete &&
-        scf.last_checkpoint->calculation_id == "ground_state", "SCF reference is not a completed requested bundle");
-    cp::CheckpointStore store(world, scf_checkpoint_directory(scf));
-    const auto& ref = *scf.last_checkpoint;
-    const auto saved = store.read(ref); // exact generation; never follow a newer latest pointer
-    return store.task_directory(ref.calculation_id, ref.task_id) / saved.generation / "scf.restartdata";
+    (void)qualified(world, scf);
+    return it::Node(*scf.last_node).archive() / "scf.restartdata";
 }
 
 GroundReference scf_ground_reference(World& world, const SCF& scf) {
-    const auto archive = scf_checkpoint_archive(world, scf);
-    cp::CheckpointStore store(world, scf_checkpoint_directory(scf));
-    const auto saved = store.read(*scf.last_checkpoint);
-    const auto& definition = saved.record.at("task").at("definition");
-    const auto protocol = cp::records::read_protocol(definition.at("protocol"));
-    // The store keeps no save time; the manifest is written once, when the
-    // generation is published, so its modification time is that time.
-    const auto saved_at = cp::detail::on_root(world, [&] {
-        const auto written = std::filesystem::last_write_time(archive.parent_path() / "manifest.json");
-        const auto seconds = std::chrono::system_clock::to_time_t(
-            std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                std::chrono::file_clock::to_sys(written)));
-        std::tm utc{};
-        gmtime_r(&seconds, &utc);
-        char text[32];
-        std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &utc);
-        return std::string(text);
-    });
-    return {archive, protocol, {{"settings", definition.at("scientific_settings")},
-                                {"protocol", cp::records::protocol_record(protocol)}, {"saved_at", saved_at}}};
+    const auto saved = qualified(world, scf);
+    return {it::Node(*scf.last_node).archive() / "scf.restartdata", saved.protocol, node_identity(saved)};
 }
 
-void require_scf_restart(World& world, const std::filesystem::path& root, bool frozen) {
-    cp::CheckpointStore store(world, root);
-    if (frozen && store.read_latest("ground_state", "scf")) return;
-    const std::string task = frozen ? "virtuals" : "scf";
-    if (store.read_latest("ground_state", task)) return;
-    const auto progress = read_preparation(world, root / "checkpoints" / (task + "_preparation.json"));
-    cp::records::require(!progress.is_null() && progress.contains("calculation_id") &&
-        !progress.value("retiring", false), "no selected SCF or preparation checkpoint");
-    cp::records::require(store.read_latest(progress.at("calculation_id"), task).has_value(),
-        "no selected SCF preparation checkpoint");
+bool has_saved_ground_state(World& world, const std::filesystem::path& root) {
+    return read_node(world, ground_state_node(root)).has_value();
 }
 
-void inspect_scf(World& world, const std::filesystem::path& root, const CalculationParameters& plotting) {
-    cp::CheckpointStore store(world, root);
-    const std::string task = plotting.freeze_occupied() ? "virtuals" : "scf";
-    const auto saved = store.read_latest("ground_state", task);
-    cp::records::require(saved.has_value(), "no selected SCF checkpoint");
-    cp::records::require(saved->archives.size() == 1 && saved->archives.front().role == "orbitals" &&
-        saved->archives.front().basename == "scf.restartdata", "unsupported SCF native payload");
-    if (world.rank() == 0) print(saved->record.dump(2));
-    if (!plotting.get<bool>("plotdens") && !plotting.get<bool>("plotcoul") &&
-        plotting.get<int>("plothi") < plotting.get<int>("plotlo")) return;
-    cp::records::require(saved->archives.front().writers <= world.size(), "insufficient native archive reader ranks");
-    const auto directory = store.task_directory("ground_state", task) / saved->generation;
-    const auto metadata = peek_restartdata(world, (directory / "scf.restartdata").string());
-    cp::records::require(metadata.has_value(), "missing native SCF metadata");
-    const auto& definition = saved->record.at("task").at("definition");
-    const auto protocol = cp::records::read_protocol(definition.at("protocol"));
-    auto parameters = plotting;
-    parameters.from_json(definition.at("scientific_settings").at("dft"));
-    parameters.set_user_defined_value("k", protocol.k);
-    parameters.set_user_defined_value("protocol", std::vector<double>{protocol.thresh});
-    const auto& layout = definition.at("orbitals");
-    for (const auto* key : {"nmo_alpha", "nmo_beta", "nalpha", "nbeta"})
-        parameters.set_user_defined_value(key, layout.at(key).get<int>());
-    parameters.set_user_defined_value("nvalpha", layout.at("nmo_alpha").get<int>() - layout.at("nalpha").get<int>());
-    parameters.set_user_defined_value("nvbeta", std::max(0, layout.at("nmo_beta").get<int>() - layout.at("nbeta").get<int>()));
-    parameters.set_user_defined_value("freeze_occupied", layout.at("freeze_occupied").get<bool>());
-    // Inspection loads the saved representation; current convergence requests
-    // are not assessed and no operator or metric evaluation is needed.
-    SCF scf(world, parameters, metadata->molecule);
-    scf.set_protocol<3>(world, protocol.thresh);
-    scf.make_nuclear_potential(world);
-    scf.param.set_user_defined_value("prefix", (directory / "scf").string());
-    scf.load_mos(world, false);
-    scf.param.set_user_defined_value("prefix", plotting.prefix());
-    scf.do_plots(world);
+void require_scf_restart(World& world, const std::filesystem::path& root) {
+    cp::records::require(has_saved_ground_state(world, root), "--continue needs a saved ground state");
+}
+
+void inspect_scf(World&, const std::filesystem::path&, const CalculationParameters&) {
+    // It returns as a loop over the node descriptions of a run.
+    throw std::runtime_error("inspection of saved states is not available in this version");
 }
 
 // The single recursive call qualifies an ordinary occupied source; that branch
 // explicitly clears freeze_occupied, so recursion is bounded to one level.
 // NOLINTNEXTLINE(misc-no-recursion)
 double run_scf(World& world, SCF& scf) {
-    scf.last_checkpoint.reset();
+    scf.last_node.reset();
     scf.last_calculation_outcome.reset();
     cp::records::require(scf.param.restart() != "read_only", "read_only is inspection, not a solver request");
     const auto request = scf_iteration_request(scf.param);
@@ -237,13 +186,14 @@ double run_scf(World& world, SCF& scf) {
                                      settings);
     }
     const auto root = scf_checkpoint_directory(scf);
+    // Removed in 4c: the launch identifier and the store, kept for the timings
+    // entry and for the results file that response's store still checks.
     cp::CheckpointStore store(world, root);
     const auto owner = attempt(world);
     store.initialize(owner);
-    const std::string calculation = "ground_state";
     it::TimingCollector<> timing;
     timing.begin("run", {{"clock_scope", "driver_rank"}});
-    timing.begin("scf", {{"calculation_id", calculation}});
+    timing.begin("scf", {{"calculation_id", "ground_state"}});
     // Occupied qualification recurses once with freeze_occupied cleared.
     // NOLINTNEXTLINE(misc-no-recursion)
     const auto measured = [&](const char* name, auto&& operation, const json& context = json::object()) {
@@ -273,26 +223,22 @@ double run_scf(World& world, SCF& scf) {
     };
     // NOLINTNEXTLINE(misc-no-recursion)
     const auto execute = [&]() -> double {
-        const std::string task = scf.param.freeze_occupied() ? "virtuals" : "scf";
+        const bool frozen = scf.param.freeze_occupied();
+        const std::string task = frozen ? "virtuals" : "scf";
         const std::string context = "scf-physical-v1";
         const auto mode = scf.param.restart();
-        const auto preparation_file = root / "checkpoints" / (task + "_preparation.json");
-        auto progress = read_preparation(world, preparation_file);
-        std::string preparation_id;
-        if (!progress.is_null() && progress.contains("calculation_id")) preparation_id = progress.at("calculation_id");
-        if (!preparation_id.empty() && progress.value("retiring", false)) {
-            retire_preparation(world, store, preparation_file, preparation_id);
-            preparation_id.clear(); progress = nullptr;
-        }
+        const auto folder = frozen ? virtuals_node(root) : ground_state_node(root);
+        write_launch_header(world, folder);
         timing.begin("prepare");
         scf.xc.initialize(scf.param.xc(), !scf.param.spin_restricted(), world, false);
         scf.dispersion = DispersionCorrection(scf.param.dispersion(), scf.param.xc(),
                                             scf.param.dispersion_functional(), scf.param.dispersion_atm());
 
-        json inputs = json::array();
-        std::optional<cp::Manifest> occupied_manifest;
+        // The virtuals node's lineage is the identity of the ground state it was solved in.
+        json lineage;
+        std::optional<it::NodeDescription> occupied_saved;
         std::shared_ptr<SCF> occupied;
-        if (scf.param.freeze_occupied()) {
+        if (frozen) {
             cp::records::require(mode != "none" && mode != "ao" && mode != "nwchem", "frozen SCF requires an occupied checkpoint");
             auto p = scf.param;
             p.set_user_defined_value("freeze_occupied", false);
@@ -306,48 +252,49 @@ double run_scf(World& world, SCF& scf) {
             // NOLINTNEXTLINE(misc-no-recursion)
             measured("occupied_reference", [&] { run_scf(world, *occupied); });
             cp::records::require(occupied->last_calculation_outcome->complete, "occupied SCF does not satisfy the current request");
-            cp::records::require(occupied->last_checkpoint.has_value(), "occupied SCF did not select a checkpoint");
-            occupied_manifest = store.read(*occupied->last_checkpoint);
-            inputs.push_back({{"role", "occupied"}, {"calculation_id", calculation}, {"task_id", "scf"},
-                              {"generation", occupied_manifest->generation}});
-            store.initialize(owner);
+            occupied_saved = qualified(world, *occupied);
+            lineage = node_identity(*occupied_saved);
+            store.initialize(owner); // removed in 4c: the occupied run took over run.json's launch
         }
         prepare(world, scf, ladder.front());
         timing.end();
+        // A ground state started from a seed names it as its lineage; a restart
+        // keeps the lineage of the state it continues.
+        const bool seed = mode == "none" || mode == "ao" || mode == "nwchem";
+        if (!frozen && !seed)
+            if (const auto previous = read_node(world, folder)) lineage = previous->lineage;
         const int target_alpha = scf.param.nmo_alpha(), target_beta = scf.param.nmo_beta();
-        std::optional<cp::Manifest> preparation_saved;
-        if (!preparation_id.empty()) preparation_saved = store.read_latest(preparation_id, task);
-        const bool use_preparation = preparation_saved && (mode == "auto" || mode == "iterate") &&
-            preparation_saved->record.at("task").at("inputs") == inputs;
         std::size_t start = 0;
         std::size_t previous_updates = 0;
         bool padded_or_new = false;
+        // A saved state with more orbitals than requested is an unfinished
+        // step-down at the first level: continue the step-down from it.
+        std::optional<it::NodeDescription> step_down;
         {
-            SCFCheckpoint binding(world, scf, store, {calculation, task, owner, context}, inputs);
-            const auto saved = store.read_latest(calculation, task);
-            const bool source_changed = saved && saved->record.at("task").at("inputs") != inputs;
-            const bool seed = mode == "none" || mode == "ao" || mode == "nwchem" || source_changed;
-            if (!seed) {
+            SCFCheckpoint binding(world, scf, folder, {task, owner, context}, lineage);
+            const auto saved = binding.saved();
+            if (!seed && saved && saved->details.at("orbitals").at("nmo_alpha").get<int>() > target_alpha &&
+                saved->protocol == ladder.front() && saved->lineage == lineage)
+                step_down = saved;
+            else if (!seed) {
                 const auto restart = measured("checkpoint_planning", [&] { return binding.plan(ladder, request); });
                 if (restart.plan.action != it::RestartAction::fresh) {
                     start = restart.plan.start_protocol;
                     measured("prepare", [&] { prepare(world, scf, ladder[start]); });
                     measured("load", [&] { binding.load(restart); }, {{"task_id", task}});
                     previous_updates = restart.plan.updates_at_protocol;
-                    padded_or_new = restart.checkpoint->record.at("task").at("definition").at("orbitals").at("nmo_alpha").get<int>() < target_alpha ||
-                        (scf.param.have_beta() && restart.checkpoint->record.at("task").at("definition").at("orbitals").at("nmo_beta").get<int>() < target_beta);
+                    const auto& orbitals = restart.saved->details.at("orbitals");
+                    padded_or_new = orbitals.at("nmo_alpha").get<int>() < target_alpha ||
+                        (scf.param.have_beta() && orbitals.at("nmo_beta").get<int>() < target_beta);
                     if (restart.plan.action == it::RestartAction::reuse) {
-                        measured("publish_results", [&] {
-                            report(world, store, owner, calculation, *restart.checkpoint, scf, occupied_manifest);
-                            retire_preparation(world, store, preparation_file, preparation_id);
-                        });
+                        measured("publish_results", [&] { report(world, store, owner, root, folder, scf, occupied_saved); });
                         return scf.current_energy;
                     }
                 } else padded_or_new = true;
             } else padded_or_new = true;
-            if (padded_or_new && scf.param.freeze_occupied())
-                measured("load_guess", [&] { binding.load_guess(*occupied_manifest); });
-            else if (padded_or_new && (seed || !saved) && !use_preparation) {
+            if (padded_or_new && frozen)
+                measured("load_guess", [&] { binding.load_guess(ground_state_node(root)); });
+            else if (padded_or_new && (seed || !saved)) {
                 timing.begin("initial_guess");
                 auto legacy_mode = restart_mode_from_string(mode);
                 if (mode == "auto") {
@@ -373,74 +320,73 @@ double run_scf(World& world, SCF& scf) {
                     scf.aset = scf.group_orbital_sets(world, scf.aeps, scf.aocc, scf.param.nmo_alpha());
                     if (scf.param.have_beta()) scf.bset = scf.group_orbital_sets(world, scf.beps, scf.bocc, scf.param.nmo_beta());
                 }
+                if (guess.source == RestartSource::restartdata)
+                    lineage = {{"seed", scf.param.prefix() + ".restartdata"}};
+                else if (guess.source == RestartSource::restartao || guess.source == RestartSource::nwchem)
+                    lineage = {{"seed", guess.source == RestartSource::nwchem ? "nwchem" : scf.param.prefix() + ".restartaodata"}};
+                else lineage = nullptr;
                 padded_or_new = guess.source == RestartSource::initial_guess || scf.last_load_padded;
                 scf.converged_for_thresh = scf.converged_for_dconv = 1e10;
                 scf.last_calculation_outcome = CalculationOutcome{false, "fresh_evaluation_required"};
                 timing.end();
             }
         }
-        const int extra = (padded_or_new || !preparation_id.empty()) ? scf.param.nv_extra() : 0;
-        if ((extra > 0 || !preparation_id.empty()) && start == 0) {
+        // The nv_extra step-down: converge extra virtuals first, then drop them
+        // stepwise. Each stage saves into the same node as an unfinished state
+        // with its larger bundle; the final save replaces it.
+        const int extra = padded_or_new ? scf.param.nv_extra() : 0;
+        if ((extra > 0 || step_down) && start == 0) {
             cp::records::require(scf.param.nv_its() >= 0, "negative virtual preparation budget");
             auto prep_request = request; prep_request.max_updates = scf.param.nv_its();
-            const int step = scf.param.nv_step() > 0 ? scf.param.nv_step() : std::max(extra, 1);
-            int count = target_alpha + extra;
-            auto saved = use_preparation ? preparation_saved : std::nullopt;
+            const int step = scf.param.nv_step() > 0 ? scf.param.nv_step() : std::max(scf.param.nv_extra(), 1);
+            int count = step_down ? step_down->details.at("orbitals").at("nmo_alpha").get<int>() : target_alpha + extra;
             const json schedule{{"nv_extra", scf.param.nv_extra()}, {"nv_step", scf.param.nv_step()},
                 {"nv_its", scf.param.nv_its()}, {"target_alpha", target_alpha}, {"target_beta", target_beta},
                 {"protocol", cp::records::protocol_record(ladder.front())}};
-            // Embed the schedule in the saved evidence as well as the pointer. A
-            // crash after writing a new pointer cannot relabel an old completion.
+            // In memory only: a step-down stage never compares with the final bundle.
             const auto preparation_context = context + ":preparation:" + schedule.dump();
-            const bool resume = saved && progress.value("schedule", json()) == schedule &&
-                saved->record.at("task").at("definition").at("context_id") == preparation_context;
-            if (resume)
-                count = saved->record.at("task").at("definition").at("orbitals").at("nmo_alpha");
-            else {
-                if (preparation_id.empty()) preparation_id = calculation + "-preparation-" + owner;
-            }
+            // Each membership is a separate solve: iteration zero at a smaller
+            // bundle must not share an identity with the previous bundle.
+            const auto preparation_attempt = [&](int n) { return owner + "-n" + std::to_string(n); };
             scf.param.set_user_defined_value("nmo_alpha", count);
             if (scf.param.have_beta()) scf.param.set_user_defined_value("nmo_beta", target_beta + count - target_alpha);
-            if (!saved) resize_bundle(world, scf, count, target_beta + count - target_alpha);
-            // Each membership is a separate solve attempt: iteration zero at a
-            // smaller bundle must not share an identity with the previous bundle.
-            const auto preparation_attempt = [&](int n) { return owner + "-n" + std::to_string(n); };
-            SCFCheckpoint first(world, scf, store, {preparation_id, task, preparation_attempt(count), preparation_context}, inputs);
-            write_preparation(world, preparation_file, {{"version", 1}, {"calculation_id", preparation_id},
-                {"schedule", schedule}});
+            if (!step_down) resize_bundle(world, scf, count, target_beta + count - target_alpha);
             std::size_t preparation_updates = 0;
-            if (saved) {
-                timing.begin("orbital_preparation", {{"calculation_id", preparation_id}, {"task_id", task},
+            if (step_down) {
+                timing.begin("orbital_preparation", {{"orbitals_alpha", count}, {"task_id", task},
                     {"protocol", cp::records::protocol_record(ladder.front())}});
+                SCFCheckpoint first(world, scf, folder, {task, preparation_attempt(count), preparation_context}, lineage);
                 const auto restart = measured("checkpoint_planning", [&] { return first.plan({ladder.front()}, prep_request); });
-                measured("load", [&] { first.load(restart, true); }); // intermediate preparation reporting only
+                measured("load", [&] { first.load(restart, true); }); // intermediate step-down reporting only
+                // A step-down state is never a qualified result.
+                scf.last_calculation_outcome = CalculationOutcome{false, "fresh_evaluation_required"};
+                scf.last_node.reset();
                 preparation_updates = restart.plan.updates_at_protocol;
                 const auto settings = scf_scientific_settings(scf);
-                if (resume && saved->record.at("task").at("iteration").at("protocol_complete") == true &&
-                    saved->record.at("task").at("definition").at("scientific_settings") == settings &&
-                    scf_settings_allow_reuse(settings)) {
+                // level_finished only chooses the next, smaller bundle; a step-down state is never reused.
+                if (step_down->level_finished && step_down->settings == settings && scf_settings_allow_reuse(settings)) {
                     if (world.rank() == 0 && scf.param.print_level() > 0)
-                        print("Completed preparation bundle; continue with a smaller orbital bundle.");
+                        print("Completed step-down bundle; continue with a smaller orbital bundle.");
                     count = std::max(target_alpha, count - step);
                     preparation_updates = 0;
                 } else if (world.rank() == 0 && scf.param.print_level() > 0) {
-                    print("Continue preparation on the loaded orbital bundle.");
+                    print("Continue the step-down on the loaded orbital bundle.");
                 }
                 timing.end();
             }
             for (; count > target_alpha; count = std::max(target_alpha, count - step)) {
-                timing.begin("orbital_preparation", {{"calculation_id", preparation_id}, {"orbitals_alpha", count},
+                timing.begin("orbital_preparation", {{"orbitals_alpha", count},
                     {"protocol", cp::records::protocol_record(ladder.front())}});
                 timing.begin("prepare");
                 resize_bundle(world, scf, count, target_beta + count - target_alpha);
                 scf.reset_aobasis("sto-3g"); scf.ao = scf.project_ao_basis(world, scf.aobasis);
-                SCFCheckpoint binding(world, scf, store, {preparation_id, task, preparation_attempt(count), preparation_context}, inputs);
+                SCFCheckpoint binding(world, scf, folder, {task, preparation_attempt(count), preparation_context}, lineage);
                 auto control = binding.control(prep_request, ladder.front(), false, preparation_updates);
                 control.preparing_virtuals = true;
                 control.timing_observer = observe_iteration;
                 timing.end();
                 const auto decision = measured("task", [&] {
-                    return scf.param.freeze_occupied() ? scf.solve_virtuals(world, control) : scf.solve(world, control);
+                    return frozen ? scf.solve_virtuals(world, control) : scf.solve(world, control);
                 }, {{"task_id", task}});
                 timing.end();
                 cp::records::require(decision.action == it::Action::finish_protocol, "SCF virtual preparation stopped; endpoint saved");
@@ -474,23 +420,19 @@ double run_scf(World& world, SCF& scf) {
             }
             scf.reset_aobasis("sto-3g"); scf.ao.clear(); world.gop.fence();
             scf.ao = scf.project_ao_basis(world, scf.aobasis);
-            SCFCheckpoint binding(world, scf, store, {calculation, task, owner, context}, inputs);
+            SCFCheckpoint binding(world, scf, folder, {task, owner, context}, lineage);
             auto control = binding.control(request, ladder[stage], stage + 1 == ladder.size(),
                                                  stage == start ? previous_updates : 0);
             control.timing_observer = observe_iteration;
             timing.end();
             const auto decision = measured("task", [&] {
-                return scf.param.freeze_occupied() ? scf.solve_virtuals(world, control) : scf.solve(world, control);
+                return frozen ? scf.solve_virtuals(world, control) : scf.solve(world, control);
             }, {{"task_id", task}});
             timing.end();
             if (decision.action != it::Action::finish_protocol) break;
         }
-        cp::records::require(scf.last_checkpoint.has_value(), "SCF ended without a shared endpoint checkpoint");
-        const auto last = store.read(*scf.last_checkpoint);
-        measured("publish_results", [&] {
-            report(world, store, owner, calculation, last, scf, occupied_manifest);
-            retire_preparation(world, store, preparation_file, preparation_id);
-        });
+        cp::records::require(scf.last_node.has_value(), "SCF ended without a saved endpoint");
+        measured("publish_results", [&] { report(world, store, owner, root, folder, scf, occupied_saved); });
         return scf.current_energy;
     };
     try {

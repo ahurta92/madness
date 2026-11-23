@@ -172,7 +172,8 @@ int main() {
     std::set<std::string> keys;
     for (const auto& [key, value] : saved.items()) keys.insert(key);
     check(keys == std::set<std::string>{"kind", "protocol", "updates_at_protocol", "settings", "metrics",
-                                        "lineage", "saved_at", "code_version"}, "the description's fields");
+                                        "lineage", "saved_at", "code_version", "level_finished", "details"},
+          "the description's fields");
     const auto text = saved.dump();
     for (const auto* word : {"target", "converged", "attempt", "generation", "launch", "limit", "satisfied"})
         check(text.find(word) == std::string::npos, std::string("no ") + word + " in the description");

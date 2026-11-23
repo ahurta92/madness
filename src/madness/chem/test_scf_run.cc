@@ -1,5 +1,6 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
+#include <madness/chem/StageCheckpoint.h>
 #include <iostream>
 using namespace madness;
 namespace {
@@ -45,9 +46,9 @@ int main(int argc, char** argv) {
             MolecularEnergy energy(world, scf);
             energy.value(molecule.get_all_coords().flat());
             MADNESS_CHECK_THROW(!scf.last_calculation_outcome->complete, "zero cap must remain incomplete");
-            checkpoint::CheckpointStore store(world, scf.work_dir);
-            const auto before = store.read_latest("ground_state", "scf");
-            MADNESS_CHECK_THROW(before.has_value(), "endpoint must publish shared metrics and native functions");
+            const auto ground = ground_state_node(scf.work_dir);
+            const auto before = read_node(world, ground);
+            MADNESS_CHECK_THROW(before.has_value(), "endpoint must save its metrics and native functions");
             const auto initial_times = timing_records(world, scratch);
             MADNESS_CHECK_THROW(initial_times.size() == 1, "fresh SCF timing record is missing");
             auto iterations = checkpoint::json::array();
@@ -63,8 +64,7 @@ int main(int argc, char** argv) {
             scf.param.set_user_defined_value("convergence.bsh_residual", 1000.0);
             energy.value(molecule.get_all_coords().flat());
             MADNESS_CHECK_THROW(scf.last_calculation_outcome->complete, "satisfied saved metrics must be reusable");
-            MADNESS_CHECK_THROW(store.read_latest("ground_state", "scf")->generation == before->generation,
-                                "reuse must not publish a new numerical generation");
+            MADNESS_CHECK_THROW(read_node(world, ground) == before, "reuse must not save again");
             const auto reused_times = timing_records(world, scratch);
             MADNESS_CHECK_THROW(reused_times.size() == 2 && reused_times[0] == initial_times[0],
                                 "reuse must retain the original timing record");
@@ -77,8 +77,7 @@ int main(int argc, char** argv) {
             try { energy.value(moved.flat()); }
             catch (const std::exception& error) { rejected = true; model_failure = error.what(); }
             MADNESS_CHECK_THROW(rejected, "ordinary restart must reject a changed geometry");
-            MADNESS_CHECK_THROW(store.read_latest("ground_state", "scf")->generation == before->generation,
-                                "model rejection must preserve the checkpoint");
+            MADNESS_CHECK_THROW(read_node(world, ground) == before, "model rejection must preserve the saved state");
             const auto failed_times = timing_records(world, scratch);
             MADNESS_CHECK_THROW(failed_times.size() == 3 && failed_times[0] == initial_times[0] &&
                                 failed_times[1] == reused_times[1] && failed_times.back().contains("failure"),
@@ -104,20 +103,6 @@ int main(int argc, char** argv) {
             energy.value(molecule.get_all_coords().flat());
             MADNESS_CHECK_THROW(scf.amo.front().k() == 8 && scf.amo.front().thresh() == 1e-6,
                                 "native restart converts to the requested final representation");
-            const auto qualified_archive = scf_checkpoint_archive(world, scf);
-            SCF competing(world, scf.param, scf.molecule);
-            competing.work_dir = scf.work_dir;
-            competing.molecule.update_rcut_with_eprec(1e-8);
-            competing.set_protocol<3>(world, 1e-6); competing.make_nuclear_potential(world);
-            competing.ao = competing.project_ao_basis(world, competing.aobasis);
-            SCFCheckpoint another(world, competing, store, {"ground_state", "scf", "competing", "scf-physical-v1"});
-            const auto request = scf_iteration_request(competing.param);
-            another.load(another.plan({{1e-6, 8}}, request));
-            competing.solve(world, another.control(request, {1e-6, 8}, true));
-            MADNESS_CHECK_THROW(store.read_latest("ground_state", "scf")->generation != scf.last_checkpoint->generation,
-                                "competing publication fixture did not replace latest");
-            MADNESS_CHECK_THROW(scf_checkpoint_archive(world, scf) == qualified_archive,
-                                "consumer followed latest instead of its qualified generation");
             // Raw archives are unqualified guesses. Their occupation holes
             // must not survive a new request for default occupations.
             scf.aocc[0] = 0.0;

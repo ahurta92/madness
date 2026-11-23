@@ -23,7 +23,7 @@ namespace madness::iteration {
 // What a restart needs to know about a saved node. No target, no converged
 // flag, no launch identifier, no generation.
 struct NodeDescription {
-    std::string kind;                    // ground_state, driven, excited_set, second_order
+    std::string kind;                    // ground_state, virtuals, driven, excited_set, second_order
     Protocol protocol;                   // the level the states were saved at
     std::size_t updates_at_protocol = 0;
     nlohmann::json settings;             // what must match: the molecule and the model, never tolerances
@@ -31,17 +31,21 @@ struct NodeDescription {
     nlohmann::json lineage;              // what the node was computed from; empty for the ground state
     std::string saved_at;                // UTC; filled by save when empty
     std::string code_version;
+    bool level_finished = false;         // saved at the end of its level, not at a stop; never decides reuse
+    nlohmann::json details;              // the application's facts about its archive (counts, writers)
     bool operator==(const NodeDescription&) const = default;
 };
 
 inline bool node_kind(const std::string& kind) {
-    return kind == "ground_state" || kind == "driven" || kind == "excited_set" || kind == "second_order";
+    return kind == "ground_state" || kind == "virtuals" || kind == "driven" || kind == "excited_set" ||
+           kind == "second_order";
 }
 
 inline nlohmann::json description_record(const NodeDescription& d) {
     return {{"kind", d.kind}, {"protocol", madness::checkpoint::records::protocol_record(d.protocol)},
             {"updates_at_protocol", d.updates_at_protocol}, {"settings", d.settings}, {"metrics", d.metrics},
-            {"lineage", d.lineage}, {"saved_at", d.saved_at}, {"code_version", d.code_version}};
+            {"lineage", d.lineage}, {"saved_at", d.saved_at}, {"code_version", d.code_version},
+            {"level_finished", d.level_finished}, {"details", d.details}};
 }
 
 // Throws on a malformed record.
@@ -49,7 +53,8 @@ inline NodeDescription read_description(const nlohmann::json& r) {
     namespace records = madness::checkpoint::records;
     NodeDescription d{r.at("kind"), records::read_protocol(r.at("protocol")),
                       records::count(r.at("updates_at_protocol")), r.at("settings"), r.at("metrics"),
-                      r.at("lineage"), r.at("saved_at"), r.at("code_version")};
+                      r.at("lineage"), r.at("saved_at"), r.at("code_version"), r.at("level_finished"),
+                      r.at("details")};
     records::require(node_kind(d.kind), "unknown node kind: " + d.kind);
     records::require(d.metrics.is_array(), "node metrics must be an array");
     return d;
