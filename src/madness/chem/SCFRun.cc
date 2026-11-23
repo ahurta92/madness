@@ -207,7 +207,8 @@ double run_scf(World& world, SCF& scf) {
     for (std::size_t i = 0; i < ladder.size(); ++i) {
         const bool final_level = i + 1 == ladder.size();
         const auto settings = it::resolve(request, scf.iteration_model(), ladder[i], final_level, "ground state");
-        if (final_level && world.rank() == 0 && scf.param.print_level() > 0)
+        if (final_level && world.rank() == 0 &&
+            it::prints(it::verbosity(scf.param.print_level()), it::needed::targets_below_floor))
             it::write_targets_below_floor(std::cout, "SCF", scf.param.freeze_occupied() ? "virtuals" : "ground_state",
                                      settings);
     }
@@ -242,11 +243,9 @@ double run_scf(World& world, SCF& scf) {
             {"seconds", interval.seconds}, {"children", children}});
     };
     const auto publish_timing = [&](const std::string& failure = {}) {
-        json record{{"attempt_id", owner},
-            {"execution", {{"mpi_ranks", world.size()}, {"threads_per_rank", ThreadPool::size() + 1}}},
-            {"timing", timing.record()}};
-        if (!failure.empty()) record["failure"] = failure;
-        store.publish_timings(record);
+        const it::Execution execution{static_cast<std::size_t>(world.size()),
+                                      static_cast<std::size_t>(ThreadPool::size() + 1)};
+        store.publish_timings(it::timing_entry(owner, execution, timing.record(), failure));
     };
     // NOLINTNEXTLINE(misc-no-recursion)
     const auto execute = [&]() -> double {

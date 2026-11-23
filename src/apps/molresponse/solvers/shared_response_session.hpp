@@ -47,6 +47,7 @@ class Session {
   std::string owner_, analysis_directory_;
   it::Protocol final_;
   it::TimingCollector<> timing_;
+  it::Verbosity verbosity_;
   json properties_=json::object();
 public:
   std::map<std::string,std::unique_ptr<Checkpoint>> states;
@@ -54,10 +55,11 @@ public:
   Session(madness::World& world,const GroundSource& ground,const it::Request& request,
           const std::vector<it::Protocol>& protocols,
           const std::vector<TaskSpec>& definitions,
-          std::string analysis_directory, it::TimingCollector<> timing,SessionScope scope={})
+          std::string analysis_directory, it::TimingCollector<> timing,it::Verbosity verbosity,
+          SessionScope scope={})
       : world_(world),root_(std::filesystem::absolute(ground.store)),store_(world,root_,{},scope.writer_group),ground_(ground),request_(request),protocols_(protocols),scope_(std::move(scope)),
         analysis_directory_(std::move(analysis_directory)),final_(protocols.back()),
-        timing_(std::move(timing)) {
+        timing_(std::move(timing)),verbosity_(verbosity) {
     timing_.end(); // reference/input setup began before loading the ground state
     timing_.begin("checkpoint_planning");
     owner_=cp::detail::on_root(world_,[] {
@@ -69,7 +71,7 @@ public:
       specifications_[task.id]=task;
       cp::records::require(!states.contains(task.id),"ambiguous response task identity");
       states.emplace(task.id,std::make_unique<Checkpoint>(world,ground,
-          task.checkpoint_id.empty()?task.id:task.checkpoint_id,task.settings,request,protocols,owner_,task.definition,task.guess,scope_.writer_group));
+          task.checkpoint_id.empty()?task.id:task.checkpoint_id,task.settings,request,protocols,owner_,task.definition,task.guess,scope_.writer_group,verbosity_));
     }
     for (const auto& [id,state] : states) if (state->reusable()) record_summary(*state,0);
     timing_.end();
@@ -104,7 +106,7 @@ public:
         guess=cp::GenerationRef{"response",old_id,saved->generation};
       }
     }
-    auto binding=std::make_unique<Checkpoint>(world_,ground_,id,settings,request_,protocols_,owner_,derived_task(),guess,scope_.writer_group);
+    auto binding=std::make_unique<Checkpoint>(world_,ground_,id,settings,request_,protocols_,owner_,derived_task(),guess,scope_.writer_group,verbosity_);
     specifications_[id]={id,settings,derived_task(),{},guess};
     if(guess && guess->task_id!=id) replaced_tasks_[id]=guess->task_id;
     if(binding->reusable()) record_summary(*binding,0);
@@ -143,10 +145,9 @@ public:
     });
   }
   void publish_timings(const std::string& failure={}) {
-    json record{{"attempt_id",owner_},
-        {"execution",{{"mpi_ranks",world_.size()},{"threads_per_rank",madness::ThreadPool::size()+1}}},
-        {"timing",timing_.record()}};
-    if(!failure.empty()) record["failure"]=failure;
+    const it::Execution execution{static_cast<std::size_t>(world_.size()),
+                                  static_cast<std::size_t>(madness::ThreadPool::size()+1)};
+    json record=it::timing_entry(owner_,execution,timing_.record(),failure);
     if(scope_.parent_attempt.empty()) {store_.publish_timings(record);return;}
     record["parent_attempt"]=scope_.parent_attempt;
     record["direct"]=json::array();
@@ -176,7 +177,7 @@ public:
     timing.begin("subworld_work",{{"clock_scope","subworld_driver_rank"},{"subworld_id",group},
         {"mpi_ranks",world.size()},{"threads_per_rank",madness::ThreadPool::size()+1}});
     timing.begin("response");timing.begin("binding_setup");
-    return std::make_shared<Session>(world,ground_,request_,protocols_,definitions,analysis_directory_,std::move(timing),
+    return std::make_shared<Session>(world,ground_,request_,protocols_,definitions,analysis_directory_,std::move(timing),verbosity_,
         SessionScope{owner_,std::to_string(group),owner_,group});
   }
   void collect_subworlds() {

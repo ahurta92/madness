@@ -113,6 +113,8 @@ struct ExecutorSettings {
   StatePlans        state_plans;
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
+  // Guards the shared print functions (IterationOutput.h); from the same print_level.
+  madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::detail;
   std::string       calc_dir;      // holds response_metadata.json + archives
   int               max_iters = 25;
   // ES iteration budget per rung (deck excited.maxiter); 0 = inherit max_iters.
@@ -586,12 +588,13 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
       s0.responses.front()=binding.template load<typename Solver::Storage>();
       const double load_seconds=load_timer.seconds();
       ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
-      if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
         const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
         it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
             it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());
-        it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
       }
+      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_timing))
+        it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
     }
     if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
       auto& timing=ctx.shared_response->timing();timing.begin("imported_guess");
@@ -632,7 +635,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
             diagnostics.push_back({"polarizability",metrics.states.front().id,
                                    std::string{char('x'+pert.axis),char('x'+column)},value});
           }
-        if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+        if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
           it::write_iteration_metrics(std::cout,"response",metrics,decision,
               response_shared::metric_labels(),binding.final_level());
         binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
@@ -642,17 +645,18 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
           if (world.rank()==0) payload.archives.push_back(checkpoint::inspect_archive(directory,"functions","response",{},1));
           return payload;
         });
-        if (decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+        if (decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
           it::write_checkpoint_saved(std::cout,decision);
         ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
-        if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit")
+        if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
+            it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
           it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::metric_labels());
       };
       const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.final_level(),binding.expected(),
           binding.info(),binding.previous_updates(),observe,
           [&](const it::IterationInfo& info,const it::IterationTiming& timing) {
             ctx.shared_response->record_iteration(info,timing);
-            if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+            if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_timing))
               it::write_iteration_timing(std::cout,"response",info,timing);
           });
       MADNESS_CHECK_THROW(decision.checkpoint,"driven response stopped without a valid current checkpoint");
@@ -1010,7 +1014,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       return response_shared::load_excited_functions<Type,ClosedShell>(world,directory,manifest,binding.controls().protocol);
     });
     timing.end();
-    if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+    if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
       const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
       it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
           it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::excited_metric_labels());
@@ -1062,12 +1066,12 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
   if(!binding.reusable()) {
     const auto observer=[&](const auto& current,const it::IterationMetrics& metrics,const it::Decision& decision,const it::Progress& progress) {
       ++evaluations;
-      if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+      if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
         it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.final_level());
       binding.publish(metrics,decision,progress,[&](const auto& directory) {
         return response_shared::save_excited_functions(world,current,directory);
       });
-      if(decision.checkpoint && world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
+      if(decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
         it::write_checkpoint_saved(std::cout,decision);
       // Diagnostic excitation energies: already measured, nothing computed.
       std::vector<it::Diagnostic> diagnostics;
@@ -1077,13 +1081,14 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
              found!=root.metrics.end() && found->second.evidence.current)
             diagnostics.push_back({"excitation_energy",root.id,"",*found->second.evidence.current});
       session.record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
-      if(world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit")
+      if(world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
+         it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
         it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::excited_metric_labels());
     };
     const auto decision=solvers::iterate_shared(solver,state,binding.controls(),binding.final_level(),binding.expected(),binding.info(),binding.previous_updates(),observer,
       [&](const it::IterationInfo& info,const it::IterationTiming& measured) {
         session.record_iteration(info,measured);
-        if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal) it::write_iteration_timing(std::cout,"response",info,measured);
+        if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_timing)) it::write_iteration_timing(std::cout,"response",info,measured);
       });
     MADNESS_CHECK_THROW(decision.checkpoint,"excited bundle stopped without a valid current checkpoint");
   }
@@ -3318,12 +3323,13 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         const double load_seconds=load_timer.seconds();
         ctx.shared_response->timing().append({{"name","load"},{"task_id",binding.info().task_id},{"seconds",load_seconds}});
         const auto frame=checkpoint::iteration_metrics_from_manifest(binding.manifest());
-        if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal) {
+        if (world.rank()==0) {
           // Reusable states bypass the solver node and first load here.
-          if (binding.reusable())
+          if (binding.reusable() && iteration::prints(ctx.verbosity,iteration::needed::restart_summary))
             iteration::write_restart_summary(std::cout,"response",frame,binding.controls().protocol,
                 iteration::assess(binding.controls(),binding.expected(),frame),true,response_shared::metric_labels());
-          iteration::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
+          if (iteration::prints(ctx.verbosity,iteration::needed::checkpoint_timing))
+            iteration::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
         }
         max_residual=std::max(max_residual,*frame.states.front().metrics.at(iteration::Metric::bsh_residual).value);
         for (int column:ax) {

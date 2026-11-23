@@ -2115,7 +2115,7 @@ void SCF::prepare_final_orbitals(World& world, const OrbitalEvaluation& evaluati
             normalize(world, mo);
             times.emplace_back("Transform orbitals", timer.lap());
         }
-        if (world.rank() == 0 && param.print_level() > 2)
+        if (world.rank() == 0 && iteration::prints(iteration::verbosity(param.print_level()), iteration::needed::final_orbital_timing))
             iteration::write_value_table(std::cout, std::string("Final orbital preparation: ") + spin +
                 " (wall seconds, driver rank)", times);
     };
@@ -2715,7 +2715,7 @@ std::optional<iteration::Decision> SCF::solve_virtuals_impl(World& world, const 
             }
             timing.seconds = iteration_timer.seconds();
             if (control->timing_observer) control->timing_observer(metrics.info, timing);
-            if (world.rank() == 0 && param.print_level() > 0)
+            if (world.rank() == 0 && iteration::prints(iteration::verbosity(param.print_level()), iteration::needed::iteration_timing))
                 iteration::write_iteration_timing(std::cout, "SCF", metrics.info, timing);
             if (decision->action != iteration::Action::update) break;
         }
@@ -3409,7 +3409,8 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
                 energies.emplace_back(term.first, evaluation.energies.at(term.second));
             if (dispersion.active()) energies.emplace_back("Dispersion (D3)", evaluation.energies.at("e_disp"));
             energies.emplace_back("Total", evaluation.energy);
-            iteration::write_value_table(std::cout, "Energy breakdown (hartree)", energies, 8);
+            if (iteration::prints(iteration::verbosity(param.print_level()), iteration::needed::energy_breakdown))
+                iteration::write_value_table(std::cout, "Energy breakdown (hartree)", energies, 8);
             if (!control) print("density changes", step.density_alpha, step.density_beta, "BSH residual", step.bsh_residual);
         }
         if (stopped) {
@@ -3436,7 +3437,7 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
                     const double overlap_seconds = timer.lap();
                     sygvp(world, fock, overlap, 1, rotation, values);
                     const double eigen_seconds = timer.lap();
-                    if (world.rank() == 0 && param.print_level() > 2)
+                    if (world.rank() == 0 && iteration::prints(iteration::verbosity(param.print_level()), iteration::needed::final_orbital_timing))
                         iteration::write_value_table(std::cout, std::string("Final orbital spectrum: ") + spin +
                             " (wall seconds, driver rank)", {{"Overlap", overlap_seconds}, {"Fock eigensolve", eigen_seconds}});
                     return values;
@@ -3464,7 +3465,7 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
         const auto report_timing = [&] {
             timing.seconds = iteration_timer.seconds();
             if (control && control->timing_observer) control->timing_observer(metrics.info, timing);
-            if (control && world.rank() == 0 && param.print_level() > 0)
+            if (control && world.rank() == 0 && iteration::prints(iteration::verbosity(param.print_level()), iteration::needed::iteration_timing))
                 iteration::write_iteration_timing(std::cout, "SCF", metrics.info, timing);
         };
         if (stopped) { report_timing(); break; }

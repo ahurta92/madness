@@ -134,7 +134,8 @@ public:
              std::string task, json scientific_settings,
              const it::Request &request, std::vector<it::Protocol> protocols,
              const std::string& attempt, TaskDefinition definition = driven_task(),
-             std::optional<cp::GenerationRef> guess = {}, std::string writer_group = {})
+             std::optional<cp::GenerationRef> guess = {}, std::string writer_group = {},
+             it::Verbosity verbosity = it::Verbosity::detail)
       : world_(world), root_(std::filesystem::absolute(ground.store)),
         store_(world, root_,{},std::move(writer_group)), task_(std::move(task)),
         settings_(std::move(scientific_settings)),
@@ -208,7 +209,7 @@ public:
     for(const auto& protocol:protocols_) {
       const bool final_level=protocol==protocols_.back();
       const auto resolved=it::resolve(request_,definition_.model(protocol),protocol,final_level,definition_.application);
-      if(final_level && world_.rank()==0)
+      if(final_level && world_.rank()==0 && it::prints(verbosity,it::needed::targets_below_floor))
         it::write_targets_below_floor(std::cout,"response",task_,resolved,definition_.labels);
     }
     restart_plan_=it::plan_restart(protocols_,request_,definition_.model(protocols_.back()),restart_expected,saved);

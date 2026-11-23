@@ -588,6 +588,7 @@ struct molresponse_v3_lib {
       in.settings.es_kain_min_residual_written = true;  // D-122: it wins
     }
     in.settings.print_level = engine_print_level(rp.print_level());
+    in.settings.verbosity = madness::iteration::verbosity(rp.print_level());
     // ES initial-guess knobs (deck: response { excited.guess virtual_ao,
     // excited.guess_basis aug-cc-pvtz }). Deck default (solid_harmonics /
     // aug-cc-pvdz) maps to the ExecutorSettings default — existing decks are
@@ -667,7 +668,8 @@ struct molresponse_v3_lib {
           response_shared::excited_task(bundle.n_roots),"es:"+model});
       }
       in.settings.shared_response=std::make_shared<response_shared::Session>(world,*shared_source,
-          *shared_request,ladder,definitions,in.settings.calc_dir,std::move(response_timing));
+          *shared_request,ladder,definitions,in.settings.calc_dir,std::move(response_timing),
+          in.settings.verbosity);
       // Direct sources run once at the final protocol, after B/C qualify.
       // The binding then checks exact inputs instead of legacy convergence flags.
       for(const auto& request:expand_vbc_requests(in.plan.vbc,static_cast<int>(gs.molecule().natom()))) {

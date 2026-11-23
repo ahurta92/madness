@@ -225,7 +225,7 @@ void SCFCheckpoint::load(const Restart& restart, bool report_preparation) {
     }
     scf_.converged_for_thresh = 1e10;
     scf_.converged_for_dconv = 1e10;
-    if (world_.rank() == 0 && scf_.param.print_level() > 0) {
+    if (world_.rank() == 0 && it::prints(it::verbosity(scf_.param.print_level()), it::needed::restart_summary)) {
         const double load_seconds = load_timer.seconds();
         const auto metrics = cp::iteration_metrics_from_manifest(manifest);
         it::Assessment assessment;
@@ -235,7 +235,8 @@ void SCFCheckpoint::load(const Restart& restart, bool report_preparation) {
         it::write_restart_summary(std::cout, report_preparation ? "SCF preparation" : "SCF", metrics,
             target, assessment, reuse, metric_labels(),
             report_preparation ? "Loaded saved preparation functions." : "");
-        it::write_checkpoint_timing(std::cout, "SCF", identity_.task_id, load_seconds);
+        if (it::prints(it::verbosity(scf_.param.print_level()), it::needed::checkpoint_timing))
+            it::write_checkpoint_timing(std::cout, "SCF", identity_.task_id, load_seconds);
     }
 
 }
@@ -287,7 +288,7 @@ SCF::IterationControl SCFCheckpoint::control(const it::Request& request, it::Pro
     result.observer = [this, final_protocol](World& world, const SCF& owner, const it::IterationMetrics& metrics,
                              const it::Decision& decision, const it::Progress& progress) {
         cp::records::require(&world == &world_ && &owner == &scf_, "SCF control used with another application");
-        if (world.rank() == 0 && scf_.param.print_level() > 0)
+        if (world.rank() == 0 && it::prints(it::verbosity(scf_.param.print_level()), it::needed::iteration_metrics))
             it::write_iteration_metrics(std::cout, "SCF", metrics, decision, metric_labels(), final_protocol);
         // One history row per decision, before any publication can fail.
         cp::detail::on_root(world, [&] {
@@ -297,7 +298,7 @@ SCF::IterationControl SCFCheckpoint::control(const it::Request& request, it::Pro
         });
         if (decision.checkpoint) {
             publish(metrics, decision, progress);
-            if (world.rank() == 0 && scf_.param.print_level() > 0)
+            if (world.rank() == 0 && it::prints(it::verbosity(scf_.param.print_level()), it::needed::checkpoint_saved))
                 it::write_checkpoint_saved(std::cout, decision);
         }
     };

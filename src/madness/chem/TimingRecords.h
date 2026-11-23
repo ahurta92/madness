@@ -86,4 +86,21 @@ public:
         return node;
     }
 };
+
+/// The process layout of one launch, supplied by the caller.
+struct Execution {
+    std::size_t mpi_ranks = 1;
+    std::size_t threads_per_rank = 1;
+};
+
+/// The record for one launch, as CheckpointStore::publish_timings expects it.
+/// `failure` is empty for a launch that ended normally. Reads nothing from the runtime.
+inline nlohmann::json timing_entry(const std::string& attempt_id, const Execution& execution,
+                                   const nlohmann::json& timing_tree, const std::string& failure = {}) {
+    nlohmann::json record{{"attempt_id", attempt_id},
+        {"execution", {{"mpi_ranks", execution.mpi_ranks}, {"threads_per_rank", execution.threads_per_rank}}},
+        {"timing", timing_tree}};
+    if (!failure.empty()) record["failure"] = failure;
+    return record;
+}
 } // namespace madness::iteration

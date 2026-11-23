@@ -7,11 +7,50 @@
 #include <madness/chem/IterationMetrics.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <iomanip>
 #include <ostream>
 #include <sstream>
 
 namespace madness::iteration {
+
+/// How much the shared print functions show. The levels are defined by what
+/// the ground state and response print today, at print_level 0, 1, 2 and 3+.
+enum class Verbosity : std::uint8_t {
+    silent = 0,     // warnings only
+    progress = 1,   // one table per update, its timing, checkpoint and restart notices
+    breakdown = 2,  // energy breakdown per update
+    detail = 3      // timings of the final orbital preparation and spectrum
+};
+
+inline bool prints(Verbosity current, Verbosity needed) { return current >= needed; }
+
+/// The one mapping from the input key print_level, for every application.
+inline Verbosity verbosity(int print_level) {
+    if (print_level <= 0) return Verbosity::silent;
+    if (print_level == 1) return Verbosity::progress;
+    if (print_level == 2) return Verbosity::breakdown;
+    return Verbosity::detail;
+}
+
+/// The level each shared print call needs: the one place that says what each
+/// level shows. write_value_table is listed by what it is used to print.
+namespace needed {
+// silent: printed at every level
+inline constexpr Verbosity targets_below_floor = Verbosity::silent;     // write_targets_below_floor
+inline constexpr Verbosity unconverged_diagnostics = Verbosity::silent; // write_unconverged_diagnostics
+// progress
+inline constexpr Verbosity iteration_metrics = Verbosity::progress;     // write_iteration_metrics
+inline constexpr Verbosity iteration_timing = Verbosity::progress;      // write_iteration_timing
+inline constexpr Verbosity checkpoint_saved = Verbosity::progress;      // write_checkpoint_saved
+inline constexpr Verbosity restart_summary = Verbosity::progress;       // write_restart_summary
+inline constexpr Verbosity checkpoint_timing = Verbosity::progress;     // write_checkpoint_timing
+// breakdown
+inline constexpr Verbosity energy_breakdown = Verbosity::breakdown;     // write_value_table, energy terms
+// detail
+inline constexpr Verbosity final_orbital_timing = Verbosity::detail;    // write_value_table, final orbital steps
+} // namespace needed
+
 template<class Clock = std::chrono::steady_clock>
 class ElapsedTimer {
     typename Clock::time_point start_ = Clock::now();
