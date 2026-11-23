@@ -38,7 +38,7 @@ namespace molresponse_v3::solvers {
 template <class Solver, class Observer>
 madness::iteration::Decision iterate_shared(
     Solver& solver, typename Solver::State& state,
-    const madness::iteration::ResolvedSettings& settings,
+    const madness::iteration::ResolvedSettings& settings, bool final_protocol,
     const madness::iteration::ExpectedTask& expected,
     madness::iteration::IterationInfo info, std::size_t previous_updates,
     const Observer& observe,
@@ -54,7 +54,7 @@ madness::iteration::Decision iterate_shared(
     const auto metrics = solver.evaluate(state, info);
     timing.steps.emplace_back("evaluate", timer.lap());
     progress.state_valid = !state.diverged;
-    const auto decision = it::decide(settings, expected, progress, metrics);
+    const auto decision = it::decide(settings, expected, progress, metrics, final_protocol);
     timing.steps.emplace_back("decide", timer.lap());
     observe(state, metrics, decision, progress);
     timing.steps.emplace_back("checkpoint/report", timer.lap());

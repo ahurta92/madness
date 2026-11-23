@@ -2,6 +2,7 @@
 
 // Shared presentation and driver-rank elapsed intervals. This adds no fences
 // or numerical work; broad steps include their existing completion boundaries.
+#include <madness/chem/ConvergenceDecision.h>
 #include <madness/chem/IterationMetrics.h>
 #include <algorithm>
 #include <chrono>
@@ -157,7 +158,7 @@ inline void write_metric_table(std::ostream& os, const IterationMetrics& metrics
             if (!reason.empty() && result != "met" && result != "unmet")
                 state_notes.push_back(name + ": " + output_detail::words(reason));
             if (selected && check->relative > 0.0)
-                state_notes.push_back(name + ": limit = absolute + relative * scale (relative " +
+                state_notes.push_back(name + ": limit = target * (1 + scale) (target " +
                     output_detail::number(check->relative, 4, true) + ")");
         }
         tables.push_back(std::move(rows));
@@ -186,6 +187,24 @@ inline void write_iteration_metrics(std::ostream& os, const std::string& applica
             : "Iteration limit reached; final criteria not met.\n");
     else if (decision.action == Action::update) os << "Selected criteria not yet met; continue iteration.\n";
     else os << "Stopped: " << output_detail::words(decision.reason) << ".\n";
+}
+
+// Once per task, before its first iteration: final-level targets below the
+// protocol floor (factor * threshold). They are used as written; silent if none.
+inline void write_targets_below_floor(std::ostream& os, const std::string& application,
+                                      const std::string& task_id, const ResolvedSettings& final_settings,
+                                      const MetricLabels& labels = {}) {
+    bool any = false;
+    for (const auto& criterion : final_settings.criteria) {
+        if (!(criterion.requested < criterion.floor)) continue;
+        if (!any) os << "Warning: " << application << " " << task_id
+                     << ": requested targets are below the final protocol floor\n";
+        any = true;
+        os << "  " << output_detail::label(criterion.metric, labels) << ": requested "
+           << output_detail::number(criterion.requested, 4, true) << ", floor "
+           << output_detail::number(criterion.floor, 4, true) << '\n';
+    }
+    if (any) os << "  The requested targets are used; this protocol may not reach them. A finer final level would.\n";
 }
 
 // Call only after successful publication, never merely from a checkpoint request.

@@ -42,7 +42,6 @@ def run(settings, success=True, extra=()):
  k 6
  protocol [1e-4]
  maxiter 25
- convergence.criteria [bsh_residual, density_change, energy_change]
  convergence.bsh_residual 1e-4
  convergence.density_change 1e-4
  convergence.energy_change 1e-6
@@ -53,9 +52,9 @@ response
  dipole.frequencies [0.05]
  print_level 1
  kain true
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ maxiter 1
 ''' + settings + '''
 end
 molecule
@@ -107,17 +106,18 @@ def current_timing():
 
 first_output = run('')
 first_timing, first_steps = current_timing()
-assert [n['iteration'] for n in first_steps if n['name'] == 'iteration'] == [0]
+# One update with loose targets: change metrics need a predecessor.
+assert [n['iteration'] for n in first_steps if n['name'] == 'iteration'] == [0, 1]
 assert any(n['name'] == 'prepare' for n in first_steps)
 assert any(n['name'] == 'checkpoint/report' for n in first_steps)
-assert not any(n['name'] == 'advance' for n in first_steps)
+assert any(n['name'] == 'advance' for n in first_steps)
 assert 'policy: dconv_user' not in first_output, 'shared response must report its actual criteria'
 summary = first_output.split('MADQC RESULTS SUMMARY')[-1]
 assert 'dconv =' not in summary and '1e+10' not in summary, 'legacy stamps leaked into summary'
 assert 'Wall time' in summary and '2 threads' in summary
 assert 'Response steps' in summary and 'solve ' in summary
 assert 'Timing response' in first_output and 'Evaluation' in first_output and 'Checkpoint and reporting' in first_output
-assert 'Solver update' not in first_output, 'zero-update response must not invent an update timing'
+assert first_output.count('Solver update') == 1, 'one update reports one update timing'
 assert 'Induced-density change' in first_output and 'Response kinetic change' in first_output
 assert 'Checkpoint saved.' in first_output
 report = json.loads((work/'run.calc_info.json').read_text())
@@ -127,8 +127,8 @@ for application in report['tasks']:
     assert runtime['mpi_size'] == a.ranks and runtime['nthreads'] == 2
 
 first, record = saved()
-assert record['task']['iteration']['updates_this_attempt'] == 0
-assert metric(record,'density_change')['status'] == 'unavailable'
+assert record['task']['iteration']['updates_this_attempt'] == 1
+assert metric(record,'density_change')['status'] == 'measured'
 assert metric(record,'energy_change')['status'] == 'not_applicable'
 initial_residual = metric(record,'bsh_residual')['value']
 assert initial_residual > 0
@@ -153,7 +153,7 @@ assert saved()[0] == first, 'satisfying tighter tolerance must reuse saved evide
 assert response_summary()['shared_evaluations'] == 0
 assert response_summary()['shared_reused']
 assert all(hashlib.sha256(Path(f).read_bytes()).hexdigest()==h for f,h in archives.items())
-run('convergence.bsh_residual 0', success=False)
+run('convergence.bsh_residual 0\nmaxiter 0', success=False)
 second, resumed = saved()
 assert second != first
 assert resumed['task']['iteration']['updates_this_attempt'] == 0
@@ -167,7 +167,7 @@ assert third != second and updated['task']['iteration']['updates_this_attempt'] 
 assert metric(updated,'density_change')['status'] == 'measured'
 updated_residual = metric(updated,'bsh_residual')['value']
 assert updated_residual != initial_residual
-run('convergence.bsh_residual 0', success=False)
+run('convergence.bsh_residual 0\nmaxiter 0', success=False)
 fourth, checked = saved()
 assert fourth != third
 assert abs(metric(checked,'bsh_residual')['value']-updated_residual) < 1e-10, 'checkpoint metrics describe different functions'
@@ -180,7 +180,7 @@ assert len(list(tasks.glob('*/*.00000'))) == 1, 'intermediate payloads must be r
 if a.wiring_only:
     print('response checkpoint/result/timing wiring passed', flush=True)
     raise SystemExit(0)
-run('convergence.criteria [bsh_residual, density_change, kinetic_change]\nconvergence.bsh_residual 1e-5\nconvergence.density_change 1e-5\nconvergence.kinetic_change 1e-5\nmaxiter 30')
+run('convergence.bsh_residual 1e-5\nconvergence.density_change 1e-5\nconvergence.kinetic_change 1e-5\nmaxiter 30')
 final, final_record = saved()
 assert final_record['task']['outcome']['complete']
 assert metric(final_record,'density_change')['status'] == 'measured'
@@ -200,14 +200,17 @@ for history in (work/'run/analysis/response').glob('*.jsonl'):
 if a.wiring_only:
     print('response checkpoint/result/timing wiring passed', flush=True)
     raise SystemExit(0)
-run('convergence.criteria [bsh_residual, density_change, kinetic_change]\nconvergence.bsh_residual 1e-5\nconvergence.density_change 1e-5\nconvergence.kinetic_change 1e-5\nmaxiter 30')
+run('convergence.bsh_residual 1e-5\nconvergence.density_change 1e-5\nconvergence.kinetic_change 1e-5\nmaxiter 30')
 assert saved()[0] == final
 assert response_summary()['shared_evaluations'] == 0
-run('convergence.bsh_residual 0\nconvergence.bsh_residual.relative 1')
-assert saved()[0] == final and response_summary()['shared_evaluations'] == 0
+# Retired keys fail with a migration message and leave the saved state alone.
+for retired, message in [('convergence.criteria [bsh_residual]', 'convergence.criteria has been retired'),
+                         ('convergence.bsh_residual.relative 1', 'convergence.bsh_residual.relative has been retired')]:
+    run(retired, success=False)
+    assert message in (work/f'{counter:02d}.log').read_text(), retired
+    assert saved()[0] == final
 for invalid in ['convergence.bsh_residual -1\nconvergence.bsh_residual 1000',
-                'convergence.criteria [not_a_metric]', 'excited.maxiter 1',
-                'dipole.directions xq']:
+                'excited.maxiter 1', 'dipole.directions xq']:
     run(invalid, success=False)
     assert saved()[0] == final
 run('', success=False, extra=['--response=convergence.bsh_residual=-1',

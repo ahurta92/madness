@@ -1,5 +1,5 @@
 // Shared-controller contract. Scalar fixtures deliberately need no World or solver.
-#include <madness/chem/ConvergenceSettings.h>
+#include <madness/chem/ConvergenceDecision.h>
 #include <madness/chem/IterationMetrics.h>
 
 #include <cmath>
@@ -18,19 +18,26 @@ template <class F> void rejects(F&& call, const std::string& message) {
     try { call(); check(false, message); }
     catch (const std::invalid_argument&) {}
 }
+// Floor factor zero: these cases exercise assessment, not the protocol floor.
 Request request() {
     Request r;
-    r.criteria = {Metric::bsh_residual, Metric::energy_change};
-    r.tolerances = {{Metric::bsh_residual, {1e-5, 0.0}},
-                    {Metric::energy_change, {1e-6, 0.0}}};
+    r.targets = {{Metric::bsh_residual, 1e-5}, {Metric::energy_change, 1e-6}};
+    r.floor_factor = 0.0;
     r.max_updates = 2;
     return r;
 }
 ModelMetrics model() {
-    return {{Metric::bsh_residual, {Support::supported, 1e-5}},
-            {Metric::energy_change, {Support::supported, 1e-6}},
-            {Metric::density_change, {Support::supported, 1e-4}},
-            {Metric::kinetic_change, {Support::unsupported, std::nullopt}}};
+    return {{Metric::bsh_residual, {Support::supported, true, 1e-5, LimitRule::plain, {}}},
+            {Metric::energy_change, {Support::supported, true, 1e-6, LimitRule::plain, {}}},
+            {Metric::density_change, {Support::supported, false, 1e-4, LimitRule::plain, {}}},
+            {Metric::kinetic_change, {Support::unsupported, false, std::nullopt, LimitRule::plain, {}}}};
+}
+// Only the BSH residual is a criterion.
+ModelMetrics bsh_model() {
+    auto m = model(); m.at(Metric::energy_change).default_criterion = false; return m;
+}
+Request bsh_request() {
+    auto r = request(); r.targets.erase(Metric::energy_change); return r;
 }
 ExpectedTask expected() { return {"scf", "model1", {"ground"}}; }
 IterationMetrics iteration_metrics() {
@@ -45,44 +52,37 @@ IterationMetrics iteration_metrics() {
     return e;
 }
 void resolution() {
-    auto r = request();
+    auto r = request(); r.floor_factor.reset();
     auto m = model();
-    m.at(Metric::bsh_residual).intermediate = LegacyFloor{5e-4, "5 * threshold", {{"threshold", 1e-4}, {"factor", 5.0}}};
     auto coarse = resolve(r, m, {1e-4, 6}, false);
-    auto fine = resolve(r, m, {1e-6, 8}, true);
-    check(coarse.criteria[0].absolute == 5e-4 && fine.criteria[0].absolute == 1e-5,
-          "legacy floor relaxes intermediate absolute limits only");
-    check(coarse.criteria[0].adjustment.has_value() && !fine.criteria[0].adjustment,
-          "resolved report retains only applied intermediate heuristic");
-    check(coarse.criteria[1].absolute == 1e-6 && !coarse.criteria[1].adjustment,
-          "a metric without a legacy rule keeps its requested limit");
-    r.tolerances.at(Metric::bsh_residual) = {1e-3, 0.25};
+    auto fine = resolve(r, m, {1e-6, 8}, false);
+    check(coarse.criteria[0].effective == 5e-4 && fine.criteria[0].effective == 1e-5,
+          "the floor relaxes a coarse level and leaves a fine target above it unchanged");
+    check(fine.criteria[1].requested == 1e-6 && fine.criteria[1].floor == 0.0 && fine.criteria[1].effective == 1e-6,
+          "energy change has no floor");
+    check(resolve(r, m, {1e-4, 6}, true).criteria[0].effective == 1e-5,
+          "the final level judges the request as written");
+    r.targets.at(Metric::bsh_residual) = 1e-3;
     coarse = resolve(r, m, {1e-4, 6}, false);
-    check(coarse.criteria[0].absolute == 1e-3 && coarse.criteria[0].relative == 0.25,
-          "intermediate heuristic cannot tighten a requested limit or change relative tolerance");
-    r = request(); r.tolerances.erase(Metric::energy_change);
-    check(resolve(r, m, {1e-6, 8}, true).criteria[1].absolute == 1e-6,
-          "omitted absolute tolerance uses the declared model default");
-    r.tolerances[Metric::energy_change] = {};
-    r.tolerances[Metric::energy_change].relative = 0.05;
-    const auto relative_only = resolve(r, m, {1e-6, 8}, true);
-    check(relative_only.criteria[1].absolute == 1e-6 && relative_only.criteria[1].relative == 0.05,
-          "relative-only override preserves the model absolute default");
-    r.criteria = {Metric::bsh_residual}; r.tolerances[Metric::density_change] = {1e-9, 0.0};
-    check(resolve(r, m, {1e-6, 8}, true).criteria.size() == 1,
-          "a tolerance override does not activate another criterion");
-    r.criteria.clear(); rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "empty selection rejected");
-    r = request(); r.criteria.push_back(Metric::bsh_residual);
-    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "duplicate selection rejected");
-    r.criteria = {Metric::kinetic_change};
-    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "unsupported applicable metric rejected");
-    r = request(); m.at(Metric::energy_change).default_absolute.reset();
-    r.tolerances.erase(Metric::energy_change);
-    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "missing absolute default rejected");
-    r = request(); r.tolerances[Metric::energy_change].relative = -1;
-    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "negative relative tolerance rejected");
-    r = request(); r.tolerances[Metric::energy_change].absolute = std::numeric_limits<double>::infinity();
-    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "nonfinite tolerance rejected");
+    check(coarse.criteria[0].effective == 1e-3, "the floor cannot tighten a requested limit");
+    r = request(); r.targets.erase(Metric::energy_change);
+    check(resolve(r, m, {1e-6, 8}, true).criteria[1].requested == 1e-6,
+          "omitted target uses the declared model default");
+    r = request(); r.targets[Metric::density_change] = 1e-9;
+    const auto with_density = resolve(r, m, {1e-6, 8}, true);
+    check(with_density.criteria.size() == 3 && with_density.criteria[1].metric == Metric::density_change,
+          "a written target makes its metric a criterion");
+    auto none = model(); for (auto& [metric, definition] : none) definition.default_criterion = false;
+    rejects([&] { resolve({}, none, {1e-6, 8}, true); }, "no default criterion and no written target is rejected");
+    r = request(); r.targets[Metric::kinetic_change] = 1e-5;
+    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "target for an unsupported metric rejected");
+    r = request(); m.at(Metric::energy_change).default_target.reset();
+    r.targets.erase(Metric::energy_change);
+    rejects([&] { resolve(r, m, {1e-6, 8}, true); }, "missing default target rejected");
+    r = request(); r.targets[Metric::energy_change] = -1;
+    rejects([&] { resolve(r, model(), {1e-6, 8}, true); }, "negative target rejected");
+    r = request(); r.targets[Metric::energy_change] = std::numeric_limits<double>::infinity();
+    rejects([&] { resolve(r, model(), {1e-6, 8}, true); }, "nonfinite target rejected");
     rejects([] { metric_from_name("dconv"); }, "legacy names are not aliases");
     check(metric_from_name("energy_change") == Metric::energy_change, "explicit metric name accepted");
 }
@@ -123,80 +123,84 @@ void assessments() {
     check(!assess(settings, expected(), e).valid, "same threshold with wrong k cannot pass");
 }
 void scales() {
-    auto r = request(); auto e = iteration_metrics();
-    r.criteria = {Metric::energy_change}; r.tolerances[Metric::energy_change] = {0.1, 0.01};
-    auto settings = resolve(r, model(), e.info.protocol, true);
-    e.states[0].metrics[Metric::energy_change] = MetricValue::measured(0.85, 75.0);
+    // Scaled rule: limit = T * (1 + scale). T = 0.125 and scale 7 give 1.0 exactly.
+    auto m = model(); m.at(Metric::energy_change).rule = LimitRule::scaled;
+    Request r; r.floor_factor = 0.0; r.targets[Metric::energy_change] = 0.125;
+    m.at(Metric::bsh_residual).default_criterion = false;
+    auto e = iteration_metrics();
+    auto settings = resolve(r, m, e.info.protocol, true);
+    e.states[0].metrics[Metric::energy_change] = MetricValue::measured(1.0, 7.0);
     auto a = assess(settings, expected(), e);
-    check(a.all_met && a.checks[0].limit && std::abs(*a.checks[0].limit - 0.85) < 1e-14,
-          "combined tolerance includes equality and reports its effective limit");
+    check(a.all_met && a.checks[0].limit && *a.checks[0].limit == 1.0,
+          "scaled limit includes equality and reports its effective limit");
     auto& metric = e.states[0].metrics[Metric::energy_change];
-    metric = MetricValue::measured(0.11, 0.0);
+    metric = MetricValue::measured(0.13, 0.0);
     check(!assess(settings, expected(), e).all_met, "zero scale has no artificial floor");
     metric = MetricValue::measured(0.01);
-    check(!assess(settings, expected(), e).all_met, "relative request cannot fall back to absolute-only");
-    metric.evidence.current = -75.0; metric.evidence.previous = -74.99;
+    check(!assess(settings, expected(), e).all_met, "scaled rule cannot fall back to the plain one");
+    metric.evidence.current = -7.0; metric.evidence.previous = -6.99;
     check(assess(settings, expected(), e).all_met, "negative energy evidence reconstructs magnitude scale");
     metric.scale = Scale::measured(std::numeric_limits<double>::infinity());
     check(!assess(settings, expected(), e).all_met, "invalid scale is not silently replaced by evidence");
-    r.tolerances[Metric::energy_change].relative = 0.0;
-    check(assess(resolve(r, model(), e.info.protocol, true), expected(), e).all_met,
-          "absolute-only test does not require a usable scale");
+    m.at(Metric::energy_change).rule = LimitRule::plain;
+    check(assess(resolve(r, m, e.info.protocol, true), expected(), e).all_met,
+          "plain rule does not require a usable scale");
 }
 void decisions() {
     auto r = request(); auto e = iteration_metrics(); auto settings = resolve(r, model(), e.info.protocol, true);
     Progress p;
-    auto d = decide(settings, expected(), p, e);
+    bool final_level = true;
+    auto d = decide(settings, expected(), p, e, final_level);
     check(d.action == Action::complete && d.checkpoint && d.info.iteration == 0,
           "converged live sample requests endpoint publication before any update");
     p.main_updates = 2; p.updates_at_protocol = 2; e.info.iteration = 2;
-    check(decide(settings, expected(), p, e).action == Action::complete,
+    check(decide(settings, expected(), p, e, final_level).action == Action::complete,
           "criteria passing at cap still completes");
     e.states[0].metrics[Metric::bsh_residual].value = 1.0;
-    d = decide(settings, expected(), p, e);
+    d = decide(settings, expected(), p, e, final_level);
     check(d.action == Action::stop && d.reason == "iteration_limit" && d.checkpoint,
           "unmet final endpoint stops with valid checkpoint");
     p.main_updates = 0; e.info.iteration = 0;
-    d = decide(settings, expected(), p, e);
+    d = decide(settings, expected(), p, e, final_level);
     check(d.action == Action::update && !d.checkpoint, "ordinary unmet sample updates without default archive write");
-    settings.final_protocol = false;
+    final_level = false;
     p.main_updates = 2; p.updates_at_protocol = 2; e.info.iteration = 2;
-    check(decide(settings, expected(), p, e).action == Action::finish_protocol,
+    check(decide(settings, expected(), p, e, final_level).action == Action::finish_protocol,
           "intermediate cap permits advancement without completion");
     p.main_updates = 0; e.info.iteration = 0; e = iteration_metrics();
-    check(decide(settings, expected(), p, e).action == Action::finish_protocol,
+    check(decide(settings, expected(), p, e, final_level).action == Action::finish_protocol,
           "intermediate targets passing early finish only that protocol");
     e.states[0].metrics[Metric::bsh_residual].value = 1.0;
     settings.checkpoint_interval = 2; p.updates_at_protocol = 2;
-    check(decide(settings, expected(), p, e).checkpoint, "optional interval requests publication");
+    check(decide(settings, expected(), p, e, final_level).checkpoint, "optional interval requests publication");
     p.updates_at_protocol = 0;
-    check(!decide(settings, expected(), p, e).checkpoint, "zero updates does not trigger interval save");
+    check(!decide(settings, expected(), p, e, final_level).checkpoint, "zero updates does not trigger interval save");
     p.state_valid = false;
-    d = decide(settings, expected(), p, e);
+    d = decide(settings, expected(), p, e, final_level);
     check(d.action == Action::stop && !d.checkpoint, "invalid state never replaces usable checkpoint");
-    p = {}; settings.final_protocol = true; e = iteration_metrics();
-    const auto saved = saved_completion(settings, expected(), e);
+    p = {}; final_level = true; e = iteration_metrics();
+    const auto saved = saved_completion(settings, expected(), e, true);
     check(saved && saved->action == Action::complete && !saved->checkpoint && saved->info.attempt_id == "run1",
           "saved qualifying evidence completes without numerical work or relabeling");
-    r.tolerances[Metric::energy_change].absolute = 1e-8;
-    check(!saved_completion(resolve(r, model(), e.info.protocol, true), expected(), e),
+    r.targets[Metric::energy_change] = 1e-8;
+    check(!saved_completion(resolve(r, model(), e.info.protocol, true), expected(), e, true),
           "unmet tighter request needs fresh numerical evaluation");
 }
 void coupled_and_terminal() {
-    auto r = request(); r.criteria = {Metric::bsh_residual};
+    auto r = bsh_request();
     auto e = iteration_metrics(); e.states[0].id = "root1";
     auto second = e.states[0]; second.id = "root2";
     second.metrics[Metric::bsh_residual].value = 1.0;
     e.states.push_back(second);
     auto task = expected(); task.states = {"root1", "root2"};
-    auto settings = resolve(r, model(), e.info.protocol, true);
-    const auto choice = decide(settings, task, {}, e);
+    auto settings = resolve(r, bsh_model(), e.info.protocol, true);
+    const auto choice = decide(settings, task, {}, e, true);
     check(choice.action == Action::update && choice.checks.size() == 2
           && choice.checks[0].result == CheckResult::met && choice.checks[1].result == CheckResult::unmet,
           "one passing root cannot complete a coupled bundle with an unmet root");
-    check(!saved_completion(settings, task, e), "coupled reuse requires every root to pass");
+    check(!saved_completion(settings, task, e, true), "coupled reuse requires every root to pass");
     std::swap(e.states[0], e.states[1]);
-    check(decide(settings, task, {}, e).action == Action::update, "root order does not alter membership or policy");
+    check(decide(settings, task, {}, e, true).action == Action::update, "root order does not alter membership or policy");
 
     e = iteration_metrics(); e.states[0].metrics[Metric::bsh_residual].value = 1.0;
     Progress progress;
@@ -204,7 +208,7 @@ void coupled_and_terminal() {
     for (;;) {
         ++evaluations;
         e.info.iteration = progress.main_updates;
-        auto decision = decide(settings, expected(), progress, e);
+        auto decision = decide(settings, expected(), progress, e, true);
         if (decision.action != Action::update) break;
         ++updates; ++progress.main_updates; ++progress.updates_at_protocol;
     }
@@ -213,8 +217,6 @@ void coupled_and_terminal() {
     auto invalid = settings;
     invalid.criteria.clear();
     rejects([&] { assess(invalid, expected(), e); }, "empty resolved criteria cannot pass");
-    invalid = settings; invalid.criteria[0].applicable = false;
-    rejects([&] { assess(invalid, expected(), e); }, "all-inapplicable resolved criteria cannot pass vacuously");
 }
 void iteration_identity() {
     auto r = request(); auto e = iteration_metrics();
@@ -232,16 +234,16 @@ void iteration_identity() {
     comparison->task_id = "another_task";
     check(!assess(settings, expected(), e).all_met, "comparison cannot silently come from another task");
     e = iteration_metrics();
-    const auto stale = decide(settings, expected(), {1, 1, true}, e);
+    const auto stale = decide(settings, expected(), {1, 1, true}, e, true);
     check(stale.action == Action::stop && !stale.checkpoint && stale.reason == "iteration_context_mismatch",
           "metrics for iteration zero cannot drive iteration one");
-    const auto reused = saved_completion(settings, expected(), e);
+    const auto reused = saved_completion(settings, expected(), e, true);
     check(reused && reused->info == e.info, "saved evidence retains its full producing iteration identity");
 }
 void application_owned_loop() {
     // Catch extra KAIN updates, lost terminal evaluation, and proposal rebuilding.
-    auto r = request(); r.criteria = {Metric::bsh_residual};
-    auto e = iteration_metrics(); auto settings = resolve(r, model(), e.info.protocol, true);
+    auto r = bsh_request();
+    auto e = iteration_metrics(); auto settings = resolve(r, bsh_model(), e.info.protocol, true);
     int evaluations = 0, proposals = 0, advances = 0, publications = 0;
     double state = 1.0;
     Progress progress;
@@ -249,7 +251,7 @@ void application_owned_loop() {
         ++evaluations; ++proposals; // app.evaluate caches a proposal for THIS state.
         e.info.iteration = progress.main_updates;
         e.states[0].metrics[Metric::bsh_residual] = MetricValue::measured(state);
-        const auto d = decide(settings, expected(), progress, e);
+        const auto d = decide(settings, expected(), progress, e, true);
         if (d.checkpoint) ++publications;
         if (d.action != Action::update) break;
         ++advances; state = 0.0; // app retains its own history and uses cached raw work.
@@ -257,9 +259,9 @@ void application_owned_loop() {
     }
     check(evaluations == 2 && proposals == 2 && advances == 1 && publications == 1,
           "functional loop evaluates current state then stops before another update");
-    e.info.iteration = 0; r.max_updates = 0; settings = resolve(r, model(), e.info.protocol, true);
+    e.info.iteration = 0; r.max_updates = 0; settings = resolve(r, bsh_model(), e.info.protocol, true);
     e.states[0].metrics[Metric::bsh_residual] = MetricValue::measured(1.0);
-    check(decide(settings, expected(), {}, e).action == Action::stop,
+    check(decide(settings, expected(), {}, e, true).action == Action::stop,
           "zero allowance still evaluates its endpoint but never updates");
 }
 }

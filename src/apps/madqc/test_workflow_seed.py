@@ -24,9 +24,10 @@ with tempfile.TemporaryDirectory(prefix='madqc-seed-') as scratch:
  xc hf
  localize canon
  protocol [1e-4]
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 io
@@ -45,11 +46,10 @@ end
         (work/'input.in').write_text(text)
         return subprocess.run(launch+[str(Path(a.binary).resolve()),'input.in','--wf=scf','--prefix='+prefix],cwd=work,env=env,capture_output=True,text=True,timeout=600)
     if a.numerical:
-        accurate = deck.replace('maxiter 0','maxiter 30').replace(
-            'convergence.criteria [bsh_residual]',
-            'convergence.criteria [bsh_residual,density_change,energy_change]').replace(
-            'convergence.bsh_residual 1000',
+        accurate = deck.replace('maxiter 1','maxiter 30').replace(
+            'convergence.bsh_residual 1000\n convergence.density_change 1000\n convergence.energy_change 1000',
             'convergence.bsh_residual 5e-4\n convergence.density_change 1e-4\n convergence.energy_change 1e-6')
+        assert 'maxiter 30' in accurate and 'energy_change 1e-6' in accurate
         cold = accurate.replace(f'io\n dalton.dir {seed}\nend\n','')
         for prefix, text in [('cold',cold),('seeded',accurate)]:
             result=run(prefix,text)

@@ -1,5 +1,4 @@
 dft
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.0005
     convergence.density_change 0.0001
     convergence.energy_change 1e-05

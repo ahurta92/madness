@@ -20,7 +20,6 @@ deck = '''dft
  k 6
  protocol [1e-4]
  maxiter 25
- convergence.criteria [bsh_residual, density_change, energy_change]
  convergence.bsh_residual 1e-4
  convergence.density_change 1e-4
  convergence.energy_change 1e-6
@@ -29,9 +28,9 @@ end
 response
  dipole.directions z
  dipole.frequencies [0.05]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ maxiter 1
  print_level 1
 end
 molecule

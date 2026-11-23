@@ -18,7 +18,6 @@ print('artifacts:',work,flush=True)
  protocol [1e-4]
  l 30
  maxiter 30
- convergence.criteria [bsh_residual, density_change, energy_change]
  convergence.bsh_residual 1e-4
  convergence.density_change 1e-4
  convergence.energy_change 1e-6
@@ -42,9 +41,10 @@ if a.families:
  localize canon
  protocol [1e-4]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response

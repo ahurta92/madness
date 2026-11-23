@@ -18,11 +18,12 @@ template<class F> void rejects(F&& action, const char* why) {
     try { action(); } catch (const std::exception&) { rejected = true; }
     check(rejected, why);
 }
+// Zero targets for all four metrics; the protocol floor sets the effective limit.
 it::Request request(std::size_t cap) {
     it::Request value;
-    value.criteria = {it::Metric::bsh_residual, it::Metric::density_change,
-                      it::Metric::energy_change, it::Metric::kinetic_change};
-    for (const auto metric : value.criteria) value.tolerances[metric] = {0.0, 0.0};
+    for (const auto metric : {it::Metric::bsh_residual, it::Metric::density_change,
+                              it::Metric::energy_change, it::Metric::kinetic_change})
+        value.targets[metric] = 0.0;
     value.max_updates = cap;
     return value;
 }
@@ -50,22 +51,28 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     scf.make_nuclear_potential(world);
     scf.initial_guess(world);
     auto model = scf.iteration_model();
-    check(!model.at(it::Metric::energy_change).intermediate &&
-          !model.at(it::Metric::kinetic_change).intermediate,
-          "no invented energy or kinetic threshold floor");
-    it::Request defaults;
-    defaults.criteria = {it::Metric::bsh_residual, it::Metric::density_change,
-                         it::Metric::energy_change, it::Metric::kinetic_change};
-    const auto final_defaults = it::resolve(defaults, model, {1e-4, 6}, true);
-    near(final_defaults.criteria[0].absolute, 1e-4, "final residual default has no threshold floor");
-    near(final_defaults.criteria[1].absolute, 1e-4, "physical spin density default");
-    near(final_defaults.criteria[2].absolute, 1e-5, "physical total energy default");
-    near(final_defaults.criteria[3].absolute, 1e-5, "physical kinetic default when selected");
+    check(!model.at(it::Metric::energy_change).floor_factor && !model.at(it::Metric::kinetic_change).floor_factor &&
+          model.at(it::Metric::density_change).floor_factor == 5.0, // one atom: max(5, 1)
+          "density keeps max(5, natom); energy and kinetic use the shared floor factor");
+    check(!model.at(it::Metric::kinetic_change).default_criterion &&
+          model.at(it::Metric::kinetic_change).default_target == 1e-5, "kinetic is a criterion only when written");
+    const auto final_defaults = it::resolve({}, model, {1e-6, 6}, true);
+    check(final_defaults.criteria.size() == 3, "three default criteria");
+    near(final_defaults.criteria[0].effective, 1e-4, "residual default above the fine floor");
+    near(final_defaults.criteria[1].effective, 1e-4, "physical spin density default");
+    near(final_defaults.criteria[2].effective, 1e-5, "physical total energy default");
+    const auto coarse_final = it::resolve({}, model, {1e-4, 6}, true);
+    near(coarse_final.criteria[0].effective, 1e-4, "a coarse final level judges the BSH default as written");
+    near(coarse_final.criteria[2].effective, 1e-5, "a coarse final level judges the energy default as written");
+    const auto coarse_intermediate = it::resolve({}, model, {1e-4, 6}, false);
+    near(coarse_intermediate.criteria[0].effective, 5e-4, "an intermediate level raises BSH to its floor");
+    near(coarse_intermediate.criteria[2].effective, 1e-5, "energy change has no floor");
     auto r = request(1);
+    auto strict = r; strict.floor_factor = 0.0; // never relaxed: zero targets stay zero
     const it::ExpectedTask task{"scf", name + "-scientific-context", {"ground"}};
-    SCF::IterationControl control{it::resolve(r, model, {1e-4, 6}, false), task, "a1"};
-    near(control.settings.criteria[0].absolute, 5e-4, "intermediate BSH floor is explicit");
-    near(control.settings.criteria[1].absolute, 5e-4, "intermediate spin density floor is explicit");
+    SCF::IterationControl control{it::resolve(r, model, {1e-4, 6}, false), false, task, "a1"};
+    near(control.settings.criteria[0].effective, 5e-4, "intermediate BSH floor is explicit");
+    near(control.settings.criteria[1].effective, 5e-4, "intermediate spin density floor is explicit");
     std::vector<it::IterationMetrics> records;
     std::optional<SCF::OrbitalComparison> previous;
     cp::CheckpointStore store(world, name + "-run");
@@ -154,12 +161,13 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     const auto restored = cp::iteration_metrics_from_manifest(*loaded);
     check(restored.info == records.back().info, "stored evidence preserves the exact iteration");
     auto loose = request(0);
-    for (auto& [metric, tolerance] : loose.tolerances) tolerance = {10.0, 0.1};
+    for (auto& [metric, target] : loose.targets) target = 10.0;
     auto final = it::resolve(loose, model, {1e-4, 6}, true);
-    check(bool(it::saved_completion(final, task, restored)), "saved evidence can satisfy a new request without evaluation");
-    final = it::resolve(r, model, {1e-4, 6}, true);
-    near(final.criteria[0].absolute, 0.0, "final request is never relaxed by the protocol floor");
-    check(!it::saved_completion(final, task, restored), "stricter unmet request must iterate");
+    check(bool(it::saved_completion(final, task, restored, true)), "saved evidence can satisfy a new request without evaluation");
+    near(it::resolve(r, model, {1e-4, 6}, true).criteria[0].effective, 0.0, "no floor at the final level");
+    final = it::resolve(strict, model, {1e-4, 6}, true);
+    near(final.criteria[0].effective, 0.0, "a zero floor factor leaves the zero target");
+    check(!it::saved_completion(final, task, restored, true), "stricter unmet request must iterate");
     // Load the exact native payload with the existing SCF reader. It stays a
     // numerical guess for legacy readers: typed evidence is the new authority.
     // Derive the selected path from the store, not a test-owned layout assumption.
@@ -174,13 +182,14 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     control.attempt_id = "a2";
     control.previous_updates = 1;
     control.settings = final;
+    control.final_protocol = true;
     // Use a new selected protocol below for helium; Li/DFT keep the same one to
     // verify fresh comparison history and allowance on restart.
     if (name == "he") {
         scf.set_protocol<3>(world, 1e-6);
         scf.project(world);
         scf.make_nuclear_potential(world);
-        control.settings = it::resolve(r, scf.iteration_model(), {1e-6, 6}, true);
+        control.settings = it::resolve(strict, scf.iteration_model(), {1e-6, 6}, true);
         control.previous_updates = 0;
     } else scf.param.set_user_defined_value("protocol", std::vector<double>{1e-4});
     end = scf.solve(world, control);

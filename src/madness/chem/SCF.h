@@ -502,6 +502,7 @@ public:
     };
     struct IterationControl {
         iteration::ResolvedSettings settings;
+        bool final_protocol = true; // the role of this level; limits do not depend on it
         iteration::ExpectedTask task;
         std::string attempt_id;
         std::size_t previous_updates = 0; // previous attempts at this protocol, cadence only
@@ -514,7 +515,7 @@ public:
         std::function<void(const iteration::IterationInfo&, const iteration::IterationTiming&)> timing_observer;
     };
     /// SCF model for the active solve. Frozen occupied changes are inapplicable.
-    /// Explicit requests override defaults; only intermediate protocols have floors.
+    /// Written targets override defaults; the floor applies at every protocol.
     iteration::ModelMetrics iteration_model() const;
     static std::map<iteration::Metric, std::string> iteration_metric_set();
     static nlohmann::json iteration_metric_definitions();

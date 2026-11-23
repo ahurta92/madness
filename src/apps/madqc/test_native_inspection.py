@@ -23,9 +23,10 @@ if not roots:
  localize canon
  protocol [1e-4]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
@@ -36,9 +37,10 @@ response
  excited.enable true
  excited.tda true
  excited.num_states 1
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 molecule

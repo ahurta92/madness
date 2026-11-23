@@ -40,7 +40,6 @@ dft
     nopen    1
     protocol [1e-4]
     maxiter  20
-    convergence.criteria [bsh_residual, density_change, energy_change]
     # Explicit coarse-protocol tolerance; shared defaults intentionally demand more.
     convergence.bsh_residual 5e-4
 end

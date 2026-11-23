@@ -14,30 +14,27 @@ shared_response_request(const ResponseParameters &parameters) {
         key == "diagnostic.iterations_per_rung" || key.starts_with("stall.") ||
         key == "seed.start_rung")
       throw std::invalid_argument("unknown input for shared response: " + key);
+    if (const auto retired = it::retired_convergence_input(key))
+      throw std::invalid_argument(*retired);
   }
+  // Only written targets enter the request. Each solver's model supplies its
+  // default criteria and targets; a target it cannot judge is reported.
   it::Request request;
-  for (const auto &name :
-       parameters.get<std::vector<std::string>>("convergence.criteria"))
-    request.criteria.push_back(it::metric_from_name(name));
-  if (request.criteria.empty()) {
-    if (parameters.is_user_defined("convergence.criteria"))
-      throw std::invalid_argument("empty convergence selection");
-    request.criteria = {it::Metric::bsh_residual, it::Metric::density_change,
-                        it::Metric::energy_change};
-  }
   for (auto metric : {it::Metric::bsh_residual, it::Metric::density_change,
                       it::Metric::energy_change, it::Metric::kinetic_change}) {
     const auto key = std::string("convergence.") + it::metric_name(metric);
-    it::Tolerance tolerance;
-    const auto absolute = parameters.get<double>(key);
-    if (parameters.is_user_defined(key) || absolute >= 0.0)
-      tolerance.absolute = absolute;
-    tolerance.relative = parameters.get<double>(key + ".relative");
-    if ((tolerance.absolute && !it::finite_nonnegative(*tolerance.absolute)) ||
-        !it::finite_nonnegative(tolerance.relative))
-      throw std::invalid_argument("invalid convergence tolerance: " + key);
-    if (tolerance.absolute || tolerance.relative != 0.0)
-      request.tolerances[metric] = tolerance;
+    if (!parameters.is_user_defined(key))
+      continue;
+    const double target = parameters.get<double>(key);
+    if (!it::finite_nonnegative(target))
+      throw std::invalid_argument("invalid convergence target: " + key);
+    request.targets[metric] = target;
+  }
+  if (parameters.is_user_defined("convergence.floor_factor")) {
+    request.floor_factor = parameters.get<double>("convergence.floor_factor");
+    if (!it::finite_nonnegative(*request.floor_factor))
+      throw std::invalid_argument(
+          "convergence.floor_factor must be finite and not negative");
   }
   const int interval = parameters.get<int>("checkpoint.every_iterations");
   if (interval < 0)

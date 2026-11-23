@@ -8,7 +8,6 @@
 # Run:   ./run.sh          (or: madqc --wf=response response_he_lda_alpha.in)
 
 dft
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 5e-05
     convergence.density_change 1e-05
     convergence.energy_change 1e-06
@@ -21,7 +20,6 @@ response
     dipole              true
     dipole.directions   z
     dipole.frequencies  [0.0, 0.05]
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 5e-05
     convergence.density_change 5e-05
     convergence.energy_change 5e-05

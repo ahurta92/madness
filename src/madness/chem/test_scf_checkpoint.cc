@@ -17,9 +17,11 @@ template<class F> void rejects(F&& action, const char* message) {
 }
 it::Request request() {
     it::Request result;
-    result.criteria = {it::Metric::bsh_residual, it::Metric::density_change, it::Metric::energy_change};
-    result.tolerances = {{it::Metric::bsh_residual, {1e-3, 0}},
-        {it::Metric::density_change, {1e-3, 0}}, {it::Metric::energy_change, {1e-5, 0}}};
+    // Floor factor zero keeps the written targets exact; this test is about
+    // checkpoints and restart, not the protocol floor.
+    result.targets = {{it::Metric::bsh_residual, 1e-3},
+        {it::Metric::density_change, 1e-3}, {it::Metric::energy_change, 1e-5}};
+    result.floor_factor = 0.0;
     result.max_updates = 25;
     return result;
 }
@@ -69,12 +71,12 @@ void exercise(World& world) {
     const auto metrics = cp::iteration_metrics_from_manifest(*first);
     auto relaxed = req;
     relaxed.max_updates = 0;
-    for (auto& [metric, tolerance] : relaxed.tolerances) tolerance = {1.0, 0.0};
+    for (auto& [metric, target] : relaxed.targets) target = 1.0;
     store.initialize("a2");
     SCFCheckpoint resumed(world, scf, store, {"ground_state", "scf", "a2", "he-context"});
     auto satisfied_tighter = req;
-    for (auto& [metric, tolerance] : satisfied_tighter.tolerances)
-        tolerance.absolute = (*tolerance.absolute + *metrics.states[0].metrics.at(metric).value) / 2;
+    for (auto& [metric, target] : satisfied_tighter.targets)
+        target = (target + *metrics.states[0].metrics.at(metric).value) / 2;
     check(resumed.plan({protocol}, satisfied_tighter).plan.action == it::RestartAction::reuse,
           "tighter requests already met by saved metrics reuse without evaluation");
     const auto reuse = resumed.plan({protocol}, relaxed, true);
@@ -133,7 +135,7 @@ void exercise(World& world) {
           "reuse preserves the original source generation and attempt");
 
     auto tight = req;
-    for (auto& [metric, tolerance] : tight.tolerances) tolerance = {0.0, 0.0};
+    for (auto& [metric, target] : tight.targets) target = 0.0;
     tight.max_updates = 1;
     const auto more = resumed.plan({protocol}, tight);
     check(more.plan.action == it::RestartAction::resume && more.plan.main_updates == 0,
@@ -203,8 +205,8 @@ void exercise(World& world) {
         "frozen task cannot omit its occupied source");
     SCFCheckpoint frozen(world, virtuals, store, {"ground_state", "virtuals", "a3", "virtual-context"}, inputs);
     it::Request vr;
-    vr.criteria = {it::Metric::bsh_residual};
-    vr.tolerances[it::Metric::bsh_residual] = {10.0, 0.0};
+    vr.targets[it::Metric::bsh_residual] = 10.0;
+    vr.floor_factor = 0.0;
     vr.max_updates = 0;
     check(virtuals.solve_virtuals(world, frozen.control(vr, protocol, true)).action == it::Action::complete,
           "frozen virtual task publishes through the same binding");
@@ -223,7 +225,7 @@ void exercise(World& world) {
     other_inputs[0]["role"] = "replacement_occupied";
     SCFCheckpoint rebound(world, virtuals, store, {"ground_state", "virtuals", "a4", "virtual-context"}, other_inputs);
     auto strict_virtual = vr;
-    strict_virtual.tolerances[it::Metric::bsh_residual] = {0.0, 0.0};
+    strict_virtual.targets[it::Metric::bsh_residual] = 0.0;
     const auto virtual_resume = frozen.plan({protocol}, strict_virtual);
     check(virtual_resume.plan.action == it::RestartAction::resume, "virtual fixture needs more iterations");
     rejects([&] { rebound.load(virtual_resume); }, "resume plan cannot cross a frozen-source binding");
@@ -243,19 +245,24 @@ void exercise(World& world) {
     const auto old_parameters = virtuals.param;
     const auto old_molecule = virtuals.molecule;
     virtuals.param.set_user_defined_value("freeze_occupied", false);
+    // The full solve judges every default criterion: one update, loose targets.
+    auto active_request = vr;
+    active_request.targets[it::Metric::density_change] = 1000.0;
+    active_request.targets[it::Metric::energy_change] = 1000.0;
+    active_request.max_updates = 1;
     SCFCheckpoint active(world, virtuals, store, {"ground_state", "active", "a5", "active-context"});
-    check(virtuals.solve(world, active.control(vr, protocol, true)).action == it::Action::complete,
+    check(virtuals.solve(world, active.control(active_request, protocol, true)).action == it::Action::complete,
           "active-space source fixture publishes both occupied and virtual functions");
     const auto active_parameters = virtuals.param;
     const auto active_occupations = copy(virtuals.aocc);
     virtuals.param.set_user_defined_value("aocc", std::vector<double>{0.0, 1.0});
     SCFCheckpoint holes(world, virtuals, store, {"ground_state", "occupations", "a7", "occupation-context"});
-    virtuals.solve(world, holes.control(vr, protocol, true));
+    virtuals.solve(world, holes.control(active_request, protocol, true));
     check(bool(store.read_latest("ground_state", "occupations")), "occupation-hole fixture publishes real native functions");
     for (const auto& occupations : {std::vector<double>{}, std::vector<double>{1.0}}) {
         virtuals.param.set_user_defined_value("aocc", occupations);
         SCFCheckpoint changed(world, virtuals, store, {"ground_state", "occupations", "a8", "occupation-context"});
-        rejects([&] { changed.plan({protocol}, vr); },
+        rejects([&] { changed.plan({protocol}, active_request); },
                 "ordinary restart rejects changed occupation requests");
     }
     virtuals.param = active_parameters;
@@ -274,7 +281,7 @@ void exercise(World& world) {
     virtuals.param.set_user_defined_value("nmo_alpha", 1);
     virtuals.param.set_user_defined_value("nvalpha", 0);
     SCFCheckpoint trimmed(world, virtuals, store, {"ground_state", "active", "a6", "core-context"});
-    rejects([&] { trimmed.plan({protocol}, vr); }, "core-potential virtual trimming is rejected before native reading");
+    rejects([&] { trimmed.plan({protocol}, active_request); }, "core-potential virtual trimming is rejected before native reading");
     virtuals.param = old_parameters;
     virtuals.molecule = old_molecule;
 

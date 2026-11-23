@@ -1,5 +1,6 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/SCFScientificSettings.h>
 #include <madness/chem/TimingRecords.h>
 #include <chrono>
@@ -201,8 +202,15 @@ double run_scf(World& world, SCF& scf) {
     cp::records::require(scf.param.restart() != "read_only", "read_only is inspection, not a solver request");
     const auto request = scf_iteration_request(scf.param);
     const auto ladder = protocols(scf);
-    for (std::size_t i = 0; i < ladder.size(); ++i)
-        (void)it::resolve(request, scf.iteration_model(), ladder[i], i + 1 == ladder.size());
+    // Validate the request at every level before any work; warn once about
+    // final-level targets below the protocol floor.
+    for (std::size_t i = 0; i < ladder.size(); ++i) {
+        const bool final_level = i + 1 == ladder.size();
+        const auto settings = it::resolve(request, scf.iteration_model(), ladder[i], final_level, "ground state");
+        if (final_level && world.rank() == 0 && scf.param.print_level() > 0)
+            it::write_targets_below_floor(std::cout, "SCF", scf.param.freeze_occupied() ? "virtuals" : "ground_state",
+                                     settings);
+    }
     const auto root = scf_checkpoint_directory(scf);
     cp::CheckpointStore store(world, root);
     const auto owner = attempt(world);

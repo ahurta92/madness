@@ -308,7 +308,7 @@ struct molresponse_v3_lib {
         previous=threshold;
       }
       (void)madness::iteration::resolve(*shared_request,response_shared::model(),
-          {protocol.back(),default_k_for_thresh(protocol.back())},true);
+          {protocol.back(),default_k_for_thresh(protocol.back())},true,"driven response");
     }
 
     // 1. Ground state from the moldft ARCHIVE (not the in-memory SCF). On a

@@ -75,15 +75,46 @@ int main(int argc, char** argv) {
                   "default listing enabled the shared response path");
         } catch (const std::exception&) { check(false, "actual response parameter listing cannot be read"); }
         auto request = scf_iteration_request(p);
-        check(request.criteria.size() == 3 && request.max_updates == 25 && request.checkpoint_interval == 0,
-              "ordinary defaults select three metrics and endpoint checkpoints");
+        check(request.targets.empty() && !request.floor_factor && request.max_updates == 25 &&
+              request.checkpoint_interval == 0,
+              "ordinary defaults write no target; the model supplies the criteria");
+        {
+            auto q = p;
+            q.set_user_defined_value("convergence.kinetic_change", 3e-5);
+            q.set_user_defined_value("convergence.floor_factor", 2.0);
+            const auto written = scf_iteration_request(q);
+            check(written.targets.size() == 1 && written.targets.at(iteration::Metric::kinetic_change) == 3e-5 &&
+                  written.floor_factor == 2.0, "written target and floor factor enter the request");
+            rejects([&] { p.validate_input_value("convergence.floor_factor", "-1"); }, "negative floor factor rejected");
+            rejects([&] { p.validate_input_value("convergence.floor_factor", "inf"); }, "nonfinite floor factor rejected");
+        }
+        // Retired keys fail with a migration message, both from a deck and programmatically.
+        const auto message = [](auto action) {
+            try { action(); } catch (const std::exception& error) { return std::string(error.what()); }
+            return std::string();
+        };
+        check(message([&] { p.validate_input_value("convergence.criteria", "[bsh_residual]"); })
+                  .find("written target") != std::string::npos, "convergence.criteria migration message names targets");
+        check(message([&] { p.validate_input_value("convergence.bsh_residual.relative", "0.1"); })
+                  .find("limit rule") != std::string::npos, ".relative migration message names the limit rule");
+        check(message([&] { response.validate_input_value("convergence.criteria", "[bsh_residual]"); })
+                  .find("written target") != std::string::npos, "response convergence.criteria is retired");
+        check(message([&] { response.validate_input_value("convergence.density_change.relative", "0.1"); })
+                  .find("limit rule") != std::string::npos, "response .relative is retired");
+        check(printed.find("convergence.criteria ") == std::string::npos &&
+              response_listing.find("convergence.criteria ") == std::string::npos &&
+              printed.find(".relative ") == std::string::npos, "retired convergence keys are not advertised");
+        {
+            auto q = p;
+            q.set_user_defined_value("convergence.criteria", std::vector<std::string>{"bsh_residual"});
+            check(message([&] { scf_iteration_request(q); }).find("written target") != std::string::npos,
+                  "a programmatic convergence.criteria is rejected with the migration message");
+            q = p;
+            q.set_user_defined_value("convergence.bsh_residual.relative", 1e-4);
+            rejects([&] { scf_iteration_request(q); }, "a programmatic relative tolerance is rejected");
+        }
         p.set_user_defined_value("freeze_occupied", true);
-        check(scf_iteration_request(p).criteria == std::vector<iteration::Metric>{iteration::Metric::bsh_residual},
-              "frozen default only selects the applicable residual");
-        p.set_user_defined_value("convergence.criteria", std::vector<std::string>{"bsh_residual", "kinetic_change"});
-        p.set_user_defined_value("convergence.bsh_residual.relative", 1e-4);
-        check(!scf_iteration_request(p).tolerances.at(iteration::Metric::bsh_residual).absolute,
-              "relative-only override retains the model absolute default");
+        check(scf_iteration_request(p).targets.empty(), "frozen default writes no target; the model selects the residual");
         rejects([&] { p.validate_input_value("dconv", "1e-5"); }, "dconv is retired for SCF");
         rejects([&] { p.validate_input_value("save", "true"); }, "save is retired for SCF");
         rejects([&] { p.validate_input_value("convergence.energy_change", "nan"); }, "nonfinite tolerance rejected");

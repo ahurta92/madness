@@ -17,7 +17,6 @@ a=p.parse_args();work=Path(tempfile.mkdtemp(prefix='response-ladder-review-'));p
  localize canon
  protocol [1e-4]
  maxiter 25
- convergence.criteria [bsh_residual, density_change, energy_change]
  convergence.bsh_residual 1e-4
  convergence.density_change 1e-4
  convergence.energy_change 1e-6
@@ -26,9 +25,9 @@ end
 response
  dipole.directions z
  dipole.frequencies [0.05,0.1]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ maxiter 1
  print_level 1
 end
 molecule
@@ -82,7 +81,8 @@ assert run('loose-again')==0
 residuals={f:next(m['value'] for m in saved(f)[1]['task']['iteration']['metrics'] if m['metric']=='bsh_residual') for f in [.05,.1]}
 gate=sum(residuals.values())/2
 assert min(residuals.values())<gate<max(residuals.values())
-assert run('partial',f'convergence.bsh_residual={gate:.17g}')!=0
+# No update: the deck allows one, which could carry the unmet state under the gate.
+assert run('partial',f'convergence.bsh_residual={gate:.17g};maxiter=0')!=0
 wanted={f for f,v in residuals.items() if v<=gate}
 if mirror_frequencies()!=wanted:failures.append('analysis mirror retained an unqualified alpha tensor')
 assert run('subset','dipole.frequencies=[0.1]')==0

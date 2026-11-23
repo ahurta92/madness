@@ -41,18 +41,18 @@ int main() {
           "nonfinite physical quantity is invalid");
     check(maximum_field_change({{2.0, 3.0, -0.1}}, previous).status == Availability::invalid,
           "invalid density evidence is not hidden by maximum reduction");
-    const auto outcome = evaluate_metric(Metric::density_change, density, {},
-        {"scf", "a1", {1e-6, 8}, 3, "ctx"}, 0.1, 0.1);
+    const ResolvedCriterion scaled{Metric::density_change, 0.1, 0.0, 0.1, LimitRule::scaled};
+    const auto outcome = check_metric(scaled, density, {}, {"scf", "a1", {1e-6, 8}, 3, "ctx"});
     check(outcome.result == CheckResult::met && outcome.limit && std::abs(*outcome.limit - 0.6) < 1e-15,
-          "constructed evidence works with shared relative assessment");
+          "constructed evidence works with the shared scaled rule");
     for (std::size_t updates : {0u, 1u}) {
         IterationMetrics state{{"scf", "a1", {1e-6, 8}, updates, "ctx"},
             {{"ground", {}, {{Metric::bsh_residual, MetricValue::measured(0.1, 1.0)}}}}};
-        ResolvedSettings settings{{1e-6, 8}, true, 1, 0,
-            {{Metric::bsh_residual, true, 0.5, 0.5, 0.0, {}}}};
+        ResolvedSettings settings{{1e-6, 8}, 1, 0,
+            {{Metric::bsh_residual, 0.5, 0.0, 0.5, LimitRule::plain}}, {}};
         int prepared = 0;
         auto endpoint = madness::scf_continuation::assess_prepared_endpoint(
-            [&] { return decide(settings, {"scf", "ctx", {"ground"}}, {updates, updates, true}, state); },
+            [&] { return decide(settings, {"scf", "ctx", {"ground"}}, {updates, updates, true}, state, true); },
             [&] { ++prepared; state.states[0].metrics[Metric::bsh_residual] = MetricValue::measured(0.8, 1.0); },
             [](const Decision& decision) { return decision.action != Action::update; });
         check(prepared == 1 && endpoint.action == (updates == 0 ? Action::update : Action::stop),

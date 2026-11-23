@@ -20,7 +20,6 @@ with tempfile.TemporaryDirectory(prefix='scf-final-evidence-') as scratch:
  localize canon
  protocol [1e-4]
  maxiter 2
- convergence.criteria [bsh_residual,energy_change,density_change,kinetic_change]
  convergence.bsh_residual 1000
  convergence.energy_change 0
  convergence.density_change 1000

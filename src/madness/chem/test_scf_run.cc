@@ -35,9 +35,12 @@ int main(int argc, char** argv) {
             p.set_user_defined_value("protocol", std::vector<double>{1e-4});
             p.set_user_defined_value("localize", std::string("canon"));
             p.set_user_defined_value("print_level", 0);
-            p.set_user_defined_value("maxiter", 0);
-            p.set_user_defined_value("convergence.criteria", std::vector<std::string>{"bsh_residual"});
+            // One update with loose change targets, so a later loose BSH target
+            // is judged on saved evidence for every default criterion.
+            p.set_user_defined_value("maxiter", 1);
             p.set_user_defined_value("convergence.bsh_residual", 0.0);
+            p.set_user_defined_value("convergence.density_change", 1000.0);
+            p.set_user_defined_value("convergence.energy_change", 1000.0);
             SCF scf(world, p, molecule); scf.work_dir = scratch;
             MolecularEnergy energy(world, scf);
             energy.value(molecule.get_all_coords().flat());
@@ -49,9 +52,13 @@ int main(int argc, char** argv) {
             MADNESS_CHECK_THROW(initial_times.size() == 1, "fresh SCF timing record is missing");
             auto iterations = checkpoint::json::array();
             collect_iterations(initial_times.back().at("timing"), iterations);
-            MADNESS_CHECK_THROW(iterations.size() == 1 && iterations[0].at("iteration") == 0,
-                                "zero-update endpoint still has one evaluation timing");
-            for (const auto& step : iterations[0].at("children"))
+            MADNESS_CHECK_THROW(iterations.size() == 2 && iterations[0].at("iteration") == 0 &&
+                                iterations[1].at("iteration") == 1,
+                                "one-update endpoint has two evaluation timings");
+            bool advanced = false;
+            for (const auto& step : iterations[0].at("children")) advanced |= step.at("name") == "advance";
+            MADNESS_CHECK_THROW(advanced, "the update after the first evaluation must be timed");
+            for (const auto& step : iterations[1].at("children"))
                 MADNESS_CHECK_THROW(step.at("name") != "advance", "terminal check must not report an update");
             scf.param.set_user_defined_value("convergence.bsh_residual", 1000.0);
             energy.value(molecule.get_all_coords().flat());

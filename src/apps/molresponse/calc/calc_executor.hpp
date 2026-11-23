@@ -613,7 +613,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         ++evaluations;
         if (world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
           it::write_iteration_metrics(std::cout,"response",metrics,decision,
-              response_shared::metric_labels(),binding.controls().final_protocol);
+              response_shared::metric_labels(),binding.final_level());
         binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
           MADNESS_CHECK_THROW(state.responses.size()==1,"driven task must contain one response state");
           state.responses.front().save(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
@@ -625,7 +625,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
           it::write_checkpoint_saved(std::cout,decision);
         ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids);
       };
-      const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.expected(),
+      const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.final_level(),binding.expected(),
           binding.info(),binding.previous_updates(),observe,
           [&](const it::IterationInfo& info,const it::IterationTiming& timing) {
             ctx.shared_response->record_iteration(info,timing);
@@ -1034,7 +1034,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
     const auto observer=[&](const auto& current,const it::IterationMetrics& metrics,const it::Decision& decision,const it::Progress& progress) {
       ++evaluations;
       if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal)
-        it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.controls().final_protocol);
+        it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.final_level());
       binding.publish(metrics,decision,progress,[&](const auto& directory) {
         return response_shared::save_excited_functions(world,current,directory);
       });
@@ -1042,7 +1042,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
         it::write_checkpoint_saved(std::cout,decision);
       session.record_evaluation(metrics,decision,binding.definition().metric_ids);
     };
-    const auto decision=solvers::iterate_shared(solver,state,binding.controls(),binding.expected(),binding.info(),binding.previous_updates(),observer,
+    const auto decision=solvers::iterate_shared(solver,state,binding.controls(),binding.final_level(),binding.expected(),binding.info(),binding.previous_updates(),observer,
       [&](const it::IterationInfo& info,const it::IterationTiming& measured) {
         session.record_iteration(info,measured);
         if(world.rank()==0 && ctx.print_level>=PrintLevel::Normal) it::write_iteration_timing(std::cout,"response",info,measured);

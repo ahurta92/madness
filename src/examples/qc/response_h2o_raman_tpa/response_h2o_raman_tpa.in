@@ -17,7 +17,6 @@
 # Run:   ./run.sh          (or: madqc --wf=response response_h2o_raman_tpa.in)
 
 dft
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.0005
     convergence.density_change 0.0001
     convergence.energy_change 1e-05
@@ -40,7 +39,6 @@ response
     excited.num_states    2
     excited.tda           false
     excited.tpa           true
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.0005
     convergence.density_change 0.0005
     convergence.energy_change 0.0005

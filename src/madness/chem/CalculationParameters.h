@@ -63,17 +63,23 @@ struct CalculationParameters : public QCCalculationParametersBase {
   }
   bool visible_input(const std::string& key) const override {
       if (key == "restartao" || key == "no_compute") return false;
-      if (scf_input_owner) return !retired_scf_input(key);
+      if (scf_input_owner) return !retired_scf_input(key) && !iteration::retired_convergence_input(key);
       return key != "checkpoint.every_iterations" && !key.starts_with("convergence.");
   }
+  static bool convergence_number(const std::string& key) {
+      return key == "convergence.floor_factor" || key == "convergence.bsh_residual" ||
+          key == "convergence.density_change" || key == "convergence.energy_change" ||
+          key == "convergence.kinetic_change";
+  }
   void validate_input_value(const std::string& key, const std::string& value) const override {
-      const bool shared = key == "convergence.criteria" || key == "checkpoint.every_iterations" ||
+      const bool shared = key == "convergence.criteria" || key == "convergence.floor_factor" || key == "checkpoint.every_iterations" ||
           key.starts_with("convergence.bsh_residual") || key.starts_with("convergence.density_change") ||
           key.starts_with("convergence.energy_change") || key.starts_with("convergence.kinetic_change");
       if (shared && !scf_input_owner) throw std::invalid_argument("unknown input for this engine: " + key);
       if (scf_input_owner) {
           if (retired_scf_input(key)) throw std::invalid_argument("unknown input: " + key);
-          if ((shared && key != "convergence.criteria") || key == "maxiter" || key == "nv_its") {
+          if (const auto retired = iteration::retired_convergence_input(key)) throw std::invalid_argument(*retired);
+          if (convergence_number(key) || key == "checkpoint.every_iterations" || key == "maxiter" || key == "nv_its") {
               std::size_t used = 0;
               const double number = std::stod(value, &used);
               if (!std::isfinite(number) || number < 0.0 || value.find_first_not_of(" \t", used) != std::string::npos)
@@ -89,7 +95,7 @@ struct CalculationParameters : public QCCalculationParametersBase {
               "convergence.bsh_residual", "convergence.bsh_residual.relative",
               "convergence.density_change", "convergence.density_change.relative",
               "convergence.energy_change", "convergence.energy_change.relative",
-              "convergence.kinetic_change", "convergence.kinetic_change.relative"};
+              "convergence.kinetic_change", "convergence.kinetic_change.relative", "convergence.floor_factor"};
   }
 
 	CalculationParameters(const CalculationParameters& other) = default;
@@ -106,11 +112,13 @@ struct CalculationParameters : public QCCalculationParametersBase {
 
 	/// ctor reading out the input file
 	CalculationParameters() {
-        initialize<std::vector<std::string>>("convergence.criteria", {}, "SCF convergence metrics; empty selects model defaults");
+        // Retired keys stay registered so a deck that writes them gets a migration error.
+        initialize<std::vector<std::string>>("convergence.criteria", {}, "retired: targets select the criteria");
         for (const auto* metric : {"bsh_residual", "density_change", "energy_change", "kinetic_change"}) {
-            initialize<double>(std::string("convergence.") + metric, -1.0, "SCF absolute tolerance; omitted uses the model default");
-            initialize<double>(std::string("convergence.") + metric + ".relative", 0.0, "SCF relative tolerance");
+            initialize<double>(std::string("convergence.") + metric, -1.0, "SCF convergence target; omitted uses the model default");
+            initialize<double>(std::string("convergence.") + metric + ".relative", 0.0, "retired: the limit rule belongs to the application");
         }
+        initialize<double>("convergence.floor_factor", -1.0, "floor = factor * protocol threshold; omitted uses the model value, else 5");
         initialize<int>("checkpoint.every_iterations", 0, "SCF interior checkpoint cadence; zero saves only endpoints");
 		initialize<std::string>("prefix","mad","prefixes your output/restart/json/plot/etc files");
 		initialize<double>("charge",0.0,"total molecular charge");

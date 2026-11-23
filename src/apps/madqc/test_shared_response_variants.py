@@ -35,9 +35,10 @@ subjects = [('dipole_z', 0.), ('dipole_z', .05)] + ([('nuc_0_z', 0.)] if a.nucle
  nopen {nopen}
  protocol [1e-4]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
@@ -46,9 +47,9 @@ response
  dipole.frequencies [0.0, 0.05]
  requested_properties [polarizability]
  {nuclear}
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ maxiter 1
  print_level 1
 end
 molecule
@@ -79,8 +80,10 @@ for (_, frequency), record in zip(subjects, first):
     assert record['task']['outcome']['complete']
     metrics = {m['metric']: m for m in record['task']['iteration']['metrics']}
     assert metrics['energy_change']['status'] == 'not_applicable'
-    assert metrics['density_change']['status'] == 'unavailable'
-    assert metrics['kinetic_change']['status'] == 'unavailable'
+    # One update with loose targets: change metrics have a predecessor.
+    assert record['task']['iteration']['updates_this_attempt'] == 1
+    assert metrics['density_change']['status'] == 'measured'
+    assert metrics['kinetic_change']['status'] == 'measured'
     expected = {f'x_alpha:{i}' for i in range(na)} | {f'x_beta:{i}' for i in range(nb)}
     if frequency:
         expected |= {f'y_alpha:{i}' for i in range(na)} | {f'y_beta:{i}' for i in range(nb)}

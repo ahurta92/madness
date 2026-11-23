@@ -33,9 +33,10 @@ def main():
  localize canon
  aobasis 6-31gss
  protocol [1e-4]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ convergence.energy_change 1000
+ maxiter 1
  print_level 0
  {settings}
 end

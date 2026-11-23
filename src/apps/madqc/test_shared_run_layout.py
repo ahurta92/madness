@@ -24,18 +24,19 @@ print('artifacts:', work, flush=True)
  plotdens true
  plotcube true
  npt_plot 5
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
  dipole true
  dipole.directions z
  dipole.frequencies [0.0]
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
  print_level 0
 end
 molecule

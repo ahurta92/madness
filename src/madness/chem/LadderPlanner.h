@@ -399,7 +399,7 @@ inline RestartPlan plan_restart(const std::vector<Protocol>& protocols,
         }
     }
     // Validate the saved frame independently of whether its metrics pass today's
-    // limits. Final settings avoid applying a model floor for the wrong rung.
+    // limits; only membership and identity matter here, not the floor.
     auto saved_settings = final_settings;
     saved_settings.protocol = metrics.info.protocol;
     if (!std::isfinite(saved_settings.protocol.thresh) || saved_settings.protocol.thresh <= 0.0
@@ -422,7 +422,7 @@ inline RestartPlan plan_restart(const std::vector<Protocol>& protocols,
     if (saved->use == SavedEvidenceUse::guess_only || saved->bundle_expanded)
         return plan;
     if (plan.start_protocol + 1 == protocols.size()) {
-        plan.completion = saved_completion(final_settings, expected, metrics);
+        plan.completion = saved_completion(final_settings, expected, metrics, true);
         if (plan.completion) {
             plan.action = RestartAction::reuse;
             plan.reason = "saved_metrics_satisfy_request";

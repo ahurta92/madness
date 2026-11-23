@@ -34,18 +34,19 @@ def run(label, *, ground='', response='', molecule='', success=True):
  xc hf
  localize canon
  protocol [1e-4, 1e-6]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ convergence.energy_change 1000
+ maxiter 1
  print_level 0
  {ground}
 end
 response
  dipole.directions z
  dipole.frequencies [0.0, 0.05]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 1000
- maxiter 0
+ convergence.density_change 1000
+ maxiter 1
  print_level 1
  {response}
 end
@@ -103,9 +104,10 @@ assert sources(continued) != sources(initial)
 for previous, current in zip(initial, continued):
     assert current['task']['inputs'][0]['generation'] == updated_ground['generation']
     assert current['task']['definition']['protocol'] == previous['task']['definition']['protocol']
-    assert current['task']['iteration']['updates_this_attempt'] == 0
-    assert metric(current, 'density_change')['status'] == 'unavailable'
-    assert metric(current, 'kinetic_change')['status'] == 'unavailable'
+    # Checked anew with one update: change metrics need a predecessor to meet loose targets.
+    assert current['task']['iteration']['updates_this_attempt'] == 1
+    assert metric(current, 'density_change')['status'] == 'measured'
+    assert metric(current, 'kinetic_change')['status'] == 'measured'
     assert current['task']['outcome']['complete']
 # Existing measurements may qualify another request without a numerical update.
 run('reuse', response='convergence.bsh_residual 500')
@@ -114,9 +116,9 @@ assert states() == continued
 run('smoothing', molecule='eprec 1e-8')
 smoothed = states()
 assert sources(smoothed) != sources(continued)
-assert all(metric(r, 'density_change')['status'] == 'unavailable' for r in smoothed)
+assert all(metric(r, 'density_change')['status'] == 'measured' and r['task']['iteration']['updates_this_attempt'] == 1 for r in smoothed)
 # Same model, changed response request: native functions survive, comparison history resets.
-run('tight-response', molecule='eprec 1e-8', response='convergence.bsh_residual 0', success=False)
+run('tight-response', molecule='eprec 1e-8', response='convergence.bsh_residual 0\n maxiter 0', success=False)
 tightened = states()
 for previous, current in zip(smoothed, tightened):
     assert not current['task']['outcome']['complete']

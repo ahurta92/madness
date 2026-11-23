@@ -50,18 +50,21 @@ int main(int argc, char** argv) {
                 protocol = {std::stod(options.value("protocol"))};
                 scf.param.set_user_defined_value("protocol", protocol);
             }
+            // The model supplies the three default criteria; kinetic change is a
+            // criterion only with a written target (its model default here).
             it::Request request;
-            request.criteria = {it::Metric::bsh_residual, it::Metric::density_change, it::Metric::energy_change};
-            if (options.key_exists("kinetic-required")) request.criteria.push_back(it::Metric::kinetic_change);
+            if (options.key_exists("kinetic-required"))
+                request.targets[it::Metric::kinetic_change] =
+                    *scf.iteration_model().at(it::Metric::kinetic_change).default_target;
             request.max_updates = 25;
             for (auto metric : {it::Metric::bsh_residual, it::Metric::density_change,
                                 it::Metric::energy_change, it::Metric::kinetic_change}) {
                 const std::string key = it::metric_name(metric);
-                if (options.key_exists(key)) request.tolerances[metric] = {std::stod(options.value(key)), 0.0};
+                if (options.key_exists(key)) request.targets[metric] = std::stod(options.value(key));
             }
             scf.set_protocol<3>(world, protocol.front());
             // Fail before costly guess construction if a default is missing.
-            it::resolve(request, scf.iteration_model(), {protocol.front(), FunctionDefaults<3>::get_k()}, protocol.size() == 1);
+            it::resolve(request, scf.iteration_model(), {protocol.front(), FunctionDefaults<3>::get_k()}, protocol.size() == 1, "ground state");
             scf.ao = scf.project_ao_basis(world, scf.aobasis);
             scf.make_nuclear_potential(world);
             scf.initial_guess(world);
@@ -75,9 +78,10 @@ int main(int argc, char** argv) {
                 scf.reset_aobasis("sto-3g");
                 scf.ao.clear(); world.gop.fence();
                 scf.ao = scf.project_ao_basis(world, scf.aobasis);
+                const bool final_level = stage + 1 == protocol.size();
                 auto settings = it::resolve(request, scf.iteration_model(),
-                    {protocol[stage], FunctionDefaults<3>::get_k()}, stage + 1 == protocol.size());
-                SCF::IterationControl control{settings, {"scf", name, {"ground"}}, "calibration"};
+                    {protocol[stage], FunctionDefaults<3>::get_k()}, final_level, "ground state");
+                SCF::IterationControl control{settings, final_level, {"scf", name, {"ground"}}, "calibration"};
                 it::IterationMetrics latest;
                 control.observer = [&](World&, const SCF&, const it::IterationMetrics& metrics,
                                        const it::Decision& decision, const it::Progress&) {
@@ -93,7 +97,7 @@ int main(int argc, char** argv) {
                 // be hidden by a successful solve at the following protocol.
                 if (stage == 0 && options.key_exists("invalid-stage")) {
                     evidence["injected_invalid_state"] = true;
-                    last = it::decide(settings, control.task, {last.info.iteration, last.info.iteration, false}, latest);
+                    last = it::decide(settings, control.task, {last.info.iteration, last.info.iteration, false}, latest, final_level);
                 }
                 evidence["protocol_decisions"].push_back({{"threshold", protocol[stage]},
                     {"action", static_cast<int>(last.action)}, {"reason", last.reason}});

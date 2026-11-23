@@ -77,10 +77,10 @@ void review_regression(World& world, const std::string& mode) {
     scf.make_nuclear_potential(world);
     scf.load_mos(world);
     it::Request request;
-    request.criteria = {it::Metric::bsh_residual};
-    request.tolerances[it::Metric::bsh_residual] = {0.0, 0.0};
+    request.targets[it::Metric::bsh_residual] = 0.0;
+    request.floor_factor = 0.0; // a strict, never-met request
     request.max_updates = 1;
-    SCF::IterationControl control{it::resolve(request, scf.iteration_model(), {1e-4, 6}, true),
+    SCF::IterationControl control{it::resolve(request, scf.iteration_model(), {1e-4, 6}, true), true,
         {"virtuals", "review-fixed-context", {"virtuals"}}, "a1"};
     if (mode == "empty" || mode == "occupations") {
         scf.last_calculation_outcome = CalculationOutcome{true, "preserve_previous_outcome"};
@@ -143,12 +143,11 @@ void exercise(World& world, int atom, const std::string& xc) {
     occupied.make_nuclear_potential(world);
     occupied.initial_guess(world);
     it::Request ground_request;
-    ground_request.criteria = {it::Metric::bsh_residual, it::Metric::density_change, it::Metric::energy_change};
-    ground_request.tolerances = {{it::Metric::bsh_residual, {1e-3, 0}},
-        {it::Metric::density_change, {1e-3, 0}}, {it::Metric::energy_change, {1e-5, 0}}};
+    ground_request.targets = {{it::Metric::bsh_residual, 1e-3},
+        {it::Metric::density_change, 1e-3}, {it::Metric::energy_change, 1e-5}};
     ground_request.max_updates = 30;
     const it::Protocol protocol{1e-4, 6};
-    SCF::IterationControl ground_control{it::resolve(ground_request, occupied.iteration_model(), protocol, true),
+    SCF::IterationControl ground_control{it::resolve(ground_request, occupied.iteration_model(), protocol, true), true,
         {"occupied", name + "-occupied-context", {"ground"}}, "a1"};
     cp::CheckpointStore store(world, name + "-run");
     store.initialize("a1");
@@ -199,18 +198,24 @@ void exercise(World& world, int atom, const std::string& xc) {
     const auto alpha_eps = copy(scf.aeps), beta_eps = copy(scf.beps);
     const double occupied_energy = scf.current_energy;
     const auto model = scf.iteration_model();
+    // Targets for the fixed changes are written but cannot be judged here:
+    // they are reported as not applicable, and only the residual decides.
     it::Request request;
-    request.criteria = {it::Metric::bsh_residual, it::Metric::density_change,
-                        it::Metric::energy_change, it::Metric::kinetic_change};
-    request.tolerances[it::Metric::bsh_residual] = {0.0, 0.0};
+    for (const auto metric : {it::Metric::bsh_residual, it::Metric::density_change,
+                              it::Metric::energy_change, it::Metric::kinetic_change})
+        request.targets[metric] = 0.0;
+    request.floor_factor = 0.0; // a strict, never-met request
     request.max_updates = 1;
     request.checkpoint_interval = 1;
     for (const auto metric : {it::Metric::density_change, it::Metric::energy_change, it::Metric::kinetic_change})
         check(model.at(metric).support == it::Support::not_applicable, "fixed occupied changes are inapplicable");
     auto inapplicable = request;
-    inapplicable.criteria = {it::Metric::density_change, it::Metric::energy_change, it::Metric::kinetic_change};
-    rejects([&] { it::resolve(inapplicable, model, protocol, true); }, "fixed changes alone cannot converge virtuals");
-    SCF::IterationControl control{it::resolve(request, model, protocol, true),
+    inapplicable.targets.erase(it::Metric::bsh_residual);
+    const auto fixed_only = it::resolve(inapplicable, model, protocol, true);
+    check(fixed_only.criteria.size() == 1 && fixed_only.criteria[0].metric == it::Metric::bsh_residual &&
+          fixed_only.criteria[0].requested == 1e-4 && fixed_only.not_applicable.size() == 3,
+          "fixed changes alone never converge virtuals: the residual default still decides");
+    SCF::IterationControl control{it::resolve(request, model, protocol, true), true,
         {"virtuals", name + "-fixed-source-g1", {"virtuals"}}, "a1"};
     int writes = 0;
     std::vector<it::IterationMetrics> records;
@@ -268,8 +273,9 @@ void exercise(World& world, int atom, const std::string& xc) {
     auto bad = control;
     bad.task.states = {"ground"};
     rejects([&] { scf.solve_virtuals(world, bad); }, "frozen task cannot claim ordinary ground evidence");
-    bad = control; bad.settings.criteria[1].applicable = true;
-    rejects([&] { scf.solve_virtuals(world, bad); }, "caller cannot make a fixed density applicable");
+    bad = control;
+    bad.settings.criteria.push_back({it::Metric::density_change, 0.0, 0.0, 0.0, it::LimitRule::plain});
+    rejects([&] { scf.solve_virtuals(world, bad); }, "caller cannot make a fixed density a criterion");
     bad = control; bad.settings.protocol.k = 8;
     rejects([&] { scf.solve_virtuals(world, bad); }, "wrong representation rejected");
     if (scf.param.have_beta()) {
@@ -298,7 +304,7 @@ void exercise(World& world, int atom, const std::string& xc) {
     check(bool(loaded), "native virtual bundle and metrics are published");
     auto saved = cp::iteration_metrics_from_manifest(*loaded);
     check(saved.info == records.back().info, "native evidence identifies exact virtual iteration");
-    check(!it::saved_completion(control.settings, control.task, saved), "unmet saved request must iterate");
+    check(!it::saved_completion(control.settings, control.task, saved, true), "unmet saved request must iterate");
     scf.param.set_user_defined_value("prefix", (store.task_directory("scf", "virtuals") / loaded->generation / "scf").string());
     scf.load_mos(world);
     control.previous_updates = 1;
@@ -318,7 +324,8 @@ void exercise(World& world, int atom, const std::string& xc) {
     check(end.action == it::Action::stop && records.size() == 1 && end.info.iteration == 0,
           "strict zero allowance evaluates without applying KAIN");
     scf.param.set_user_defined_value("protocol", std::vector<double>{1e-4, 1e-6});
-    control.settings = it::resolve(capped, model, protocol, false);
+    control.settings = it::resolve(capped, model, protocol, true);
+    control.final_protocol = false;
     records.clear();
     end = scf.solve_virtuals(world, control);
     check(end.action == it::Action::finish_protocol && records.size() == 1 && !scf.last_calculation_outcome->complete,
@@ -326,9 +333,10 @@ void exercise(World& world, int atom, const std::string& xc) {
     scf.param.set_user_defined_value("protocol", std::vector<double>{1e-4});
     auto relaxed = request;
     relaxed.max_updates = 0;
-    relaxed.tolerances[it::Metric::bsh_residual] = {2.0 * *records.back().states[0].metrics.at(it::Metric::bsh_residual).value, 0.0};
+    relaxed.targets[it::Metric::bsh_residual] = 2.0 * *records.back().states[0].metrics.at(it::Metric::bsh_residual).value;
     control.settings = it::resolve(relaxed, model, protocol, true);
-    check(bool(it::saved_completion(control.settings, control.task, records.back())), "sufficient saved virtual evidence reuses without evaluation");
+    control.final_protocol = true;
+    check(bool(it::saved_completion(control.settings, control.task, records.back(), true)), "sufficient saved virtual evidence reuses without evaluation");
     records.clear();
     end = scf.solve_virtuals(world, control);
     check(end.action == it::Action::complete && records.size() == 1 && end.info.iteration == 0,

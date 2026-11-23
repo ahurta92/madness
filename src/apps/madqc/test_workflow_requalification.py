@@ -24,8 +24,8 @@ def main():
 
         def run(engine, settings, *, prefix=None):
             prefix = prefix or engine
-            convergence = ("econv 1e-4\n dconv 1e-3\n save true" if engine == "nemo" else
-                           "convergence.criteria [bsh_residual, density_change, energy_change]")
+            # SCF: the default criteria, no criteria list (retired).
+            convergence = "econv 1e-4\n dconv 1e-3\n save true" if engine == "nemo" else ""
             deck = f"""dft
  xc hf
  protocol [1e-4]

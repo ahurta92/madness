@@ -20,9 +20,10 @@ print('artifacts:',work,flush=True)
  localize canon
  protocol [1e-4,1e-5]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
@@ -32,9 +33,10 @@ response
  excited.enable true
  excited.tda {str(not a.full).lower()}
  excited.num_states 2
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 1
 end
 molecule
@@ -62,9 +64,11 @@ assert first['task']['definition']['protocol']=={'threshold':1e-5,'k':8}
 assert first['task']['outcome']['complete']
 assert len(first['archives'])==2
 assert set(first['task']['definition']['subjects'])=={'es_root_0000','es_root_0001'}
+# One update with loose targets: every change metric has a predecessor.
+assert first['task']['iteration']['updates_this_attempt']==1
 for m in first['task']['iteration']['metrics']:
  if m['metric'] in ['energy_change','density_change','kinetic_change']:
-  assert m['status']=='unavailable'
+  assert m['status']=='measured'
 run('reuse')
 assert saved()==first
 run('tighten','convergence.bsh_residual=0;maxiter=1',success=False)
@@ -75,9 +79,10 @@ run('add-root','excited.num_states=3')
 expanded=saved()
 assert len(expanded['archives'])==3
 assert expanded['task']['definition']['protocol']=={'threshold':1e-5,'k':8}
-assert expanded['task']['iteration']['updates_this_attempt']==0
+# The added root needs one update before its energy change can be judged.
+assert expanded['task']['iteration']['updates_this_attempt']==1
 for m in expanded['task']['iteration']['metrics']:
- if m['metric']=='energy_change': assert m['status']=='unavailable'
+ if m['metric']=='energy_change': assert m['status']=='measured'
 run('expanded-reuse','excited.num_states=3')
 assert saved()==expanded
 result=next(c for c in json.loads((root/'results.json').read_text())['calculations'] if c['calculation_id']=='response')

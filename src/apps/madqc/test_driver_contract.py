@@ -63,14 +63,15 @@ end
         # Preserve CLI-only calls and workflow alias precedence. The last --w
         # must not override the higher-precedence --workflow selector.
         result = subprocess.run(launch+[binary,'--workflow=scf','--w=not_a_workflow',
-            '--geometry=he','--prefix=CaseRun','--dft=protocol=[1e-4];maxiter=0;convergence.criteria=[bsh_residual];convergence.bsh_residual=1000'],
+            '--geometry=he','--prefix=CaseRun','--dft=protocol=[1e-4];maxiter=1;convergence.bsh_residual=1000;convergence.density_change=1000;convergence.energy_change=1000'],
             cwd=work,env=env,capture_output=True,text=True,timeout=90)
         assert result.returncode == 0, result.stdout+result.stderr
         assert (work/'CaseRun/results.json').exists()
         # JSON/file input keeps CLI override precedence and case-sensitive paths.
         (work/'MixedCase.json').write_text(json.dumps({'dft': {
-            'maxiter': 0, 'protocol': [1e-4],
-            'convergence.criteria': ['bsh_residual'],
+            'maxiter': 1, 'protocol': [1e-4],
+            'convergence.density_change': 1000,
+            'convergence.energy_change': 1000,
             'convergence.bsh_residual': 0}}))
         result = subprocess.run(launch+[binary,'MixedCase.json','--wf=scf',
             '--geometry=he','--prefix=JsonRun','--dft=convergence.bsh_residual=1000'],
@@ -79,7 +80,7 @@ end
         assert (work/'JsonRun/results.json').exists()
         (work/'nested.in').write_text('geometry\nmolecule\n He 0 0 0\nend\nend\n')
         result = subprocess.run(launch+[binary,'nested.in','--wf=scf','--prefix=nested',
-            '--dft=protocol=[1e-4];maxiter=0;convergence.criteria=[bsh_residual];convergence.bsh_residual=1000'],
+            '--dft=protocol=[1e-4];maxiter=1;convergence.bsh_residual=1000;convergence.density_change=1000;convergence.energy_change=1000'],
             cwd=work,env=env,capture_output=True,text=True,timeout=90)
         assert result.returncode == 0, result.stdout+result.stderr
         assert (work/'nested/results.json').exists()

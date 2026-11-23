@@ -30,15 +30,15 @@ inline TaskDefinition excited_task(std::size_t roots) {
   for(std::size_t root=0;root<roots;++root) subjects.push_back(make_root_id(static_cast<int>(root)));
   return {{{"subjects",subjects},{"es_checkpoint_version",1}},ids,definitions_es,
       [](it::Protocol protocol) {
+        // Excited states also judge the change in excitation energy.
         auto metrics=model(protocol);
-        metrics[it::Metric::energy_change]={it::Support::supported,{},
-          it::LegacyFloor{5.*protocol.thresh,"legacy_response_5_times_threshold",{{"threshold",protocol.thresh},{"factor",5.0}}}};
+        metrics[it::Metric::energy_change]={it::Support::supported,true,5e-4,it::LimitRule::plain,{}};
         return metrics;
       },
       [](const json& previous,const json& current) {
         cp::records::require(previous.at("layout")==current.at("layout"),
             "unsupported excited checkpoint block layout");
-      },true};
+      },true,"excited states",excited_metric_labels()};
 }
 
 // Use the existing per-root native serializer. The shared manifest already

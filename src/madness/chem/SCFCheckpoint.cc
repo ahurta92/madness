@@ -230,7 +230,7 @@ void SCFCheckpoint::load(const Restart& restart, bool report_preparation) {
         it::Assessment assessment;
         if (restart.display_request_)
             assessment = it::assess(it::resolve(*restart.display_request_, scf_.iteration_model(), target,
-                !report_preparation && restart.plan.start_protocol + 1 == restart.protocols.size()), expected(), metrics);
+                target == restart.protocols.back(), "ground state"), expected(), metrics);
         it::write_restart_summary(std::cout, report_preparation ? "SCF preparation" : "SCF", metrics,
             target, assessment, reuse, metric_labels(),
             report_preparation ? "Loaded saved preparation functions." : "");
@@ -281,8 +281,8 @@ void SCFCheckpoint::load_guess(const cp::Manifest& source) {
 SCF::IterationControl SCFCheckpoint::control(const it::Request& request, it::Protocol protocol,
                                              bool final_protocol, std::size_t previous_updates) {
     check_current();
-    SCF::IterationControl result{it::resolve(request, scf_.iteration_model(), protocol, final_protocol),
-                                expected(), identity_.attempt_id, previous_updates};
+    SCF::IterationControl result{it::resolve(request, scf_.iteration_model(), protocol, final_protocol, "ground state"),
+                                final_protocol, expected(), identity_.attempt_id, previous_updates};
     result.observer = [this, final_protocol](World& world, const SCF& owner, const it::IterationMetrics& metrics,
                              const it::Decision& decision, const it::Progress& progress) {
         cp::records::require(&world == &world_ && &owner == &scf_, "SCF control used with another application");

@@ -2703,7 +2703,7 @@ std::optional<iteration::Decision> SCF::solve_virtuals_impl(World& world, const 
             const iteration::IterationMetrics metrics{{control->task.task_id, control->attempt_id,
                 control->settings.protocol, std::size_t(iter), control->task.context_id}, {std::move(state)}};
             const iteration::Progress progress{std::size_t(iter), control->previous_updates + std::size_t(iter), valid};
-            decision = iteration::decide(control->settings, control->task, progress, metrics);
+            decision = iteration::decide(control->settings, control->task, progress, metrics, control->final_protocol);
             if (decision->action != iteration::Action::update)
                 last_calculation_outcome = CalculationOutcome{decision->action == iteration::Action::complete, decision->reason};
             timing.steps.emplace_back("prepare/evaluate/decide", iteration_timer.lap());
@@ -2995,27 +2995,20 @@ iteration::ModelMetrics SCF::iteration_model() const {
     using namespace iteration;
     MADNESS_CHECK_THROW(restart_representation == Representation::mo,
                        "shared SCF metrics do not describe a regularized solve");
-    const double threshold = FunctionDefaults<3>::get_thresh();
-    const double atoms = std::max(5.0, double(molecule.natom()));
     if (param.freeze_occupied())
-        return {{Metric::bsh_residual, {Support::supported, 1e-4,
-                    LegacyFloor{5.0 * threshold, "5 * threshold", {{"threshold", threshold}}}}},
-                {Metric::density_change, {Support::not_applicable, {}, {}}},
-                {Metric::energy_change, {Support::not_applicable, {}, {}}},
-                {Metric::kinetic_change, {Support::not_applicable, {}, {}}}};
-    // Only the threshold-dependent parts of engine_check_limits apply here.
-    // User tolerances are resolved separately; no legacy dconv factor transfers
-    // to the final request, energy change or physical kinetic change.
-    // Initial defaults calibrated with curated HF, hybrid and open-shell
-    // meta-GGA cases; see docs/design/madqc-metric-validation.md. A coarse final
-    // representation may still fail these requests; no final floor is applied.
-    return {{Metric::bsh_residual, {Support::supported, 1e-4,
-                LegacyFloor{5.0 * threshold, "5 * threshold", {{"threshold", threshold}}}}},
-            {Metric::density_change, {Support::supported, 1e-4,
-                LegacyFloor{atoms * threshold, "max(5, natom) * threshold",
-                            {{"threshold", threshold}, {"natom", double(molecule.natom())}}}}},
-            {Metric::energy_change, {Support::supported, 1e-5, {}}},
-            {Metric::kinetic_change, {Support::supported, 1e-5, {}}}};
+        return {{Metric::bsh_residual, {Support::supported, true, 1e-4, LimitRule::plain, {}}},
+                {Metric::density_change, {Support::not_applicable, false, {}, LimitRule::plain, {}}},
+                {Metric::energy_change, {Support::not_applicable, false, {}, LimitRule::plain, {}}},
+                {Metric::kinetic_change, {Support::not_applicable, false, {}, LimitRule::plain, {}}}};
+    // Default targets calibrated with curated HF, hybrid and open-shell meta-GGA
+    // cases; see docs/design/madqc-metric-validation.md. The floor (factor times
+    // the protocol threshold) applies at every level; the density keeps its
+    // legacy max(5, natom) factor, the others use the shared default.
+    const double density_factor = std::max(shared_floor_factor, double(molecule.natom()));
+    return {{Metric::bsh_residual, {Support::supported, true, 1e-4, LimitRule::plain, {}}},
+            {Metric::density_change, {Support::supported, true, 1e-4, LimitRule::plain, density_factor}},
+            {Metric::energy_change, {Support::supported, true, 1e-5, LimitRule::plain, {}}},
+            {Metric::kinetic_change, {Support::supported, false, 1e-5, LimitRule::plain, {}}}};
 }
 
 std::map<iteration::Metric, std::string> SCF::iteration_metric_set() {
@@ -3115,12 +3108,12 @@ void SCF::validate_iteration_control(const IterationControl& control, const std:
     const auto requested = param.protocol();
     const bool extra_virtuals = param.nmo_alpha() > param.nalpha() + param.nvalpha() ||
         (param.have_beta() && param.nmo_beta() > param.nbeta() + param.nvbeta());
-    MADNESS_CHECK_THROW(!control.preparing_virtuals || (extra_virtuals && !control.settings.final_protocol),
+    MADNESS_CHECK_THROW(!control.preparing_virtuals || (extra_virtuals && !control.final_protocol),
                        "SCF preparation requires an extra virtual bundle and intermediate control");
     MADNESS_CHECK_THROW(!requested.empty() &&
                        std::find(requested.begin(), requested.end(), protocol.thresh) != requested.end() &&
                        control.settings.protocol == protocol &&
-                       control.settings.final_protocol == (protocol.thresh == requested.back() && !control.preparing_virtuals),
+                       control.final_protocol == (protocol.thresh == requested.back() && !control.preparing_virtuals),
                        "SCF shared settings do not match the current or final requested protocol");
     MADNESS_CHECK_THROW(!checkpoint_observer, "SCF shared and legacy checkpoint observers cannot coexist");
     MADNESS_CHECK_THROW(control.task.states == std::vector<std::string>{subject},
@@ -3133,10 +3126,9 @@ void SCF::validate_iteration_control(const IterationControl& control, const std:
     const auto model = iteration_model();
     for (const auto& criterion : control.settings.criteria) {
         MADNESS_CHECK_THROW(model.contains(criterion.metric) &&
-                           model.at(criterion.metric).support != iteration::Support::unsupported &&
-                           criterion.applicable == (model.at(criterion.metric).support == iteration::Support::supported) &&
-                           iteration::finite_nonnegative(criterion.absolute) &&
-                           iteration::finite_nonnegative(criterion.relative), "invalid shared SCF criterion");
+                           model.at(criterion.metric).support == iteration::Support::supported &&
+                           criterion.rule == model.at(criterion.metric).rule &&
+                           iteration::finite_nonnegative(criterion.effective), "invalid shared SCF criterion");
     }
     const iteration::IterationMetrics initial{{control.task.task_id, control.attempt_id,
         protocol, 0, control.task.context_id}, {{subject, {}, {}}}};
@@ -3322,7 +3314,7 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
                 for (const auto& [metric, value] : metrics.states[0].metrics)
                     valid = valid && value.status != iteration::Availability::invalid;
                 shared_progress = {std::size_t(iter), control->previous_updates + std::size_t(iter), valid};
-                decision = iteration::decide(control->settings, control->task, shared_progress, metrics);
+                decision = iteration::decide(control->settings, control->task, shared_progress, metrics, control->final_protocol);
                 MADNESS_CHECK_THROW(valid, "invalid shared SCF measurement");
                 IterationCheckpoint step{};
                 step.iteration = iter;

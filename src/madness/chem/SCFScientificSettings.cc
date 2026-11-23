@@ -29,6 +29,7 @@ json equation_parameters(const CalculationParameters& parameters) {
              "convergence.criteria", "convergence.bsh_residual", "convergence.bsh_residual.relative",
              "convergence.density_change", "convergence.density_change.relative", "convergence.energy_change",
              "convergence.energy_change.relative", "convergence.kinetic_change", "convergence.kinetic_change.relative",
+             "convergence.floor_factor",
              "k", "protocol", "maxiter", "maxiter_per_rung", "restart.start_rung", "checkpoint.every_iterations",
              "diagnostic.iterations_per_rung", "progress.window", "progress.minimum_relative_improvement",
              "maxsub", "maxrotn", "nio", "save", "restart", "restartao", "no_compute",

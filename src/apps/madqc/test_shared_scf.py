@@ -36,7 +36,6 @@ def main():
  xc hf
  localize canon
  protocol [1e-4]
- convergence.criteria [bsh_residual]
  convergence.bsh_residual 0
  maxiter 0
  print_level 0

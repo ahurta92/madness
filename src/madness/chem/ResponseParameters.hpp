@@ -12,17 +12,20 @@ struct ResponseParameters : public QCCalculationParametersBase {
                 "convergence.bsh_residual", "convergence.bsh_residual.relative",
                 "convergence.density_change", "convergence.density_change.relative",
                 "convergence.energy_change", "convergence.energy_change.relative",
-                "convergence.kinetic_change", "convergence.kinetic_change.relative"};
+                "convergence.kinetic_change", "convergence.kinetic_change.relative", "convergence.floor_factor"};
     }
     static bool retired_input(const std::string& key) {
         return key.starts_with("accuracy.") || key.starts_with("progress.") || key.starts_with("stall.") ||
             key == "convergence.use_default_criteria" || key == "diagnostic.iterations_per_rung" ||
             key == "dconv" || key == "excited.guess_max_iter" || key == "seed.start_rung" || key == "seed.es_warmup" || key == "excited.maxiter";
     }
-    bool visible_input(const std::string& key) const override { return !retired_input(key); }
+    bool visible_input(const std::string& key) const override {
+        return !retired_input(key) && !iteration::retired_convergence_input(key);
+    }
     void validate_input_value(const std::string& key, const std::string& value) const override {
         if (retired_input(key)) throw std::invalid_argument("unknown input: " + key);
-        if (key == "checkpoint.every_iterations" || key == "maxiter" ||
+        if (const auto retired = iteration::retired_convergence_input(key)) throw std::invalid_argument(*retired);
+        if (key == "checkpoint.every_iterations" || key == "maxiter" || key == "convergence.floor_factor" ||
             key.starts_with("convergence.bsh_residual") || key.starts_with("convergence.density_change") ||
             key.starts_with("convergence.energy_change") || key.starts_with("convergence.kinetic_change")) {
             std::size_t used=0;
@@ -43,13 +46,16 @@ struct ResponseParameters : public QCCalculationParametersBase {
     }
     ResponseParameters() {
         ignore_unknown_keys = false;
-        initialize<std::vector<std::string>>("convergence.criteria", {}, "Convergence metrics; default: BSH residual, density and applicable energy change");
+        // Retired keys stay registered so a deck that writes them gets a migration error.
+        initialize<std::vector<std::string>>("convergence.criteria", {}, "retired: targets select the criteria");
         for (const auto* metric : {"bsh_residual", "density_change", "energy_change", "kinetic_change"}) {
             initialize<double>(std::string("convergence.")+metric,
                 std::string(metric)=="kinetic_change" ? -1.0 : 5e-4,
-                std::string(metric)=="kinetic_change" ? "Absolute tolerance; set explicitly if selected" : "Absolute convergence tolerance");
-            initialize<double>(std::string("convergence.")+metric+".relative", 0.0, "Optional relative tolerance");
+                std::string(metric)=="kinetic_change" ? "Convergence target; writing it makes the metric a criterion"
+                                                      : "Convergence target; the solver default when omitted");
+            initialize<double>(std::string("convergence.")+metric+".relative", 0.0, "retired: the limit rule belongs to the application");
         }
+        initialize<double>("convergence.floor_factor", -1.0, "floor = factor * protocol threshold; omitted uses 5");
         initialize<int>("checkpoint.every_iterations", 0, "Shared checkpoint interval; zero saves endpoints only");
         initialize<std::string>("prefix", "response", "prefixes your output/restart/json/plot/etc files");
         initialize<std::string>("fock_json_file", "moldft.fock.json", "data file for fock matrix");

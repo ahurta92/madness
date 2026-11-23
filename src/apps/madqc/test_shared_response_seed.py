@@ -15,10 +15,10 @@ case=Path(a.source).resolve()/'src/examples/qc/response_h2o_tpa_seeded'
 work=Path(tempfile.mkdtemp(prefix='shared-seed-'))
 print('artifacts:',work,flush=True)
 deck=(case/'response_h2o_tpa_seeded.in').read_text()
-deck=re.sub(r'convergence.criteria\s+\[[^\n]*\]','convergence.criteria [bsh_residual]',deck)
-deck=re.sub(r'convergence.bsh_residual\s+\S+','convergence.bsh_residual 1000',deck)
-deck=re.sub(r'(?m)^\s*dconv\s+\S+','    convergence.criteria [bsh_residual]\n    convergence.bsh_residual 1000',deck)
-deck=re.sub(r'(?m)^(\s*maxiter)\s+\d+',r'\1 0',deck)
+# One update with loose targets on every default criterion: change metrics need a predecessor.
+deck,n=re.subn(r'convergence\.(bsh_residual|density_change|energy_change)\s+\S+',r'convergence.\1 1000',deck)
+assert n==6,n
+deck=re.sub(r'(?m)^(\s*maxiter)\s+\d+',r'\1 1',deck)
 deck=deck.replace('excited.num_states    2','excited.num_states    1').replace('excited.tpa           true','excited.tpa           false')
 deck=deck.replace('dalton.dir  dalton','dalton.dir  '+str(case/'dalton'))
 (work/'input.in').write_text(deck)
@@ -38,7 +38,7 @@ first_log=run('initial')
 assert 'imported excited bundle; fresh convergence checks' in first_log
 first=saved()
 assert first['task']['definition']['guess']['kind']=='dalton'
-assert first['task']['iteration']['updates_this_attempt']==0
+assert first['task']['iteration']['updates_this_attempt']==1
 residual=next(m for m in first['task']['iteration']['metrics'] if m['metric']=='bsh_residual')
 assert residual['status']=='measured' and len(residual['evidence']['components'])==10
 run('reuse')

@@ -69,9 +69,9 @@ void exercise(World& world,bool stream,bool batch) {
     MADNESS_CHECK(rejected); // preparation never creates an update proposal
   }
   it::IterationInfo info{"excited","attempt",{1e-4,6},0,"model"};
-  it::Request request;request.criteria={it::Metric::bsh_residual};request.max_updates=0;
-  request.tolerances[it::Metric::bsh_residual]={1e6,0.};
-  it::ModelMetrics model{{it::Metric::bsh_residual,{it::Support::supported,{},{}}}};
+  it::Request request;request.max_updates=0;
+  request.targets[it::Metric::bsh_residual]=1e6;
+  it::ModelMetrics model{{it::Metric::bsh_residual,{it::Support::supported,false,{},it::LimitRule::plain,{}}}};
   namespace cp=madness::checkpoint;
   namespace shared=molresponse_v3::response_shared;
   const auto directory=cp::detail::on_root(world,[] {
@@ -105,7 +105,7 @@ void exercise(World& world,bool stream,bool batch) {
       MADNESS_CHECK(root.metrics.at(it::Metric::kinetic_change).status==it::Availability::unavailable);
     }
   };
-  solvers::iterate_shared(solver,state,it::resolve(request,model,info.protocol,true),
+  solvers::iterate_shared(solver,state,it::resolve(request,model,info.protocol, true),true,
       {info.task_id,info.context_id,{"es_root_0000","es_root_0001"}},info,0,observer);
   MADNESS_CHECK(observations==1 && state.iter==0 && state.omega.size()==2);
   // The evaluated proposal is consumed once, with no second equation solve.

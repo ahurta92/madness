@@ -20,9 +20,10 @@ print('artifacts:', work, flush=True)
  localize canon
  protocol [1e-4,1e-5]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
@@ -31,9 +32,9 @@ response
  dipole.frequencies [0.02]
  quadratic true
  beta.frequencies [0.02]
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
  print_level 1
 end
 molecule

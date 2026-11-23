@@ -28,7 +28,6 @@ int main(int argc, char** argv) {
                 p.set_user_defined_value("spin_restricted", !charged);
                 p.set_user_defined_value("maxiter", 0);
                 p.set_user_defined_value("print_level", 0);
-                p.set_user_defined_value("convergence.criteria", std::vector<std::string>{"bsh_residual"});
                 p.set_user_defined_value("convergence.bsh_residual", 1000.0);
                 Molecule molecule; molecule.add_atom(0, 0, 0, 2, 2);
                 SCF scf(world, p, molecule);

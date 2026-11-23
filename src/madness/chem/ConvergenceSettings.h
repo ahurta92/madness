@@ -16,6 +16,7 @@
 //
 // Pure: no World, MPI, archives or solver state (B1).
 
+#include <madness/chem/ConvergenceDecision.h>
 #include <madness/chem/ExplicitCriteria.h>
 
 #include <nlohmann/json.hpp>
@@ -847,186 +848,16 @@ render_outcome_table(const ConvergenceSettings& settings,
 
 } // namespace madness::convergence
 
-// Additive shared interface. Existing applications keep their legacy API above
-// until their solver, input and checkpoint adapters migrate together.
+// The shared convergence decision (resolve, limits, decide) lives in
+// ConvergenceDecision.h. Input keys it retired fail with a migration message.
 namespace madness::iteration {
-
-struct Tolerance {
-    std::optional<double> absolute; // omitted: the model default, also for relative-only overrides
-    double relative = 0.0;
-};
-struct Request {
-    std::vector<Metric> criteria;
-    std::map<Metric, Tolerance> tolerances; // overrides; never changes selection
-    std::size_t max_updates = 0;
-    std::size_t checkpoint_interval = 0;  // zero: endpoints only
-};
-enum class Support : std::uint8_t { supported, not_applicable, unsupported };
-struct LegacyFloor {
-    double absolute = 0.0;
-    std::string rule;
-    std::map<std::string, double> inputs;
-};
-struct ModelMetric {
-    Support support = Support::unsupported;
-    std::optional<double> default_absolute;
-    // Supplied for this protocol by the owning model's documented legacy rule.
-    // The shared layer neither guesses scientific factors nor changes metrics.
-    std::optional<LegacyFloor> intermediate;
-};
-using ModelMetrics = std::map<Metric, ModelMetric>;
-struct ResolvedCriterion {
-    Metric metric = Metric::bsh_residual;
-    bool applicable = true;
-    double requested_absolute = 0.0;
-    double absolute = 0.0;
-    double relative = 0.0;
-    std::optional<LegacyFloor> adjustment;
-};
-struct ResolvedSettings {
-    Protocol protocol;
-    bool final_protocol = true;
-    std::size_t max_updates = 0;
-    std::size_t checkpoint_interval = 0;
-    std::vector<ResolvedCriterion> criteria;
-};
-
-inline ResolvedSettings resolve(const Request& request, const ModelMetrics& model,
-                                Protocol protocol, bool final_protocol) {
-    if (!std::isfinite(protocol.thresh) || protocol.thresh <= 0.0 || protocol.k <= 0)
-        throw std::invalid_argument("invalid protocol representation");
-    if (request.criteria.empty()) throw std::invalid_argument("empty convergence selection");
-    for (const auto& [metric, tolerance] : request.tolerances) {
-        metric_name(metric);
-        if ((tolerance.absolute && !finite_nonnegative(*tolerance.absolute)) || !finite_nonnegative(tolerance.relative))
-            throw std::invalid_argument("invalid convergence tolerance");
-    }
-    ResolvedSettings settings{protocol, final_protocol, request.max_updates, request.checkpoint_interval, {}};
-    std::set<Metric> selected;
-    bool any_applicable = false;
-    for (auto metric : request.criteria) {
-        metric_name(metric);
-        if (!selected.insert(metric).second) throw std::invalid_argument("duplicate convergence criterion");
-        const auto definition = model.find(metric);
-        if (definition == model.end() || definition->second.support == Support::unsupported)
-            throw std::invalid_argument(std::string("unsupported convergence criterion: ") + metric_name(metric));
-        const auto& support = definition->second;
-        ResolvedCriterion criterion;
-        criterion.metric = metric;
-        criterion.applicable = support.support != Support::not_applicable;
-        if (criterion.applicable) {
-            any_applicable = true;
-            const auto override = request.tolerances.find(metric);
-            if (override != request.tolerances.end()) criterion.relative = override->second.relative;
-            if (override != request.tolerances.end() && override->second.absolute) {
-                criterion.requested_absolute = *override->second.absolute;
-            } else if (support.default_absolute && finite_nonnegative(*support.default_absolute)) {
-                criterion.requested_absolute = *support.default_absolute;
-            } else throw std::invalid_argument("missing valid absolute convergence tolerance");
-            criterion.absolute = criterion.requested_absolute;
-            if (!final_protocol && support.intermediate) {
-                const auto& floor = *support.intermediate;
-                if (!finite_nonnegative(floor.absolute) || floor.rule.empty())
-                    throw std::invalid_argument("invalid intermediate convergence rule");
-                for (const auto& [key, value] : floor.inputs)
-                    if (key.empty() || !std::isfinite(value)) throw std::invalid_argument("invalid heuristic input");
-                criterion.absolute = std::max(criterion.absolute, floor.absolute);
-                criterion.adjustment = floor;
-            }
-        }
-        settings.criteria.push_back(std::move(criterion));
-    }
-    if (!any_applicable) throw std::invalid_argument("no applicable convergence criteria");
-    return settings;
+inline std::optional<std::string> retired_convergence_input(const std::string& key) {
+    if (key == "convergence.criteria")
+        return "convergence.criteria has been retired: the criteria are now the application's defaults "
+               "plus every metric with a written target (convergence.<metric>)";
+    if (key.starts_with("convergence.") && key.ends_with(".relative"))
+        return key + " has been retired: the limit rule belongs to the application; "
+               "write only the target, convergence.<metric>";
+    return std::nullopt;
 }
-
-inline Assessment assess(const ResolvedSettings& settings, const ExpectedTask& expected,
-                         const IterationMetrics& metrics) {
-    Assessment assessment;
-    const auto& info = metrics.info;
-    if (expected.task_id.empty() || expected.context_id.empty() || info.attempt_id.empty()
-        || info.task_id != expected.task_id
-        || info.context_id != expected.context_id || info.protocol != settings.protocol) {
-        assessment.reason = "iteration_context_mismatch"; return assessment;
-    }
-    const std::set<std::string> wanted(expected.states.begin(), expected.states.end());
-    std::set<std::string> present;
-    for (const auto& subject : metrics.states)
-        if (!present.insert(subject.id).second) { assessment.reason = "duplicate_subject"; return assessment; }
-    if (wanted.empty() || wanted.contains("") || wanted.size() != expected.states.size() || wanted != present) {
-        assessment.reason = "subject_membership_mismatch"; return assessment;
-    }
-    std::set<Metric> selected;
-    bool any_applicable = false;
-    for (const auto& criterion : settings.criteria) {
-        metric_name(criterion.metric);
-        if (!selected.insert(criterion.metric).second)
-            throw std::invalid_argument("duplicate resolved convergence criterion");
-        any_applicable = any_applicable || criterion.applicable;
-    }
-    if (!any_applicable) throw std::invalid_argument("no applicable resolved convergence criteria");
-    assessment.valid = true; assessment.all_met = true;
-    for (const auto& subject : metrics.states) {
-        for (const auto& criterion : settings.criteria) {
-            MetricCheck check;
-            if (!criterion.applicable) {
-                check.metric = criterion.metric; check.result = CheckResult::not_applicable;
-                check.reason = "model_not_applicable";
-            } else {
-                const auto found = subject.metrics.find(criterion.metric);
-                const auto missing = MetricValue::unavailable("not_measured");
-                check = evaluate_metric(criterion.metric, found == subject.metrics.end() ? missing : found->second,
-                                        subject.comparison, info, criterion.absolute, criterion.relative);
-                assessment.all_met = assessment.all_met && check.result == CheckResult::met;
-            }
-            check.subject = subject.id;
-            assessment.checks.push_back(std::move(check));
-        }
-    }
-    return assessment;
-}
-
-inline Decision decide(const ResolvedSettings& settings, const ExpectedTask& expected,
-                       const Progress& progress, const IterationMetrics& metrics) {
-    auto assessment = assess(settings, expected, metrics);
-    Decision decision;
-    decision.info = metrics.info;
-    decision.checks = std::move(assessment.checks);
-    if (!assessment.valid || !progress.state_valid) {
-        decision.reason = progress.state_valid ? assessment.reason : "invalid_state";
-        return decision;
-    }
-    if (metrics.info.iteration != progress.main_updates || progress.main_updates > progress.updates_at_protocol) {
-        decision.reason = "iteration_context_mismatch";
-        return decision;
-    }
-    if (assessment.all_met) {
-        decision.action = settings.final_protocol ? Action::complete : Action::finish_protocol;
-        decision.reason = settings.final_protocol ? "final_criteria_met" : "intermediate_criteria_met";
-    } else if (progress.main_updates >= settings.max_updates) {
-        decision.action = settings.final_protocol ? Action::stop : Action::finish_protocol;
-        decision.reason = "iteration_limit";
-    } else {
-        decision.action = Action::update; decision.reason = "criteria_unmet";
-    }
-    decision.checkpoint = decision.action != Action::update
-        || (settings.checkpoint_interval > 0 && progress.updates_at_protocol > 0
-            && progress.updates_at_protocol % settings.checkpoint_interval == 0);
-    return decision;
-}
-
-// Only qualifying saved evidence produces a completion decision. Otherwise the
-// restart planner resumes prepare/evaluate; saved scalars cannot drive KAIN.
-// Call after archive integrity, scientific compatibility and bundle validity
-// checks. This operation has no numerical callbacks or archive side effects.
-inline std::optional<Decision> saved_completion(const ResolvedSettings& settings,
-                                               const ExpectedTask& expected,
-                                               const IterationMetrics& saved) {
-    if (!settings.final_protocol) return std::nullopt;
-    auto assessment = assess(settings, expected, saved);
-    if (!assessment.valid || !assessment.all_met) return std::nullopt;
-    return Decision{saved.info, Action::complete, "saved_metrics_satisfy_request", false,
-                    std::move(assessment.checks)};
-}
-
 } // namespace madness::iteration

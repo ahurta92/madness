@@ -33,7 +33,7 @@ def history():
     return [json.loads(line) for f in sorted((work/'run/analysis/response').glob('*.jsonl'),key=lambda f:f.stat().st_mtime_ns) for line in f.read_text().splitlines()]
 def run(options='',success=True,interrupt=None):
     global count
-    if a.wiring_only and 'convergence.criteria=' not in options:
+    if a.wiring_only and 'convergence.bsh_residual=' not in options:
         options=loose+(';' + options if options else '')
     count+=1
     with (work/f'{count:02d}.log').open('w') as log:
@@ -56,21 +56,23 @@ def run(options='',success=True,interrupt=None):
             if proc.poll() is None:os.killpg(proc.pid,signal.SIGKILL);proc.wait()
     assert (code==0)==success,(code,(work/f'{count:02d}.log').read_text()[-6000:])
 
-loose='convergence.criteria=[bsh_residual];convergence.bsh_residual=1000;maxiter=0'
+# The deck also writes a kinetic target, so it is a criterion and gets the loose target too.
+loose='convergence.bsh_residual=1000;convergence.density_change=1000;convergence.kinetic_change=1000;maxiter=1'
 run(loose+';dipole.frequencies=[0.05]')
 dynamic=task(.05);static=task(0)
 original,_=saved(dynamic)
-assert all(next(m for m in r['metrics'] if m['metric']=='density_change')['status']=='unavailable' for r in history() if r['task_id']==dynamic)
+# One update per level: density change has a predecessor only after it.
+assert all((next(m for m in r['metrics'] if m['metric']=='density_change')['status']=='unavailable')==(r['iteration']==0) for r in history() if r['task_id']==dynamic)
 assert saved(dynamic)[1]['task']['definition']['protocol']=={'threshold':1e-6,'k':8}
-assert [r['protocol']['threshold'] for r in history() if r['task_id']==dynamic]==[1e-4,1e-5,1e-6]
+assert [r['protocol']['threshold'] for r in history() if r['task_id']==dynamic]==[1e-4,1e-4,1e-5,1e-5,1e-6,1e-6]
 run(loose)
 assert saved(dynamic)[0]==original,'new state restarted an already finished state'
-assert [r['protocol']['threshold'] for r in history() if r['task_id']==static]==[1e-4,1e-5,1e-6]
+assert [r['protocol']['threshold'] for r in history() if r['task_id']==static]==[1e-4,1e-4,1e-5,1e-5,1e-6,1e-6]
 assert len(list(tasks.glob('*/*/*.00000')))==2,'only latest payload per state should remain'
 before={t:saved(t)[0] for t in [static,dynamic]}
 values={t:residual(saved(t)[1]) for t in before};gate=sum(values.values())/2
 assert min(values.values())<gate<max(values.values())
-run(f'convergence.criteria=[bsh_residual];convergence.bsh_residual={gate:.17g};maxiter=0',success=False)
+run(f'convergence.bsh_residual={gate:.17g};convergence.density_change=1000;convergence.kinetic_change=1000;maxiter=0',success=False)
 for t,value in values.items():assert (saved(t)[0]==before[t])==(value<=gate)
 rows=response_result()['properties']['polarizability']['values']
 assert sum('zz' in r['components'] for r in rows)==1

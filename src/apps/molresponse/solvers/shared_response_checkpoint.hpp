@@ -5,6 +5,7 @@
 #include <chrono>
 #include <madness/chem/CheckpointStore.h>
 #include <madness/chem/ConvergenceSettings.h>
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/Restart.h>
 #include <madness/chem/LadderPlanner.h>
 
@@ -64,12 +65,14 @@ inline json definitions() {
   }
   return result;
 }
-inline it::ModelMetrics model(it::Protocol protocol = {1e-4, 6}) {
-  const it::LegacyFloor floor{5.0*protocol.thresh,"legacy_response_5_times_threshold",{{"threshold",protocol.thresh},{"factor",5.0}}};
-  return {{it::Metric::bsh_residual, {it::Support::supported, {}, floor}},
-          {it::Metric::density_change, {it::Support::supported, {}, floor}},
-          {it::Metric::energy_change, {it::Support::not_applicable, {}, {}}},
-          {it::Metric::kinetic_change, {it::Support::supported, {}, {}}}};
+// Driven response. Default targets are the branch's response defaults; the
+// shared floor (5 * threshold) applies at intermediate levels. The frequency is
+// fixed input, so an energy change is not applicable.
+inline it::ModelMetrics model(it::Protocol = {1e-4, 6}) {
+  return {{it::Metric::bsh_residual, {it::Support::supported, true, 5e-4, it::LimitRule::plain, {}}},
+          {it::Metric::density_change, {it::Support::supported, true, 5e-4, it::LimitRule::plain, {}}},
+          {it::Metric::energy_change, {it::Support::not_applicable, false, {}, it::LimitRule::plain, {}}},
+          {it::Metric::kinetic_change, {it::Support::supported, false, {}, it::LimitRule::plain, {}}}};
 }
 
 // Applications supply their metric definitions and restart compatibility check.
@@ -81,6 +84,8 @@ struct TaskDefinition {
   std::function<it::ModelMetrics(it::Protocol)> model;
   std::function<void(const json&,const json&)> validate_settings;
   bool allow_subject_expansion=false;
+  std::string application="driven response"; // names the solver in input errors
+  it::MetricLabels labels=metric_labels();
 };
 inline TaskDefinition driven_task() {
   return {{{"subject","response"},{"fd_checkpoint_version",1}}, metric_set(), definitions(),
@@ -116,6 +121,7 @@ class Checkpoint {
   std::vector<it::Protocol> protocols_;
   it::RestartPlan restart_plan_;
   it::ResolvedSettings settings;
+  bool final_level_ = true;
   std::optional<cp::Manifest> selected_;
   bool reusable_ = false;
   bool complete_ = false;
@@ -132,7 +138,8 @@ public:
         store_(world, root_,{},std::move(writer_group)), task_(std::move(task)),
         settings_(std::move(scientific_settings)),
         definition_(std::move(definition)), request_(request), protocols_(std::move(protocols)),
-        settings(it::resolve(request, definition_.model(protocols_.at(0)), protocols_.at(0), true)) {
+        settings(it::resolve(request, definition_.model(protocols_.at(0)), protocols_.at(0),
+                             protocols_.size() == 1, definition_.application)) {
     const auto source = store_.read(ground.reference);
     cp::records::require(source.record.at("stage").at("application") == "scf",
                          "driven response needs an exact qualified SCF source");
@@ -195,7 +202,15 @@ public:
     // its original evidence identity; never relabel its saved measurements.
     if(saved && saved->use==it::SavedEvidenceUse::guess_only)
       restart_expected.task_id=saved->metrics.info.task_id;
-    restart_plan_=it::plan_restart(protocols_,request_,definition_.model(protocols_.front()),restart_expected,saved);
+    // Validate the request at every level before work; warn once about final
+    // targets below the protocol floor.
+    for(const auto& protocol:protocols_) {
+      const bool final_level=protocol==protocols_.back();
+      const auto resolved=it::resolve(request_,definition_.model(protocol),protocol,final_level,definition_.application);
+      if(final_level && world_.rank()==0)
+        it::write_targets_below_floor(std::cout,"response",task_,resolved,definition_.labels);
+    }
+    restart_plan_=it::plan_restart(protocols_,request_,definition_.model(protocols_.back()),restart_expected,saved);
     activate(protocols_.at(restart_plan_.start_protocol));
   }
   void refresh() {
@@ -210,16 +225,18 @@ public:
   it::Protocol final_protocol() const {return protocols_.back();}
   void activate(it::Protocol protocol) {
     cp::records::require(std::find(protocols_.begin(),protocols_.end(),protocol)!=protocols_.end(),"unrequested response protocol");
-    settings=it::resolve(request_,definition_.model(protocol),protocol,protocol==protocols_.back());
+    final_level_=protocol==protocols_.back();
+    settings=it::resolve(request_,definition_.model(protocol),protocol,final_level_,definition_.application);
     reusable_=false;
-    if (selected_ && settings.final_protocol) {
+    if (selected_ && final_level_) {
       const auto metrics=cp::iteration_metrics_from_manifest(*selected_);
       reusable_=metrics.info.task_id==task_ && metrics.info.context_id==context_ && metrics.info.protocol==protocol &&
-          it::saved_completion(settings,expected(),metrics).has_value();
+          it::saved_completion(settings,expected(),metrics,true).has_value();
     }
     complete_=reusable_;
   }
   const it::ResolvedSettings &controls() const { return settings; }
+  bool final_level() const { return final_level_; }
   it::ExpectedTask expected() const {
     const auto subjects=cp::records::subjects(definition_.record);
     return {task_,context_,{subjects.begin(),subjects.end()}};

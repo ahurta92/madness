@@ -18,7 +18,6 @@
 # Run:   ./run.sh          (or: madqc scf_lih_pcm_water.in)
 
 dft
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.005
     convergence.density_change 0.001
     convergence.energy_change 0.0001

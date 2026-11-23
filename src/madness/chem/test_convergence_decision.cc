@@ -1,6 +1,7 @@
 // Unit tests for the convergence decision module. Plain values only: no World,
 // no MPI, no solver. Each block follows one line of the step 1 test list.
 #include <madness/chem/ConvergenceDecision.h>
+#include <madness/chem/IterationOutput.h>
 
 #include <cmath>
 #include <iostream>
@@ -187,6 +188,16 @@ int main() {
         check(near(at_coarse.floor, 5e-4) && near(at_fine.floor, 5e-6)
                   && near(at_coarse.effective, 5e-4) && near(at_fine.effective, 1e-5),
               "the same request at two thresholds gives two floors");
+    }
+    {
+        // The start-of-task warning lists final targets below the floor, unchanged.
+        Request r; r.targets[Metric::bsh_residual] = 1e-6;
+        std::ostringstream warned, silent;
+        write_targets_below_floor(warned, "SCF", "ground_state", resolve(r, ground(), fine, true));
+        write_targets_below_floor(silent, "SCF", "ground_state", resolve({}, ground(), fine, true));
+        check(warned.str().find("Warning: SCF ground_state") != std::string::npos
+                  && warned.str().find("requested 1.0000e-06, floor 5.0000e-06") != std::string::npos
+                  && silent.str().empty(), "warning names each target below the final floor");
     }
 
     // ---- Limits ----

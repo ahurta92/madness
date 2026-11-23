@@ -52,9 +52,13 @@ int main(int argc, char** argv) {
             task.validate_settings = [](const cp::json& previous,const cp::json& current) {
                 cp::records::require(previous == current,"test model changed");
             };
+            // These records carry only the residual; judge only it.
+            task.model = [](it::Protocol) {
+                return it::ModelMetrics{{it::Metric::bsh_residual,
+                    {it::Support::supported,true,0.1,it::LimitRule::plain,{}}}};
+            };
             it::Request request;
-            request.criteria = {it::Metric::bsh_residual};
-            request.tolerances[it::Metric::bsh_residual] = {0.1,0.0};
+            request.targets[it::Metric::bsh_residual] = 0.1;
             request.max_updates = 0;
             const std::vector<it::Protocol> ladder{{1e-4,6}};
             rs::Checkpoint bundle(world,ground,"roots",cp::json::object(),request,ladder,"solve",task);
@@ -65,7 +69,7 @@ int main(int argc, char** argv) {
                 metrics.states.push_back(state);
             }
             const it::Progress progress{0,0,true};
-            const auto decision=it::decide(bundle.controls(),bundle.expected(),progress,metrics);
+            const auto decision=it::decide(bundle.controls(),bundle.expected(),progress,metrics,bundle.final_level());
             require(decision.action==it::Action::complete);
             bundle.publish(metrics,decision,progress,[&](const auto& dir){return payload(world,dir);});
             require(cp::iteration_metrics_from_manifest(bundle.manifest()).states.size()==2);
@@ -96,14 +100,14 @@ int main(int argc, char** argv) {
             // A is a property input, not part of the direct B/C definition.
             rs::DirectCheckpoint new_a(world,root,"VBC",{{"kind","VBC"}},inputs,"new-A");
             require(new_a.reusable());
-            auto tighter=request; tighter.tolerances[it::Metric::bsh_residual].absolute=0.0;
+            auto tighter=request; tighter.targets[it::Metric::bsh_residual]=0.0;
             rs::Checkpoint tighter_bundle(world,ground,"roots",cp::json::object(),tighter,ladder,"tighter",task);
             require(tighter_bundle.reusable());
             require(tighter_bundle.qualified_input("B")==reused.qualified_input("B"));
             auto bad=inputs; bad[0]["generation"]="missing";
             rejects([&]{rs::DirectCheckpoint invalid(world,root,"VBC",{{"kind","VBC"}},bad,"bad");});
             metrics.states.back().metrics[it::Metric::bsh_residual]=it::MetricValue::measured(1.0,1.0);
-            const auto capped=it::decide(bundle.controls(),bundle.expected(),progress,metrics);
+            const auto capped=it::decide(bundle.controls(),bundle.expected(),progress,metrics,bundle.final_level());
             bundle.publish(metrics,capped,progress,[&](const auto& dir){return payload(world,dir);});
             rejects([&]{bundle.qualified_input("C");});
             auto changed_inputs=inputs;
@@ -130,8 +134,16 @@ int main(int argc, char** argv) {
             it::IterationMetrics old_metrics;old_metrics.info=old_leg.info();
             it::StateMetrics leg;leg.id="response";
             leg.metrics[it::Metric::bsh_residual]=it::MetricValue::measured(0.0,1.0);
+            // Driven response judges the density change by default, against a
+            // comparable earlier iteration of the same task.
+            const auto density=[](const it::IterationInfo& info) {
+              auto value=it::MetricValue::measured(0.0,1.0);
+              value.comparison=it::Comparison{info.task_id,"earlier",info.protocol,0,"response"};
+              return value;
+            };
+            leg.metrics[it::Metric::density_change]=density(old_leg.info());
             old_metrics.states={leg};
-            const auto old_decision=it::decide(old_leg.controls(),old_leg.expected(),progress,old_metrics);
+            const auto old_decision=it::decide(old_leg.controls(),old_leg.expected(),progress,old_metrics,old_leg.final_level());
             old_leg.publish(old_metrics,old_decision,progress,[&](const auto& dir){return payload(world,dir);});
             const cp::GenerationRef previous{"response","old-leg",old_leg.manifest().generation};
             auto refined_settings=old_settings;refined_settings["frequency"]=0.11;
@@ -140,7 +152,8 @@ int main(int argc, char** argv) {
             require(refined.load(read_payload)==123);
             rejects([&]{refined.qualified_input("B");});
             auto new_metrics=old_metrics;new_metrics.info=refined.info();
-            const auto new_decision=it::decide(refined.controls(),refined.expected(),progress,new_metrics);
+            new_metrics.states[0].metrics[it::Metric::density_change]=density(refined.info());
+            const auto new_decision=it::decide(refined.controls(),refined.expected(),progress,new_metrics,refined.final_level());
             refined.publish(new_metrics,new_decision,progress,[&](const auto& dir){return payload(world,dir);});
             require(refined.manifest().record.at("task").at("definition").at("replaces").at("task_id")=="old-leg");
             // Simulate a crash after replacement publication and before report/retirement.

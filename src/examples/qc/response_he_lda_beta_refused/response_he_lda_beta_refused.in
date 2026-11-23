@@ -3,7 +3,6 @@
 # Refusal case: check.json expect_error; no reference. Run: ./run.sh
 
 dft
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.0005
     convergence.density_change 0.0001
     convergence.energy_change 0.0001
@@ -18,7 +17,6 @@ response
     dipole.directions   z
     dipole.frequencies  [0.0]
     quadratic           true
-    convergence.criteria [bsh_residual, density_change, energy_change]
     convergence.bsh_residual 0.0005
     convergence.density_change 0.0005
     convergence.energy_change 0.0005

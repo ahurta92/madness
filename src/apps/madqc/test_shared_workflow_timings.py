@@ -21,18 +21,19 @@ print('artifacts:', work, flush=True)
  localize canon
  protocol [1e-4]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 1
 end
 response
  dipole true
  dipole.directions z
  dipole.frequencies [0.0]
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
  print_level 1
 end
 molecule
@@ -91,8 +92,10 @@ first = records()
 assert [calculation(r) for r in first] == ['ground_state', 'response'], 'shared timings must include SCF before response'
 for record in first:
     validate(record)
-    assert len(iterations(record)) == 1
-    assert 'advance' not in [c['name'] for c in iterations(record)[0]['children']]
+    # One update: change metrics need a predecessor, so loose targets are met at iteration 1.
+    assert [n['iteration'] for n in iterations(record)] == [0, 1]
+    assert 'advance' in [c['name'] for c in iterations(record)[0]['children']]
+    assert 'advance' not in [c['name'] for c in iterations(record)[-1]['children']]
 compare_console(first_output, first[0])
 sources = {str(p.relative_to(root)): p.read_bytes() for p in (root / 'checkpoints').rglob('latest')}
 run('reuse')

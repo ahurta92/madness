@@ -22,24 +22,26 @@ request=''' requested_properties [raman]
  excited.tda true
  excited.num_states 1
  excited.tpa true
+ convergence.energy_change 1000
 '''
 (work/'input.in').write_text('''dft
  xc hf
  localize canon
  protocol [1e-4,1e-5]
  l 30
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
+ convergence.energy_change 1000
  print_level 0
 end
 response
  dipole true
  dipole.directions z
  dipole.frequencies [0.0]
- maxiter 0
- convergence.criteria [bsh_residual]
+ maxiter 1
  convergence.bsh_residual 1000
+ convergence.density_change 1000
  print_level 0
 '''+request+'''end
 molecule
@@ -97,7 +99,8 @@ if not a.raman:
  assert len(derived)>=3
  for m in derived:
   assert m['task']['definition']['protocol']=={'threshold':1e-5,'k':8}
-  assert m['task']['iteration']['updates_this_attempt']==0
+  # New states at the requalified root frequency: one update meets the loose targets.
+  assert m['task']['iteration']['updates_this_attempt']==1
 run('reuse-refined')
 assert manifests()==second
 print('shared derived response checks passed',flush=True)

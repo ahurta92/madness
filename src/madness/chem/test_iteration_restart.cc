@@ -13,8 +13,9 @@ template<class F> void rejects(F&& f, const char* why) {
 }
 int main() {
     const std::vector<Protocol> ladder{{1e-4, 6}, {1e-6, 8}};
-    Request request{{Metric::bsh_residual}, {{Metric::bsh_residual, {1e-5, 0.0}}}, 3, 0};
-    ModelMetrics model{{Metric::bsh_residual, {Support::supported, 1e-5}}};
+    // Floor factor zero: these cases are about restart planning, not the floor.
+    Request request{{{Metric::bsh_residual, 1e-5}}, 0.0, 3, 0};
+    ModelMetrics model{{Metric::bsh_residual, {Support::supported, true, 1e-5, LimitRule::plain, {}}}};
     ExpectedTask task{"state_z_0.05", "ground_generation_1", {"z"}};
     SavedTask saved;
     saved.metrics.info = {task.task_id, "old_attempt", ladder.back(), 20, task.context_id};
@@ -27,10 +28,13 @@ int main() {
     check(plan.action == RestartAction::reuse && plan.start_protocol == 1 && plan.completion
           && !plan.completion->checkpoint && plan.completion->info.attempt_id == "old_attempt",
           "saved final evidence reused with original identity and no archive request");
-    request.tolerances[Metric::bsh_residual].absolute = 3e-6;
+    request.targets[Metric::bsh_residual] = 3e-6;
     check(plan_restart(ladder, request, model, task, saved).action == RestartAction::reuse,
           "tighter already-satisfied request needs no evaluation");
-    request.tolerances[Metric::bsh_residual].absolute = 1e-7;
+    request.targets[Metric::bsh_residual] = 1e-7;
+    auto floored = request; floored.floor_factor.reset();
+    check(plan_restart(ladder, floored, model, task, saved).action == RestartAction::resume,
+          "no floor at the final level: a 1e-7 request is not met by the saved 2e-6");
     plan = plan_restart(ladder, request, model, task, saved);
     check(plan.action == RestartAction::resume && plan.start_protocol == 1
           && plan.main_updates == 0 && plan.max_updates == 3 && plan.updates_at_protocol == 20,
