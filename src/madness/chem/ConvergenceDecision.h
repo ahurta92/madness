@@ -36,12 +36,16 @@ using ModelMetrics = std::map<Metric, ModelMetric>;
 
 inline constexpr double shared_floor_factor = 5.0;
 
+// The floor bounds only metrics that track the representation's resolution.
+inline bool has_floor(Metric metric) {
+    return metric == Metric::bsh_residual || metric == Metric::density_change;
+}
+
 struct ResolvedCriterion {
     Metric metric = Metric::bsh_residual;
     double requested = 0.0; // the user's target, or the default
-    double floor = 0.0;     // floor factor times the level's threshold
-    double effective = 0.0; // the larger of the two
-    bool capped = false;    // true when the floor replaced the request
+    double floor = 0.0;     // factor times the level's threshold; zero without a floor
+    double effective = 0.0; // intermediate: max(requested, floor); final: requested
     LimitRule rule = LimitRule::plain;
 };
 
@@ -50,11 +54,13 @@ struct ResolvedSettings {
     std::size_t max_updates = 0;
     std::size_t checkpoint_interval = 0;
     std::vector<ResolvedCriterion> criteria;
+    std::vector<Metric> not_applicable; // written targets this application cannot judge
 };
 
-// `application` only names the solver in error messages.
+// The floor raises targets at intermediate levels only; the final level judges
+// the request as written. `application` only names the solver in error messages.
 inline ResolvedSettings resolve(const Request& request, const ModelMetrics& model, Protocol protocol,
-                                const std::string& application = "this application") {
+                                bool final_protocol, const std::string& application = "this application") {
     const auto fail = [&](const std::string& what) {
         throw std::invalid_argument(what + " (" + application + ")");
     };
@@ -67,12 +73,14 @@ inline ResolvedSettings resolve(const Request& request, const ModelMetrics& mode
         if (!finite_nonnegative(target)) fail(key + " must be finite and not negative");
         const auto found = model.find(metric);
         const auto support = found == model.end() ? Support::unsupported : found->second.support;
-        if (support == Support::not_applicable) fail(key + " is not applicable to " + application);
         if (support == Support::unsupported) fail(key + " is not supported by " + application);
     }
-    ResolvedSettings settings{protocol, request.max_updates, request.checkpoint_interval, {}};
+    ResolvedSettings settings{protocol, request.max_updates, request.checkpoint_interval, {}, {}};
+    for (const auto& [metric, target] : request.targets)
+        if (model.at(metric).support == Support::not_applicable) settings.not_applicable.push_back(metric);
     for (const auto& [metric, definition] : model) {
         const auto written = request.targets.find(metric);
+        if (definition.support == Support::not_applicable) continue;
         if (!definition.default_criterion && written == request.targets.end()) continue;
         const std::string name = metric_name(metric);
         if (definition.support != Support::supported)
@@ -89,9 +97,9 @@ inline ResolvedSettings resolve(const Request& request, const ModelMetrics& mode
         const double factor = request.floor_factor ? *request.floor_factor
                             : definition.floor_factor ? *definition.floor_factor
                                                       : shared_floor_factor;
-        criterion.floor = factor * protocol.thresh;
-        criterion.capped = criterion.floor > criterion.requested;
-        criterion.effective = std::max(criterion.requested, criterion.floor);
+        criterion.floor = has_floor(metric) ? factor * protocol.thresh : 0.0;
+        criterion.effective = final_protocol ? criterion.requested
+                                             : std::max(criterion.requested, criterion.floor);
         settings.criteria.push_back(criterion);
     }
     if (settings.criteria.empty()) fail("no convergence criteria");
@@ -198,6 +206,13 @@ inline Assessment assess(const ResolvedSettings& settings, const ExpectedTask& e
                                       subject.comparison, info);
             assessment.all_met = assessment.all_met && check.result == CheckResult::met;
             check.subject = subject.id;
+            assessment.checks.push_back(std::move(check));
+        }
+    for (const auto& subject : metrics.states)
+        for (const auto metric : settings.not_applicable) {
+            MetricCheck check;
+            check.subject = subject.id; check.metric = metric;
+            check.result = CheckResult::not_applicable; check.reason = "model_not_applicable";
             assessment.checks.push_back(std::move(check));
         }
     return assessment;

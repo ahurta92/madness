@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,7 @@ IterationMetrics bsh_only(double value, std::size_t iteration = 1, Protocol prot
 }
 ResolvedSettings bsh_settings(double target, Protocol protocol = fine, std::size_t cap = 5) {
     Request r; r.targets[Metric::bsh_residual] = target; r.max_updates = cap;
-    return resolve(r, {{Metric::bsh_residual, {Support::supported, false, {}, LimitRule::plain, 0.0}}}, protocol);
+    return resolve(r, {{Metric::bsh_residual, {Support::supported, false, {}, LimitRule::plain, 0.0}}}, protocol, true);
 }
 MetricCheck one(const ResolvedCriterion& c, const MetricValue& value) {
     return check_metric(c, value, std::nullopt, {"scf", "a1", fine, 1, "ctx"});
@@ -63,108 +64,134 @@ MetricCheck one(const ResolvedCriterion& c, const MetricValue& value) {
 int main() {
     // ---- Resolving criteria ----
     {
-        const auto s = resolve({}, ground(), fine);
+        const auto s = resolve({}, ground(), fine, true);
         check(s.criteria.size() == 3 && find(s, Metric::bsh_residual) && find(s, Metric::density_change)
                   && find(s, Metric::energy_change) && !find(s, Metric::kinetic_change),
               "no written targets: criteria are exactly the defaults");
         check(near(find(s, Metric::bsh_residual)->requested, 1e-4) && near(find(s, Metric::energy_change)->requested, 1e-5),
               "default targets are used when nothing is written");
-        const auto d = resolve({}, driven(), coarse);
+        const auto d = resolve({}, driven(), coarse, true);
         check(d.criteria.size() == 2 && !find(d, Metric::energy_change), "driven defaults: BSH and density only");
     }
     {
         Request r; r.targets[Metric::kinetic_change] = 3e-5;
-        const auto s = resolve(r, ground(), fine);
+        const auto s = resolve(r, ground(), fine, true);
         check(s.criteria.size() == 4 && find(s, Metric::kinetic_change) && near(find(s, Metric::kinetic_change)->requested, 3e-5),
               "written target for a supported non-default metric adds it");
         r.targets[Metric::bsh_residual] = 2e-4;
-        check(near(find(resolve(r, ground(), fine), Metric::bsh_residual)->requested, 2e-4), "written target replaces the default");
+        check(near(find(resolve(r, ground(), fine, true), Metric::bsh_residual)->requested, 2e-4), "written target replaces the default");
     }
     {
         auto m = ground(); m.erase(Metric::kinetic_change);
         Request r; r.targets[Metric::kinetic_change] = 1e-5;
-        rejects([&] { resolve(r, m, fine, "ground state"); }, {"kinetic_change", "ground state"},
+        rejects([&] { resolve(r, m, fine, true, "ground state"); }, {"kinetic_change", "ground state"},
                 "target for a metric absent from the model is unsupported");
         m[Metric::kinetic_change].support = Support::unsupported;
-        rejects([&] { resolve(r, m, fine, "ground state"); }, {"kinetic_change", "not supported", "ground state"},
+        rejects([&] { resolve(r, m, fine, true, "ground state"); }, {"kinetic_change", "not supported", "ground state"},
                 "target for an unsupported metric names metric and application");
     }
     {
-        Request r; r.targets[Metric::energy_change] = 1e-6;
-        rejects([&] { resolve(r, driven(), fine, "driven response"); }, {"energy_change", "not applicable", "driven response"},
-                "target for a not-applicable metric names metric and application");
+        // A written target for a not-applicable metric is reported, not judged.
+        Request r; r.targets[Metric::energy_change] = 1e-6; r.max_updates = 5;
+        const auto s = resolve(r, driven(), fine, true, "driven response");
+        check(s.criteria.size() == 2 && !find(s, Metric::energy_change)
+                  && s.not_applicable == std::vector<Metric>{Metric::energy_change},
+              "not-applicable target is not a criterion and is listed as not applicable");
+        auto unscaled = s; for (auto& c : unscaled.criteria) c.rule = LimitRule::plain;
+        IterationMetrics m{{"scf", "a1", fine, 1, "ctx"}, {{"ground", {}, {}}}};
+        const auto d = decide(unscaled, task, {1, 1, true}, m, true);
+        bool reported = false;
+        for (const auto& c : d.checks)
+            reported = reported || (c.metric == Metric::energy_change && c.result == CheckResult::not_applicable);
+        check(reported && d.action == Action::update, "not-applicable row is reported and never blocks or passes");
+        check(resolve({}, driven(), fine, true).not_applicable.empty(), "nothing written: nothing reported");
     }
     {
         auto m = ground(); m.at(Metric::energy_change).default_target.reset();
-        rejects([&] { resolve({}, m, fine); }, {"energy_change"}, "default criterion with no target is an error");
+        rejects([&] { resolve({}, m, fine, true); }, {"energy_change"}, "default criterion with no target is an error");
         Request r; r.targets[Metric::energy_change] = 1e-6;
-        check(near(find(resolve(r, m, fine), Metric::energy_change)->requested, 1e-6),
+        check(near(find(resolve(r, m, fine, true), Metric::energy_change)->requested, 1e-6),
               "a written target supplies a default criterion that has no default");
     }
     for (double bad : {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
         Request r; r.targets[Metric::bsh_residual] = bad;
-        rejects([&] { resolve(r, ground(), fine); }, {"bsh_residual"}, "invalid target rejected");
+        rejects([&] { resolve(r, ground(), fine, true); }, {"bsh_residual"}, "invalid target rejected");
         Request f; f.floor_factor = bad;
-        rejects([&] { resolve(f, ground(), fine); }, {"floor_factor"}, "invalid user floor factor rejected");
+        rejects([&] { resolve(f, ground(), fine, true); }, {"floor_factor"}, "invalid user floor factor rejected");
         auto m = ground(); m.at(Metric::bsh_residual).floor_factor = bad;
-        rejects([&] { resolve({}, m, fine); }, {"bsh_residual"}, "invalid model floor factor rejected");
+        rejects([&] { resolve({}, m, fine, true); }, {"bsh_residual"}, "invalid model floor factor rejected");
     }
-    rejects([&] { resolve({}, ground(), {0.0, 6}); }, {"protocol"}, "invalid protocol rejected");
-    rejects([&] { resolve({}, {}, fine); }, {"no convergence criteria"}, "a model with no criteria is an error");
+    rejects([&] { resolve({}, ground(), {0.0, 6}, true); }, {"protocol"}, "invalid protocol rejected");
+    rejects([&] { resolve({}, {}, fine, true); }, {"no convergence criteria"}, "a model with no criteria is an error");
 
     // ---- The floor ----
     {
-        const auto c = *find(resolve({}, ground(), fine), Metric::bsh_residual); // 1e-4 vs 5e-6
-        check(near(c.floor, 5e-6) && near(c.effective, 1e-4) && !c.capped, "target above the floor is unchanged");
+        // Intermediate level: the floor raises BSH and density targets.
+        const auto c = *find(resolve({}, ground(), fine, false), Metric::bsh_residual); // 1e-4 vs 5e-6
+        check(near(c.floor, 5e-6) && near(c.effective, 1e-4), "target above the floor is unchanged");
         Request r; r.targets[Metric::bsh_residual] = 1e-6;
-        const auto capped = *find(resolve(r, ground(), fine), Metric::bsh_residual);
-        check(near(capped.requested, 1e-6) && near(capped.floor, 5e-6) && near(capped.effective, 5e-6) && capped.capped,
-              "target below the floor becomes the floor, capped");
+        const auto raised = *find(resolve(r, ground(), fine, false), Metric::bsh_residual);
+        check(near(raised.requested, 1e-6) && near(raised.floor, 5e-6) && near(raised.effective, 5e-6),
+              "intermediate: a target below the floor becomes the floor");
         Request equal; equal.targets[Metric::bsh_residual] = 0.625; // 5 * 0.125, exact in binary
-        const auto at_floor = *find(resolve(equal, ground(), {0.125, 6}), Metric::bsh_residual);
-        check(at_floor.floor == 0.625 && !at_floor.capped, "a target equal to the floor is not capped");
+        const auto at_floor = *find(resolve(equal, ground(), {0.125, 6}, false), Metric::bsh_residual);
+        check(at_floor.floor == 0.625 && at_floor.effective == 0.625, "a target equal to the floor is kept");
+        Request below; below.targets[Metric::bsh_residual] = 0.5;
+        check(find(resolve(below, ground(), {0.125, 6}, false), Metric::bsh_residual)->effective == 0.625,
+              "a target just below the floor is raised");
     }
     {
-        // resolve has no notion of the level's role: the same protocol gives the
-        // same limits whether decide is then told it is final or intermediate.
+        // Final level: the request is judged as written; the floor is only reported.
         Request r; r.targets[Metric::bsh_residual] = 1e-6; r.max_updates = 5;
-        const auto s = resolve(r, ground(), fine);
-        check(find(s, Metric::bsh_residual)->capped, "floor applies at the final level");
-        check(!find(bsh_settings(1e-6, fine), Metric::bsh_residual)->capped, "zero factor: no cap");
-        Request r2; r2.targets[Metric::bsh_residual] = 1e-6; r2.max_updates = 5;
-        const auto five = resolve(r2, {{Metric::bsh_residual, {Support::supported, false, {}, LimitRule::plain, {}}}}, fine);
-        const auto fin = decide(five, task, {1, 1, true}, bsh_only(4e-6), true);
-        const auto mid = decide(five, task, {1, 1, true}, bsh_only(4e-6), false);
-        check(fin.action == Action::complete && mid.action == Action::finish_protocol
-                  && fin.checks[0].limit && mid.checks[0].limit && near(*fin.checks[0].limit, *mid.checks[0].limit)
-                  && near(*fin.checks[0].limit, 5e-6),
-              "the floored limit is identical at final and intermediate levels");
+        const ModelMetrics bsh{{Metric::bsh_residual, {Support::supported, false, {}, LimitRule::plain, {}}}};
+        const auto s = resolve(r, bsh, fine, true);
+        const auto& c = *find(s, Metric::bsh_residual);
+        check(near(c.effective, 1e-6) && near(c.floor, 5e-6), "final level: written target kept, floor reported");
+        const auto fin = decide(s, task, {1, 1, true}, bsh_only(4e-6), true);
+        check(fin.action == Action::update && fin.checks[0].limit && near(*fin.checks[0].limit, 1e-6),
+              "final level: a value between target and floor is unmet");
+        const auto mid = decide(resolve(r, bsh, fine, false), task, {1, 1, true}, bsh_only(4e-6), false);
+        check(mid.action == Action::finish_protocol && near(*mid.checks[0].limit, 5e-6),
+              "intermediate level: the same value meets the floor");
+    }
+    {
+        // Energy and kinetic change have no floor at any level.
+        Request r; r.targets[Metric::energy_change] = 1e-9; r.targets[Metric::kinetic_change] = 1e-9;
+        for (bool final_level : {false, true}) {
+            const auto s = resolve(r, ground(), coarse, final_level);
+            for (auto metric : {Metric::energy_change, Metric::kinetic_change})
+                check(find(s, metric)->floor == 0.0 && find(s, metric)->effective == 1e-9,
+                      "energy and kinetic targets are never floored");
+        }
+        check(has_floor(Metric::bsh_residual) && has_floor(Metric::density_change)
+                  && !has_floor(Metric::energy_change) && !has_floor(Metric::kinetic_change),
+              "only BSH residual and density change have a floor");
     }
     {
         auto m = ground();
-        const auto app = resolve({}, m, fine);
+        const auto app = resolve({}, m, fine, false);
         check(near(find(app, Metric::density_change)->floor, 7e-6), "application factor overrides the shared default");
         check(near(find(app, Metric::bsh_residual)->floor, shared_floor_factor * 1e-6) && shared_floor_factor == 5.0,
               "shared default factor is 5");
         Request r; r.floor_factor = 2.0;
-        const auto user = resolve(r, m, fine);
+        const auto user = resolve(r, m, fine, false);
         check(near(find(user, Metric::density_change)->floor, 2e-6) && near(find(user, Metric::bsh_residual)->floor, 2e-6),
               "user factor overrides application and shared factors");
         r.floor_factor = 0.0;
-        check(near(find(resolve(r, m, fine), Metric::bsh_residual)->floor, 0.0), "a zero user factor is allowed");
+        check(near(find(resolve(r, m, fine, false), Metric::bsh_residual)->floor, 0.0), "a zero user factor is allowed");
     }
     {
         Request r; r.targets[Metric::bsh_residual] = 1e-5;
-        const auto at_coarse = *find(resolve(r, ground(), coarse), Metric::bsh_residual);
-        const auto at_fine = *find(resolve(r, ground(), fine), Metric::bsh_residual);
-        check(near(at_coarse.floor, 5e-4) && near(at_fine.floor, 5e-6) && at_coarse.capped && !at_fine.capped
+        const auto at_coarse = *find(resolve(r, ground(), coarse, false), Metric::bsh_residual);
+        const auto at_fine = *find(resolve(r, ground(), fine, false), Metric::bsh_residual);
+        check(near(at_coarse.floor, 5e-4) && near(at_fine.floor, 5e-6)
                   && near(at_coarse.effective, 5e-4) && near(at_fine.effective, 1e-5),
               "the same request at two thresholds gives two floors");
     }
 
     // ---- Limits ----
     {
-        ResolvedCriterion plain{Metric::bsh_residual, 1e-3, 0.0, 1e-3, false, LimitRule::plain};
+        ResolvedCriterion plain{Metric::bsh_residual, 1e-3, 0.0, 1e-3, LimitRule::plain};
         const auto equal = one(plain, MetricValue::measured(1e-3));
         check(equal.result == CheckResult::met && equal.limit && near(*equal.limit, 1e-3)
                   && near(equal.absolute, 1e-3) && equal.relative == 0.0,
@@ -174,7 +201,7 @@ int main() {
         check(one(plain, MetricValue::measured(5e-4, 100.0)).limit == 1e-3, "plain ignores any measured scale");
     }
     {
-        ResolvedCriterion scaled{Metric::bsh_residual, 1e-3, 0.0, 1e-3, false, LimitRule::scaled};
+        ResolvedCriterion scaled{Metric::bsh_residual, 1e-3, 0.0, 1e-3, LimitRule::scaled};
         const auto zero = one(scaled, MetricValue::measured(1e-3, 0.0));
         check(zero.result == CheckResult::met && zero.limit && near(*zero.limit, 1e-3)
                   && near(zero.absolute, 1e-3) && near(zero.relative, 1e-3) && zero.scale && *zero.scale == 0.0,
@@ -191,7 +218,7 @@ int main() {
               "scaled: the scale may come from the application's evidence");
     }
     {
-        ResolvedCriterion scaled{Metric::bsh_residual, 1e-3, 0.0, 1e-3, false, LimitRule::scaled};
+        ResolvedCriterion scaled{Metric::bsh_residual, 1e-3, 0.0, 1e-3, LimitRule::scaled};
         const auto missing = one(scaled, MetricValue::measured(1e-9));
         check(missing.result == CheckResult::unmet && missing.reason == "scale_unavailable" && !missing.limit,
               "scaled with unavailable scale is unmet with a reason, never plain");
@@ -199,12 +226,12 @@ int main() {
         check(one(scaled, bad).result == CheckResult::invalid, "scaled with an invalid scale is invalid");
     }
     {
-        ResolvedCriterion plain{Metric::bsh_residual, 1.0, 0.0, 1.0, false, LimitRule::plain};
+        ResolvedCriterion plain{Metric::bsh_residual, 1.0, 0.0, 1.0, LimitRule::plain};
         for (const auto& value : {MetricValue::unavailable("nope"), MetricValue::invalid("bad"),
                                   MetricValue::not_applicable("na"), MetricValue::measured(-1.0),
                                   MetricValue::measured(std::numeric_limits<double>::quiet_NaN())})
             check(one(plain, value).result != CheckResult::met, "unavailable or invalid measurement is never met");
-        ResolvedCriterion density{Metric::density_change, 1.0, 0.0, 1.0, false, LimitRule::plain};
+        ResolvedCriterion density{Metric::density_change, 1.0, 0.0, 1.0, LimitRule::plain};
         check(one(density, MetricValue::measured(0.0)).reason == "comparison_unavailable",
               "a change metric without a valid comparison is not met");
     }
