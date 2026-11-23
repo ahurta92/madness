@@ -611,6 +611,8 @@ public:
                   RootProvider workflow_roots = {}, std::string writer_group = {})
       : world_(world), run_(fs::absolute(run)), root_(run_ / "checkpoints"),
         workflow_roots_(std::move(workflow_roots)),writer_group_(std::move(writer_group)) {}
+  /// The run directory: checkpoints/, analysis/ and results.json live here.
+  [[nodiscard]] const fs::path &run_directory() const { return run_; }
   [[nodiscard]] fs::path task_directory(const std::string &calculation,
                                         const std::string &task) const {
     records::identifier(calculation);

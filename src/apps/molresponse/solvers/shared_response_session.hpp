@@ -2,6 +2,7 @@
 #include "shared_response_checkpoint.hpp"
 #include "shared_es_checkpoint.hpp"
 #include "response_metadata.hpp"
+#include <madness/chem/IterationHistory.h>
 #include <madness/chem/TimingRecords.h>
 #include "../ResponseProtocol.hpp"
 
@@ -133,17 +134,12 @@ public:
         {"seconds",measured.seconds},{"children",children}});
   }
   void record_evaluation(const it::IterationMetrics& metrics,const it::Decision& decision,
-                         const std::map<it::Metric,std::string>& metric_ids) {
+                         const std::map<it::Metric,std::string>& metric_ids,
+                         const std::vector<it::Diagnostic>& diagnostics={}) {
     cp::detail::on_root(world_,[&] {
-      const auto path=root_/"analysis"/"response";
-      std::filesystem::create_directories(path);
-      std::ofstream history(path/(metrics.info.attempt_id+".jsonl"),std::ios::app);
-      history.exceptions(std::ios::failbit|std::ios::badbit);
-      history << json{{"task_id",metrics.info.task_id},
-          {"protocol",cp::records::protocol_record(metrics.info.protocol)},
-          {"iteration",metrics.info.iteration},{"metrics",cp::records::measurements(metrics,metric_ids)},
-          {"decision",decision.reason}}.dump() << '\n';
-      history.close();return std::string{};
+      it::append_history(root_/"analysis"/"response"/(metrics.info.attempt_id+".jsonl"),
+          it::history_row(metrics,decision,metric_ids,diagnostics));
+      return std::string{};
     });
   }
   void publish_timings(const std::string& failure={}) {

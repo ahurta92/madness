@@ -1,4 +1,5 @@
 #include <madness/chem/SCFCheckpoint.h>
+#include <madness/chem/IterationHistory.h>
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/SCFScientificSettings.h>
 
@@ -288,6 +289,12 @@ SCF::IterationControl SCFCheckpoint::control(const it::Request& request, it::Pro
         cp::records::require(&world == &world_ && &owner == &scf_, "SCF control used with another application");
         if (world.rank() == 0 && scf_.param.print_level() > 0)
             it::write_iteration_metrics(std::cout, "SCF", metrics, decision, metric_labels(), final_protocol);
+        // One history row per decision, before any publication can fail.
+        cp::detail::on_root(world, [&] {
+            it::append_history(store_.run_directory() / "analysis" / "ground_state" / (identity_.attempt_id + ".jsonl"),
+                               it::history_row(metrics, decision, SCF::iteration_metric_set()));
+            return std::string{};
+        });
         if (decision.checkpoint) {
             publish(metrics, decision, progress);
             if (world.rank() == 0 && scf_.param.print_level() > 0)
