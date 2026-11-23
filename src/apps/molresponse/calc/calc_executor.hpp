@@ -1634,15 +1634,14 @@ inline std::optional<ResponseStateXY<ClosedShell>> qualified_fd_as_xy(
   session.timing().end();return functions;
 }
 inline ResponseStateXY<ClosedShell> load_shared_vbc(ExecutorContext& ctx,
-    response_shared::DirectCheckpoint& binding) {
+    response_shared::SecondOrderNode& binding) {
   auto& timing=ctx.shared_response->timing();
-  timing.begin("load",{{"task_id",binding.source_record().at("task_id")}});
-  auto source=binding.load([&](const auto& directory,const auto& manifest) {
+  timing.begin("load",{{"task_id",binding.id()}});
+  auto source=binding.load([&](const auto& directory,const auto& description) {
     const madness::iteration::Protocol current{madness::FunctionDefaults<3>::get_thresh(),madness::FunctionDefaults<3>::get_k()};
-    madness::checkpoint::records::require(
-        madness::checkpoint::records::read_protocol(manifest.record.at("task").at("definition").at("protocol"))==current &&
-        manifest.archives.size()==1 && manifest.archives.front().basename=="response" &&
-        manifest.archives.front().role=="functions", "VBC checkpoint representation or payload differs");
+    madness::checkpoint::records::require(description.protocol==current &&
+        description.details.at("archives")==nlohmann::json::array({"response"}),
+        "VBC node representation or payload differs");
     return ResponseStateXY<ClosedShell>::load(ctx.world,
         madness::native_archive_name((directory/"response").string()),IoBackend::Native);
   });
@@ -1656,7 +1655,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
 
-  response_shared::DirectCheckpoint* shared=nullptr;
+  response_shared::SecondOrderNode* shared=nullptr;
   if(ctx.shared_response) {
     auto& session=*ctx.shared_response;
     session.timing().begin("vbc",{{"task_id",node.id}});
@@ -1668,10 +1667,10 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
     const nlohmann::json definition{{"kind","VBC"},{"binding_version",1},
         {"protocol",madness::checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})},
         {"source",ctx.beta_pq_source ? "pq" : "vbc"}};
-    shared=&session.bind_direct(node.id,definition,
-        nlohmann::json::array({B.qualified_input("B"),C.qualified_input("C")}));
+    shared=&session.bind_second_order(node.id,vbc_node_name(node.pert,node.pert_c,node.freq,node.freq_c),definition,
+        nlohmann::json::array({response_shared::lineage_entry("B",B),response_shared::lineage_entry("C",C)}));
     if(shared->reusable()) {
-      session.record_direct(node.id,*shared);session.timing().end();
+      session.record_vbc(node.id,*shared);session.timing().end();
       return {true,protocol_key(thresh,default_k_for_thresh(thresh)),{}};
     }
     session.timing().begin("prepare");
@@ -1724,13 +1723,10 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   if(shared) {
     auto& session=*ctx.shared_response;
     session.timing().end();session.timing().begin("checkpoint");
-    shared->publish([&](const std::filesystem::path& directory) {
+    shared->save({"response"},[&](const std::filesystem::path& directory) {
       vbc_src.save(world,native_archive_name((directory/"response").string()),IoBackend::Native);
-      checkpoint::Payload payload;
-      if(world.rank()==0) payload.archives.push_back(checkpoint::inspect_archive(directory,"functions","response",{},1));
-      return payload;
     });
-    session.record_direct(node.id,*shared);
+    session.record_vbc(node.id,*shared);
     session.timing().end();session.timing().end();session.publish_timings();
   } else {
   save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id,
@@ -2493,8 +2489,8 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       if(nuclear) tensor["coordinate"]=request.pert_c.description();
     }
     std::optional<ResponseStateXY<ClosedShell>> source,B,C,alternate;
-    const auto selected=session.direct.find(id);
-    if(supported && selected!=session.direct.end() && selected->second->reusable()) {
+    const auto selected=session.second_order.find(id);
+    if(supported && selected!=session.second_order.end() && selected->second->reusable()) {
       B=detail_exec::qualified_fd_as_xy(ctx,request.pert_b,request.freq_b);
       C=detail_exec::qualified_fd_as_xy(ctx,request.pert_c,request.freq_c);
       if(B && C) {
@@ -2954,7 +2950,6 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
                                        // no metadata writes (read-only pass)
 
     madness::Tensor<double> S;
-    std::vector<std::string> src_files;
     if(shared_bundle) ctx.shared_response->timing().begin("contraction",{{"state",root_ids[f]}});
     if (ctx.tpa_residue) {
       // PRODUCTION composition (TPA_SCOPING §5m + §5q, verified 6/6 vs DALTON
@@ -3067,58 +3062,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       }
     } else {
       // Legacy candidate: build the 3 axis sources (the TPA analogue of beta's
-      // VBC quadratic source), SAVE them to disk (mirrors beta/Raman
-      // vbc_states — reusable + inspectable/isosurface-able), then contract.
-      std::array<ResponseStateXY<ClosedShell>,3> vbc_b;
-      if(shared_bundle) {
-        auto& session=*ctx.shared_response;
-        nlohmann::json inputs=nlohmann::json::array({shared_bundle->qualified_input("excited")});
-        for(int axis=0;axis<3;++axis) inputs.push_back(session.at(fd_node_id(Perturbation::dipole(axis),wf_half)).qualified_input(std::string(1,"xyz"[axis])));
-        auto& binding=session.bind_direct("tpa_sources:"+shared_bundle->info().task_id+":"+root_ids[f],
-            {{"kind","tpa_sources"},{"binding_version",1},{"root",root_ids[f]},
-             {"protocol",checkpoint::records::protocol_record(shared_bundle->controls().protocol)}},inputs);
-        if(binding.reusable()) {
-          session.timing().begin("load_sources");
-          vbc_b=binding.load([&](const auto& directory,const auto& manifest) {
-            checkpoint::records::require(manifest.archives.size()==3,"invalid two-photon source payload");
-            std::array<ResponseStateXY<ClosedShell>,3> sources;
-            std::set<int> seen;
-            for(const auto& archive:manifest.archives) {
-              checkpoint::records::require(archive.role=="axis" && archive.indices.size()==1,"invalid two-photon source axis");
-              const int axis=archive.indices.front();
-              checkpoint::records::require(axis>=0 && axis<3 && seen.insert(axis).second && archive.basename==std::string(1,"xyz"[axis]),"invalid two-photon source axis identity");
-              sources[axis]=ResponseStateXY<ClosedShell>::load(world,native_archive_name((directory/archive.basename).string()),IoBackend::Native);
-            }
-            return sources;
-          });
-          session.timing().end();
-        } else {
-          session.timing().begin("build_sources");
-          vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
-          session.timing().end();session.timing().begin("checkpoint");
-          binding.publish([&](const auto& directory) {
-            checkpoint::Payload payload;
-            for(int axis=0;axis<3;++axis) {
-              const std::string basename(1,"xyz"[axis]);
-              vbc_b[axis].save(world,native_archive_name((directory/basename).string()),IoBackend::Native);
-            }
-            // Inspection may fail only after all collective archive saves finish.
-            if(world.rank()==0) for(int axis=0;axis<3;++axis) {
-              const std::string basename(1,"xyz"[axis]);
-              payload.archives.push_back(checkpoint::inspect_archive(directory,"axis",basename,{axis},1));
-            }
-            return payload;
-          });
-          session.timing().end();
-        }
-      } else {
-        vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
-        for(int axis=0;axis<3;++axis) {
-          const std::string path=ctx.calc_dir+"/tpa_src__root"+std::to_string(f)+"__"+std::string(1,"xyz"[axis])+"__"+key;
-          vbc_b[axis].save(world,path);
-          src_files.push_back(std::filesystem::path(path).filename().string());
-        }
-      }
+      // VBC quadratic source), then contract. The sources are not saved.
+      const auto vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
       S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
     }
     const auto obs = tpa::observables(S, wf);
@@ -3143,7 +3088,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       rows.push_back({{"es_root_id", static_cast<int>(f)},
                       {"omega", wf},
                       {"omega_ev", wf * 27.211386245988},
-                      {"source_files", src_files},
+                      {"source_files", nlohmann::json::array()}, // sources are not saved
                       {"writer_nproc", static_cast<int>(world.size())},
                       {"S", Sj},
                       {"Df", obs.Df}, {"Dg", obs.Dg},

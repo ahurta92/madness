@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
             require(cp::iteration_metrics_from_manifest(bundle.manifest()).states.size()==2);
             rs::Checkpoint reused(world,root,ground,"roots",cp::json::object(),request,ladder,"restart",task);
             require(reused.reusable());
-            const auto read_payload=[&](const auto& directory,const cp::Manifest&) {
+            const auto read_payload=[&](const auto& directory,const auto&) {
                 archive::ParallelInputArchive in(world,(directory/"response").c_str());
                 int value=0;
                 if (in.is_io_node()) in.local_archive() & value;
@@ -88,35 +88,50 @@ int main(int argc, char** argv) {
             require(reused.source_record("root1").at("subject")=="root1");
             require(reused.measured_values("root1").at("values").at("bsh_residual")==0.0);
             rejects([&]{reused.measured_values();});
-            const auto inputs=cp::json::array({reused.qualified_input("B")});
-            rs::DirectCheckpoint direct(world,root,"VBC",{{"kind","VBC"}},inputs,"build");
-            require(!direct.reusable());
-            direct.publish([&](const auto& dir){return payload(world,dir);});
-            require(!direct.manifest().record.at("task").contains("iteration"));
-            rs::DirectCheckpoint cached(world,root,"VBC",{{"kind","VBC"}},inputs,"again");
+            // A second-order node records its inputs' identities and is
+            // reused only while its settings and every input are unchanged.
+            rejects([&]{rs::second_order_folder("vbc:B");});
+            rejects([&]{rs::second_order_folder("..");});
+            const cp::json vbc_settings{{"kind","VBC"},{"protocol",cp::records::protocol_record(ladder.back())}};
+            const auto lineage=cp::json::array({rs::lineage_entry("B",reused)});
+            require(lineage[0].at("identity").at("generation")==reused.manifest().generation);
+            const auto save_payload=[&](const auto& dir){(void)payload(world,dir);};
+            rs::SecondOrderNode built(world,root,"vbc:B","vbc-B",vbc_settings,lineage);
+            require(!built.reusable());
+            built.save({"response"},save_payload);
+            require(built.folder()=="states/response/vbc-B" && built.description().kind=="second_order");
+            rs::SecondOrderNode cached(world,root,"vbc:B","vbc-B",vbc_settings,lineage);
             require(cached.reusable());
             require(cached.load(read_payload)==123);
-            require(cached.qualified_input("VBC").at("generation")==direct.manifest().generation);
-            require(cached.source_record().at("attempt_id")=="build");
-            // A is a property input, not part of the direct B/C definition.
-            rs::DirectCheckpoint new_a(world,root,"VBC",{{"kind","VBC"}},inputs,"new-A");
-            require(new_a.reusable());
+            require(cached.description()==built.description());
+            auto other_settings=vbc_settings;other_settings["source"]="pq";
+            rs::SecondOrderNode other(world,root,"vbc:B","vbc-B",other_settings,lineage);
+            require(!other.reusable());
+            rejects([&]{other.load(read_payload);});
             auto tighter=request; tighter.targets[it::Metric::bsh_residual]=0.0;
             rs::Checkpoint tighter_bundle(world,root,ground,"roots",cp::json::object(),tighter,ladder,"tighter",task);
             require(tighter_bundle.reusable());
             require(tighter_bundle.qualified_input("B")==reused.qualified_input("B"));
-            auto bad=inputs; bad[0]["generation"]="missing";
-            rejects([&]{rs::DirectCheckpoint invalid(world,root,"VBC",{{"kind","VBC"}},bad,"bad");});
             metrics.states.back().metrics[it::Metric::bsh_residual]=it::MetricValue::measured(1.0,1.0);
             const auto capped=it::decide(bundle.controls(),bundle.expected(),progress,metrics,bundle.final_level());
             bundle.publish(metrics,capped,progress,[&](const auto& dir){return payload(world,dir);});
             rejects([&]{bundle.qualified_input("C");});
-            auto changed_inputs=inputs;
-            changed_inputs[0]["generation"]=bundle.manifest().generation;
-            rs::DirectCheckpoint changed_b(world,root,"VBC",{{"kind","VBC"}},changed_inputs,"new-B");
+            // A changed input identity rebuilds the node over the old one.
+            auto changed_lineage=lineage;
+            changed_lineage[0]["identity"]["generation"]=bundle.manifest().generation;
+            rs::SecondOrderNode changed_b(world,root,"vbc:B","vbc-B",vbc_settings,changed_lineage);
             require(!changed_b.reusable());
-            rejects([&]{changed_b.qualified_input("VBC");});
             rejects([&]{changed_b.load(read_payload);});
+            changed_b.save({"response"},save_payload);
+            require(rs::SecondOrderNode(world,root,"vbc:B","vbc-B",vbc_settings,changed_lineage).reusable());
+            require(!rs::SecondOrderNode(world,root,"vbc:B","vbc-B",vbc_settings,lineage).reusable());
+            cp::detail::on_root(world,[&] {
+                const auto folder=std::filesystem::path(root)/built.folder();
+                std::size_t entries=0;
+                for(const auto& entry:std::filesystem::directory_iterator(folder)) {(void)entry;++entries;}
+                require(entries==2 && std::filesystem::is_directory(folder/"archive"));
+                return std::string{};
+            });
             auto expanded_task=task;
             expanded_task.allow_subject_expansion=true;
             expanded_task.record["subjects"]={"root0","root1","root2"};
@@ -166,12 +181,7 @@ int main(int argc, char** argv) {
             auto& recovered_leg=recovered.bind_derived("new-leg",refined_settings);
             require(recovered_leg.reusable());
             require(recovered_leg.manifest().generation==refined.manifest().generation);
-            // Retiring the predecessor must preserve any exact live dependency.
-            rs::DirectCheckpoint pinned(world,root,"old-dependent",{{"kind","fixture"}},
-                cp::json::array({old_leg.qualified_input("old")}),"pin-old");
-            pinned.publish([&](const auto& dir){return payload(world,dir);});
             recovered.report();
-            require(store.read(previous).generation==previous.generation);
             rejects([&]{store.read_latest("response","old-leg");});
             // The same collective metadata writer used by Raman must preserve
             // the old file and publish failure timing on every rank.

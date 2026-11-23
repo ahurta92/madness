@@ -8,6 +8,8 @@
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/Restart.h>
 #include <madness/chem/LadderPlanner.h>
+#include <madness/chem/SCFCheckpoint.h>
+#include <madness/misc/info.h>
 
 namespace molresponse_v3::response_shared {
 namespace cp = madness::checkpoint;
@@ -371,61 +373,97 @@ public:
     return {{"values",values},{"availability",availability}};
   }
 };
-// Direct work consumes exact inputs selected and qualified by the application's
-// DAG. Changing an input invalidates completion without inventing an iteration.
-class DirectCheckpoint {
+// A second-order intermediate (VBC sources, two-photon sources) is built once
+// from converged response states and saved in its own node folder,
+// <run>/states/response/<name>/, with no history: it is never iterated.
+// The caller names the folder from the intermediate's parts, joined by
+// hyphens; a name holds only letters, digits, '.', '_' and '-'.
+inline std::filesystem::path second_order_folder(const std::string& name) {
+  cp::records::require(!name.empty() && name.find_first_not_of(
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")==std::string::npos &&
+      name.find_first_not_of('.')!=std::string::npos,"invalid second-order node name: "+name);
+  return std::filesystem::path("states")/"response"/name;
+}
+// One lineage entry: which input state, at which level, and its identity.
+// 4c part 1: the inputs are still store states, whose records hold no save
+// time, so the generation stands in for it. Parts 2 and 3 replace the
+// identity with saved_at from the input's own node description; only this
+// function changes.
+inline json lineage_entry(const std::string& role,const Checkpoint& input) {
+  const auto ref=input.qualified_input(role); // the input has met the final request
+  const auto protocol=cp::iteration_metrics_from_manifest(input.manifest()).info.protocol;
+  return {{"role",role},{"name",ref.at("task_id")},{"protocol",cp::records::protocol_record(protocol)},
+          {"identity",{{"generation",ref.at("generation")}}}};
+}
+// Reused when the saved settings and every lineage entry equal the current
+// ones; otherwise built again and saved over the old node. Never a guess.
+// Each node is written by the one process group that builds it.
+class SecondOrderNode {
   madness::World& world_;
-  cp::CheckpointStore store_;
-  std::string task_,owner_;
-  json definition_,inputs_;
-  std::optional<cp::Manifest> selected_;
+  std::string id_,name_;
+  std::filesystem::path folder_;
+  json settings_,lineage_;
+  std::optional<it::NodeDescription> saved_;
   bool reusable_=false;
-  std::size_t publications_=0;
 public:
-  DirectCheckpoint(madness::World& world,const std::filesystem::path& root,
-      std::string task,json definition,json inputs,std::string attempt, std::string writer_group={})
-      : world_(world),store_(world,root,{},std::move(writer_group)),task_(std::move(task)),owner_(std::move(attempt)),
-        definition_(std::move(definition)),inputs_(std::move(inputs)) {
-    store_.initialize(owner_);
-    // Missing/corrupt dependencies fail collectively before replacing the task.
-    for (const auto& input:cp::records::inputs(inputs_)) (void)store_.read(input);
-    selected_=store_.read_latest("response",task_,true);
-    if (selected_) {
-      const auto& saved=selected_->record.at("task");
-      cp::records::require(saved.at("kind")=="direct","response task changed kind");
-      reusable_=saved.at("definition")==definition_ && saved.at("inputs")==inputs_ &&
-                saved.at("outcome").at("complete")==true;
+  SecondOrderNode(madness::World& world,const std::filesystem::path& root,
+      std::string id,std::string name,json settings,json lineage)
+      : world_(world),id_(std::move(id)),name_(std::move(name)),
+        folder_(std::filesystem::absolute(root)/second_order_folder(name_)),
+        settings_(std::move(settings)),lineage_(std::move(lineage)) {
+    cp::records::require(lineage_.is_array() && !lineage_.empty(),"second-order node needs its inputs");
+    saved_=madness::read_node(world_,folder_); // collective; a half-present node is an error
+    if (saved_) {
+      cp::records::require(saved_->kind=="second_order","response node changed kind: "+folder_.string());
+      reusable_=saved_->settings==settings_ && saved_->lineage==lineage_;
     }
-    store_.register_task("response","molresponse",task_,"direct",true,inputs_);
   }
+  const std::string& id() const {return id_;}
+  const std::string& name() const {return name_;}
   bool reusable() const {return reusable_;}
-  const cp::Manifest& manifest() const {
-    cp::records::require(selected_.has_value(),"direct response task has no checkpoint");
-    return *selected_;
+  const json& settings() const {return settings_;}
+  const json& lineage() const {return lineage_;}
+  // The node folder relative to the run folder, for metadata and results.
+  std::string folder() const {return second_order_folder(name_).generic_string();}
+  const it::NodeDescription& description() const {
+    cp::records::require(saved_.has_value(),"second-order node has no saved state");
+    return *saved_;
   }
-  json source_record() const {
-    cp::records::require(reusable_,"direct source does not match current qualified inputs");
-    return {{"calculation_id","response"},{"task_id",task_},
-        {"generation",manifest().generation},{"attempt_id",manifest().record.at("attempt_id")}};
-  }
-  json qualified_input(const std::string& role) const {
-    auto input=source_record();input.erase("attempt_id");input["role"]=role;return input;
-  }
+  // reader(archive folder, description), on every process.
   template<class Reader> auto load(const Reader& reader) {
-    cp::records::require(reusable_,"direct checkpoint does not match the current qualified inputs");
-    const auto verified=store_.read({"response",task_,manifest().generation});
-    return reader(store_.task_directory("response",task_)/verified.generation,verified);
+    cp::records::require(reusable_,"second-order node does not match its current inputs");
+    return reader(it::Node(folder_).archive(),*saved_);
   }
-  template<class Writer> void publish(const Writer& writer) {
-    const auto generation=owner_+"-"+std::to_string(++publications_);
-    const json stage{{"application","molresponse"},{"settings",definition_},
-        {"requested_properties",json::array()},{"inputs",inputs_},
-        {"outcome",{{"complete",true},{"reason","computed"}}}};
-    const auto saved=cp::direct_manifest("response",owner_,generation,stage,task_,definition_,inputs_);
-    const auto warning=store_.publish(saved,writer);
-    selected_=store_.read({"response",task_,generation});
+  // writer(folder) writes the named archives collectively into an empty
+  // staging folder; rank 0's one save then moves them into the node.
+  template<class Writer> void save(const std::vector<std::string>& archives,const Writer& writer) {
+    const auto staging=folder_/"archive.staging";
+    cp::detail::on_root(world_,[&] {
+      std::filesystem::remove_all(staging);
+      std::filesystem::create_directories(staging);
+      return std::string{};
+    });
+    writer(staging);
+    world_.gop.fence();
+    cp::detail::on_root(world_,[&] {
+      it::NodeDescription d;
+      d.kind="second_order";
+      d.protocol=cp::records::read_protocol(settings_.at("protocol"));
+      d.settings=settings_;
+      d.metrics=json::array();
+      d.lineage=lineage_;
+      d.code_version=madness::info::git_commit();
+      d.level_finished=true;
+      d.details={{"second_order_node_version",1},{"archives",archives}};
+      it::Node(folder_).save(d,[&](const std::filesystem::path& archive) {
+        for (const auto& file:std::filesystem::directory_iterator(staging))
+          std::filesystem::rename(file.path(),archive/file.path().filename());
+      });
+      std::filesystem::remove_all(staging);
+      return std::string{};
+    });
+    saved_=madness::read_node(world_,folder_);
     reusable_=true;
-    if (!warning.empty() && world_.rank()==0) madness::print(warning);
   }
 };
 } // namespace molresponse_v3::response_shared

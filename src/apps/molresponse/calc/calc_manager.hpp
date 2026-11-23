@@ -212,6 +212,14 @@ inline std::string vbc_node_id(const Perturbation &pb, const Perturbation &pc,
   return "vbc:" + pb.description() + "__" + pc.description() + "@"
        + ResponseMetadata::freq_key(fb) + "_" + ResponseMetadata::freq_key(fc);
 }
+/// The VBC source's node folder name: the parts of vbc_node_id joined by
+/// hyphens. A description never holds a hyphen and each frequency part starts
+/// with 'f', so two different sources never share a name.
+inline std::string vbc_node_name(const Perturbation &pb, const Perturbation &pc,
+                                 double fb, double fc) {
+  return "vbc-" + pb.description() + "-" + pc.description() + "-"
+       + ResponseMetadata::freq_key(fb) + "-" + ResponseMetadata::freq_key(fc);
+}
 
 /// The perturbation a node belongs to — the unit of parallelism (distinct
 /// perturbations are independent and share every wave). FD / NuclearFD /

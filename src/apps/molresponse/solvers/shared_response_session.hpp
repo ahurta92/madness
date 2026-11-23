@@ -51,7 +51,7 @@ class Session {
   json properties_=json::object();
 public:
   std::map<std::string,std::unique_ptr<Checkpoint>> states;
-  std::map<std::string,std::unique_ptr<DirectCheckpoint>> direct;
+  std::map<std::string,std::unique_ptr<SecondOrderNode>> second_order;
   Session(madness::World& world,const std::filesystem::path& root,const GroundSource& ground,const it::Request& request,
           const std::vector<it::Protocol>& protocols,
           const std::vector<TaskSpec>& definitions,
@@ -112,18 +112,18 @@ public:
     if(binding->reusable()) record_summary(*binding,0);
     auto& result=*binding;states[id]=std::move(binding);return result;
   }
-  // Direct inputs are response states, whose settings carry the ground identity.
-  DirectCheckpoint& bind_direct(const std::string& id,const json& definition,const json& inputs) {
-    auto binding=std::make_unique<DirectCheckpoint>(world_,root_,id,definition,inputs,owner_,scope_.writer_group);
-    auto& result=*binding;direct[id]=std::move(binding);return result;
+  // The lineage names response states, whose settings carry the ground identity.
+  SecondOrderNode& bind_second_order(const std::string& id,const std::string& name,const json& settings,const json& lineage) {
+    auto binding=std::make_unique<SecondOrderNode>(world_,root_,id,name,settings,lineage);
+    auto& result=*binding;second_order[id]=std::move(binding);return result;
   }
-  void record_direct(const std::string& id,const DirectCheckpoint& binding) const {
+  void record_vbc(const std::string& id,const SecondOrderNode& binding) const {
     cp::detail::on_root(world_,[&] {
       auto meta=ResponseMetadata::load_or_create(metadata_path());
       const auto key=protocol_key(final_.thresh,final_.k);
       meta.set_protocol(key,final_.thresh,final_.k,0);
       meta.set_vbc_state(id,key,{{"converged",true},{"diverged",false},
-          {"shared_generation",binding.manifest().generation}});
+          {"node",binding.folder()}});
       meta.save();return std::string{};
     });
   }
@@ -149,8 +149,9 @@ public:
     json record=it::timing_entry(owner_,execution,timing_.record(),failure);
     if(scope_.parent_attempt.empty()) {store_.publish_timings(record);return;}
     record["parent_attempt"]=scope_.parent_attempt;
-    record["direct"]=json::array();
-    for(const auto& [id,binding]:direct) if(binding->reusable()) record["direct"].push_back(binding->manifest().record.at("task"));
+    record["second_order"]=json::array();
+    for(const auto& [id,binding]:second_order) if(binding->reusable())
+      record["second_order"].push_back({{"id",id},{"name",binding->name()},{"settings",binding->settings()},{"lineage",binding->lineage()}});
     cp::detail::on_root(world_,[&] {
       const auto directory=root_/"analysis"/"response";
       std::filesystem::create_directories(directory);
@@ -194,9 +195,9 @@ public:
       const auto& record=entry.at("record");
       cp::records::require(record.at("parent_attempt")==owner_,"subworld timing belongs to another invocation");
       timing_.append(record.at("timing"));
-      for(const auto& task:record.at("direct")) {
-        const auto id=task.at("task_id").get<std::string>();
-        direct[id]=std::make_unique<DirectCheckpoint>(world_,root_,id,task.at("definition"),task.at("inputs"),owner_);
+      for(const auto& node:record.at("second_order")) {
+        const auto id=node.at("id").get<std::string>();
+        second_order[id]=std::make_unique<SecondOrderNode>(world_,root_,id,node.at("name"),node.at("settings"),node.at("lineage"));
       }
       merged_groups_.insert(entry.at("name").get<std::string>());
     }
@@ -258,10 +259,10 @@ public:
         group["states"][public_id]=state->measured_values(subject.id);
       }
     }
-    json tasks=json::array();
-    for(const auto& [id,binding]:direct) if(binding->reusable()) tasks.push_back(binding->source_record());
+    // Second-order intermediates are nodes, not store tasks: the source map
+    // lists none (removed in part 4, with the source map).
     store_.publish_source_map({{"version",2},{"calculation_id","response"},{"attempt_id",owner_},
-                               {"states",sources},{"tasks",tasks}});
+                               {"states",sources},{"tasks",json::array()}});
     auto result=json::parse(cp::detail::on_root(world_,[&]{return cp::detail::read_json(root_/"results.json").dump();}));
     const auto prior_attempt=result.at("attempt_id");
     json calculations=json::array(),metrics=json::array();
@@ -270,10 +271,14 @@ public:
       calculations.push_back(std::move(entry));
     }
     for (const auto& [key,group]:groups) metrics.push_back(group);
+    json second_order_nodes=json::array();
+    for(const auto& [id,binding]:second_order) if(binding->reusable())
+      second_order_nodes.push_back({{"id",id},{"node",binding->folder()}});
     calculations.push_back({{"calculation_id","response"},{"attempt_id",owner_},{"application","molresponse"},
        {"protocol",cp::records::protocol_record(final_)},
        {"properties",properties_},
-       {"state_metrics",metrics}});
+       {"state_metrics",metrics},
+       {"second_order",second_order_nodes}});
     result["attempt_id"]=owner_;result["calculations"]=std::move(calculations);
     const auto warning=store_.publish_results(result);
     if (!warning.empty() && world_.rank()==0) madness::print(warning);
