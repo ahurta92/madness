@@ -131,7 +131,8 @@ int main() {
     check(decision.action == Action::stop && decision.reason == "iteration_limit", "sample stops at the limit");
     const std::vector<Diagnostic> diagnostics{{"polarizability", "b", "zz", 3.84}};
 
-    // A value that is unavailable is never printed as zero, in the NOT CONVERGED block.
+    // A value that is unavailable is never printed as zero, in the NOT CONVERGED block,
+    // and the block gives its reason.
     {
         std::ostringstream block;
         write_unconverged_diagnostics(block, metrics, decision, diagnostics);
@@ -145,6 +146,8 @@ int main() {
                 check(line.find(" - ") != std::string::npos, "unavailable BSH shows a dash");
                 check(line.find("0.0e+00") == std::string::npos, "unavailable BSH is not zero");
                 check(line.find("unavailable") != std::string::npos, "unavailable BSH says unavailable");
+                check(line.find("unavailable (not measured)") != std::string::npos,
+                      "unavailable BSH gives its reason");
             }
         check(seen, "the block lists the BSH check of state b");
     }

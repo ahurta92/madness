@@ -270,10 +270,15 @@ inline void write_unconverged_diagnostics(std::ostream& os, const IterationMetri
                 if (const auto found = state->metrics.find(check.metric);
                     found != state->metrics.end() && found->second.value)
                     measured = output_detail::number(*found->second.value, 1, true);
+            // A check without a usable measurement names its reason, as the metric table does.
+            std::string result = check.result == CheckResult::met ? "met"
+                               : check.result == CheckResult::unmet ? "NOT MET"
+                               : output_detail::words(check_result_name(check.result));
+            if (check.result != CheckResult::met && check.result != CheckResult::unmet && !check.reason.empty())
+                result += " (" + output_detail::words(check.reason) + ")";
             rows.push_back({"  " + output_detail::label(check.metric, labels), measured,
                             "limit " + (check.limit ? output_detail::number(*check.limit, 1, true) : std::string("-")),
-                            check.result == CheckResult::met ? "met" : check.result == CheckResult::unmet
-                                ? "NOT MET" : output_detail::words(check_result_name(check.result))});
+                            result});
         }
         output_detail::table(os, rows, {16, 7, 13, 7}, {false, true, false, false});
     }
