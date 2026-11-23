@@ -589,7 +589,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
       const double load_seconds=load_timer.seconds();
       ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
       if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
-        const auto saved=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+        const auto saved=binding.saved_metrics();
         it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
             it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());
       }
@@ -638,16 +638,13 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
           it::write_iteration_metrics(std::cout,"response",metrics,decision,
               response_shared::metric_labels(),binding.final_level());
+        binding.record_evaluation(metrics,decision,diagnostics);
         binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
           MADNESS_CHECK_THROW(state.responses.size()==1,"driven task must contain one response state");
           state.responses.front().save(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
-          checkpoint::Payload payload;
-          if (world.rank()==0) payload.archives.push_back(checkpoint::inspect_archive(directory,"functions","response",{},1));
-          return payload;
         });
         if (decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
           it::write_checkpoint_saved(std::cout,decision);
-        ctx.shared_response->record_evaluation(metrics,decision,binding.definition().metric_ids,diagnostics);
         if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
             it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
           it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::metric_labels());
@@ -3268,7 +3265,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         } else functions=binding.load<ResponseStateXY<ClosedShell>>(true);
         const double load_seconds=load_timer.seconds();
         ctx.shared_response->timing().append({{"name","load"},{"task_id",binding.info().task_id},{"seconds",load_seconds}});
-        const auto frame=checkpoint::iteration_metrics_from_manifest(binding.manifest());
+        const auto frame=binding.saved_metrics();
         if (world.rank()==0) {
           // Reusable states bypass the solver node and first load here.
           if (binding.reusable() && iteration::prints(ctx.verbosity,iteration::needed::restart_summary))
