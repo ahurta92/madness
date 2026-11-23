@@ -3,7 +3,7 @@ vscode_build*
 cmake-build-debug*
 .history*
 *-workspace
-*/__pycache__/
+__pycache__/
 slurm-logs/
 molresponse_testdata/
 clang*
