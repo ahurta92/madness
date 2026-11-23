@@ -262,6 +262,8 @@ if(BUILD_TESTING)
   add_unittests(chem "test_convergence_decision.cc" "MADworld" "unittests;short")
   # Per-update history row (step 2): header-only, plain values, no runtime.
   add_unittests(chem "test_iteration_history.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  # Timing record of one launch, verbosity, printing rules (step 3): header-only, plain values.
+  add_unittests(chem "test_iteration_output.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_metric_helpers.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_optimizer_settings.cc" "MADchem" "unittests;short")
   add_unittests(chem "test_timing_records.cc" "MADchem" "unittests;short")
