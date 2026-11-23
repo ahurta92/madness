@@ -69,6 +69,7 @@ set(MADCHEM_HEADERS
     IterationMetrics.h
     IterationHistory.h
     IterationOutput.h
+    NodeArchive.h
     TimingRecords.h
     MetricHelpers.h
     ConvergenceSettings.h
@@ -264,6 +265,8 @@ if(BUILD_TESTING)
   add_unittests(chem "test_iteration_history.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Timing record of one launch, verbosity, printing rules (step 3): header-only, plain values.
   add_unittests(chem "test_iteration_output.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
+  # Node archive (step 4a): header-only, plain values and a temporary folder.
+  add_unittests(chem "test_node_archive.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_metric_helpers.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_optimizer_settings.cc" "MADchem" "unittests;short")
   add_unittests(chem "test_timing_records.cc" "MADchem" "unittests;short")
