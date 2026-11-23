@@ -78,7 +78,8 @@ analysis=json.loads(metadata.read_text())
 analysis['properties']['unrelated_analysis']={'marker':'preserve'}
 metadata.write_text(json.dumps(analysis))
 assert run('loose-again')==0
-residuals={f:next(m['value'] for m in saved(f)[1]['task']['iteration']['metrics'] if m['metric']=='bsh_residual') for f in [.05,.1]}
+# Driven BSH is judged as value <= target*(1+scale), so the gate is placed on value/(1+scale).
+residuals={f:next(m['value']/(1+m['scale']['value']) for m in saved(f)[1]['task']['iteration']['metrics'] if m['metric']=='bsh_residual') for f in [.05,.1]}
 gate=sum(residuals.values())/2
 assert min(residuals.values())<gate<max(residuals.values())
 # No update: the deck allows one, which could carry the unmet state under the gate.

@@ -27,7 +27,10 @@ def task(frequency,axis='z'):return f'fd:dipole_{axis}@f{frequency:.5f}'
 def saved(identity):
     g=json.loads((tasks/identity/'latest').read_text())['generation']
     return g,json.loads((tasks/identity/g/'manifest.json').read_text())
-def residual(record):return next(m['value'] for m in record['task']['iteration']['metrics'] if m['metric']=='bsh_residual')
+# Driven BSH is judged as value <= target*(1+scale), so the gate is placed on value/(1+scale).
+def residual(record):
+    m=next(m for m in record['task']['iteration']['metrics'] if m['metric']=='bsh_residual')
+    return m['value']/(1+m['scale']['value'])
 def response_result():return next(c for c in json.loads((root/'results.json').read_text())['calculations'] if c['calculation_id']=='response')
 def history():
     return [json.loads(line) for f in sorted((work/'run/analysis/response').glob('*.jsonl'),key=lambda f:f.stat().st_mtime_ns) for line in f.read_text().splitlines()]

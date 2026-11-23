@@ -30,8 +30,10 @@ inline TaskDefinition excited_task(std::size_t roots) {
   for(std::size_t root=0;root<roots;++root) subjects.push_back(make_root_id(static_cast<int>(root)));
   return {{{"subjects",subjects},{"es_checkpoint_version",1}},ids,definitions_es,
       [](it::Protocol protocol) {
-        // Excited states also judge the change in excitation energy.
+        // Excited states also judge the change in excitation energy, and keep
+        // the plain rule for every metric.
         auto metrics=model(protocol);
+        for(auto& [metric,definition]:metrics) definition.rule=it::LimitRule::plain;
         metrics[it::Metric::energy_change]={it::Support::supported,true,5e-4,it::LimitRule::plain,{}};
         return metrics;
       },

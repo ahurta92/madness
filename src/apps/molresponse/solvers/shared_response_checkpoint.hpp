@@ -66,11 +66,12 @@ inline json definitions() {
   return result;
 }
 // Driven response. Default targets are the branch's response defaults; the
-// shared floor (5 * threshold) applies at intermediate levels. The frequency is
-// fixed input, so an energy change is not applicable.
+// shared floor (5 * threshold) applies at intermediate levels. BSH and density
+// use the scaled rule, T * (1 + scale), with the scale this solver measures.
+// The frequency is fixed input, so an energy change is not applicable.
 inline it::ModelMetrics model(it::Protocol = {1e-4, 6}) {
-  return {{it::Metric::bsh_residual, {it::Support::supported, true, 5e-4, it::LimitRule::plain, {}}},
-          {it::Metric::density_change, {it::Support::supported, true, 5e-4, it::LimitRule::plain, {}}},
+  return {{it::Metric::bsh_residual, {it::Support::supported, true, 5e-4, it::LimitRule::scaled, {}}},
+          {it::Metric::density_change, {it::Support::supported, true, 5e-4, it::LimitRule::scaled, {}}},
           {it::Metric::energy_change, {it::Support::not_applicable, false, {}, it::LimitRule::plain, {}}},
           {it::Metric::kinetic_change, {it::Support::supported, false, {}, it::LimitRule::plain, {}}}};
 }
