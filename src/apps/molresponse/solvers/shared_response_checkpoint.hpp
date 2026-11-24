@@ -421,14 +421,14 @@ public:
       reusable_=saved_->settings==settings_ && saved_->lineage==lineage_;
     }
   }
-  const std::string& id() const {return id_;}
-  const std::string& name() const {return name_;}
-  bool reusable() const {return reusable_;}
-  const json& settings() const {return settings_;}
-  const json& lineage() const {return lineage_;}
+  [[nodiscard]] const std::string& id() const {return id_;}
+  [[nodiscard]] const std::string& name() const {return name_;}
+  [[nodiscard]] bool reusable() const {return reusable_;}
+  [[nodiscard]] const json& settings() const {return settings_;}
+  [[nodiscard]] const json& lineage() const {return lineage_;}
   // The node folder relative to the run folder, for metadata and results.
-  std::string folder() const {return second_order_folder(name_).generic_string();}
-  const it::NodeDescription& description() const {
+  [[nodiscard]] std::string folder() const {return second_order_folder(name_).generic_string();}
+  [[nodiscard]] const it::NodeDescription& description() const {
     cp::records::require(saved_.has_value(),"second-order node has no saved state");
     return *saved_;
   }
