@@ -28,7 +28,7 @@
 // The run folder is --run-dir (default: the current directory). The ground
 // state comes from its node, <run>/states/ground_state/, at the level its
 // description records, with the molecule from the run's analysis files
-// (saved_states.hpp:read_ground). With --fd and --es it also dumps the saved
+// (solvers/saved_states.hpp:read_ground). With --fd and --es it also dumps the saved
 // response states: it lists the node folders under <run>/states/response/,
 // reads each description, and loads the driven states (--fd) and excited-state
 // sets (--es) through the node module. It never writes into the run folder.
@@ -45,7 +45,7 @@
 #include "../kernels/full.hpp"     // Kernels<Full,ClosedShell>::compute_density
 #include "../kernels/tda.hpp"      // Kernels<TDA,ClosedShell>::compute_density
 #include "../solvers/response_metadata.hpp"  // ResponseMetadata::freq_key (output names)
-#include "saved_states.hpp"        // node folders under <run>/states/response/
+#include "../solvers/saved_states.hpp"        // node folders under <run>/states/response/
 
 #include <madness/chem/atomutil.h>
 #include <nlohmann/json.hpp>

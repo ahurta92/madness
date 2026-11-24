@@ -58,6 +58,7 @@ Iterative FD/ES solvers, convergence evidence, state archives, metadata, importe
 | [function_hdf5_io.hpp](./function_hdf5_io.hpp) | Structured Function and opaque archive HDF5 persistence |
 | [response_metadata.hpp](./response_metadata.hpp) | JSON registry, property upserts and shard merging |
 | [response_seed.hpp](./response_seed.hpp) | Seeds: starting guesses from elsewhere, in the node layout under seeds/ |
+| [saved_states.hpp](./saved_states.hpp) | Lists and loads a run folder's saved response nodes through the node module, read-only |
 | [node_subworlds.hpp](./node_subworlds.hpp) | Hostname-aware task partition and World lifetimes |
 | [es_analysis.hpp](./es_analysis.hpp) | Transition properties and AO analysis |
 | [raman_analysis.hpp](./raman_analysis.hpp) | Hessian, modes and Raman spectrum |

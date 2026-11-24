@@ -7,7 +7,7 @@
 // so a tool can look at a run that is still going.
 #include "../GroundState.hpp"
 #include "../ResponseProtocol.hpp"
-#include "../solvers/shared_es_checkpoint.hpp"
+#include "shared_es_checkpoint.hpp"
 
 #include <madness/chem/SCFCheckpoint.h>  // ground_state_node
 #include <madness/chem/molecule.h>
