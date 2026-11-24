@@ -1,16 +1,22 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 #include <iostream>
 using namespace madness;
 namespace {
+// This process's launch entry. Every SCF run in one process is part of one
+// launch; each run adds its own top-level steps, tagged with its part number.
 checkpoint::json timing_records(World& world, const std::filesystem::path& root) {
-    return checkpoint::json::parse(checkpoint::detail::on_root(world, [&] {
+    const auto launches = checkpoint::json::parse(checkpoint::detail::on_root(world, [&] {
         MADNESS_CHECK_THROW(std::filesystem::is_regular_file(root / "timings.json"),
                             "SCF must persist shared timings even with print_level zero");
         return checkpoint::detail::read_json(root / "timings.json").dump();
-    })).at("attempts");
+    })).at("launches");
+    MADNESS_CHECK_THROW(launches.size() == 1 && launches[0].contains("started_at") &&
+                        !launches[0].contains("attempt_id"), "one process writes one launch entry");
+    return launches[0];
 }
+checkpoint::json steps(const checkpoint::json& launch) { return launch.at("timing").at("children"); }
 // Recursively inspect the finite timing tree saved by the application.
 // NOLINTNEXTLINE(misc-no-recursion)
 void collect_iterations(const checkpoint::json& node, checkpoint::json& iterations) {
@@ -49,10 +55,11 @@ int main(int argc, char** argv) {
             const auto ground = ground_state_node(scf.work_dir);
             const auto before = read_node(world, ground);
             MADNESS_CHECK_THROW(before.has_value(), "endpoint must save its metrics and native functions");
-            const auto initial_times = timing_records(world, scratch);
-            MADNESS_CHECK_THROW(initial_times.size() == 1, "fresh SCF timing record is missing");
+            const auto initial_times = steps(timing_records(world, scratch));
+            MADNESS_CHECK_THROW(initial_times.size() == 1 && initial_times[0].at("part") == 0,
+                                "fresh SCF timing record is missing");
             auto iterations = checkpoint::json::array();
-            collect_iterations(initial_times.back().at("timing"), iterations);
+            collect_iterations(initial_times.back(), iterations);
             MADNESS_CHECK_THROW(iterations.size() == 2 && iterations[0].at("iteration") == 0 &&
                                 iterations[1].at("iteration") == 1,
                                 "one-update endpoint has two evaluation timings");
@@ -65,11 +72,11 @@ int main(int argc, char** argv) {
             energy.value(molecule.get_all_coords().flat());
             MADNESS_CHECK_THROW(scf.last_calculation_outcome->complete, "satisfied saved metrics must be reusable");
             MADNESS_CHECK_THROW(read_node(world, ground) == before, "reuse must not save again");
-            const auto reused_times = timing_records(world, scratch);
-            MADNESS_CHECK_THROW(reused_times.size() == 2 && reused_times[0] == initial_times[0],
-                                "reuse must retain the original timing record");
+            const auto reused_times = steps(timing_records(world, scratch));
+            MADNESS_CHECK_THROW(reused_times.size() == 2 && reused_times[0] == initial_times[0] &&
+                                reused_times[1].at("part") == 1, "reuse must retain the original timing record");
             iterations = checkpoint::json::array();
-            collect_iterations(reused_times.back().at("timing"), iterations);
+            collect_iterations(reused_times.back(), iterations);
             MADNESS_CHECK_THROW(iterations.empty(), "reuse must not copy historical iterations");
             auto moved = molecule.get_all_coords(); moved(0, 0) = 0; moved(0, 1) = 0.1;
             bool rejected = false;
@@ -78,9 +85,10 @@ int main(int argc, char** argv) {
             catch (const std::exception& error) { rejected = true; model_failure = error.what(); }
             MADNESS_CHECK_THROW(rejected, "ordinary restart must reject a changed geometry");
             MADNESS_CHECK_THROW(read_node(world, ground) == before, "model rejection must preserve the saved state");
-            const auto failed_times = timing_records(world, scratch);
+            const auto failed_launch = timing_records(world, scratch);
+            const auto failed_times = steps(failed_launch);
             MADNESS_CHECK_THROW(failed_times.size() == 3 && failed_times[0] == initial_times[0] &&
-                                failed_times[1] == reused_times[1] && failed_times.back().contains("failure"),
+                                failed_times[1] == reused_times[1] && failed_launch.contains("failure"),
                                 "failed SCF must retain previous records and record its failure");
             // A secondary timing-file error must not hide the collective model error.
             checkpoint::detail::on_root(world, [&] {
@@ -94,7 +102,7 @@ int main(int argc, char** argv) {
                 const auto file = std::filesystem::path(scratch) / "timings.json";
                 MADNESS_CHECK_THROW(checkpoint::detail::read_json(file).empty(),
                                     "failed timing publication replaced the existing record");
-                std::ofstream(file) << checkpoint::json{{"version", 1}, {"attempts", failed_times}}.dump();
+                std::ofstream(file) << checkpoint::json{{"version", 2}, {"launches", {failed_launch}}}.dump();
                 return std::string{};
             });
             MADNESS_CHECK_THROW(preserved_failure == model_failure,

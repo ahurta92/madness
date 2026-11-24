@@ -68,7 +68,7 @@ void exercise(World& world,bool stream,bool batch) {
     try {solver.advance(state);} catch(...) {rejected=true;}
     MADNESS_CHECK(rejected); // preparation never creates an update proposal
   }
-  it::IterationInfo info{"excited","attempt",{1e-4,6},0,"model"};
+  it::IterationInfo info{"excited",{1e-4,6},0,"model"};
   it::Request request;request.max_updates=0;
   request.targets[it::Metric::bsh_residual]=1e6;
   it::ModelMetrics model{{it::Metric::bsh_residual,{it::Support::supported,false,{},it::LimitRule::plain,{}}}};
@@ -84,15 +84,17 @@ void exercise(World& world,bool stream,bool batch) {
   auto observer=[&](const auto& saved,const auto& metrics,const auto& decision,const auto& progress) {
     ++observations;
     MADNESS_CHECK(saved.iter==0 && metrics.states.size()==2 && decision.action==it::Action::complete);
-    const auto definition=shared::excited_task(saved.roots.size());
-    const cp::json stage{{"application","molresponse"},{"settings",cp::json::object()},
-      {"requested_properties",cp::json::array()},{"inputs",cp::json::array()},
-      {"outcome",{{"complete",true},{"reason","converged"}}}};
-    auto manifest=cp::iterative_manifest("response","g",stage,definition.record,cp::json::array(),
-        definition.metric_definitions,definition.metric_ids,metrics,decision,progress);
-    manifest.archives=shared::save_excited_functions(world,saved,directory).archives;
-    manifest=cp::from_json_record(cp::json::parse(cp::detail::on_root(world,[&] {return cp::to_json_record(manifest).dump();})));
-    const auto loaded=shared::load_excited_functions<Type,ClosedShell>(world,directory,manifest,info.protocol);
+    // The roots as ExcitedSet::publish describes them in a node.
+    shared::save_excited_functions(world,saved,directory);
+    world.gop.fence();
+    cp::json roots=cp::json::array();
+    for(std::size_t slot=0;slot<saved.roots.size();++slot)
+      roots.push_back({{"slot",slot},{"root_id",molresponse_v3::make_root_id(saved.stable_index[slot])},
+          {"stable_index",saved.stable_index[slot]},{"omega",saved.omega(static_cast<long>(slot))}});
+    it::NodeDescription description;
+    description.kind="excited_set";description.protocol=info.protocol;
+    description.details={{"n_roots",roots.size()},{"roots",roots},{"writers",world.size()}};
+    const auto loaded=shared::load_excited_functions<Type,ClosedShell>(world,directory,description,info.protocol);
     MADNESS_CHECK(loaded.stable_index==saved.stable_index && loaded.iter==0);
     for(std::size_t i=0;i<loaded.roots.size();++i) {
       MADNESS_CHECK(loaded.omega(static_cast<long>(i))==saved.omega(static_cast<long>(i)));

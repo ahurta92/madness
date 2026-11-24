@@ -1,5 +1,5 @@
 #include <madness/chem/SCF.h>
-#include <madness/chem/CheckpointRecords.h>
+#include <madness/chem/MetricRecords.h>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
                 const bool final_level = stage + 1 == protocol.size();
                 auto settings = it::resolve(request, scf.iteration_model(),
                     {protocol[stage], FunctionDefaults<3>::get_k()}, final_level, "ground state");
-                SCF::IterationControl control{settings, final_level, {"scf", name, {"ground"}}, "calibration"};
+                SCF::IterationControl control{settings, final_level, {"scf", name, {"ground"}}};
                 it::IterationMetrics latest;
                 control.observer = [&](World&, const SCF&, const it::IterationMetrics& metrics,
                                        const it::Decision& decision, const it::Progress&) {

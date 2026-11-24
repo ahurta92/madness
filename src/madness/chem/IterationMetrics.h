@@ -38,12 +38,11 @@ struct Protocol {
     bool operator==(const Protocol&) const = default;
 };
 
-// Within the enclosing calculation, (task, attempt, protocol, iteration)
-// identifies the prepared state. Zero precedes the first main update; N follows
+// Within the enclosing calculation, (task, protocol, iteration) identifies the
+// prepared state of one solve. Zero precedes the first main update; N follows
 // N completed main updates at this protocol in this solve session.
 struct IterationInfo {
     std::string task_id;
-    std::string attempt_id;
     Protocol protocol;
     std::size_t iteration = 0;
     // Application-validated definitions/reference/operator context. Tolerances
@@ -52,9 +51,9 @@ struct IterationInfo {
     bool operator==(const IterationInfo&) const = default;
 };
 
+// The earlier state a change was measured against.
 struct Comparison {
     std::string task_id;
-    std::string attempt_id;
     Protocol protocol;
     std::size_t iteration = 0;
     std::string subject;

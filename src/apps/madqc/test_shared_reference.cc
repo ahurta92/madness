@@ -1,6 +1,6 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 #include <apps/molresponse/GroundState.hpp>
 #include <iostream>
 

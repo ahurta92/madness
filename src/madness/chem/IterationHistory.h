@@ -3,7 +3,7 @@
 // Per-update history: one JSON row per decision, in one format for the ground
 // state, driven response and excited states. It records; it never measures or
 // judges. No MADNESS runtime or MPI: the caller chooses the writing process.
-#include <madness/chem/CheckpointRecords.h>
+#include <madness/chem/MetricRecords.h>
 #include <madness/chem/IterationMetrics.h>
 
 #include <filesystem>

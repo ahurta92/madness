@@ -62,7 +62,7 @@ inline std::filesystem::path excited_folder(const std::string& model) {
 class ExcitedSet {
   madness::World& world_;
   std::filesystem::path folder_;
-  std::string task_,owner_,context_;
+  std::string task_,context_;
   json settings_,lineage_;
   TaskDefinition definition_;
   it::Request request_;
@@ -74,7 +74,7 @@ class ExcitedSet {
   bool reusable_=false,complete_=false;
 
   [[nodiscard]] it::IterationMetrics stored(const it::NodeDescription& d) const {
-    return it::stored_metrics(d,{task_,owner_,d.protocol,0,context_});
+    return it::stored_metrics(d,{task_,d.protocol,0,context_});
   }
   [[nodiscard]] static std::vector<std::string> saved_subjects(const it::NodeDescription& d) {
     std::vector<std::string> ids;
@@ -84,9 +84,9 @@ class ExcitedSet {
 public:
   ExcitedSet(madness::World& world,const std::filesystem::path& root,const GroundSource& ground,
              std::string task,json scientific_settings,const it::Request& request,
-             std::vector<it::Protocol> protocols,std::string attempt,TaskDefinition definition,
+             std::vector<it::Protocol> protocols,TaskDefinition definition,
              it::Verbosity verbosity=it::Verbosity::detail)
-      : world_(world),task_(std::move(task)),owner_(std::move(attempt)),settings_(std::move(scientific_settings)),
+      : world_(world),task_(std::move(task)),settings_(std::move(scientific_settings)),
         definition_(std::move(definition)),request_(request),protocols_(std::move(protocols)),
         settings(it::resolve(request,definition_.model(protocols_.at(0)),protocols_.at(0),
                              protocols_.size()==1,definition_.application)) {
@@ -151,7 +151,7 @@ public:
     const auto subjects=cp::records::subjects(definition_.record);
     return {task_,context_,{subjects.begin(),subjects.end()}};
   }
-  [[nodiscard]] it::IterationInfo info() const {return {task_,owner_,settings.protocol,0,context_};}
+  [[nodiscard]] it::IterationInfo info() const {return {task_,settings.protocol,0,context_};}
   [[nodiscard]] bool has_saved() const {return saved_.has_value();}
   [[nodiscard]] bool reusable() const {return reusable_;}
   [[nodiscard]] bool complete() const {return complete_;}
@@ -187,7 +187,7 @@ public:
   template<class Writer>
   void publish(const it::IterationMetrics& metrics,const it::Decision& decision,
                const it::Progress& progress,const std::vector<int>& stable_index,const Writer& writer) {
-    cp::records::require(metrics.info==it::IterationInfo{task_,owner_,settings.protocol,metrics.info.iteration,context_},
+    cp::records::require(metrics.info==it::IterationInfo{task_,settings.protocol,metrics.info.iteration,context_},
                          "response metrics belong to a different binding or protocol");
     complete_=decision.action==it::Action::complete;
     if(!decision.checkpoint) return;

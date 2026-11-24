@@ -50,7 +50,7 @@ int main() {
   require(timer.lap() == 0.25 && timer.seconds() == 0.375);
 
   const it::ExpectedTask expected{"fd", "context", {"response"}};
-  const it::IterationInfo info{"fd", "attempt", {1e-4, 6}, 0, "context"};
+  const it::IterationInfo info{"fd", {1e-4, 6}, 0, "context"};
   it::Request request;
   request.max_updates = 2;
   request.targets[it::Metric::bsh_residual] = 0.5;

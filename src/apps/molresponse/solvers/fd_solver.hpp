@@ -687,7 +687,7 @@ public:
       values.id = state.responses.size() == 1 ? "response" : "response_" + std::to_string(channel);
       if (shared_previous_info_) {
         const auto& old = *shared_previous_info_;
-        values.comparison = it::Comparison{old.task_id, old.attempt_id, old.protocol, old.iteration, values.id};
+        values.comparison = it::Comparison{old.task_id, old.protocol, old.iteration, values.id};
       }
       auto residual = it::maximum_residual(std::move(components));
       state.last_bsh_residual.push_back(residual.value.value_or(0.0));

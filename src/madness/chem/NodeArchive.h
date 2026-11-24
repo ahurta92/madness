@@ -7,7 +7,7 @@
 // A save replaces the archive and the description together. No MADNESS runtime,
 // MPI or lock: the caller chooses the one process that touches the folder.
 // Known limit: no fsync; a save survives the process dying, not a power loss.
-#include <madness/chem/CheckpointRecords.h>
+#include <madness/chem/MetricRecords.h>
 #include <madness/chem/IterationMetrics.h>
 #include <algorithm>
 #include <chrono>
@@ -61,8 +61,8 @@ inline NodeDescription read_description(const nlohmann::json& r) {
 }
 
 // The measurements in the form records::measurements writes, with each
-// comparison reduced to the level and subject it compared with: the task and
-// launch it came from are not stored, and stored_metrics rebinds them.
+// comparison reduced to the level and subject it compared with: the task it
+// came from is not stored, and stored_metrics rebinds it.
 inline nlohmann::json node_metrics(const IterationMetrics& metrics,
                                    const std::map<Metric, std::string>& definitions) {
     auto entries = madness::checkpoint::records::measurements(metrics, definitions);
@@ -74,15 +74,14 @@ inline nlohmann::json node_metrics(const IterationMetrics& metrics,
     return entries;
 }
 
-// The stored measurements as measured values of `as_task` (its task, launch and
+// The stored measurements as measured values of `as_task` (its task and
 // context), at the saved level after `updates_at_protocol` updates. A stored
 // comparison at the same level is taken as the update before; with no update
 // at the level it cannot be, and the change check then finds no comparison.
 inline IterationMetrics stored_metrics(const NodeDescription& description, const IterationInfo& as_task) {
     namespace records = madness::checkpoint::records;
     IterationMetrics result;
-    result.info = {as_task.task_id, as_task.attempt_id, description.protocol, description.updates_at_protocol,
-                   as_task.context_id};
+    result.info = {as_task.task_id, description.protocol, description.updates_at_protocol, as_task.context_id};
     const auto& info = result.info;
     for (const auto& entry : description.metrics) {
         const auto id = entry.at("subject").get<std::string>();
@@ -103,7 +102,7 @@ inline IterationMetrics stored_metrics(const NodeDescription& description, const
             const auto& c = entry.at("comparison");
             const auto level = records::read_protocol(c.at("protocol"));
             const auto before = level != info.protocol ? 0 : info.iteration > 0 ? info.iteration - 1 : info.iteration;
-            m.comparison = Comparison{info.task_id, info.attempt_id, level, before, c.at("subject").get<std::string>()};
+            m.comparison = Comparison{info.task_id, level, before, c.at("subject").get<std::string>()};
         }
         const auto e = entry.value("evidence", nlohmann::json::object());
         const auto number = [&](const char* key) {

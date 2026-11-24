@@ -43,11 +43,7 @@ if(BUILD_TESTING)
   # Scientific numbers live in src/examples/qc. These tests cover chained
   # runs, checkpoint integrity and relationships between reported quantities.
   if(Python3_EXECUTABLE)
-    add_test(NAME madness/test/madqc/test_migrate_run_layout/run
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_migrate_run_layout.py)
-    set_tests_properties(madness/test/madqc/test_migrate_run_layout/run PROPERTIES
-      LABELS "unit;madqc;short" TIMEOUT 30)
-    foreach(test test_shared_run_layout test_stdio_review test_shared_workflow_timings test_shared_scf test_scf_recovery test_workflow_requalification
+    foreach(test test_stdio_review test_shared_scf test_scf_recovery test_workflow_requalification
         test_workflow_completion test_driver_contract test_workflow_seed test_workflow_response test_shared_response test_shared_response_review test_shared_response_ladder test_shared_response_ladder_review test_shared_response_refinement)
       set(script_args)
       if(test MATCHES "^test_(workflow_completion|workflow_seed|workflow_response|shared_response|shared_response_ladder)$")

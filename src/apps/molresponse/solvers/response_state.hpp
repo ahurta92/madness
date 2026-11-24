@@ -35,7 +35,7 @@
 
 #include <madness/mra/mra.h>
 #include <madness/world/parallel_archive.h>
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 
 #include <array>
 #include <cstddef>

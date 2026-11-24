@@ -1,5 +1,6 @@
 #include <madness/chem/SCF.h>
-#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/NodeArchive.h>
+#include <madness/chem/RootCoordination.h>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -81,7 +82,7 @@ void review_regression(World& world, const std::string& mode) {
     request.floor_factor = 0.0; // a strict, never-met request
     request.max_updates = 1;
     SCF::IterationControl control{it::resolve(request, scf.iteration_model(), {1e-4, 6}, true), true,
-        {"virtuals", "review-fixed-context", {"virtuals"}}, "a1"};
+        {"virtuals", "review-fixed-context", {"virtuals"}}};
     if (mode == "empty" || mode == "occupations") {
         scf.last_calculation_outcome = CalculationOutcome{true, "preserve_previous_outcome"};
         scf.converged_for_dconv = 1e-5;
@@ -148,32 +149,40 @@ void exercise(World& world, int atom, const std::string& xc) {
     ground_request.max_updates = 30;
     const it::Protocol protocol{1e-4, 6};
     SCF::IterationControl ground_control{it::resolve(ground_request, occupied.iteration_model(), protocol, true), true,
-        {"occupied", name + "-occupied-context", {"ground"}}, "a1"};
-    cp::CheckpointStore store(world, name + "-run");
-    store.initialize("a1");
-    store.register_task("scf", "scf", "occupied", "iterative", true);
-    store.register_task("scf", "scf", "virtuals", "iterative", true);
-    const cp::json stage{{"application", "scf"}, {"settings", {{"xc", xc}}},
-        {"requested_properties", cp::json::array()}, {"inputs", cp::json::array()},
-        {"outcome", {{"complete", false}, {"reason", "in_progress"}}}};
+        {"occupied", name + "-occupied-context", {"ground"}}};
+    // Each endpoint is saved as a node, as SCFCheckpoint saves it.
+    const auto run = std::filesystem::absolute(name + "-run");
+    cp::detail::on_root(world, [&] { std::filesystem::remove_all(run); return std::string{}; });
     const auto publish = [&](const SCF& owner, const it::IterationMetrics& metrics,
-                             const it::Decision& decision, const it::Progress& progress,
-                             const std::string& generation, const cp::json& inputs) {
-        auto manifest = cp::iterative_manifest("scf", generation, stage,
-            {{"subject", metrics.states.at(0).id}}, inputs, SCF::iteration_metric_definitions(),
-            SCF::iteration_metric_set(), metrics, decision, progress);
-        store.publish(manifest, [&](const std::filesystem::path& directory) {
-            cp::Payload payload;
-            payload.local_error = owner.write_mos(world, (directory / "scf.restartdata").string(), owner.orbital_metadata());
-            world.gop.fence();
-            if (world.rank() == 0 && payload.local_error.empty())
-                payload.archives.push_back(cp::inspect_archive(directory, "orbitals", "scf.restartdata", {}, 1));
-            return payload;
+                             const it::Decision&, const it::Progress& progress,
+                             const std::filesystem::path& folder, const cp::json& lineage) {
+        const auto staging = run / "staging";
+        cp::detail::on_root(world, [&] { std::filesystem::create_directories(staging); return std::string{}; });
+        cp::detail::collective_error(world, owner.write_mos(world, (staging / "scf.restartdata").string(),
+                                                            owner.orbital_metadata()));
+        world.gop.fence();
+        cp::detail::on_root(world, [&] {
+            const it::NodeDescription d{metrics.states.at(0).id == "virtuals" ? "virtuals" : "ground_state",
+                metrics.info.protocol, progress.updates_at_protocol, {{"xc", xc}},
+                it::node_metrics(metrics, SCF::iteration_metric_set()), lineage, {}, "test", false, {}};
+            it::Node(folder).save(d, [&](const std::filesystem::path& archive) {
+                for (const auto& file : std::filesystem::directory_iterator(staging))
+                    std::filesystem::rename(file.path(), archive / file.path().filename());
+            });
+            std::filesystem::remove_all(staging);
+            return std::string{};
         });
+    };
+    const auto saved_node = [&](const std::filesystem::path& folder) {
+        const auto record = cp::json::parse(cp::detail::on_root(world, [&] {
+            const auto d = it::Node(folder).inspect();
+            return d ? it::description_record(*d).dump() : std::string("null");
+        }));
+        return record.is_null() ? std::nullopt : std::optional(it::read_description(record));
     };
     ground_control.observer = [&](World&, const SCF& owner, const it::IterationMetrics& metrics,
                                   const it::Decision& decision, const it::Progress& progress) {
-        if (decision.checkpoint) publish(owner, metrics, decision, progress, "g1", cp::json::array());
+        if (decision.checkpoint) publish(owner, metrics, decision, progress, run / "occupied", nullptr);
     };
     check(occupied.solve(world, ground_control).action == it::Action::complete,
           "fixed occupied source satisfies its explicitly selected request");
@@ -183,7 +192,7 @@ void exercise(World& world, int atom, const std::string& xc) {
     if (atom == 3) p.set_user_defined_value("nvbeta", 1);
     p.set_user_defined_value("freeze_occupied", true);
     p.set_user_defined_value("maxiter", 0); // the typed request owns its allowance
-    p.set_user_defined_value("prefix", (store.task_directory("scf", "occupied") / "g1/scf").string());
+    p.set_user_defined_value("prefix", (it::Node(run / "occupied").archive() / "scf").string());
     SCF scf(world, p, molecule);
     scf.set_protocol<3>(world, 1e-4);
     scf.make_nuclear_potential(world);
@@ -216,7 +225,7 @@ void exercise(World& world, int atom, const std::string& xc) {
           fixed_only.criteria[0].requested == 1e-4 && fixed_only.not_applicable.size() == 3,
           "fixed changes alone never converge virtuals: the residual default still decides");
     SCF::IterationControl control{it::resolve(request, model, protocol, true), true,
-        {"virtuals", name + "-fixed-source-g1", {"virtuals"}}, "a1"};
+        {"virtuals", name + "-fixed-source-g1", {"virtuals"}}};
     int writes = 0;
     std::vector<it::IterationMetrics> records;
     std::vector<it::IterationTiming> intervals;
@@ -224,8 +233,7 @@ void exercise(World& world, int atom, const std::string& xc) {
         check(!records.empty() && info == records.back().info, "timing describes the evaluated virtual bundle");
         intervals.push_back(interval);
     };
-    const cp::json inputs = cp::json::array({{{"role", "fixed_occupied_reference"},
-        {"calculation_id", "scf"}, {"task_id", "occupied"}, {"generation", "g1"}}});
+    const cp::json inputs{{"fixed_occupied_reference", "occupied"}};
     control.observer = [&](World& w, const SCF& owner, const it::IterationMetrics& metrics,
                            const it::Decision& decision, const it::Progress& progress) {
         check(metrics.states.size() == 1 && metrics.states[0].id == "virtuals", "one task covers both virtual spin blocks");
@@ -268,7 +276,7 @@ void exercise(World& world, int atom, const std::string& xc) {
         check(progress.main_updates == metrics.info.iteration &&
               progress.updates_at_protocol == control.previous_updates + metrics.info.iteration, "update counts preserve restart cadence");
         records.push_back(metrics);
-        if (decision.checkpoint) publish(owner, metrics, decision, progress, "g" + std::to_string(++writes), inputs);
+        if (decision.checkpoint) { ++writes; publish(owner, metrics, decision, progress, run / "virtuals", inputs); }
     };
     auto bad = control;
     bad.task.states = {"ground"};
@@ -300,16 +308,14 @@ void exercise(World& world, int atom, const std::string& xc) {
     }
     check(!scf.last_calculation_outcome->complete && scf.converged_for_dconv > 1.0,
           "typed solve cannot leave a legacy success stamp");
-    auto loaded = store.read_latest("scf", "virtuals");
+    const auto loaded = saved_node(run / "virtuals");
     check(bool(loaded), "native virtual bundle and metrics are published");
-    auto saved = cp::iteration_metrics_from_manifest(*loaded);
+    auto saved = it::stored_metrics(*loaded, {control.task.task_id, {}, 0, control.task.context_id});
     check(saved.info == records.back().info, "native evidence identifies exact virtual iteration");
     check(!it::saved_completion(control.settings, control.task, saved, true), "unmet saved request must iterate");
-    scf.param.set_user_defined_value("prefix", (store.task_directory("scf", "virtuals") / loaded->generation / "scf").string());
+    scf.param.set_user_defined_value("prefix", (it::Node(run / "virtuals").archive() / "scf").string());
     scf.load_mos(world);
     control.previous_updates = 1;
-    control.attempt_id = "a2";
-    store.initialize("a2");
     records.clear();
     end = scf.solve_virtuals(world, control);
     check(end.action == it::Action::stop && records.size() == 2 && records.front().info.iteration == 0,

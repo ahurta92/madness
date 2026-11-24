@@ -1,6 +1,6 @@
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/SCFCheckpoint.h>
-#include <madness/chem/CheckpointStore.h> // removed in 4c: timings and the results stub
+#include <madness/chem/RunFiles.h>
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/SCFScientificSettings.h>
 #include <madness/chem/TimingRecords.h>
@@ -37,14 +37,6 @@ std::vector<it::Protocol> protocols(const SCF& scf) {
     return result;
 }
 
-std::string attempt(World& world) {
-    return cp::detail::on_root(world, [] {
-        static std::size_t sequence = 0;
-        return "a" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-            "-" + std::to_string(++sequence);
-    });
-}
-
 void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
     scf.param.set_user_defined_value("nmo_alpha", alpha);
     if (scf.param.have_beta()) scf.param.set_user_defined_value("nmo_beta", beta);
@@ -61,7 +53,7 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
 
 json state_metrics(const it::NodeDescription& saved) {
     json metrics = json::object();
-    for (const auto& state : it::stored_metrics(saved, {"scf", "saved", saved.protocol, 0, "saved"}).states) {
+    for (const auto& state : it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"}).states) {
         json values = json::object(), unavailable = json::object();
         for (const auto& [metric, value] : state.metrics) {
             if (value.status == it::Availability::measured) values[it::metric_name(metric)] = *value.value;
@@ -73,28 +65,21 @@ json state_metrics(const it::NodeDescription& saved) {
     return metrics;
 }
 
-void report(World& world, cp::CheckpointStore& store, const std::string& owner, const std::filesystem::path& root,
-            const std::filesystem::path& folder, const SCF& scf, const std::optional<it::NodeDescription>& occupied) {
+void report(World& world, const std::filesystem::path& root, const std::filesystem::path& folder, const SCF& scf,
+            const std::optional<it::NodeDescription>& occupied) {
     const auto saved = read_node(world, folder);
     cp::records::require(saved.has_value(), "SCF ended without a saved state");
     json metrics = occupied ? state_metrics(*occupied) : json::object();
     metrics.update(state_metrics(*saved));
-    // Removed in 4c: response's store checks every results entry against a
-    // source map, so the ground state publishes one that lists no sources.
-    store.publish_source_map({{"version", 2}, {"calculation_id", "ground_state"}, {"attempt_id", owner},
-        {"states", json::object()}, {"tasks", json::array()}});
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     json energy{{"units", "hartree"}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
     if (complete) energy["value"] = scf.current_energy;
     else energy["reason"] = "criteria_unmet";
-    // Removed in 4c: the store's results envelope carries the launch identifier.
-    const auto warning = store.publish_results({{"version", 2}, {"attempt_id", owner}, {"calculations", json::array({
-        {{"calculation_id", "ground_state"}, {"application", "moldft"}, {"model", scf.param.xc()},
-         {"node", std::filesystem::relative(folder, root).string()},
-         {"protocol", cp::records::protocol_record(saved->protocol)},
-         {"properties", {{"total_energy", energy}}},
-         {"state_metrics", json::array({{{"states", metrics}}})}}})}});
-    if (!warning.empty() && world.rank() == 0) print(warning);
+    it::write_results_entry(world, root, {{"calculation_id", "ground_state"}, {"application", "moldft"},
+        {"model", scf.param.xc()}, {"node", std::filesystem::relative(folder, root).string()},
+        {"protocol", cp::records::protocol_record(saved->protocol)},
+        {"properties", {{"total_energy", energy}}},
+        {"state_metrics", json::array({{{"states", metrics}}})}});
 }
 } // namespace
 
@@ -169,11 +154,7 @@ double run_scf(World& world, SCF& scf) {
                                      settings);
     }
     const auto root = scf_checkpoint_directory(scf);
-    // Removed in 4c: the launch identifier and the store, kept for the timings
-    // entry and for the results file that response's store still checks.
-    cp::CheckpointStore store(world, root);
-    const auto owner = attempt(world);
-    store.initialize(owner);
+    it::require_current_run_folder(world, root);
     it::TimingCollector<> timing;
     timing.begin("run", {{"clock_scope", "driver_rank"}});
     timing.begin("scf", {{"calculation_id", "ground_state"}});
@@ -196,13 +177,13 @@ double run_scf(World& world, SCF& scf) {
         for (const auto& [name, seconds] : interval.steps)
             children.push_back({{"name", name}, {"seconds", seconds}});
         timing.append({{"name", "iteration"}, {"iteration", info.iteration},
-            {"task_id", info.task_id}, {"attempt_id", info.attempt_id},
+            {"task_id", info.task_id},
             {"seconds", interval.seconds}, {"children", children}});
     };
     const auto publish_timing = [&](const std::string& failure = {}) {
         const it::Execution execution{static_cast<std::size_t>(world.size()),
                                       static_cast<std::size_t>(ThreadPool::size() + 1)};
-        store.publish_timings(it::timing_entry(owner, execution, timing.record(), failure));
+        it::write_timing_entry(world, root, it::timing_entry(it::launch_started_at(), execution, timing.record(), failure));
     };
     // NOLINTNEXTLINE(misc-no-recursion)
     const auto execute = [&]() -> double {
@@ -237,7 +218,6 @@ double run_scf(World& world, SCF& scf) {
             cp::records::require(occupied->last_calculation_outcome->complete, "occupied SCF does not satisfy the current request");
             occupied_saved = qualified(world, *occupied);
             lineage = node_identity(*occupied_saved);
-            store.initialize(owner); // removed in 4c: the occupied run took over run.json's launch
         }
         prepare(world, scf, ladder.front());
         timing.end();
@@ -254,7 +234,7 @@ double run_scf(World& world, SCF& scf) {
         // step-down at the first level: continue the step-down from it.
         std::optional<it::NodeDescription> step_down;
         {
-            SCFCheckpoint binding(world, scf, folder, {task, owner, context}, lineage);
+            SCFCheckpoint binding(world, scf, folder, {task, context}, lineage);
             const auto saved = binding.saved();
             if (!seed && saved && saved->details.at("orbitals").at("nmo_alpha").get<int>() > target_alpha &&
                 saved->protocol == ladder.front() && saved->lineage == lineage)
@@ -270,7 +250,7 @@ double run_scf(World& world, SCF& scf) {
                     padded_or_new = orbitals.at("nmo_alpha").get<int>() < target_alpha ||
                         (scf.param.have_beta() && orbitals.at("nmo_beta").get<int>() < target_beta);
                     if (restart.plan.action == it::RestartAction::reuse) {
-                        measured("publish_results", [&] { report(world, store, owner, root, folder, scf, occupied_saved); });
+                        measured("publish_results", [&] { report(world, root, folder, scf, occupied_saved); });
                         return scf.current_energy;
                     }
                 } else padded_or_new = true;
@@ -328,9 +308,8 @@ double run_scf(World& world, SCF& scf) {
                 {"protocol", cp::records::protocol_record(ladder.front())}};
             // In memory only: a step-down stage never compares with the final bundle.
             const auto preparation_context = context + ":preparation:" + schedule.dump();
-            // Each membership is a separate solve: iteration zero at a smaller
-            // bundle must not share an identity with the previous bundle.
-            const auto preparation_attempt = [&](int n) { return owner + "-n" + std::to_string(n); };
+            // Each membership is a separate solve, so a change is never measured
+            // against the state of another bundle.
             scf.param.set_user_defined_value("nmo_alpha", count);
             if (scf.param.have_beta()) scf.param.set_user_defined_value("nmo_beta", target_beta + count - target_alpha);
             if (!step_down) resize_bundle(world, scf, count, target_beta + count - target_alpha);
@@ -338,7 +317,7 @@ double run_scf(World& world, SCF& scf) {
             if (step_down) {
                 timing.begin("orbital_preparation", {{"orbitals_alpha", count}, {"task_id", task},
                     {"protocol", cp::records::protocol_record(ladder.front())}});
-                SCFCheckpoint first(world, scf, folder, {task, preparation_attempt(count), preparation_context}, lineage);
+                SCFCheckpoint first(world, scf, folder, {task, preparation_context}, lineage);
                 const auto restart = measured("checkpoint_planning", [&] { return first.plan({ladder.front()}, prep_request); });
                 measured("load", [&] { first.load(restart, true); }); // intermediate step-down reporting only
                 // A step-down state is never a qualified result.
@@ -363,7 +342,7 @@ double run_scf(World& world, SCF& scf) {
                 timing.begin("prepare");
                 resize_bundle(world, scf, count, target_beta + count - target_alpha);
                 scf.reset_aobasis("sto-3g"); scf.ao = scf.project_ao_basis(world, scf.aobasis);
-                SCFCheckpoint binding(world, scf, folder, {task, preparation_attempt(count), preparation_context}, lineage);
+                SCFCheckpoint binding(world, scf, folder, {task, preparation_context}, lineage);
                 auto control = binding.control(prep_request, ladder.front(), false, preparation_updates);
                 control.preparing_virtuals = true;
                 control.timing_observer = observe_iteration;
@@ -403,7 +382,7 @@ double run_scf(World& world, SCF& scf) {
             }
             scf.reset_aobasis("sto-3g"); scf.ao.clear(); world.gop.fence();
             scf.ao = scf.project_ao_basis(world, scf.aobasis);
-            SCFCheckpoint binding(world, scf, folder, {task, owner, context}, lineage);
+            SCFCheckpoint binding(world, scf, folder, {task, context}, lineage);
             auto control = binding.control(request, ladder[stage], stage + 1 == ladder.size(),
                                                  stage == start ? previous_updates : 0);
             control.timing_observer = observe_iteration;
@@ -415,7 +394,7 @@ double run_scf(World& world, SCF& scf) {
             if (decision.action != it::Action::finish_protocol) break;
         }
         cp::records::require(scf.last_node.has_value(), "SCF ended without a saved endpoint");
-        measured("publish_results", [&] { report(world, store, owner, root, folder, scf, occupied_saved); });
+        measured("publish_results", [&] { report(world, root, folder, scf, occupied_saved); });
         return scf.current_energy;
     };
     try {

@@ -31,7 +31,7 @@ int main() {
   it::Request energy=request; energy.targets[it::Metric::energy_change]=1e-6;
   require(it::resolve(energy,model,ladder.back(), true).not_applicable==std::vector<it::Metric>{it::Metric::energy_change});
   it::SavedTask saved;
-  saved.metrics.info={"fd","previous",ladder.front(),1,"same_ground"};
+  saved.metrics.info={"fd",ladder.front(),1,"same_ground"};
   it::StateMetrics metrics;metrics.id="response";
   for(auto metric:written) metrics.metrics[metric]=it::MetricValue::measured(0.0,1.0);
   saved.metrics.states={metrics};saved.conversion_supported=true;
@@ -43,7 +43,7 @@ int main() {
   require(plan.start_protocol==1 && plan.action==it::RestartAction::resume);
   saved.metrics.info.protocol=ladder.back();
   require(it::plan_restart(ladder,request,model,expected,saved).action==it::RestartAction::resume);
-  saved.metrics.states[0].comparison=it::Comparison{"fd","previous",ladder.back(),0,"response"};
+  saved.metrics.states[0].comparison=it::Comparison{"fd",ladder.back(),0,"response"};
   plan=it::plan_restart(ladder,request,model,expected,saved);
   require(plan.start_protocol==1 && plan.action==it::RestartAction::reuse);
   saved.metrics.states[0].metrics[it::Metric::bsh_residual]=it::MetricValue::measured(1.0,1.0);

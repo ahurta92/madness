@@ -45,7 +45,7 @@ void exercise(World& world) {
 
     const auto ground = ground_state_node("run");
     const auto node = [&](const std::string& name) { return std::filesystem::path("run") / "states" / name; };
-    SCFCheckpoint saved(world, scf, ground, {"scf", "a1", "he-context"});
+    SCFCheckpoint saved(world, scf, ground, {"scf", "he-context"});
     auto req = request();
     const auto fresh = saved.plan({protocol}, req);
     check(fresh.plan.action == it::RestartAction::fresh, "unpublished task starts fresh");
@@ -65,11 +65,11 @@ void exercise(World& world) {
     const auto original_eps = copy(scf.aeps);
     const auto original_occ = copy(scf.aocc);
     const double energy = scf.current_energy;
-    const auto metrics = it::stored_metrics(*first, {"scf", "a1", protocol, 0, "he-context"});
+    const auto metrics = it::stored_metrics(*first, {"scf", protocol, 0, "he-context"});
     auto relaxed = req;
     relaxed.max_updates = 0;
     for (auto& [metric, target] : relaxed.targets) target = 1.0;
-    SCFCheckpoint resumed(world, scf, ground, {"scf", "a2", "he-context"});
+    SCFCheckpoint resumed(world, scf, ground, {"scf", "he-context"});
     auto satisfied_tighter = req;
     for (auto& [metric, target] : satisfied_tighter.targets)
         target = (target + *metrics.states[0].metrics.at(metric).value) / 2;
@@ -88,7 +88,7 @@ void exercise(World& world) {
     changed_coords(0, 0) = 0; changed_coords(0, 1) = 0.1;
     scf.molecule.set_all_coords(changed_coords);
     rejects([&] { resumed.plan({protocol}, relaxed); }, "live geometry changes invalidate an existing binding");
-    SCFCheckpoint moved(world, scf, ground, {"scf", "a2", "he-context"});
+    SCFCheckpoint moved(world, scf, ground, {"scf", "he-context"});
     rejects([&] { moved.plan({protocol}, relaxed); },
             "ordinary restart rejects a changed geometry even with equal coordinate norms");
     scf.molecule = molecule;
@@ -99,12 +99,12 @@ void exercise(World& world) {
     if (world.size() > 1) {
         if (world.rank() == 0) scf.param.set_user_defined_value("nmo_alpha", scf.param.nmo_alpha() + 1);
         rejects([&] { SCFCheckpoint mismatched(world, scf, node("rank_layout"),
-            {"rank_layout", "a2", "he-context"}); },
+            {"rank_layout", "he-context"}); },
             "rank-local initial orbital layout is rejected collectively");
         scf.param = saved_parameters;
         if (world.rank() == 0) scf.param.set_user_defined_value("freeze_occupied", true);
         rejects([&] { SCFCheckpoint mismatched(world, scf, node("rank_layout"),
-            {"rank_layout", "a2", "he-context"}); },
+            {"rank_layout", "he-context"}); },
             "rank-local frozen mode fails before divergent collective branches");
         scf.param = saved_parameters;
     }
@@ -112,11 +112,11 @@ void exercise(World& world) {
     scf.param.set_user_defined_value("pcm_data", std::string("explicit"));
     scf.pcm_param.set_derived_values(scf.param);
     rejects([&] { SCFCheckpoint unprepared(world, scf, node("pcm"),
-        {"pcm", "a2", "he-context"}); },
+        {"pcm", "he-context"}); },
         "active PCM settings require a matching prepared operator");
     scf.param = saved_parameters;
     scf.pcm_param = saved_pcm;
-    SCFCheckpoint other_context(world, scf, ground, {"scf", "a2", "another-context"});
+    SCFCheckpoint other_context(world, scf, ground, {"scf", "another-context"});
     rejects([&] { other_context.load(reuse); }, "reuse plan from another context is rejected before loading");
     resumed.load(reuse);
     check(observations == before, "loading a reusable checkpoint never runs the numerical evaluator");
@@ -155,7 +155,7 @@ void exercise(World& world) {
           "a new request qualifies a saved state whose solve stopped incomplete");
 
     scf.molecule.update_rcut_with_eprec(1e-6);
-    SCFCheckpoint different(world, scf, ground, {"scf", "a3", "he-context"});
+    SCFCheckpoint different(world, scf, ground, {"scf", "he-context"});
     const auto guess = different.plan({protocol}, relaxed);
     check(guess.plan.action == it::RestartAction::resume && !guess.plan.completion,
           "changed operator settings keep functions but discard completion");
@@ -167,7 +167,7 @@ void exercise(World& world) {
           "removed saved protocol is a guess at the first requested protocol");
     rejects([&] { resumed.load(converted); }, "loading requires the caller to prepare the chosen representation");
     scf.param.set_user_defined_value("l", 40.0);
-    SCFCheckpoint another_cell(world, scf, ground, {"scf", "a3", "he-context"});
+    SCFCheckpoint another_cell(world, scf, ground, {"scf", "he-context"});
     rejects([&] { another_cell.plan({protocol}, relaxed); }, "unsupported cell conversion fails before native loading");
     scf.param.set_user_defined_value("l", 20.0);
 
@@ -183,9 +183,9 @@ void exercise(World& world) {
     virtuals.param.set_user_defined_value("prefix", std::string("virtuals"));
     const auto lineage = node_identity(*read_node(world, ground));
     const auto virtual_node = virtuals_node("run");
-    rejects([&] { SCFCheckpoint missing(world, virtuals, virtual_node, {"virtuals", "a3", "virtual-context"}); },
+    rejects([&] { SCFCheckpoint missing(world, virtuals, virtual_node, {"virtuals", "virtual-context"}); },
         "frozen task cannot omit its occupied source");
-    SCFCheckpoint frozen(world, virtuals, virtual_node, {"virtuals", "a3", "virtual-context"}, lineage);
+    SCFCheckpoint frozen(world, virtuals, virtual_node, {"virtuals", "virtual-context"}, lineage);
     it::Request vr;
     vr.targets[it::Metric::bsh_residual] = 10.0;
     vr.floor_factor = 0.0;
@@ -199,13 +199,13 @@ void exercise(World& world) {
     check(virtuals.current_energy == read_node(world, ground)->details.at("energy").get<double>(),
           "virtual reuse retains sourced occupied energy");
     virtuals.param.set_user_defined_value("aocc", std::vector<double>{0.0});
-    SCFCheckpoint changed_frozen(world, virtuals, virtual_node, {"virtuals", "a4", "virtual-context"}, lineage);
+    SCFCheckpoint changed_frozen(world, virtuals, virtual_node, {"virtuals", "virtual-context"}, lineage);
     rejects([&] { changed_frozen.plan({protocol}, vr); },
             "changed frozen occupations require rebuilding from a qualified occupied source");
     virtuals.param.set_user_defined_value("aocc", std::vector<double>{});
     auto other_lineage = lineage;
     other_lineage["saved_at"] = "a later save";
-    SCFCheckpoint rebound(world, virtuals, virtual_node, {"virtuals", "a4", "virtual-context"}, other_lineage);
+    SCFCheckpoint rebound(world, virtuals, virtual_node, {"virtuals", "virtual-context"}, other_lineage);
     auto strict_virtual = vr;
     strict_virtual.targets[it::Metric::bsh_residual] = 0.0;
     const auto virtual_resume = frozen.plan({protocol}, strict_virtual);
@@ -214,7 +214,7 @@ void exercise(World& world) {
     const auto changed_ground = rebound.plan({protocol}, vr);
     check(changed_ground.plan.action == it::RestartAction::resume && !changed_ground.plan.completion,
           "a ground state saved again turns the saved virtuals into a starting guess");
-    SCFCheckpoint republished(world, virtuals, virtual_node, {"virtuals", "a3", "virtual-context"}, lineage);
+    SCFCheckpoint republished(world, virtuals, virtual_node, {"virtuals", "virtual-context"}, lineage);
     check(virtuals.solve_virtuals(world, republished.control(vr, protocol, true)).action == it::Action::complete,
           "reconstructed binding in the same launch can save again");
 
@@ -230,18 +230,18 @@ void exercise(World& world) {
     active_request.targets[it::Metric::density_change] = 1000.0;
     active_request.targets[it::Metric::energy_change] = 1000.0;
     active_request.max_updates = 1;
-    SCFCheckpoint active(world, virtuals, node("active"), {"active", "a5", "active-context"});
+    SCFCheckpoint active(world, virtuals, node("active"), {"active", "active-context"});
     check(virtuals.solve(world, active.control(active_request, protocol, true)).action == it::Action::complete,
           "active-space source fixture publishes both occupied and virtual functions");
     const auto active_parameters = virtuals.param;
     const auto active_occupations = copy(virtuals.aocc);
     virtuals.param.set_user_defined_value("aocc", std::vector<double>{0.0, 1.0});
-    SCFCheckpoint holes(world, virtuals, node("occupations"), {"occupations", "a7", "occupation-context"});
+    SCFCheckpoint holes(world, virtuals, node("occupations"), {"occupations", "occupation-context"});
     virtuals.solve(world, holes.control(active_request, protocol, true));
     check(bool(read_node(world, node("occupations"))), "occupation-hole fixture saves real native functions");
     for (const auto& occupations : {std::vector<double>{}, std::vector<double>{1.0}}) {
         virtuals.param.set_user_defined_value("aocc", occupations);
-        SCFCheckpoint changed(world, virtuals, node("occupations"), {"occupations", "a8", "occupation-context"});
+        SCFCheckpoint changed(world, virtuals, node("occupations"), {"occupations", "occupation-context"});
         rejects([&] { changed.plan({protocol}, active_request); },
                 "ordinary restart rejects changed occupation requests");
     }
@@ -260,7 +260,7 @@ void exercise(World& world) {
     virtuals.molecule = core_molecule;
     virtuals.param.set_user_defined_value("nmo_alpha", 1);
     virtuals.param.set_user_defined_value("nvalpha", 0);
-    SCFCheckpoint trimmed(world, virtuals, node("active"), {"active", "a6", "core-context"});
+    SCFCheckpoint trimmed(world, virtuals, node("active"), {"active", "core-context"});
     rejects([&] { trimmed.plan({protocol}, active_request); }, "core-potential virtual trimming is rejected before native reading");
     virtuals.param = old_parameters;
     virtuals.molecule = old_molecule;

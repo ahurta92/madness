@@ -1,5 +1,5 @@
 #include <madness/chem/SCFScientificSettings.h>
-#include <madness/chem/CheckpointRecords.h>
+#include <madness/chem/MetricRecords.h>
 #include <madness/chem/SCF.h>
 #include <sstream>
 #include <cctype>

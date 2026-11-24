@@ -111,7 +111,8 @@ parts of the broad iteration interval, not additional times to sum into it.
 The [stdout preservation audit](../../../docs/design/madqc-stdout-preservation.md)
 records the retained information and gaps from the SCF evaluation split.
 Both SCF and response publish their measured intervals in the shared
-`timings.json`, including reuse and failed invocations.
+`timings.json`, including reuse and failed invocations: one entry per launch,
+identified by its start time, holding each application's steps.
 
 The full engine output goes to stdout (your terminal or captured job log).
 `<prefix>.out` receives an appended final summary; it contains the full run only
@@ -127,36 +128,26 @@ he-alpha.out                         appended human-readable summary
 he-alpha.calc_info.json              existing combined workflow report
 he-alpha/
   results.json                      requested properties and state metrics
-  timings.json                      SCF and response interval records
+  timings.json                      SCF and response interval records, one entry per launch
   analysis/
     ground_state/                   SCF diagnostics, plots and import scratch
-    response/                       response metadata, iteration history and shards
-  checkpoints/
-    run.json                        restart index
-    ground_state/                   SCF task checkpoints and exact sources
-    response/                       response task checkpoints and exact sources
+    response/                       response metadata and shards
+  states/
+    ground_state/                   the saved ground state: description.json, history.jsonl, archive/
+    virtuals/                       frozen-occupied virtual orbitals, when requested
+    response/<node>/                one folder per driven state, excited-state set or second-order source
 ```
 
 The same ground-state location is used by `--wf=scf`, so adding response keeps
 its existing SCF work. `results.json` reflects the calculations published so
-far. Restart qualification uses checkpoints; analysis files are diagnostics.
+far. Restart qualification reads each node's description.json; analysis files
+are diagnostics.
 Optimizer and engines awaiting adoption retain their existing workflow layout.
 
 Previous development runs under `task_0/moldft` are rejected before writing.
-After stopping every solver using a run, relocate it explicitly from a source
-checkout:
-
-```sh
-python3 bin/migrate_madqc_run.py /path/to/he-alpha
-```
-
-The utility renames files without rewriting archives or source records. It
-refuses conflicts, extra workflow tasks, symlinks and store locks. If interrupted,
-repeat the same command; a temporary plan prevents the solver opening a partial
-move. Then use the original solver command (`--continue` requires saved work).
-Historical analysis can retain old path text; subsequent runs regenerate the
-plot index. This is a one-time development migration, not an ongoing input or
-checkpoint-format compatibility layer.
+A run folder written by an older version, one with a `checkpoints/` folder, is
+also refused before anything is written: use a new output prefix. It is never read or
+migrated.
 
 ## Output and adoption status
 

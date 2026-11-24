@@ -43,7 +43,6 @@
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/FunctionResidual.h>
 #include <madness/chem/CalculationOutcome.h>
-#include <madness/chem/CheckpointRetention.h>
 #include <memory>
 
 #include<madness/chem/molecular_functors.h>
@@ -504,7 +503,6 @@ public:
         iteration::ResolvedSettings settings;
         bool final_protocol = true; // the role of this level; limits do not depend on it
         iteration::ExpectedTask task;
-        std::string attempt_id;
         std::size_t previous_updates = 0; // previous attempts at this protocol, cadence only
         /// Collective, after the definitive evaluation, before advancement.
         /// It may publish a native archive when decision.checkpoint is true.

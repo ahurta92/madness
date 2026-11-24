@@ -42,10 +42,10 @@ Request bsh_request() {
 ExpectedTask expected() { return {"scf", "model1", {"ground"}}; }
 IterationMetrics iteration_metrics() {
     IterationMetrics e;
-    e.info = {"scf", "run1", {1e-6, 8}, 0, "model1"};
+    e.info = {"scf", {1e-6, 8}, 0, "model1"};
     StateMetrics s;
     s.id = "ground";
-    s.comparison = Comparison{"scf", "run0", {1e-6, 8}, 7, "ground"};
+    s.comparison = Comparison{"scf", {1e-4, 6}, 7, "ground"};
     s.metrics[Metric::bsh_residual] = MetricValue::measured(5e-6, 1.0);
     s.metrics[Metric::energy_change] = MetricValue::measured(5e-7, 75.0);
     e.states.push_back(s);
@@ -92,9 +92,9 @@ void assessments() {
     check(assess(settings, expected(), e).all_met, "same prepared sample satisfies both criteria");
     e.states[0].comparison.reset();
     check(!assess(settings, expected(), e).all_met, "zero or small change without predecessor cannot pass");
-    e.states[0].metrics[Metric::energy_change].comparison = Comparison{"scf", "run0", {1e-6, 8}, 7, "ground"};
+    e.states[0].metrics[Metric::energy_change].comparison = Comparison{"scf", {1e-4, 6}, 7, "ground"};
     check(assess(settings, expected(), e).all_met, "metric-specific predecessor can supply the comparison");
-    e.states[0].metrics[Metric::energy_change].comparison = Comparison{"scf", "run1", {1e-6, 8}, 0, "ground"};
+    e.states[0].metrics[Metric::energy_change].comparison = Comparison{"scf", {1e-6, 8}, 0, "ground"};
     check(!assess(settings, expected(), e).all_met, "loaded state cannot be its own predecessor");
     e = iteration_metrics(); e.states[0].metrics[Metric::bsh_residual] = MetricValue::unavailable("not_measured");
     check(!assess(settings, expected(), e).all_met, "missing metric cannot be a measured zero");
@@ -180,7 +180,7 @@ void decisions() {
     check(d.action == Action::stop && !d.checkpoint, "invalid state never replaces usable checkpoint");
     p = {}; final_level = true; e = iteration_metrics();
     const auto saved = saved_completion(settings, expected(), e, true);
-    check(saved && saved->action == Action::complete && !saved->checkpoint && saved->info.attempt_id == "run1",
+    check(saved && saved->action == Action::complete && !saved->checkpoint && saved->info == e.info,
           "saved qualifying evidence completes without numerical work or relabeling");
     r.targets[Metric::energy_change] = 1e-8;
     check(!saved_completion(resolve(r, model(), e.info.protocol, true), expected(), e, true),
@@ -222,15 +222,13 @@ void iteration_identity() {
     auto r = request(); auto e = iteration_metrics();
     auto settings = resolve(r, model(), e.info.protocol, true);
     auto& comparison = e.states[0].comparison;
-    comparison = Comparison{"scf", "run1", {1e-6, 8}, 0, "ground"};
-    check(!assess(settings, expected(), e).all_met, "same task/attempt/protocol/iteration cannot compare with itself");
+    comparison = Comparison{"scf", {1e-6, 8}, 0, "ground"};
+    check(!assess(settings, expected(), e).all_met, "same task/protocol/iteration cannot compare with itself");
     comparison->iteration = 1;
     check(!assess(settings, expected(), e).all_met, "a future iteration cannot be a predecessor in the same solve");
     comparison->iteration = 0;
     comparison->protocol = {1e-4, 6};
     check(assess(settings, expected(), e).all_met, "same iteration at a different protocol has distinct identity");
-    comparison->protocol = e.info.protocol; comparison->attempt_id = "run0";
-    check(assess(settings, expected(), e).all_met, "same iteration in a prior attempt has distinct identity");
     comparison->task_id = "another_task";
     check(!assess(settings, expected(), e).all_met, "comparison cannot silently come from another task");
     e = iteration_metrics();

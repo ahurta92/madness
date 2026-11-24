@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
-#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/RootCoordination.h>
 #include <madness/mra/commandlineparser.h>
 #include <set>
 #include <sstream>

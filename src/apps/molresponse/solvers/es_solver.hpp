@@ -467,7 +467,7 @@ public:
       if(match.previous) {
         const auto j=*match.previous;
         const auto& old=*shared_previous_info_;
-        values.comparison=it::Comparison{old.task_id,old.attempt_id,old.protocol,old.iteration,shared_previous_ids_.at(j)};
+        values.comparison=it::Comparison{old.task_id,old.protocol,old.iteration,shared_previous_ids_.at(j)};
         field.previous=shared_previous_density_[j].norm2();
         // Align only the comparison density; neither root nor KAIN is rotated.
         field.change=(shared_density_[i]-match.phase*shared_previous_density_[j]).norm2();

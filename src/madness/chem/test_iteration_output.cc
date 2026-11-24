@@ -30,8 +30,8 @@ const std::map<Metric, std::string> definitions{{Metric::bsh_residual, "t.bsh.v1
 // Two states after the second update; state b has no BSH measurement.
 IterationMetrics sample() {
     IterationMetrics metrics;
-    metrics.info = {"task", "attempt", {1e-4, 6}, 2, "context"};
-    const Comparison previous{"task", "attempt", {1e-4, 6}, 1, ""};
+    metrics.info = {"task", {1e-4, 6}, 2, "context"};
+    const Comparison previous{"task", {1e-4, 6}, 1, ""};
     for (const std::string id : {"a", "b"}) {
         StateMetrics state{id, previous, {}};
         state.comparison->subject = id;
@@ -70,23 +70,23 @@ int main() {
     {
         const json tree{{"name", "run"}, {"seconds", 1.5}, {"children", json::array()}};
         const int ranks = 2, threads = 9; // World::size() and ThreadPool::size() + 1 are int
-        json by_hand{{"attempt_id", "ra1-1"},
+        json by_hand{{"started_at", "2026-11-23T20:01:05.123Z"},
             {"execution", {{"mpi_ranks", ranks}, {"threads_per_rank", threads}}},
             {"timing", tree}};
-        const auto record = timing_entry("ra1-1", {2, 9}, tree);
+        const auto record = timing_entry("2026-11-23T20:01:05.123Z", {2, 9}, tree);
         check(record == by_hand, "timing_entry equals the hand-built record");
         check(record.dump() == by_hand.dump(), "timing_entry prints as the hand-built record");
         std::vector<std::string> keys;
         for (const auto& [key, value] : record.items()) keys.push_back(key);
-        check(keys == std::vector<std::string>{"attempt_id", "execution", "timing"}, "field names");
+        check(keys == std::vector<std::string>{"execution", "started_at", "timing"}, "field names");
         check(record.at("execution").size() == 2, "execution has two fields");
 
         // A failure appears when given, and is absent when not.
         by_hand["failure"] = "solver threw";
-        const auto failed = timing_entry("ra1-1", {2, 9}, tree, "solver threw");
+        const auto failed = timing_entry("2026-11-23T20:01:05.123Z", {2, 9}, tree, "solver threw");
         check(failed == by_hand, "failure recorded under the hand-built name");
         check(!record.contains("failure"), "no failure field for a normal end");
-        check(!timing_entry("ra1-1", {}, tree, "").contains("failure"), "empty failure is absent");
+        check(!timing_entry("2026-11-23T20:01:05.123Z", {}, tree, "").contains("failure"), "empty failure is absent");
         check(timing_entry("x", {}, tree).at("execution") == json{{"mpi_ranks", 1}, {"threads_per_rank", 1}},
               "default execution is one rank, one thread");
     }

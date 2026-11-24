@@ -150,12 +150,12 @@ inline MetricCheck check_metric(const ResolvedCriterion& criterion, const Metric
     }
     if (criterion.metric != Metric::bsh_residual) {
         const auto& comparison = measurement.comparison ? measurement.comparison : predecessor;
-        if (!comparison || comparison->attempt_id.empty() || comparison->subject.empty()
+        // A comparison at this level must be an earlier update of this solve.
+        if (!comparison || comparison->subject.empty()
             || comparison->task_id != info.task_id
             || !std::isfinite(comparison->protocol.thresh) || comparison->protocol.thresh <= 0.0
             || comparison->protocol.k <= 0
-            || (comparison->attempt_id == info.attempt_id && comparison->protocol == info.protocol
-                && comparison->iteration >= info.iteration)) {
+            || (comparison->protocol == info.protocol && comparison->iteration >= info.iteration)) {
             check.reason = "comparison_unavailable"; return check;
         }
     }
@@ -180,7 +180,7 @@ inline Assessment assess(const ResolvedSettings& settings, const ExpectedTask& e
                          const IterationMetrics& metrics) {
     Assessment assessment;
     const auto& info = metrics.info;
-    if (expected.task_id.empty() || expected.context_id.empty() || info.attempt_id.empty()
+    if (expected.task_id.empty() || expected.context_id.empty()
         || info.task_id != expected.task_id || info.context_id != expected.context_id
         || info.protocol != settings.protocol) {
         assessment.reason = "iteration_context_mismatch"; return assessment;

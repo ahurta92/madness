@@ -1,5 +1,6 @@
 #include <madness/chem/SCF.h>
-#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/NodeArchive.h>
+#include <madness/chem/RootCoordination.h>
 #include <filesystem>
 #include <cstdlib>
 #include <iostream>
@@ -70,14 +71,14 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     auto r = request(1);
     auto strict = r; strict.floor_factor = 0.0; // never relaxed: zero targets stay zero
     const it::ExpectedTask task{"scf", name + "-scientific-context", {"ground"}};
-    SCF::IterationControl control{it::resolve(r, model, {1e-4, 6}, false), false, task, "a1"};
+    SCF::IterationControl control{it::resolve(r, model, {1e-4, 6}, false), false, task};
     near(control.settings.criteria[0].effective, 5e-4, "intermediate BSH floor is explicit");
     near(control.settings.criteria[1].effective, 5e-4, "intermediate spin density floor is explicit");
     std::vector<it::IterationMetrics> records;
     std::optional<SCF::OrbitalComparison> previous;
-    cp::CheckpointStore store(world, name + "-run");
-    store.initialize("a1");
-    store.register_task("ground_state", "scf", "scf", "iterative", true);
+    // The endpoint is saved as a node, as SCFCheckpoint saves it.
+    const auto folder = std::filesystem::absolute(name + "-run") / "node";
+    cp::detail::on_root(world, [&] { std::filesystem::remove_all(folder.parent_path()); return std::string{}; });
     int writes = 0;
     control.observer = [&](World& w, const SCF& owner, const it::IterationMetrics& metrics,
                            const it::Decision& decision, const it::Progress& progress) {
@@ -112,19 +113,19 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
         records.push_back(metrics);
         if (decision.checkpoint) {
             ++writes;
-            cp::json stage{{"application", "scf"}, {"settings", {{"xc", xc}}},
-                {"requested_properties", {"energy"}}, {"inputs", cp::json::array()},
-                {"outcome", {{"complete", false}, {"reason", decision.reason}}}};
-            const auto manifest = cp::iterative_manifest("ground_state", "g" + std::to_string(writes),
-                stage, {{"subject", "ground"}}, cp::json::array(), SCF::iteration_metric_definitions(),
-                SCF::iteration_metric_set(), metrics, decision, progress);
-            store.publish(manifest, [&](const std::filesystem::path& directory) {
-                cp::Payload payload;
-                payload.local_error = owner.write_mos(w, (directory / "scf.restartdata").string(), owner.orbital_metadata());
-                w.gop.fence();
-                if (w.rank() == 0 && payload.local_error.empty())
-                    payload.archives.push_back(cp::inspect_archive(directory, "orbitals", "scf.restartdata", {}, 1));
-                return payload;
+            const auto staging = folder.parent_path() / "staging";
+            cp::detail::on_root(w, [&] { std::filesystem::create_directories(staging); return std::string{}; });
+            cp::detail::collective_error(w, owner.write_mos(w, (staging / "scf.restartdata").string(), owner.orbital_metadata()));
+            w.gop.fence();
+            cp::detail::on_root(w, [&] {
+                it::NodeDescription d{"ground_state", metrics.info.protocol, progress.updates_at_protocol,
+                    {{"xc", xc}}, it::node_metrics(metrics, SCF::iteration_metric_set()), nullptr, {}, "test", false, {}};
+                it::Node(folder).save(d, [&](const std::filesystem::path& archive) {
+                    for (const auto& file : std::filesystem::directory_iterator(staging))
+                        std::filesystem::rename(file.path(), archive / file.path().filename());
+                });
+                std::filesystem::remove_all(staging);
+                return std::string{};
             });
         }
     };
@@ -156,9 +157,12 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
           "intermediate work does not establish final convergence");
     check(records.size() == 2 && records.back().info.iteration == 1 && writes == 1,
           "one allowed update, free terminal evaluation, endpoint-only publication");
-    auto loaded = store.read_latest("ground_state", "scf");
-    check(bool(loaded), "native payload and typed metrics published together");
-    const auto restored = cp::iteration_metrics_from_manifest(*loaded);
+    const auto loaded = cp::json::parse(cp::detail::on_root(world, [&] {
+        const auto d = it::Node(folder).inspect();
+        return d ? it::description_record(*d).dump() : std::string("null");
+    }));
+    check(!loaded.is_null(), "native payload and typed metrics published together");
+    const auto restored = it::stored_metrics(it::read_description(loaded), {task.task_id, {}, 0, task.context_id});
     check(restored.info == records.back().info, "stored evidence preserves the exact iteration");
     auto loose = request(0);
     for (auto& [metric, target] : loose.targets) target = 10.0;
@@ -170,16 +174,13 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     check(!it::saved_completion(final, task, restored, true), "stricter unmet request must iterate");
     // Load the exact native payload with the existing SCF reader. It stays a
     // numerical guess for legacy readers: typed evidence is the new authority.
-    // Derive the selected path from the store, not a test-owned layout assumption.
-    scf.param.set_user_defined_value("prefix", (store.task_directory("ground_state", "scf") /
-                                               loaded->generation / "scf").string());
+    scf.param.set_user_defined_value("prefix", (it::Node(folder).archive() / "scf").string());
     scf.load_mos(world);
     auto saved = scf.evaluate_orbitals(world);
     near(saved.energy, *restored.states[0].metrics.at(it::Metric::energy_change).evidence.current,
          "native loaded energy matches typed checkpoint evidence");
     scf.param.set_user_defined_value("prefix", name);
     previous.reset(); records.clear();
-    control.attempt_id = "a2";
     control.previous_updates = 1;
     control.settings = final;
     control.final_protocol = true;
@@ -201,7 +202,6 @@ void exercise(World& world, int atom, const std::string& xc, bool preflight_only
     // and density remain reported as unavailable diagnostics.
     control.settings = it::resolve(loose, scf.iteration_model(), control.settings.protocol, true);
     control.settings.criteria.resize(1);
-    control.attempt_id = "a3";
     previous.reset(); records.clear();
     end = scf.solve(world, control);
     check(end.action == it::Action::complete && records.size() == 1 && end.info.iteration == 0,

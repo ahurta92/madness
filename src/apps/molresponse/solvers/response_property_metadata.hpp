@@ -1,6 +1,6 @@
 #pragma once
 #include "response_metadata.hpp"
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 
 namespace molresponse_v3 {
 // Alpha's legacy analysis record remains available during shared adoption.

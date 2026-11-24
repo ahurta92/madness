@@ -62,10 +62,9 @@ set(MADCHEM_HEADERS
     ParameterManager.hpp
     ResponseParameters.hpp
     Restart.h
-    StageCheckpoint.h
-    CheckpointRecords.h
-    CheckpointStore.h
-    CheckpointRetention.h
+    MetricRecords.h
+    RootCoordination.h
+    RunFiles.h
     IterationMetrics.h
     IterationHistory.h
     IterationOutput.h
@@ -240,19 +239,6 @@ if(BUILD_TESTING)
   if(ENABLE_MPI)
     add_mpi_tests(chem test_density_changes "2" "MADchem" "unittests;short")
   endif()
-  # Checkpoint storage exercises the runtime archives without a chemistry solve.
-  add_unittests(chem "test_stage_checkpoint.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
-  set_tests_properties(madness/test/chem/test_stage_checkpoint/run PROPERTIES TIMEOUT 60)
-  if(ENABLE_MPI)
-    add_mpi_tests(chem test_stage_checkpoint "2" "MADworld" "unittests;short")
-    set_tests_properties(madness/test/chem/test_stage_checkpoint_mpi2/run PROPERTIES TIMEOUT 60)
-  endif()
-  add_unittests(chem "test_checkpoint_store.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
-  set_tests_properties(madness/test/chem/test_checkpoint_store/run PROPERTIES TIMEOUT 60)
-  if(ENABLE_MPI)
-    add_mpi_tests(chem test_checkpoint_store "2" "MADworld" "unittests;short")
-    set_tests_properties(madness/test/chem/test_checkpoint_store_mpi2/run PROPERTIES TIMEOUT 60)
-  endif()
   # The planner, plan_ladder (DESIGN B6, D7): pure, a table of cases.
   add_unittests(chem "test_plan_ladder.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   # Who decides convergence and the settings table (DESIGN B8, B9): pure.
@@ -275,8 +261,6 @@ add_unittests(chem "test_scf_inputs.cc" "MADchem" "unittests;short")
 add_unittests(chem "test_scf_run.cc" "MADchem" "unittests;long")
   add_unittests(chem "test_iteration_restart.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
   add_unittests(chem "test_scf_evaluation_policy.cc" "MADworld;nlohmann_json::nlohmann_json" "unittests;short")
-  # Checkpoint cadence and retention decisions (DESIGN A3): pure.
-  add_unittests(chem "test_checkpoint_retention.cc" "MADworld" "unittests;short")
   # the rotating operand only moves between ranks, so the distributed path needs more than one
   add_mpi_tests(chem test_exchange_asymmetric "2" "MADchem;MADgtest" "unittests;short")
   add_unittests(chem "${CHEM_TEST_SOURCES_LONG}" "MADchem;MADgtest" "unittests;long")

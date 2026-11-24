@@ -42,7 +42,6 @@
 #include "../solvers/es_save_load.hpp" // load_es_roots<TDA,ClosedShell> (ES bundle)
 
 #include <madness/chem/atomutil.h>
-#include <madness/chem/CheckpointStore.h>
 #include "../solvers/es_root_identity.hpp"
 #include <nlohmann/json.hpp>
 #include <madness/misc/info.h>
@@ -878,84 +877,10 @@ void dump_es_roots(World& world, double L, const std::string& calc_dir,
     print("DUMP_MRA_ES  calc_dir=", calc_dir, "  roots_dumped=", nroots);
 }
 
-// Read-only native inspection: the manifest selects exact payloads and their
-// saved representation. No convergence controller or solver is invoked.
-void dump_shared_checkpoint(World& world,const commandlineparser& parser) {
-  namespace cp=madness::checkpoint;
-  cp::CheckpointStore store(world,parser.value_raw("checkpoint-root"));
-  MADNESS_CHECK_THROW(parser.key_exists("task"),"native inspection requires --task");
-  const auto task=parser.value_raw("task");
-  const auto calc=parser.key_exists("calculation") ? parser.value_raw("calculation") : "response";
-  const auto selected=parser.key_exists("generation")
-      ? std::optional<cp::Manifest>(store.read({calc,task,parser.value_raw("generation")}))
-      : store.read_latest(calc,task);
-  MADNESS_CHECK_THROW(selected,"selected checkpoint payload is unavailable");
-  const auto& manifest=*selected;
-  const auto& definition=manifest.record.at("task").at("definition");
-  const auto protocol=cp::records::read_protocol(definition.at("protocol"));
-  // The response record names where its ground orbitals were and carries the
-  // ground settings; it does not name how the ground state is stored.
-  const auto& stage=manifest.record.at("stage");
-  MADNESS_CHECK_THROW(stage.contains("ground") && definition.contains("settings") &&
-      definition.at("settings").contains("ground_settings"),"response checkpoint has no ground-state source");
-  const auto header=GroundState::read_archive_header(world,stage.at("ground").at("archive").get<std::string>());
-  set_response_protocol(world,header.L,protocol.thresh,protocol.k,false);
-  Molecule molecule;
-  for(const auto& atom:definition.at("settings").at("ground_settings").at("molecule").at("atoms")) {
-    const auto& x=atom.at("coordinates");
-    molecule.add_atom(x.at(0),x.at(1),x.at(2),atom.at("charge"),atom.at("atomic_number"),atom.at("pseudo_atom"));
-  }
-  const auto output=std::filesystem::absolute(parser.key_exists("out")?parser.value_raw("out"):"mra_trees");
-  cp::detail::on_root(world,[&]{std::filesystem::create_directories(output);return std::string{};});
-  const int limit=parser.key_exists("max-orbitals")?std::stoi(parser.value("max-orbitals")):-1;
-  const bool cube=parser.key_exists("cube"),htg=parser.key_exists("htg"),amr=parser.key_exists("amr"),coeffs=parser.key_exists("coeffs");
-  const int points=parser.key_exists("cube-npoints")?std::stoi(parser.value("cube-npoints")):80;
-  const double pad=parser.key_exists("cube-pad")?std::stod(parser.value("cube-pad")):6.;
-  const int amr_m=parser.key_exists("amr-m")?std::stoi(parser.value("amr-m")):8;
-  const auto directory=store.task_directory(calc,task)/manifest.generation;
-  const auto dump=[&]<class Storage>(const cp::Archive& archive) {
-    auto functions=Storage::load(world,native_archive_name((directory/archive.basename).string()),IoBackend::Native);
-    const auto block=[&](const auto& values,const std::string& name) {
-      const auto count=limit<0?values.size():std::min(values.size(),static_cast<std::size_t>(limit));
-      for(std::size_t i=0;i<count;++i) {
-        MADNESS_CHECK_THROW(values[i].k()==protocol.k,"native payload disagrees with saved order");
-        const auto stem=(output/(archive.basename+"_"+name+std::to_string(i))).string();
-        dump_function_trees(world,values[i],stem,htg);
-        if(cube) write_cube_file(world,values[i],molecule,stem+".cube",points,pad);
-        if(amr) write_amr_from_function(world,values[i],stem+".vthb",amr_m);
-        if(coeffs) write_coeffs_hdf5(world,values[i],stem+".mad.h5");
-      }
-    };
-    block(functions.x_alpha,"x_alpha_");
-    if constexpr(requires {functions.y_alpha;}) block(functions.y_alpha,"y_alpha_");
-    if constexpr(requires {functions.x_beta;}) block(functions.x_beta,"x_beta_");
-    if constexpr(requires {functions.y_beta;}) block(functions.y_beta,"y_beta_");
-  };
-  const auto layout=definition.value("settings",nlohmann::json::object()).value("layout",std::string("closed_shell_full"));
-  bool any=false;
-  for(const auto& archive:manifest.archives) {
-    if(parser.key_exists("subject")) {
-      MADNESS_CHECK_THROW(archive.role=="root" && archive.indices.size()==1,"subject selection requires an excited root");
-      if(molresponse_v3::make_root_id(archive.indices.front())!=parser.value_raw("subject")) continue;
-    }
-    if(layout=="closed_shell_static" || layout=="closed_shell_tda") dump.template operator()<ResponseStateX<ClosedShell>>(archive);
-    else if(layout=="open_shell_static") dump.template operator()<ResponseStateX<OpenShell>>(archive);
-    else if(layout=="open_shell_full") dump.template operator()<ResponseStateXY<OpenShell>>(archive);
-    else {
-      MADNESS_CHECK_THROW(layout=="closed_shell_full","unsupported native response layout");
-      dump.template operator()<ResponseStateXY<ClosedShell>>(archive);
-    }
-    any=true;
-  }
-  MADNESS_CHECK_THROW(any,"requested checkpoint subject is unavailable");
-  nlohmann::json report{{"source",{{"calculation_id",calc},{"task_id",task},{"generation",manifest.generation},
-      {"attempt_id",manifest.record.at("attempt_id")},{"protocol",definition.at("protocol")}}},
-      {"saved_complete",manifest.record.at("task").at("outcome").at("complete")}};
-  if(manifest.record.at("task").contains("iteration")) report["metrics"]=manifest.record.at("task").at("iteration").at("metrics");
-  cp::detail::on_root(world,[&]{
-    std::ofstream file(output/"inspection.json");file.exceptions(std::ios::failbit|std::ios::badbit);
-    file<<report.dump(2)<<'\n';file.close();return std::string{};
-  });
+// Read-only inspection of saved states. The checkpoint store it read is gone;
+// it returns as a reader of node folders.
+void dump_shared_checkpoint(World&,const commandlineparser&) {
+  throw std::runtime_error("inspection of saved states is not available in this version");
 }
 
 }  // namespace

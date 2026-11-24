@@ -11,7 +11,7 @@ int main() {
     auto check = [&](bool ok, const char* why) {
         if (!ok) { ++failures; std::cerr << why << '\n'; }
     };
-    const Comparison previous{"scf", "a1", {1e-6, 8}, 2, "ground"};
+    const Comparison previous{"scf", {1e-6, 8}, 2, "ground"};
     auto residual = maximum_residual({{"alpha/0", 0.1, 1.0}, {"beta/0", 0.2, 2.0}});
     check(residual.value == 0.2 && residual.scale.value == 2.0 &&
           residual.evidence.limiting_id == "beta/0" && residual.evidence.components.size() == 2,
@@ -42,11 +42,11 @@ int main() {
     check(maximum_field_change({{2.0, 3.0, -0.1}}, previous).status == Availability::invalid,
           "invalid density evidence is not hidden by maximum reduction");
     const ResolvedCriterion scaled{Metric::density_change, 0.1, 0.0, 0.1, LimitRule::scaled};
-    const auto outcome = check_metric(scaled, density, {}, {"scf", "a1", {1e-6, 8}, 3, "ctx"});
+    const auto outcome = check_metric(scaled, density, {}, {"scf", {1e-6, 8}, 3, "ctx"});
     check(outcome.result == CheckResult::met && outcome.limit && std::abs(*outcome.limit - 0.6) < 1e-15,
           "constructed evidence works with the shared scaled rule");
     for (std::size_t updates : {0u, 1u}) {
-        IterationMetrics state{{"scf", "a1", {1e-6, 8}, updates, "ctx"},
+        IterationMetrics state{{"scf", {1e-6, 8}, updates, "ctx"},
             {{"ground", {}, {{Metric::bsh_residual, MetricValue::measured(0.1, 1.0)}}}}};
         ResolvedSettings settings{{1e-6, 8}, 1, 0,
             {{Metric::bsh_residual, 0.5, 0.0, 0.5, LimitRule::plain}}, {}};

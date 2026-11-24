@@ -18,7 +18,7 @@ int main() {
     ModelMetrics model{{Metric::bsh_residual, {Support::supported, true, 1e-5, LimitRule::plain, {}}}};
     ExpectedTask task{"state_z_0.05", "ground_generation_1", {"z"}};
     SavedTask saved;
-    saved.metrics.info = {task.task_id, "old_attempt", ladder.back(), 20, task.context_id};
+    saved.metrics.info = {task.task_id, ladder.back(), 20, task.context_id};
     StateMetrics subject; subject.id = "z";
     subject.metrics[Metric::bsh_residual] = MetricValue::measured(2e-6, 0.5);
     saved.metrics.states = {subject};
@@ -26,7 +26,7 @@ int main() {
     saved.updates_at_protocol = 20;
     auto plan = plan_restart(ladder, request, model, task, saved);
     check(plan.action == RestartAction::reuse && plan.start_protocol == 1 && plan.completion
-          && !plan.completion->checkpoint && plan.completion->info.attempt_id == "old_attempt",
+          && !plan.completion->checkpoint && plan.completion->info == saved.metrics.info,
           "saved final evidence reused with original identity and no archive request");
     request.targets[Metric::bsh_residual] = 3e-6;
     check(plan_restart(ladder, request, model, task, saved).action == RestartAction::reuse,

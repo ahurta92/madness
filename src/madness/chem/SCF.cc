@@ -51,7 +51,7 @@
 #include <limits>
 #include <madness/chem/KineticEnergy.h>
 #include <madness/chem/Restart.h>
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 #include <madness/chem/population.h>
 #include <madchem.h>
 
@@ -2700,7 +2700,7 @@ std::optional<iteration::Decision> SCF::solve_virtuals_impl(World& world, const 
                 state.metrics[metric] = iteration::MetricValue::not_applicable("fixed_occupied_reference");
             const bool valid = state.metrics.at(iteration::Metric::bsh_residual).status == iteration::Availability::measured;
             MADNESS_CHECK_THROW(valid, "invalid shared SCF virtual measurement");
-            const iteration::IterationMetrics metrics{{control->task.task_id, control->attempt_id,
+            const iteration::IterationMetrics metrics{{control->task.task_id,
                 control->settings.protocol, std::size_t(iter), control->task.context_id}, {std::move(state)}};
             const iteration::Progress progress{std::size_t(iter), control->previous_updates + std::size_t(iter), valid};
             decision = iteration::decide(control->settings, control->task, progress, metrics, control->final_protocol);
@@ -3064,9 +3064,9 @@ iteration::IterationMetrics SCF::measure_iteration(World& world, const OrbitalEv
     ground.metrics[Metric::bsh_residual] = maximum_residual(std::move(components));
     const bool comparable = previous && previous->info.task_id == info.task_id &&
         previous->info.context_id == info.context_id && previous->info.protocol == info.protocol &&
-        (previous->info.attempt_id != info.attempt_id || previous->info.iteration < info.iteration);
+        previous->info.iteration < info.iteration;
     std::optional<Comparison> comparison;
-    if (comparable) comparison = Comparison{previous->info.task_id, previous->info.attempt_id,
+    if (comparable) comparison = Comparison{previous->info.task_id,
                                            previous->info.protocol, previous->info.iteration, "ground"};
     auto field = [&](const functionT& current, const functionT* old) {
         FieldNorms value{current.norm2(), {}, {}};
@@ -3130,7 +3130,7 @@ void SCF::validate_iteration_control(const IterationControl& control, const std:
                            criterion.rule == model.at(criterion.metric).rule &&
                            iteration::finite_nonnegative(criterion.effective), "invalid shared SCF criterion");
     }
-    const iteration::IterationMetrics initial{{control.task.task_id, control.attempt_id,
+    const iteration::IterationMetrics initial{{control.task.task_id,
         protocol, 0, control.task.context_id}, {{subject, {}, {}}}};
     MADNESS_CHECK_THROW(iteration::assess(control.settings, control.task, initial).valid,
                        "invalid shared SCF iteration identity");
@@ -3308,7 +3308,7 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
         auto assess = [&](const OrbitalEvaluation& state, const OrbitalResidual& raw) {
             if (control) {
                 metrics = measure_iteration(world, state, raw,
-                    {control->task.task_id, control->attempt_id, control->settings.protocol,
+                    {control->task.task_id, control->settings.protocol,
                      std::size_t(iter), control->task.context_id}, previous);
                 bool valid = true;
                 for (const auto& [metric, value] : metrics.states[0].metrics)

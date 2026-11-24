@@ -50,7 +50,7 @@ const ResolvedCriterion* find(const ResolvedSettings& s, Metric metric) {
 
 const ExpectedTask task{"scf", "ctx", {"ground"}};
 IterationMetrics bsh_only(double value, std::size_t iteration = 1, Protocol protocol = fine) {
-    return {{"scf", "a1", protocol, iteration, "ctx"},
+    return {{"scf", protocol, iteration, "ctx"},
             {{"ground", {}, {{Metric::bsh_residual, MetricValue::measured(value)}}}}};
 }
 ResolvedSettings bsh_settings(double target, Protocol protocol = fine, std::size_t cap = 5) {
@@ -58,7 +58,7 @@ ResolvedSettings bsh_settings(double target, Protocol protocol = fine, std::size
     return resolve(r, {{Metric::bsh_residual, {Support::supported, false, {}, LimitRule::plain, 0.0}}}, protocol, true);
 }
 MetricCheck one(const ResolvedCriterion& c, const MetricValue& value) {
-    return check_metric(c, value, std::nullopt, {"scf", "a1", fine, 1, "ctx"});
+    return check_metric(c, value, std::nullopt, {"scf", fine, 1, "ctx"});
 }
 } // namespace
 
@@ -99,7 +99,7 @@ int main() {
                   && s.not_applicable == std::vector<Metric>{Metric::energy_change},
               "not-applicable target is not a criterion and is listed as not applicable");
         auto unscaled = s; for (auto& c : unscaled.criteria) c.rule = LimitRule::plain;
-        IterationMetrics m{{"scf", "a1", fine, 1, "ctx"}, {{"ground", {}, {}}}};
+        IterationMetrics m{{"scf", fine, 1, "ctx"}, {{"ground", {}, {}}}};
         const auto d = decide(unscaled, task, {1, 1, true}, m, true);
         bool reported = false;
         for (const auto& c : d.checks)

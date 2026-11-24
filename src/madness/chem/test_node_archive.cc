@@ -44,9 +44,9 @@ const std::map<Metric, std::string> definitions{{Metric::bsh_residual, "t.bsh.v1
 // Two states after the third update at one level, each compared with update 2.
 IterationMetrics sample() {
     IterationMetrics metrics;
-    metrics.info = {"task", "launch-1", {1e-4, 6}, 3, "context"};
+    metrics.info = {"task", {1e-4, 6}, 3, "context"};
     for (const std::string id : {"a", "b"}) {
-        StateMetrics state{id, Comparison{"task", "launch-1", {1e-4, 6}, 2, id}, {}};
+        StateMetrics state{id, Comparison{"task", {1e-4, 6}, 2, id}, {}};
         state.metrics[Metric::bsh_residual] = MetricValue::measured(id == "a" ? 1e-5 : 3e-5, 1.5);
         state.metrics[Metric::density_change] = MetricValue::measured(2e-5, 0.5);
         metrics.states.push_back(state);
@@ -150,9 +150,9 @@ int main() {
         const ModelMetric criterion{.support = Support::supported, .default_criterion = true, .default_target = 1e-4};
         const ModelMetrics model{{Metric::bsh_residual, criterion}, {Metric::density_change, criterion}};
         const ExpectedTask task{"task", "context", {"a", "b"}};
-        const IterationInfo now{"task", "launch-2", {}, 0, "context"};
+        const IterationInfo now{"task", {}, 0, "context"};
         const auto stored = stored_metrics(first, now);
-        check(stored.info.attempt_id == "launch-2" && stored.info.protocol == first.protocol
+        check(stored.info.task_id == "task" && stored.info.protocol == first.protocol
                   && stored.info.iteration == 3 && stored.states.size() == 2, "stored metrics take the current task");
         const auto met = resolve({.targets = {{Metric::bsh_residual, 1e-4}, {Metric::density_change, 1e-4}}},
                                  model, {1e-4, 6}, true);

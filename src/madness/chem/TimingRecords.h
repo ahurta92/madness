@@ -93,11 +93,12 @@ struct Execution {
     std::size_t threads_per_rank = 1;
 };
 
-/// The record for one launch, as CheckpointStore::publish_timings expects it.
-/// `failure` is empty for a launch that ended normally. Reads nothing from the runtime.
-inline nlohmann::json timing_entry(const std::string& attempt_id, const Execution& execution,
+/// The record for one launch, as write_timing_entry expects it; `started_at`
+/// identifies the launch. `failure` is empty for a launch that ended normally.
+/// Reads nothing from the runtime.
+inline nlohmann::json timing_entry(const std::string& started_at, const Execution& execution,
                                    const nlohmann::json& timing_tree, const std::string& failure = {}) {
-    nlohmann::json record{{"attempt_id", attempt_id},
+    nlohmann::json record{{"started_at", started_at},
         {"execution", {{"mpi_ranks", execution.mpi_ranks}, {"threads_per_rank", execution.threads_per_rank}}},
         {"timing", timing_tree}};
     if (!failure.empty()) record["failure"] = failure;

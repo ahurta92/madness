@@ -93,7 +93,7 @@ MARKER = ".qctest_workdir"
 def clean_workdir(case, workdir, force=False):
     """Empty the working directory before staging.
 
-    madqc leaves shared checkpoints behind under <case>/checkpoints/
+    madqc leaves saved states behind under <case>/states/
     and restarts from them on the next run. A repeated qctest then
     converges onto the *previous* run's orbitals instead of solving the deck, which
     makes the case pass or fail according to what ran there last. That has already

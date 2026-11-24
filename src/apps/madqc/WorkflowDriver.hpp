@@ -6,13 +6,14 @@
 #include <WorkflowBuilders.hpp>
 #include <apps/molresponse/madqc_adapter.hpp>
 #include <madness/chem/ResultsSummary.hpp>
+#include <madness/chem/RunFiles.h>
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/VizManifest.hpp>
 
 namespace madqc {
 
-// Never silently start fresh beside an old store or a partially relocated one.
-// Validation finishes collectively before creating any run output.
+// Never silently start fresh beside, or read, a run folder an older version
+// wrote. Validation finishes collectively before creating any run output.
 inline void require_shared_run_layout(madness::World& world,
                                       const std::filesystem::path& root) {
   std::string error;
@@ -20,12 +21,13 @@ inline void require_shared_run_layout(madness::World& world,
     try {
       if (std::filesystem::exists(root / ".madqc-layout-migration.json") ||
           std::filesystem::exists(root / "task_0" / "moldft"))
-        error = "Old or partially relocated madqc run layout. Stop all writers, then run "
-                "python3 bin/migrate_madqc_run.py <run-directory> before restarting.";
+        error = "the run folder " + root.string() +
+                " was written by an older version of madqc; use a new output prefix";
     } catch (const std::exception& e) { error = e.what(); }
   }
   world.gop.broadcast_serializable(error, 0);
   if (!error.empty()) throw std::runtime_error(error);
+  madness::iteration::require_current_run_folder(world, root);
 }
 
 

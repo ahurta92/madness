@@ -11,16 +11,16 @@ template<class F> void rejects(F&& f) {
     try { f(); } catch (const std::exception&) { threw = true; }
     require(threw);
 }
-cp::Payload payload(World& world, const std::filesystem::path& directory) {
+// Collective: one native archive "response" holding 123.
+void payload(World& world, const std::filesystem::path& directory) {
     archive::ParallelOutputArchive out(world, (directory/"response").c_str(), 1);
     int value = 123;
     if (out.is_io_node()) out.local_archive() & value;
-    cp::Payload result;
-    result.local_error = cp::close_archive(out);
+    cp::detail::collective_error(world, cp::close_archive(out));
     world.gop.fence();
-    if (world.rank() == 0 && result.local_error.empty())
-        result.archives.push_back(cp::inspect_archive(directory, "functions", "response", {}, 1));
-    return result;
+}
+cp::json read_root_json(World& world, const std::filesystem::path& path) {
+    return cp::json::parse(cp::detail::on_root(world, [&] {return cp::detail::read_json(path).dump();}));
 }
 int main(int argc, char** argv) {
     initialize(argc, argv);
@@ -34,18 +34,9 @@ int main(int argc, char** argv) {
                 if (!result) throw std::runtime_error("cannot make scratch directory");
                 return std::string(result);
             });
-            cp::CheckpointStore store(world, root);
-            store.initialize("initial");
-            store.register_task("ground_state", "scf", "scf", "direct", true);
             const cp::json model{{"version",1},{"dft",{{"xc","HF"}}},
                 {"molecule",{{"parameters",cp::json::object()},{"core_potentials",cp::json::array()}}},
                 {"xc",{{"specification","HF"}}}};
-            const cp::json stage{{"application","scf"},{"settings",cp::json::object()},
-                {"requested_properties",cp::json::array()},{"inputs",cp::json::array()},
-                {"outcome",{{"complete",true},{"reason","computed"}}}};
-            store.publish(cp::direct_manifest("ground_state","initial","ground",stage,"scf",
-                {{"scientific_settings",model}},cp::json::array()),
-                [&](const auto& dir){return payload(world,dir);});
             const rs::GroundSource ground{std::filesystem::path(root)/"ground.restartdata",{1e-4,6},
                 {{"settings",model},{"protocol",{{"threshold",1e-4},{"k",6}}},{"saved_at","2026-11-23T00:00:00Z"}}};
             auto task = rs::driven_task();
@@ -63,7 +54,7 @@ int main(int argc, char** argv) {
             request.max_updates = 0;
             const std::vector<it::Protocol> ladder{{1e-4,6}};
             // A driven node: saved, reused from its stored metrics, loaded.
-            rs::DrivenState bundle(world,root,ground,"roots","roots",cp::json::object(),request,ladder,"solve",task);
+            rs::DrivenState bundle(world,root,ground,"roots","roots",cp::json::object(),request,ladder,task);
             require(!bundle.has_saved() && bundle.folder()=="states/response/roots");
             it::IterationMetrics metrics; metrics.info=bundle.info();
             for (const auto* id : {"root0","root1"}) {
@@ -74,9 +65,9 @@ int main(int argc, char** argv) {
             const it::Progress progress{0,0,true};
             const auto decision=it::decide(bundle.controls(),bundle.expected(),progress,metrics,bundle.final_level());
             require(decision.action==it::Action::complete);
-            bundle.publish(metrics,decision,progress,[&](const auto& dir){return payload(world,dir);});
+            bundle.publish(metrics,decision,progress,[&](const auto& dir){payload(world,dir);});
             require(bundle.has_node() && bundle.description().kind=="driven" && bundle.saved_metrics().states.size()==2);
-            rs::DrivenState reused(world,root,ground,"roots","roots",cp::json::object(),request,ladder,"restart",task);
+            rs::DrivenState reused(world,root,ground,"roots","roots",cp::json::object(),request,ladder,task);
             require(reused.reusable() && reused.description()==bundle.description());
             const auto read_payload=[&](const auto& directory,const auto&) {
                 archive::ParallelInputArchive in(world,(directory/"response").c_str());
@@ -97,7 +88,7 @@ int main(int argc, char** argv) {
             const auto lineage=cp::json::array({rs::lineage_entry("B",reused)});
             require(lineage[0].at("name")=="roots" &&
                     lineage[0].at("identity")==cp::json{{"saved_at",reused.description().saved_at}});
-            const auto save_payload=[&](const auto& dir){(void)payload(world,dir);};
+            const auto save_payload=[&](const auto& dir){payload(world,dir);};
             rs::SecondOrderNode built(world,root,"vbc:B","vbc-B",vbc_settings,lineage);
             require(!built.reusable());
             built.save({"response"},save_payload);
@@ -111,12 +102,12 @@ int main(int argc, char** argv) {
             require(!other.reusable());
             rejects([&]{other.load(read_payload);});
             auto tighter=request; tighter.targets[it::Metric::bsh_residual]=0.0;
-            rs::DrivenState tighter_bundle(world,root,ground,"roots","roots",cp::json::object(),tighter,ladder,"tighter",task);
+            rs::DrivenState tighter_bundle(world,root,ground,"roots","roots",cp::json::object(),tighter,ladder,task);
             require(tighter_bundle.reusable());
             require(rs::lineage_entry("B",tighter_bundle)==rs::lineage_entry("B",reused));
             metrics.states.back().metrics[it::Metric::bsh_residual]=it::MetricValue::measured(1.0,1.0);
             const auto capped=it::decide(bundle.controls(),bundle.expected(),progress,metrics,bundle.final_level());
-            bundle.publish(metrics,capped,progress,[&](const auto& dir){return payload(world,dir);});
+            bundle.publish(metrics,capped,progress,[&](const auto& dir){payload(world,dir);});
             rejects([&]{(void)rs::lineage_entry("C",bundle);});
             // A changed input identity rebuilds the node over the old one.
             auto changed_lineage=lineage;
@@ -145,7 +136,7 @@ int main(int argc, char** argv) {
             es_task.record=es_record(2);
             es_task.validate_settings=rs::excited_task(2).validate_settings;
             const cp::json es_settings{{"excited_model","tda"},{"layout","closed_shell_tda"}};
-            rs::ExcitedSet es(world,root,ground,"es:tda",es_settings,request,ladder,"es-solve",es_task);
+            rs::ExcitedSet es(world,root,ground,"es:tda",es_settings,request,ladder,es_task);
             require(!es.has_saved() && es.folder()=="states/response/excited-tda");
             it::IterationMetrics es_metrics; es_metrics.info=es.info();
             for(int r=0;r<2;++r) {
@@ -164,17 +155,17 @@ int main(int argc, char** argv) {
                     require(cp::close_archive(out).empty());
                 }
             });
-            rs::ExcitedSet es_again(world,root,ground,"es:tda",es_settings,request,ladder,"es-again",es_task);
+            rs::ExcitedSet es_again(world,root,ground,"es:tda",es_settings,request,ladder,es_task);
             require(es_again.reusable() && es_again.description()==es.description());
             require(es_again.description().details.at("roots")[1].at("omega")==1.5);
             require(es_again.load([](const auto& dir,const auto&){return std::filesystem::exists(dir/"root_1.00000");}));
             auto three=es_task;three.record=es_record(3);
-            rs::ExcitedSet es_more(world,root,ground,"es:tda",es_settings,request,ladder,"es-more",three);
+            rs::ExcitedSet es_more(world,root,ground,"es:tda",es_settings,request,ladder,three);
             require(es_more.has_saved() && !es_more.reusable() && es_more.plan().action==it::RestartAction::resume);
             auto one=es_task;one.record=es_record(1);
-            rejects([&]{rs::ExcitedSet fewer(world,root,ground,"es:tda",es_settings,request,ladder,"es-fewer",one);});
+            rejects([&]{rs::ExcitedSet fewer(world,root,ground,"es:tda",es_settings,request,ladder,one);});
             auto moved_ground=ground;moved_ground.identity["saved_at"]="2026-11-24T00:00:00Z";
-            rs::ExcitedSet es_guess(world,root,moved_ground,"es:tda",es_settings,request,ladder,"es-guess",es_task);
+            rs::ExcitedSet es_guess(world,root,moved_ground,"es:tda",es_settings,request,ladder,es_task);
             require(es_guess.has_saved() && !es_guess.reusable());
             cp::detail::on_root(world,[&] {
                 const auto folder=std::filesystem::path(root)/es.folder();
@@ -188,36 +179,36 @@ int main(int argc, char** argv) {
             const cp::json origin{{"bundle","es:tda"},{"root","es_root_0000"},{"factor",0.5}};
             const cp::json old_settings{{"frequency",0.1},{"perturbation","dipole_z"},
                 {"layout","closed_shell_full"},{"derived_from",origin}};
-            rs::DrivenState old_leg(world,root,ground,"old-leg","dipole_z-f0.10000",old_settings,request,ladder,"derived-old",derived_task);
-            it::IterationMetrics old_metrics;old_metrics.info=old_leg.info();
+            rs::DrivenState old_leg(world,root,ground,"old-leg","dipole_z-f0.10000",old_settings,request,ladder,derived_task);
+            it::IterationMetrics old_metrics;old_metrics.info=old_leg.info();old_metrics.info.iteration=1;
             it::StateMetrics leg;leg.id="response";
             leg.metrics[it::Metric::bsh_residual]=it::MetricValue::measured(0.0,1.0);
             // Driven response judges the density change by default, against a
             // comparable earlier iteration of the same task.
             const auto density=[](const it::IterationInfo& info) {
               auto value=it::MetricValue::measured(0.0,1.0);
-              value.comparison=it::Comparison{info.task_id,"earlier",info.protocol,0,"response"};
+              value.comparison=it::Comparison{info.task_id,info.protocol,0,"response"};
               return value;
             };
             leg.metrics[it::Metric::density_change]=density(old_leg.info());
             old_metrics.states={leg};
             // One update at the level: a stored comparison is the update before.
-            const it::Progress leg_progress{0,1,true};
+            const it::Progress leg_progress{1,1,true};
             const auto old_decision=it::decide(old_leg.controls(),old_leg.expected(),leg_progress,old_metrics,old_leg.final_level());
-            old_leg.publish(old_metrics,old_decision,leg_progress,[&](const auto& dir){(void)payload(world,dir);});
+            old_leg.publish(old_metrics,old_decision,leg_progress,[&](const auto& dir){payload(world,dir);});
             const auto old_description=old_leg.description();
             // The moved root's state starts from the nearby frequency's node,
             // only reading it, and names it in its lineage.
             auto refined_settings=old_settings;refined_settings["frequency"]=0.11;
             rs::DrivenState refined(world,root,ground,"new-leg","dipole_z-f0.11000",refined_settings,request,ladder,
-                                    "derived-new",derived_task,std::string("dipole_z-f0.10000"));
+                                    derived_task,std::string("dipole_z-f0.10000"));
             require(refined.has_saved() && !refined.has_node() && !refined.reusable() && refined.plan().start_protocol==0);
             require(refined.load(read_payload)==123);
             rejects([&]{(void)rs::lineage_entry("B",refined);});
-            auto new_metrics=old_metrics;new_metrics.info=refined.info();
+            auto new_metrics=old_metrics;new_metrics.info=refined.info();new_metrics.info.iteration=1;
             new_metrics.states[0].metrics[it::Metric::density_change]=density(refined.info());
             const auto new_decision=it::decide(refined.controls(),refined.expected(),leg_progress,new_metrics,refined.final_level());
-            refined.publish(new_metrics,new_decision,leg_progress,[&](const auto& dir){(void)payload(world,dir);});
+            refined.publish(new_metrics,new_decision,leg_progress,[&](const auto& dir){payload(world,dir);});
             require(refined.has_node() && refined.description().lineage.at("started_from")=="dipole_z-f0.10000");
             require(rs::read_other_node(world,std::filesystem::path(root)/old_leg.folder())==old_description);
             // A later launch binds the derived state by its settings: its own
@@ -232,6 +223,21 @@ int main(int argc, char** argv) {
             auto& moved=recovered.bind_derived("moved-leg",moved_settings);
             require(moved.has_saved() && !moved.has_node() && moved.saved_metrics().states.size()==1);
             recovered.report();
+            // results.json is written directly: response's entry names its nodes
+            // and no launch; another application's entry is left alone.
+            const auto results_path=std::filesystem::path(root)/"results.json";
+            {
+                auto results=read_root_json(world,results_path);
+                require(results.at("version")==2 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
+                const auto& entry=results.at("calculations").at(0);
+                require(entry.at("calculation_id")=="response" && !entry.contains("attempt_id") && entry.at("driven").is_array());
+                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"node","states/ground_state"}});
+                recovered.report();
+                results=read_root_json(world,results_path);
+                require(results.at("calculations").size()==2 &&
+                        results.at("calculations").at(0).at("calculation_id")=="ground_state" &&
+                        results.at("calculations").at(1).at("calculation_id")=="response");
+            }
             // The same collective metadata writer used by Raman must preserve
             // the old file and publish failure timing on every rank.
             const auto metadata_path=root+"/raman_metadata.json";
@@ -251,42 +257,73 @@ int main(int argc, char** argv) {
             });
             // A changed frequency inside the same rounded name also invalidates evidence.
             refined_settings["frequency"]=0.11000001;
-            rs::DrivenState same_id(world,root,ground,"new-leg","dipole_z-f0.11000",refined_settings,request,ladder,"derived-bin",derived_task);
+            rs::DrivenState same_id(world,root,ground,"new-leg","dipole_z-f0.11000",refined_settings,request,ladder,derived_task);
             require(same_id.has_saved() && !same_id.reusable());
             require(same_id.load(read_payload)==123);
             auto wrong_origin=refined_settings;wrong_origin["derived_from"]["root"]="es_root_0001";
-            rejects([&]{rs::DrivenState wrong(world,root,ground,"new-leg","dipole_z-f0.11000",wrong_origin,request,ladder,"wrong-root",derived_task);});
-            require(store.task_inventory("response").is_array());
-            const auto timing=cp::json{{"attempt_id","timed"},{"execution",{{"mpi_ranks",world.size()},{"threads_per_rank",2}}},
-                {"timing",{{"name","run"},{"seconds",0.0},{"clock_scope","driver_rank"}}}};
-            store.publish_timings(timing);
-            cp::detail::on_root(world,[&]{std::filesystem::remove(std::filesystem::path(root)/"timings.json");
-                std::filesystem::create_directory(std::filesystem::path(root)/"timings.json"); return std::string{};});
-            rejects([&]{store.publish_timings(timing);});
+            rejects([&]{rs::DrivenState wrong(world,root,ground,"new-leg","dipole_z-f0.11000",wrong_origin,request,ladder,derived_task);});
+            // timings.json: one entry per launch. A run's snapshot replaces its own
+            // part; another run of the same launch adds a part; a new launch appends.
+            {
+                const auto entry=[&](const std::string& started,double seconds,const std::string& step) {
+                    return it::timing_entry(started,{static_cast<std::size_t>(world.size()),2},
+                        {{"name","run"},{"seconds",seconds},{"children",{{{"name",step},{"seconds",seconds}}}}});
+                };
+                const auto timings_path=std::filesystem::path(root)/"timed"/"timings.json";
+                const auto timed=timings_path.parent_path();
+                cp::detail::on_root(world,[&]{std::filesystem::create_directory(timed);return std::string{};});
+                const auto first=it::write_timing_entry(world,timed,entry("T1",1.0,"scf"));
+                const auto second=it::write_timing_entry(world,timed,entry("T1",2.0,"response"));
+                require(first==0 && second==1);
+                require(it::write_timing_entry(world,timed,entry("T1",3.0,"response"),second)==1);
+                auto timings=read_root_json(world,timings_path);
+                const auto& launch=timings.at("launches").at(0);
+                require(timings.at("version")==2 && timings.at("launches").size()==1 && !launch.contains("attempt_id") &&
+                        launch.at("started_at")=="T1" && launch.at("execution").at("threads_per_rank")==2);
+                const auto& steps=launch.at("timing").at("children");
+                require(steps.size()==2 && steps.at(0).at("name")=="scf" && steps.at(0).at("part")==0 &&
+                        steps.at(1).at("seconds")==3.0 && steps.at(1).at("part")==1);
+                (void)it::write_timing_entry(world,timed,entry("T2",1.0,"scf"));
+                rejects([&]{(void)it::write_timing_entry(world,timed,entry("T3",1.0,"scf"),0);});
+                require(read_root_json(world,timings_path).at("launches").size()==2);
+                cp::detail::on_root(world,[&]{std::filesystem::remove(timings_path);
+                    std::filesystem::create_directory(timings_path); return std::string{};});
+                rejects([&]{(void)it::write_timing_entry(world,timed,entry("T2",1.0,"scf"));});
+                // A run folder from an older version is refused, not read.
+                cp::detail::on_root(world,[&]{std::filesystem::create_directory(timed/"checkpoints");return std::string{};});
+                rejects([&]{it::require_current_run_folder(world,timed);});
+            }
+            // Each process group writes its own timing file; the main session
+            // merges every one into its record and removes it.
             if(world.size()>1) {
-              // Each rank is an independent task World. The shared coordinator
-              // serializes publication; no universe collective enters a writer.
               const auto comm=world.mpi.comm().Split(world.rank(),world.rank());
               {
                 World sub(comm);
-                const auto id="parallel-"+std::to_string(world.rank());
-                cp::CheckpointStore concurrent(sub,root,{},"same-invocation");
-                concurrent.initialize(id);
-                concurrent.register_task("response","molresponse",id,"direct",true);
-                auto direct_stage=stage;direct_stage["application"]="molresponse";
-                for(int iteration=0;iteration<3;++iteration) {
-                  const auto manifest=cp::direct_manifest("response",id,id+"-"+std::to_string(iteration),
-                      direct_stage,id,cp::json::object(),cp::json::array());
-                  concurrent.publish(manifest,[&](const auto& dir){return payload(sub,dir);});
-                }
-                if(world.rank()==0) {
-                  const auto broken=cp::direct_manifest("response",id,id+"-broken",direct_stage,id,cp::json::object(),cp::json::array());
-                  rejects([&]{concurrent.publish(broken,[&](const auto&){cp::Payload bad;bad.local_error="injected subgroup write failure";return bad;});});
-                }
+                const auto group=recovered.for_world(sub,{},world.rank());
+                group->timing().end();group->timing().end();
+                group->publish_timings();
+                rejects([&]{group->report();});
               }
               world.gop.fence();
-              for(int rank=0;rank<world.size();++rank)
-                require(store.read_latest("response","parallel-"+std::to_string(rank))->generation=="parallel-"+std::to_string(rank)+"-2");
+              cp::detail::on_root(world,[&] {
+                for(int rank=0;rank<world.size();++rank)
+                  require(std::filesystem::is_regular_file(rs::group_timing_file(root,rank)));
+                return std::string{};
+              });
+              recovered.collect_subworlds();
+              std::size_t merged=0;
+              // NOLINTNEXTLINE(misc-no-recursion) -- a finite timing tree
+              const auto count=[&](const auto& self,const cp::json& node)->void {
+                merged+=node.at("name")=="subworld_work";
+                for(const auto& child:node.value("children",cp::json::array())) self(self,child);
+              };
+              count(count,recovered.timing().record());
+              require(merged==static_cast<std::size_t>(world.size()));
+              cp::detail::on_root(world,[&] {
+                for(int rank=0;rank<world.size();++rank)
+                  require(!std::filesystem::exists(rs::group_timing_file(root,rank)));
+                return std::string{};
+              });
             }
             cp::detail::on_root(world,[&]{std::filesystem::remove_all(root);return std::string{};});
         } catch (const std::exception& e) { std::cerr<<e.what()<<'\n';failed=1; }

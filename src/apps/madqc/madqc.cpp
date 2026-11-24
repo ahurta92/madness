@@ -51,7 +51,7 @@
 #include <iostream>
 
 #include "WorkflowDriver.hpp"
-#include <madness/chem/CheckpointStore.h>
+#include <madness/chem/RootCoordination.h>
 #include <madness/chem/SCFRun.h>
 #include <madness_exception.h>
 

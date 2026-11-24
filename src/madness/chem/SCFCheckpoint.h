@@ -28,7 +28,7 @@ void write_launch_header(World& world, const std::filesystem::path& folder);
 class SCFCheckpoint {
 public:
     struct Identity {
-        std::string task_id, attempt_id, context_id;
+        std::string task_id, context_id;
     };
     struct Restart {
         const iteration::RestartPlan plan;

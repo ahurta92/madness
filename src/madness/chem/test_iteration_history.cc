@@ -25,8 +25,8 @@ const std::map<Metric, std::string> definitions{{Metric::bsh_residual, "t.bsh.v1
 // Two states after the third update at one level, the second compared with update 2.
 IterationMetrics sample() {
     IterationMetrics metrics;
-    metrics.info = {"task", "attempt", {1e-4, 6}, 3, "context"};
-    const Comparison previous{"task", "attempt", {1e-4, 6}, 2, ""};
+    metrics.info = {"task", {1e-4, 6}, 3, "context"};
+    const Comparison previous{"task", {1e-4, 6}, 2, ""};
     for (const std::string id : {"a", "b"}) {
         StateMetrics state{id, previous, {}};
         state.comparison->subject = id;
@@ -76,6 +76,19 @@ int main() {
     check(row.at("iteration") == 3, "iteration");
     check(row.at("metrics") == madness::checkpoint::records::measurements(metrics, definitions),
           "metrics in the form measurements writes");
+    // A change names the earlier state it was measured against: its task,
+    // level, update number and subject, and no launch.
+    {
+        const auto& density = row.at("metrics").at(1);
+        check(density.at("metric") == "density_change" &&
+                  density.at("comparison") == json{{"task_id", "task"}, {"protocol", {{"threshold", 1e-4}, {"k", 6}}},
+                                                   {"iteration", 2}, {"subject", "a"}},
+              "comparison record holds the task, level, update and subject");
+        bool residual_compared = false;
+        for (const auto& entry : row.at("metrics"))
+            residual_compared = residual_compared || (entry.at("metric") == "bsh_residual" && entry.contains("comparison"));
+        check(!residual_compared, "a residual has no comparison");
+    }
     check(row.at("decision") == decision.reason && decision.reason == "criteria_unmet", "decision is the reason");
 
     // action matches the decision for each of the four actions.
@@ -150,7 +163,7 @@ int main() {
     // a directory that does not exist is created.
     {
         const auto base = scratch_directory();
-        const auto file = base / "analysis" / "ground_state" / "attempt.jsonl";
+        const auto file = base / "states" / "ground_state" / "history.jsonl";
         check(!std::filesystem::exists(file.parent_path()), "directory absent before append");
         const auto second = history_row(metrics, sample_decision(metrics, 3), definitions,
                                         {{"polarizability", "a", "zz", 1.0 / 3.0}});

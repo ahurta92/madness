@@ -2,7 +2,7 @@
 #include <madness/chem/IterationHistory.h>
 #include <madness/chem/IterationOutput.h>
 #include <madness/chem/SCFScientificSettings.h>
-#include <madness/chem/StageCheckpoint.h>
+#include <madness/chem/RootCoordination.h>
 #include <madness/misc/info.h>
 #include <unistd.h>
 #include <chrono>
@@ -78,7 +78,6 @@ SCFCheckpoint::SCFCheckpoint(World& world, SCF& scf, std::filesystem::path folde
     : world_(world), scf_(scf), folder_(std::move(folder)), identity_(std::move(identity)),
       settings_(capture_settings()), lineage_(std::move(lineage)), layout_(layout()) {
     cp::records::identifier(identity_.task_id);
-    cp::records::identifier(identity_.attempt_id);
     cp::records::require(!identity_.context_id.empty() && settings_.is_object() && !settings_.empty(),
                          "SCF needs a complete scientific settings snapshot and context identity");
     cp::records::finite_numbers(settings_);
@@ -161,8 +160,7 @@ SCFCheckpoint::Restart SCFCheckpoint::plan(const std::vector<it::Protocol>& prot
         cp::records::require(!scf_.param.freeze_occupied() || same_occupation_request(d.settings, settings_),
             "frozen occupation request changed; rebuild from the qualified occupied source");
         task = it::SavedTask{};
-        task->metrics = it::stored_metrics(d, {identity_.task_id, identity_.attempt_id, d.protocol, 0,
-                                               identity_.context_id});
+        task->metrics = it::stored_metrics(d, {identity_.task_id, d.protocol, 0, identity_.context_id});
         // level_finished never decides reuse. plan_restart reads it only to
         // advance past a finished intermediate level; reuse at the final level
         // is decided by saved_completion on the stored metrics alone.
@@ -258,8 +256,7 @@ void SCFCheckpoint::load(const Restart& restart, bool report_preparation) {
     scf_.converged_for_dconv = 1e10;
     if (world_.rank() == 0 && it::prints(it::verbosity(scf_.param.print_level()), it::needed::restart_summary)) {
         const double load_seconds = load_timer.seconds();
-        const auto metrics = it::stored_metrics(d, {identity_.task_id, identity_.attempt_id, d.protocol, 0,
-                                                    identity_.context_id});
+        const auto metrics = it::stored_metrics(d, {identity_.task_id, d.protocol, 0, identity_.context_id});
         it::Assessment assessment;
         if (restart.display_request_)
             assessment = it::assess(it::resolve(*restart.display_request_, scf_.iteration_model(), target,
@@ -308,7 +305,7 @@ SCF::IterationControl SCFCheckpoint::control(const it::Request& request, it::Pro
                                              bool final_protocol, std::size_t previous_updates) {
     check_current();
     SCF::IterationControl result{it::resolve(request, scf_.iteration_model(), protocol, final_protocol, "ground state"),
-                                final_protocol, expected(), identity_.attempt_id, previous_updates};
+                                final_protocol, expected(), previous_updates};
     result.observer = [this, final_protocol](World& world, const SCF& owner, const it::IterationMetrics& metrics,
                              const it::Decision& decision, const it::Progress& progress) {
         cp::records::require(&world == &world_ && &owner == &scf_, "SCF control used with another application");
