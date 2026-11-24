@@ -31,18 +31,9 @@
 //                  [--maxlevel=N] [--k=N] [--thresh=X] [--max-orbitals=N]
 
 #include "../GroundState.hpp"
-#include "../Perturbations.hpp"        // Perturbation (FD identity)
 #include "../ResponseProtocol.hpp"
-#include "../kernels/tags.hpp"         // Static / Full / TDA, ClosedShell
-#include "../kernels/static.hpp"       // Kernels<Static,ClosedShell>::compute_density
-#include "../kernels/full.hpp"         // Kernels<Full,ClosedShell>::compute_density
-#include "../kernels/tda.hpp"          // Kernels<TDA,ClosedShell>::compute_density (ES tdens)
-#include "../kernels/full.hpp"         // Kernels<Full,ClosedShell>::compute_density (RPA ES tdens)
-#include "../solvers/fd_save_load.hpp" // try_load_fd_state<Type,Shell>
-#include "../solvers/es_save_load.hpp" // load_es_roots<TDA,ClosedShell> (ES bundle)
 
 #include <madness/chem/atomutil.h>
-#include "../solvers/es_root_identity.hpp"
 #include <nlohmann/json.hpp>
 #include <madness/misc/info.h>
 #include <madness/mra/funcplot.h>
@@ -590,293 +581,6 @@ void dump_function_trees(World& world, Function<double, 3> f,
   if (htg) write_htg_from_function(world, f, stem + "_error.htg");
 }
 
-// Inverse of Perturbation::description() (Perturbations.hpp): turn a
-// response_metadata.json <pert> key back into a Perturbation so we can drive
-// try_load_fd_state. Mirrors the only formats description() emits:
-//   dipole_<a>   magnetic_<a>   nuc_<atom>_<a>   (atom "*" = all-atoms, -1).
-Perturbation parse_perturbation(const std::string& desc) {
-  auto axis_of = [](char c) -> int {
-    return c == 'x' ? 0 : c == 'y' ? 1 : c == 'z' ? 2 : -1;
-  };
-  if (desc.rfind("dipole_", 0) == 0)
-    return Perturbation::dipole(axis_of(desc.back()));
-  if (desc.rfind("magnetic_", 0) == 0)
-    return Perturbation::magnetic(axis_of(desc.back()));
-  if (desc.rfind("nuc_", 0) == 0) {
-    const auto last = desc.rfind('_');                  // before the axis char
-    const std::string mid = desc.substr(4, last - 4);   // atom tag between _ _
-    return Perturbation::nuclear(mid == "*" ? -1 : std::stoi(mid),
-                                 axis_of(desc.back()));
-  }
-  throw std::runtime_error("parse_perturbation: unrecognized '" + desc + "'");
-}
-
-// Load one converged FD response point at the ACTIVE protocol (caller sets
-// FunctionDefaults via set_response_protocol) using the SAME collective
-// try_load_fd_state the solver's restart path uses, then dump each response
-// orbital's octree (recon + compressed) exactly like a ground MO -- and, with
-// `cube`, the signed .cube isosurfaces too, so the response orbitals and rho^(1)
-// render as lobes just like the ground MOs. Static (static α) carries x only;
-// Full (dynamic α) carries x and y. Collective.
-template <typename Type, typename Shell>
-int dump_fd_point(World& world, const std::string& calc_dir,
-                  const Perturbation& pert, double freq,
-                  const std::string& out_dir, const std::string& label,
-                  int max_orbitals, const vecfuncT& gs_amo,
-                  const Molecule& mol, bool cube, int cube_npoints,
-                  double cube_pad, bool htg, bool amr, int amr_m, bool coeffs) {
-  auto loaded = try_load_fd_state<Type, Shell>(world, calc_dir, pert, freq);
-  if (!loaded) {
-    if (world.rank() == 0) print("  [FD] skip (no loadable bundle):", label);
-    return 0;
-  }
-  const auto& store = loaded->state.responses.at(0);
-
-  auto dump_block = [&](const std::vector<real_function_3d>& blk,
-                        const char* tag) {
-    const std::size_t n =
-        (max_orbitals >= 0)
-            ? std::min<std::size_t>(blk.size(),
-                                    static_cast<std::size_t>(max_orbitals))
-            : blk.size();
-    for (std::size_t i = 0; i < n; ++i) {
-      const std::string stem =
-          out_dir + "/" + label + "_" + tag + std::to_string(i);
-      dump_function_trees(world, blk[i], stem, htg);
-      // Same in-memory Function -> .cube as the ground MOs (write_cube_file),
-      // same stem as the _boxes.vtk so the local tools pick it up automatically.
-      if (cube)
-        write_cube_file(world, blk[i], mol, stem + ".cube", cube_npoints,
-                        cube_pad);
-      // vtkOverlappingAMR (.vthb) value export, same in-memory Function -> one
-      // adaptive-isosurface dataset per response orbital (parity with --cube).
-      if (amr) write_amr_from_function(world, blk[i], stem + ".vthb", amr_m);
-      // Native MRA coefficients (.mad.h5): the function's basis, not a sample.
-      if (coeffs) write_coeffs_hdf5(world, blk[i], stem + ".mad.h5");
-      const double nrm = blk[i].norm2();  // collective -- all ranks
-      if (world.rank() == 0)
-        print("  dumped", label, tag, i, " norm2=", nrm);
-    }
-  };
-
-  dump_block(store.x_alpha, "x");
-  if constexpr (std::is_same_v<Type, Full>) dump_block(store.y_alpha, "y");
-
-  // Response density rho^(1). Kernels::compute_density is the single source of
-  // truth for the closed-shell convention (Static folds Y=X -> factor 4; Full
-  // uses x+y -> factor 2) and reads only g0.amo, so a 1-field ResponseGroundState
-  // suffices (no prepare()/Coulomb/Q). The GS orbitals were loaded at the GS
-  // native k; reproject a LOCAL copy to the ACTIVE (FD) k so the phi*x products
-  // conform (the dumped GS trees stay native -- this copy is for the density only).
-  const int    kfd = FunctionDefaults<3>::get_k();
-  const double tfd = FunctionDefaults<3>::get_thresh();
-  vecfuncT amo_k;
-  amo_k.reserve(gs_amo.size());
-  for (const auto& o : gs_amo)
-    amo_k.push_back(o.k() == kfd ? o : project(o, kfd, tfd, false));
-  world.gop.fence();
-
-  ResponseGroundState rgs;
-  rgs.amo = amo_k;
-  real_function_3d rho1 = Kernels<Type, Shell>::compute_density(world, rgs, store);
-  const std::string rho1_stem = out_dir + "/" + label + "_rho1";
-  dump_function_trees(world, rho1, rho1_stem, htg);
-  if (cube)
-    write_cube_file(world, rho1, mol, rho1_stem + ".cube", cube_npoints,
-                    cube_pad);
-  if (amr) write_amr_from_function(world, rho1, rho1_stem + ".vthb", amr_m);
-  if (coeffs) write_coeffs_hdf5(world, rho1, rho1_stem + ".mad.h5");
-  const double rnorm = rho1.norm2();  // collective -- all ranks
-  if (world.rank() == 0) print("  dumped", label, "rho1  norm2=", rnorm);
-  return 1;
-}
-
-// Walk response_metadata.json and dump every saved CLOSED-SHELL FD response
-// point's trees into `out_dir`, alongside the ground orbitals, so a single
-// mra_tree.py run yields a combined ground + response product-overlap matrix.
-//
-// The metadata file is small and local: every rank reads it to build the
-// IDENTICAL job list (nlohmann objects are key-ordered), so the downstream
-// collective loads + dumps stay in lockstep. `L` (box length, from the
-// ground-state archive header) sets each point's protocol before loading.
-void dump_fd_states(World& world, double L, const std::string& calc_dir,
-                    const std::string& out_dir, int max_orbitals,
-                    const vecfuncT& gs_amo, const Molecule& mol, bool cube,
-                    int cube_npoints, double cube_pad, bool htg, bool amr,
-                    int amr_m, bool coeffs) {
-  const std::string meta_path = calc_dir + "/response_metadata.json";
-  if (!std::filesystem::exists(meta_path)) {
-    if (world.rank() == 0)
-      print("  [FD] no response_metadata.json in", calc_dir, "-- nothing to dump");
-    return;
-  }
-  nlohmann::json j;
-  {
-    std::ifstream ifs(meta_path);
-    ifs >> j;
-  }
-  if (!j.contains("fd_states")) {
-    if (world.rank() == 0) print("  [FD] no fd_states in", meta_path);
-    return;
-  }
-  const auto protocols = j.value("protocols", nlohmann::json::object());
-
-  int npoints = 0;
-  for (auto& [pert, by_key] : j["fd_states"].items()) {
-    Perturbation p;
-    try {
-      p = parse_perturbation(pert);
-    } catch (const std::exception& e) {
-      if (world.rank() == 0) print("  [FD] skip:", e.what());
-      continue;
-    }
-    for (auto& [key, by_fkey] : by_key.items()) {
-      // (thresh, k) recorded by save_fd_state -> set the protocol; no key parse.
-      if (!protocols.contains(key)) continue;
-      const double thresh = protocols[key].value("thresh", 0.0);
-      const int    k      = protocols[key].value("k", 0);
-      if (thresh <= 0.0 || k <= 0) continue;
-      set_response_protocol(world, L, thresh, k);
-
-      for (auto& [fkey, entry] : by_fkey.items()) {
-        if (entry.value("shell", "") != "closed_shell") {
-          if (world.rank() == 0)
-            print("  [FD] skip non-closed-shell:", pert, key, fkey);
-          continue;
-        }
-        const double freq      = entry.value("freq", 0.0);
-        const std::string type = entry.value("type", "");
-        const std::string label = "fd_" + pert + "__" + key + "__" + fkey;
-        // FD points are static (α(0)) or full (dynamic α(ω)); TDA is an ES-bundle
-        // type and never appears in fd_states (FDPerturbationOf<TDA> is undefined).
-        if (type == "static")
-          npoints += dump_fd_point<Static, ClosedShell>(
-              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
-        else if (type == "full")
-          npoints += dump_fd_point<Full, ClosedShell>(
-              world, calc_dir, p, freq, out_dir, label, max_orbitals, gs_amo,
-              mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
-        else if (world.rank() == 0)
-          print("  [FD] skip unknown type:", type, "for", label);
-      }
-    }
-  }
-  if (world.rank() == 0)
-    print("DUMP_MRA_FD  calc_dir=", calc_dir, "  points_dumped=", npoints);
-}
-
-// Dump one ES bundle (TDA: x_i; Full/RPA: x_i and y_i) plus the transition
-// density into `out_dir`. Shared body for both closed-shell types. Collective.
-template <typename Type>
-int dump_es_bundle(World& world, const std::string& bundle_dir, const std::string& key,
-                   const std::string& out_dir, int max_orbitals,
-                   const vecfuncT& gs_amo, const Molecule& mol, bool cube,
-                   int cube_npoints, double cube_pad, bool htg, bool amr,
-                   int amr_m, bool coeffs) {
-  using Solver = ESSolver<Type, ClosedShell>;
-  typename Solver::State state;
-  try {
-    state = load_es_roots<Type, ClosedShell>(world, bundle_dir);
-  } catch (const std::exception& e) {
-    if (world.rank() == 0) print("  [ES] skip", key, "--", e.what());
-    return 0;
-  }
-  // GS orbitals reprojected to the ES k for the transition density (same
-  // discipline as dump_fd_point's rho1: reproject a LOCAL copy).
-  const int    kfd = FunctionDefaults<3>::get_k();
-  const double tfd = FunctionDefaults<3>::get_thresh();
-  vecfuncT amo_k;
-  amo_k.reserve(gs_amo.size());
-  for (const auto& o : gs_amo)
-    amo_k.push_back(o.k() == kfd ? o : project(o, kfd, tfd, false));
-  world.gop.fence();
-  ResponseGroundState rgs;
-  rgs.amo = amo_k;
-
-  auto dump_one = [&](const real_function_3d& f, const std::string& stem,
-                      const std::string& what) {
-    dump_function_trees(world, f, stem, htg);
-    if (cube) write_cube_file(world, f, mol, stem + ".cube", cube_npoints, cube_pad);
-    if (amr) write_amr_from_function(world, f, stem + ".vthb", amr_m);
-    if (coeffs) write_coeffs_hdf5(world, f, stem + ".mad.h5");
-    const double nrm = f.norm2();  // collective
-    if (world.rank() == 0) print("  dumped", what, " norm2=", nrm);
-  };
-
-  int nroots = 0;
-  const int nr = static_cast<int>(state.roots.size());
-  for (int f = 0; f < nr; ++f) {
-    const auto& root = state.roots[f];
-    // Name to pymra.web's field contract: es_<state>__<protocol>_<comp>
-    // (web.py _RE_ES); comps _x<i>, _y<i> (Full only), _tdens.
-    const std::string label = "es_" + std::to_string(f) + "__" + key;
-    const std::size_t no =
-        (max_orbitals >= 0)
-            ? std::min<std::size_t>(root.x_alpha.size(),
-                                    static_cast<std::size_t>(max_orbitals))
-            : root.x_alpha.size();
-    for (std::size_t i = 0; i < no; ++i)
-      dump_one(root.x_alpha[i], out_dir + "/" + label + "_x" + std::to_string(i),
-               label + " x" + std::to_string(i));
-    if constexpr (std::is_same_v<Type, Full>) {
-      for (std::size_t i = 0; i < no && i < root.y_alpha.size(); ++i)
-        dump_one(root.y_alpha[i], out_dir + "/" + label + "_y" + std::to_string(i),
-                 label + " y" + std::to_string(i));
-    }
-    // Transition density through the single-source-of-truth Kernels density
-    // (TDA: 2 sum phi_i x_i; Full: 2 sum phi_i (x_i + y_i)).
-    real_function_3d tdens =
-        Kernels<Type, ClosedShell>::compute_density(world, rgs, root);
-    dump_one(tdens, out_dir + "/" + label + "_tdens", label + " tdens");
-    ++nroots;
-  }
-  return nroots;
-}
-
-// Walk response_metadata.json excited_states and dump every CLOSED-SHELL
-// excited-state bundle (TDA or Full/RPA, chosen from the bundle's recorded type)
-// into `out_dir`, alongside the ground + FD dumps. Collective.
-void dump_es_roots(World& world, double L, const std::string& calc_dir,
-                   const std::string& out_dir, int max_orbitals,
-                   const vecfuncT& gs_amo, const Molecule& mol, bool cube,
-                   int cube_npoints, double cube_pad, bool htg, bool amr,
-                   int amr_m, bool coeffs) {
-  const std::string meta_path = calc_dir + "/response_metadata.json";
-  if (!std::filesystem::exists(meta_path)) {
-    if (world.rank() == 0)
-      print("  [ES] no response_metadata.json in", calc_dir, "-- nothing to dump");
-    return;
-  }
-  nlohmann::json j;
-  { std::ifstream ifs(meta_path); ifs >> j; }
-  if (!j.contains("excited_states")) {
-    if (world.rank() == 0) print("  [ES] no excited_states in", meta_path);
-    return;
-  }
-  const auto protocols = j.value("protocols", nlohmann::json::object());
-
-  int nroots = 0;
-  for (auto& [key, blk] : j["excited_states"].items()) {
-    if (!protocols.contains(key)) continue;
-    const double thresh = protocols[key].value("thresh", 0.0);
-    const int    k      = protocols[key].value("k", 0);
-    if (thresh <= 0.0 || k <= 0) continue;
-    set_response_protocol(world, L, thresh, k);
-    const std::string bundle_dir = calc_dir + "/es__" + key;
-    const std::string type = blk.value("type", std::string("tda"));
-    if (world.rank() == 0) print("  [ES] bundle", bundle_dir, " type=", type);
-    if (type == "full")
-      nroots += dump_es_bundle<Full>(world, bundle_dir, key, out_dir, max_orbitals, gs_amo,
-                                     mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
-    else
-      nroots += dump_es_bundle<TDA>(world, bundle_dir, key, out_dir, max_orbitals, gs_amo,
-                                    mol, cube, cube_npoints, cube_pad, htg, amr, amr_m, coeffs);
-  }
-  if (world.rank() == 0)
-    print("DUMP_MRA_ES  calc_dir=", calc_dir, "  roots_dumped=", nroots);
-}
-
 // Read-only inspection of saved states. The checkpoint store it read is gone;
 // it returns as a reader of node folders.
 void dump_shared_checkpoint(World&,const commandlineparser&) {
@@ -900,7 +604,7 @@ int main(int argc, char** argv) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--htg] [--amr] [--amr-m=N] [--coeffs] [--fd] [--fd-calc-dir=DIR] [--es]");
+              "[--htg] [--amr] [--amr-m=N] [--coeffs]");
         print("  Native shared inspection: --checkpoint-root=RUN --task=ID [--subject=ROOT] [--generation=ID]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
@@ -915,12 +619,8 @@ int main(int argc, char** argv) {
         print("  function's NATIVE MRA coefficients as <stem>.mad.h5 (/meta+/keys+");
         print("  /coeffs: per-leaf n,l,s[k^3] + cell,k,thresh) -- the exact basis");
         print("  for offline reconstruction, not a point sample like .cube/.vthb.");
-        print("  With --fd, also dumps the converged closed-shell FD response");
-        print("  orbitals from --fd-calc-dir (default: the archive's directory)");
-        print("  into the same out dir -> one combined ground+response analysis.");
-        print("  With --es, also dumps every excited-state bundle in --fd-calc-dir");
-        print("  (TDA or Full/RPA, from response_metadata.json): x_i (+ y_i for");
-        print("  Full) per root and the transition density, stems es_<root>__<key>_*.");
+        print("  --fd and --es (response states) are not available in this");
+        print("  version: reading response node folders arrives in the next part.");
       }
       finalize();
       return 1;
@@ -942,17 +642,12 @@ int main(int argc, char** argv) {
                                    ? std::stoi(parser.value("cube-npoints")) : 80;
       const double cube_pad = parser.key_exists("cube-pad")
                                   ? std::stod(parser.value("cube-pad")) : 6.0;
-      // FD response orbitals: dump the converged closed-shell FD response states
-      // from a calc dir (response_metadata.json) into the same out dir, so one
-      // mra_tree.py run yields a combined ground + response overlap matrix.
-      const bool dump_fd = parser.key_exists("fd");
-      // ES excited-state response orbitals + transition densities from the same
-      // calc dir (response_metadata.json excited_states + es__<key>/ bundles).
-      const bool dump_es = parser.key_exists("es");
-      const std::string fd_calc_dir =
-          parser.key_exists("fd-calc-dir")
-              ? parser.value_raw("fd-calc-dir")
-              : std::filesystem::path(archive_path).parent_path().string();
+      // Response states (--fd, --es): the older layout these options read is
+      // gone; reading node folders (states/response/*) arrives in step 4c part 5d.
+      if (parser.key_exists("fd") || parser.key_exists("es"))
+        throw std::runtime_error(
+            "--fd and --es are not available in this version: reading response "
+            "node folders (states/response/) arrives in the next part");
       // Native HyperTreeGrid (.htg) export of every tree, in addition to the
       // JSON/.vtk. Needs a -DMADNESS_ENABLE_VTK=ON build; otherwise a no-op.
       const bool htg = parser.key_exists("htg");
@@ -1032,23 +727,6 @@ int main(int argc, char** argv) {
       }
       world.gop.fence();
 
-      // Combined ground + response analysis: dump the FD response orbitals into
-      // the same out dir. Runs after the GS dump (it mutates FunctionDefaults to
-      // each FD point's protocol). header.L is the box length from the GS header.
-      if (dump_fd) {
-        dump_fd_states(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
-                       gs.molecule(), cube, cube_npoints, cube_pad, htg, amr,
-                       amr_m, coeffs);
-        world.gop.fence();
-      }
-
-      // ES excited-state orbitals + transition densities (same calc dir as --fd).
-      if (dump_es) {
-        dump_es_roots(world, header.L, fd_calc_dir, out_dir, max_orbitals, mos,
-                      gs.molecule(), cube, cube_npoints, cube_pad, htg, amr,
-                      amr_m, coeffs);
-        world.gop.fence();
-      }
     }
 
     finalize();

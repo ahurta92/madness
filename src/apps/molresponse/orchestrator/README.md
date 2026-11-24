@@ -8,20 +8,18 @@ Workflow seam that, given a prepared ground state and a response session, builds
 
 - ResponseWorkflowInput carries archive_file, a nonempty protocol ladder, a prebuilt ResponsePlan and ExecutorSettings (which hold the session); ResponseWorkflowOutput contains property, metadata, vibrational, timing, diagnostics and reserved export/debug slots [response_workflow.hpp:ResponseWorkflowInput](./response_workflow.hpp) [response_workflow.hpp:ResponseWorkflowOutput](./response_workflow.hpp).
 - run_response_with_ground drives CalcManager and property assembly; it refuses settings without a session. The madqc adapter is its caller [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
-- gs_fingerprint_gate stamps or checks the ground-state archive before the Dalton import writes seeds into calc_dir [response_workflow.hpp:gs_fingerprint_gate](./response_workflow.hpp).
 
 ## Invariants
 
 - Protocol ladders must be nonempty; run_response_with_ground requires the supplied ground state prepared at the first protocol [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 - DFT ground states with VBC or derived-FD requests are rejected because the second XC kernel required by beta/Raman/2PA is absent [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
-- The ground-state archive fingerprint gate runs before a Dalton import writes seeds; a mismatched stamp fails collectively unless MADRESPONSE_ALLOW_GS_MISMATCH starts with 1. Saved response states are otherwise matched to the ground state by the session's nodes [response_workflow.hpp:gs_fingerprint_gate](./response_workflow.hpp).
+- Saved response states are matched to the ground state by the session's nodes; seeds (seeds/response/) by their settings, the ground state's geometry and model [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 - Requested FD subworld fan-out needs an archive path: without one the workflow prints a warning and keeps the single-World path [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 - Collected output property/metadata/timing/diagnostic objects are authoritative on rank 0; other ranks retain their default output objects [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 
 ## Side Effects
 
-- The gate creates calc_dir and writes the ground-state fingerprint to response_metadata.json on rank 0. Missing older stamps warn and are restamped [response_workflow.hpp:gs_fingerprint_gate](./response_workflow.hpp).
-- Merges stale per-state metadata shards before restart reconciliation; fingerprint and shard-sweep failures become collective failures [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
+- Merges stale per-state metadata shards before restart reconciliation; shard-sweep failures become collective failures [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 - Changes response protocol defaults, runs solver/checkpoint writes, optionally loads separate ground states in FD subworlds, assembles alpha/beta/Raman/2PA as requested, and records effective native/HDF5 backend [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 
 ## Source files

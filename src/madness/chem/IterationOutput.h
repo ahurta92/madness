@@ -45,7 +45,8 @@ inline constexpr Verbosity iteration_timing = Verbosity::progress;      // write
 inline constexpr Verbosity checkpoint_saved = Verbosity::progress;      // write_checkpoint_saved
 inline constexpr Verbosity restart_summary = Verbosity::progress;       // write_restart_summary
 inline constexpr Verbosity checkpoint_timing = Verbosity::progress;     // write_checkpoint_timing
-inline constexpr Verbosity start_source = Verbosity::progress;          // write_start_source
+inline constexpr Verbosity start_source = Verbosity::progress;          // write_start_source, write_seed_start
+inline constexpr Verbosity seed_refused = Verbosity::progress;          // write_seed_refused
 // breakdown
 inline constexpr Verbosity energy_breakdown = Verbosity::breakdown;     // write_value_table, energy terms
 // detail
@@ -300,6 +301,17 @@ inline void write_start_source(std::ostream& os, const std::string& subject, dou
     line << std::fixed << std::setprecision(5) << "Start: " << subject << " at frequency " << frequency
          << ", from the saved state at frequency " << source_frequency << '\n';
     os << line.str();
+}
+
+// A state that starts from a seed: a starting guess made elsewhere, kept in
+// its own folder.
+inline void write_seed_start(std::ostream& os, const std::string& subject, const std::string& seed_folder) {
+    os << "Start: " << subject << ", from the seed in " << seed_folder << '\n';
+}
+
+// A seed whose settings differ from this calculation's is not used.
+inline void write_seed_refused(std::ostream& os, const std::string& seed_folder) {
+    os << "Seed ignored: " << seed_folder << " was made for another geometry or model\n";
 }
 
 // The caller has already loaded/validated the payload. Assessment is scalar-only

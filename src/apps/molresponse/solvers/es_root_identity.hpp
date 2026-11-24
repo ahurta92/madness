@@ -93,7 +93,7 @@ assign_display_names(const madness::Tensor<double> &omega, double tol) {
   if (M == 0) return names;
 
   // Group by ENERGY order, not slot order. The caller may pass omega in
-  // dominance-sort (slot) order rather than ascending (review MED: save_es_roots
+  // dominance-sort (slot) order rather than ascending (review MED: a save
   // runs before the once-per-ramp sort_state_by_omega), so grouping consecutive
   // SLOTS mislabels/splits near-degenerate clusters. Sort slot indices by
   // ascending omega, group in that order, and map each name back to its slot.

@@ -26,7 +26,7 @@
 // test pass without testing anything.
 //
 //   test_tpa_pq_vs_vbc --archive=<moldft restartdata> [--thresh=X] [--k=N]
-//       [--calc-dir=<dir> --freq=<omega_f/2> [--baxis=N --caxis=N]]
+//   (--calc-dir, which read stored FD responses, returns with node folders in part 5d)
 // ===========================================================================
 
 #include "../GroundState.hpp"
@@ -39,7 +39,6 @@
 #include "../kernels/two_electron.hpp"
 #include "../kernels/vbc.hpp"
 #include "../solvers/build_response_ground_state.hpp"
-#include "../solvers/fd_save_load.hpp"
 #include "../solvers/response_state.hpp"
 
 #include <madness/misc/info.h>
@@ -130,37 +129,13 @@ int main(int argc, char **argv) {
       const vecfuncT xf = comb(1.0, d1, -0.37, d2, -0.19);
       const vecfuncT yf = comb(1.0, d2,  0.71, d0,  0.43);
 
-      // ---- optionally replace b,c with REAL stored FD responses ----------
-      // --calc-dir=<dir> --freq=<omega_f/2> [--baxis=N --caxis=N]
-      // The stand-ins above exercise the algebra; real responses give physical
-      // magnitudes for the (p,q)-vs-V^{bc} comparison. Falls back to stand-ins
-      // with a loud note if the metadata has no record at (pert, freq).
-      std::string src = "stand-in (dipole combinations + phi admixture)";
-      if (parser.key_exists("calc-dir") && parser.key_exists("freq")) {
-        const std::string cdir = parser.value_raw("calc-dir");
-        const double freq = std::stod(parser.value("freq"));
-        const int ba = parser.key_exists("baxis") ? std::stoi(parser.value("baxis")) : 2;
-        const int ca = parser.key_exists("caxis") ? std::stoi(parser.value("caxis")) : 2;
-        auto rb = try_load_fd_state<Full, ClosedShell>(
-            world, cdir, Perturbation::dipole(ba), freq);
-        auto rcc = try_load_fd_state<Full, ClosedShell>(
-            world, cdir, Perturbation::dipole(ca), freq);
-        if (rb && rcc) {
-          xb = madness::copy(world, rb->state.responses[0].x_alpha);
-          yb = madness::copy(world, rb->state.responses[0].y_alpha);
-          xc = madness::copy(world, rcc->state.responses[0].x_alpha);
-          yc = madness::copy(world, rcc->state.responses[0].y_alpha);
-          src = "STORED FD responses  dipole_" + std::string(1, "xyz"[ba]) +
-                " / dipole_" + std::string(1, "xyz"[ca]) +
-                "  @ omega=" + parser.value("freq") +
-                "  [b exact=" + (rb->exact ? "yes" : "no") +
-                " (" + rb->source_protocol_key + "), c exact=" +
-                (rcc->exact ? "yes" : "no") + " (" + rcc->source_protocol_key + ")]";
-        } else if (world.rank() == 0) {
-          print("  !! no stored FD record for the requested (pert, freq) --"
-                " falling back to stand-ins");
-        }
-      }
+      // ---- stored FD responses (--calc-dir) --------------------------------
+      // The older response layout this option read is gone; reading node
+      // folders arrives in step 4c part 5d. Until then only the stand-ins run.
+      const std::string src = "stand-in (dipole combinations + phi admixture)";
+      if (parser.key_exists("calc-dir"))
+        throw std::runtime_error("--calc-dir read the older response layout, which is gone; "
+                                 "reading response node folders arrives in step 4c part 5d");
 
       ResponseStateXY<ClosedShell> B, C, F;
       B.x_alpha = madness::copy(world, xb); B.y_alpha = madness::copy(world, yb);

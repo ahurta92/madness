@@ -99,19 +99,6 @@ public:
         {"thresh", thresh}, {"k", k}, {"index", index}};
   }
 
-  /// A protocol key redefined (keys round the threshold): the FD entries saved
-  /// under its old definition cannot be told apart from the new rung's, so
-  /// they are dropped, with the quadratic sources built from them. Their
-  /// archives are replaced when those states are solved again at the new
-  /// definition.
-  void drop_fd_rung(const std::string &protocol_key) {
-    for (const char *kind : {"fd_states", "vbc_states"}) {
-      if (!j_.contains(kind)) continue;
-      for (const auto &state : j_[kind].items())
-        state.value().erase(protocol_key);
-    }
-  }
-
   /// Drop the quadratic sources at `protocol_key` built from the FD leg
   /// (`pert`, `freq_key`), the B or C side of their id ("vbc:<B>__<C>@<fB>_<fC>",
   /// vbc_node_id). A source is derived from its two legs at one rung, so a
@@ -208,26 +195,6 @@ public:
   /// Full-replace upsert (one seed source per calc dir by contract).
   void set_seeded_from(const nlohmann::json &prov) {
     j_["seeded_from"] = prov;
-  }
-
-  /// Stamp the ground-state archive identity this calc dir's response states
-  /// were built against (restart safety — the GS fingerprint gate). `hex` is
-  /// the FNV-1a-64 of the archive part bytes; a later run with a different
-  /// archive (regenerated orbitals => possible phase flips) must not reuse
-  /// the cached response vectors.
-  void set_ground_state(const std::string &archive, const std::string &hex,
-                        std::uint64_t bytes, int nparts) {
-    j_["ground_state"] = {{"archive", archive},
-                          {"fnv1a64", hex},
-                          {"bytes", bytes},
-                          {"nparts", nparts}};
-  }
-
-  /// The stamped GS fingerprint, or "" if this metadata predates the stamp.
-  std::string ground_state_fingerprint() const {
-    if (j_.contains("ground_state") && j_["ground_state"].is_object())
-      return j_["ground_state"].value("fnv1a64", "");
-    return {};
   }
 
   /// Upsert a property record into properties/<name>/<protocol_key>[]. The
@@ -455,10 +422,8 @@ private:
 /// exact target_key first, else closest-to-target (max k, then min thresh).
 /// Returns "" if no usable source exists.
 ///
-/// SINGLE SOURCE OF TRUTH for both the reconcile verdict (calc_manager's
-/// reconcile_protocol) and the archive load (fd_save_load's try_load_fd_state),
-/// so the two can never disagree — the doc-15 "share one pick-best-usable-source
-/// helper" contract. Pure: reads only the json, no World / filesystem.
+/// Read by calc_manager's scheduler trace (planned_action). Pure: reads only
+/// the json, no World / filesystem.
 inline std::string
 best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
                           const std::string &freq_key, double target_thresh,
@@ -502,7 +467,7 @@ best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
 /// twin above has the same rule), and not an entry under the target's own key
 /// saved at another threshold (D-030, as D-022 for the FD twin). Exact
 /// target_key first, else closest-to-target (max k, then min thresh). "" if
-/// none. Pure: reads only the json. Used by try_load_es_bundle.
+/// none. Pure: reads only the json. Used by calc_manager's scheduler trace.
 inline std::string
 best_usable_es_source_key(const nlohmann::json &meta, const std::string &want_type,
                           const std::string &want_shell, int n_roots,

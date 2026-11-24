@@ -377,6 +377,8 @@ public:
   }
   DrivenState& at(const std::string& id) const {return *states.at(id);}
   ExcitedSet& excited_at(const std::string& id) const {return *excited.at(id);}
+  // The run folder: states/, seeds/ and analysis/ are under it.
+  const std::filesystem::path& root() const {return root_;}
   // Whether the named driven state or excited-state set has met the request.
   bool complete(const std::string& id) const {
     if(const auto set=excited.find(id);set!=excited.end()) return set->second->complete();

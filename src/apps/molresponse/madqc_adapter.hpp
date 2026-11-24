@@ -681,7 +681,8 @@ struct molresponse_v3_lib {
 
     // Deck `dalton.dir <path>` — the seed-from-directory import contract
     // (showcase W3; import-only, madness never invokes DALTON). Runs BEFORE
-    // the workflow so reconcile sees the seed bundles as restart sources.
+    // the workflow and writes a seed, <run>/seeds/response/<node name>/, for
+    // each state with no save of its own; the state starts from it.
     // The GS is prepared at protocol.front() above (the documented
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
@@ -692,16 +693,19 @@ struct molresponse_v3_lib {
           [](const auto& entry){return !entry.second->has_saved();});
     if (!dalton_dir.empty() && need_response_import) {
       in.settings.shared_response->timing().begin("import_guesses");
-      // D-120: the import writes its seeds into the calc dir, so the
-      // ground-state stamp comes first (the same gate the workflow runs): a
-      // fresh dir is stamped before any state is written there, and one
-      // stamped for another ground state is refused before the import
-      // touches it. Outside import_wall_s (D-118).
-      if (!in.archive_file.empty())
-        gs_fingerprint_gate(world, in.archive_file, in.settings.calc_dir);
+      // A seed belongs to this calculation when its settings (geometry and
+      // model) match; the nodes it is for are those with no save of their own.
+      DaltonSeedTargets targets{shared_root,in.settings.calc_dir,{},{}};
+      for (const auto& [id,state]:in.settings.shared_response->states)
+        if (!state->has_saved())
+          targets.driven[state->name()]=response_seed::seed_settings(state->scientific_settings());
+      for (const auto& [id,set]:in.settings.shared_response->excited)
+        if (!set->has_saved())
+          targets.excited[std::filesystem::path(set->folder()).filename().string()]=
+              response_seed::seed_settings(set->scientific_settings());
       const double import_started = madness::wall_time(); // D-118
       run_dalton_import(world, gs, reference_molecule, in.plan,
-                        in.settings.calc_dir, dalton_dir, {}, {}, {}, 1e-4,
+                        targets, dalton_dir, {}, {}, {}, 1e-4,
                         /*es_y_from_dalton=*/rp.seed_es_y() == "dalton");
       // D-118: the import's own time (reading the Dalton files, building the
       // MRA guesses and their gauge rotation), beside what it seeded from.

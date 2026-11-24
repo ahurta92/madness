@@ -1,6 +1,8 @@
 #pragma once
 
-// One node's saved states in one fixed folder:
+// One node's saved states in one fixed folder. A seed (kind "seed") uses the
+// same layout for a starting guess that came from elsewhere: it has no history,
+// no metrics, and a solve never writes it.
 //   <folder>/description.json  what a restart needs; measurements, never verdicts
 //   <folder>/history.jsonl     per-update rows; appended by the caller, never touched here
 //   <folder>/archive/          the functions; written and read by the caller
@@ -23,7 +25,7 @@ namespace madness::iteration {
 // What a restart needs to know about a saved node. No target, no converged
 // flag, no launch identifier, no generation.
 struct NodeDescription {
-    std::string kind;                    // ground_state, virtuals, driven, excited_set, second_order
+    std::string kind;                    // ground_state, virtuals, driven, excited_set, second_order, seed
     Protocol protocol;                   // the level the states were saved at
     std::size_t updates_at_protocol = 0;
     nlohmann::json settings;             // what must match: the molecule and the model, never tolerances
@@ -38,7 +40,7 @@ struct NodeDescription {
 
 inline bool node_kind(const std::string& kind) {
     return kind == "ground_state" || kind == "virtuals" || kind == "driven" || kind == "excited_set" ||
-           kind == "second_order";
+           kind == "second_order" || kind == "seed";
 }
 
 inline nlohmann::json description_record(const NodeDescription& d) {

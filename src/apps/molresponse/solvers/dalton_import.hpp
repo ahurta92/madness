@@ -43,12 +43,14 @@
 //      so that alpha_ab = -2 [<x^a|v_b phi> + <y^a|v_b phi>] (the validated
 //      molresponse convention, calc_executor assemble_alpha) reproduces
 //      DALTON's printed value. Q-projected against the ACTIVE MADNESS ground
-//      state, then written as an FD bundle under the synthetic protocol key
-//      "<active_key>_dseed" — registered in the protocols table at the active
-//      (thresh, k), so the UNCHANGED restart machinery (best_usable_fd_source_
-//      key / try_load_fd_state) picks it up as a coarser-or-equal source:
-//      reconcile says Restart, the loader returns exact=false, and the seed is
-//      an initial guess to refine — never mistaken for a solved rung.
+//      state, then written as a SEED (solvers/response_seed.hpp) in
+//      <run>/seeds/response/<node name>/, in the driven node's archive form.
+//      A seed is only a starting guess: never a saved state, never judged
+//      against convergence targets, never changed by a solve.
+//
+//   The seeds are written only for states with no save of their own (the
+//   caller's DaltonSeedTargets). A seed already there with matching settings
+//   (geometry and model) is left; one with other settings is replaced.
 //
 // Collective discipline: run_dalton_import() must be called by every rank.
 // Filesystem writes (extraction, metadata) are rank-0; parses are replicated
@@ -63,11 +65,11 @@
 #include "../tools/dalton_gto.hpp"
 #include "../tools/dalton_mra.hpp"
 #include "../tools/dalton_rspvec.hpp"
-#include "es_save_load.hpp"        // save_es_roots / try_load_es_bundle (ES seed)
-#include "fd_save_load.hpp"        // response_filename
-#include "gs_fingerprint.hpp"      // fnv1a64_update / kFnv1a64Basis
+#include "es_solver.hpp"
 #include "response_metadata.hpp"
+#include "response_seed.hpp"
 #include "response_state.hpp"
+#include "shared_response_session.hpp"   // driven_node_name
 
 #include <nlohmann/json.hpp>
 #include <madness/chem/molecule.h>
@@ -185,6 +187,16 @@ prepared_dalton_seed(const std::string &dir) {
 namespace detail_dalton_import {
 
 namespace fs = std::filesystem;
+
+// FNV-1a-64, for the provenance hash of the Dalton geometry.
+inline constexpr std::uint64_t kFnv1a64Basis = 14695981039346656037ULL;
+inline std::uint64_t fnv1a64_update(std::uint64_t h, const char *p, std::size_t n) {
+  for (std::size_t i = 0; i < n; ++i) {
+    h ^= static_cast<unsigned char>(p[i]);
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
 
 /// Candidates in `dir` whose filename matches: exact `name`, or suffix `ext`.
 inline std::vector<std::string> find_candidates(const std::string &dir,
@@ -528,16 +540,46 @@ match_dalton_frequencies(const std::vector<RspVecEntry> &entries,
 // -------------------------------------------------------------------------
 struct DaltonSeedReport {
   int n_seeded  = 0;
-  int n_skipped = 0;   // usable on-disk state already present
+  int n_skipped = 0;   // a save of the state, or a matching seed, already present
 };
 
-/// The synthetic protocol key the seed bundles are written under. Registered
-/// in the protocols table at the ACTIVE (thresh, k) so best_usable_fd_source_
-/// key treats it as coarser-or-equal to every rung, but never equal to a real
-/// rung key -> the loader always returns exact=false ("initial guess, refine
-/// me"), and rung entries never overwrite the seed record (provenance stays).
-inline std::string dalton_seed_protocol_key() {
-  return protocol_key() + "_dseed";
+/// Where the import writes and what each seed must hold. `driven` and
+/// `excited` name the nodes with no save of their own, each with the settings
+/// its seed must have (response_seed::seed_settings); a node not listed is
+/// not seeded.
+struct DaltonSeedTargets {
+  std::filesystem::path root;              // the run folder
+  std::string calc_dir;                    // holds response_metadata.json (provenance)
+  std::map<std::string, nlohmann::json> driven;
+  std::map<std::string, nlohmann::json> excited;
+};
+
+/// A seed's lineage: the kind of source and its directory.
+inline nlohmann::json dalton_seed_lineage(const DaltonManifest &m) {
+  return {{"kind", "dalton"}, {"directory", m.dir}};
+}
+
+/// Whether node `name` still needs a seed: listed, and with no seed of
+/// matching settings. Collective; prints why a seed is not written.
+inline bool dalton_seed_needed(madness::World &world, const std::map<std::string, nlohmann::json> &targets,
+                               const std::filesystem::path &root, const std::string &name) {
+  const auto target = targets.find(name);
+  if (target == targets.end()) {
+    if (world.rank() == 0)
+      madness::print("[DALTON-SEED]", name, "— the state has a save of its own; not seeded");
+    return false;
+  }
+  const auto status = response_seed::seed_status(world, root, name, target->second);
+  if (status == response_seed::SeedMatch::matches) {
+    if (world.rank() == 0)
+      madness::print("[DALTON-SEED]", name, "— a seed with matching settings is already in",
+                     response_seed::seed_folder(name).generic_string(), "; left as it is");
+    return false;
+  }
+  if (status == response_seed::SeedMatch::differs && world.rank() == 0)
+    madness::print("[DALTON-SEED]", name, "— the seed in", response_seed::seed_folder(name).generic_string(),
+                   "has other settings; replacing it");
+  return true;
 }
 
 /// Seed the planned dipole FD states from the DALTON RSPVEC. Collective.
@@ -553,7 +595,7 @@ inline std::string dalton_seed_protocol_key() {
 inline DaltonSeedReport
 seed_fd_from_dalton(madness::World &world, GroundState &gs,
                     const std::vector<FDRequest> &fd_requests,
-                    const std::string &calc_dir, const DaltonManifest &m) {
+                    const DaltonSeedTargets &targets, const DaltonManifest &m) {
   using namespace madness;
   DaltonSeedReport rep;
 
@@ -633,33 +675,21 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
     }
   }
 
-  // ---- skip decisions (rank 0 reads metadata; broadcast) ------------------
-  // If a usable on-disk source already exists for (pert, freq) at the active
-  // rung, the run would restart from IT — re-projecting a DALTON seed under
-  // it would be wasted work, so skip (logged). A diverged-only dir has no
-  // usable source and is re-seeded.
+  // ---- skip decisions -------------------------------------------------------
+  // A state with a save of its own restarts from it, and a seed already there
+  // with matching settings is kept: projecting again would be wasted work.
   const double active_thresh = FunctionDefaults<3>::get_thresh();
   const int    active_k      = FunctionDefaults<3>::get_k();
   const std::string active_key = protocol_key();
-  const std::string seed_key   = dalton_seed_protocol_key();
+  const auto node_name = [](int axis, double freq) {
+    return response_shared::driven_node_name(
+        {{"perturbation", Perturbation::dipole(axis).description()}, {"frequency", freq}});
+  };
 
   std::vector<int> skip(items.size(), 0);
-  if (world.rank() == 0) {
-    const std::string meta_path = calc_dir + "/response_metadata.json";
-    if (std::filesystem::exists(meta_path)) {
-      auto meta = ResponseMetadata::load_or_create(meta_path);
-      for (size_t i = 0; i < items.size(); ++i) {
-        const std::string pdesc =
-            Perturbation::dipole(items[i].axis).description();
-        const std::string fkey = ResponseMetadata::freq_key(items[i].freq);
-        if (!best_usable_fd_source_key(meta.json(), pdesc, fkey, active_thresh,
-                                       active_k, active_key)
-                 .empty())
-          skip[i] = 1;
-      }
-    }
-  }
-  world.gop.broadcast_serializable(skip, 0);
+  for (size_t i = 0; i < items.size(); ++i)
+    skip[i] = dalton_seed_needed(world, targets.driven, targets.root,
+                                 node_name(items[i].axis, items[i].freq)) ? 0 : 1;
 
   if (world.rank() == 0) {
     print("[DALTON-SEED] rspvec=", m.rspvec_path);
@@ -667,8 +697,7 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
           " n_mo=", n_mo, " n_occ=", n_occ, " n_vir=", n_vir);
     print("[DALTON-SEED] basis=", m.basis, "  method=", m.method,
           "  geometry_hash=", m.geometry_hash);
-    print("[DALTON-SEED] seed protocol key=", seed_key,
-          "  (active=", active_key, ")");
+    print("[DALTON-SEED] seed protocol =", active_key);
   }
 
   // ---- occupied-orbital GAUGE ROTATION -------------------------------------
@@ -739,9 +768,6 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
     const std::string  fkey  = ResponseMetadata::freq_key(freq);
     if (skip[i]) {
       ++rep.n_skipped;
-      if (world.rank() == 0)
-        print("[DALTON-SEED] ", pdesc, "@", freq,
-              " — usable on-disk state already present; NOT overwriting");
       continue;
     }
     const RspVecEntry *e = find_dalton_dipole_entry(entries, axis, freq);   // guaranteed above
@@ -799,58 +825,40 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
       }
     }
 
-    // Save the bundle under the seed key; metadata via the layer (rank 0).
-    const std::string archive_basename = response_filename(pdesc, seed_key, freq);
-    const std::string archive_path     = calc_dir + "/" + archive_basename;
-    if (world.rank() == 0) std::filesystem::create_directories(calc_dir);
-    world.gop.fence();
-
-    IoBackend backend;
+    // Save the seed in the driven node's archive form.
+    const std::string name = node_name(axis, freq);
+    const madness::iteration::Protocol level{active_thresh, active_k};
+    const nlohmann::json details = {{"frequency", freq}, {"dalton_frequency", e->freq1},
+                                    {"source", m.provenance()}};
     const char *type_tag;
     if (is_static) {
       ResponseStateX<ClosedShell> st;
       st.x_alpha = std::move(x);
-      backend = st.save(world, archive_path);
+      response_seed::save_driven_seed(world, targets.root, name, level, targets.driven.at(name),
+                                      dalton_seed_lineage(m), details, st);
       type_tag = "static";
     } else {
       ResponseStateXY<ClosedShell> st;
       st.x_alpha = std::move(x);
       st.y_alpha = std::move(y);
-      backend = st.save(world, archive_path);
+      response_seed::save_driven_seed(world, targets.root, name, level, targets.driven.at(name),
+                                      dalton_seed_lineage(m), details, st);
       type_tag = "full";
     }
 
-    if (world.rank() == 0) {
-      auto meta = ResponseMetadata::load_or_create(
-          calc_dir + "/response_metadata.json");
-      if (!meta.json()["protocols"].contains(seed_key))
-        meta.set_protocol(seed_key, active_thresh, active_k, /*index=*/-1);
-      nlohmann::json entry = {
-          {"freq",         freq},
-          {"type",         type_tag},
-          {"shell",        "closed_shell"},
-          {"converged",    false},   // a seed is an initial guess, never a result
-          {"accepted",     false},
-          {"diverged",     false},
-          {"iter",         0},
-          {"bsh_residual", 1.0},     // unknown; the first solve step measures it
-          {"seed",         "dalton_import"},
-          {"archive",      archive_basename},
-          {"backend",      io_backend_tag(backend)},
-          {"writer_nproc", static_cast<int>(world.size())},
-          {"dalton_freq",  e->freq1},
-      };
-      meta.set_fd_state(pdesc, seed_key, fkey, entry);
-      meta.set_seeded_from(m.provenance());
-      meta.save();
+    if (world.rank() == 0)
       print("[DALTON-SEED] wrote ", pdesc, "@", freq, "  type=", type_tag,
-            "  archive=", archive_basename);
-    }
+            "  seed=", response_seed::seed_folder(name).generic_string());
     world.gop.fence();
     ++rep.n_seeded;
     wrote_any = true;
   }
-  (void)wrote_any;
+  if (wrote_any && world.rank() == 0) {
+    auto meta = ResponseMetadata::load_or_create(targets.calc_dir + "/response_metadata.json");
+    meta.set_seeded_from(m.provenance());
+    meta.save();
+  }
+  world.gop.fence();
 
   if (world.rank() == 0)
     print("[DALTON-SEED] done: seeded=", rep.n_seeded,
@@ -876,19 +884,19 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
 // has no spin factor; the y sign follows the eigenvector dictionary
 // y_i = -sum_a Y_ai phi_a, both pinned by the tool's seeded-convergence A/B),
 // rotate into the MADNESS occupied gauge (U = M (M^T M)^{-1/2}, see
-// occupied_gauge_rotation), Q-project, and write the bundle as
-//     <calc_dir>/es__<active protocol key>/   (converged=false)
-// -- the same seam seed_es_from_hdf5 documents: reconcile_protocol sees a
-// non-converged exact-key entry -> Resume -> try_load_es_bundle hands the
-// solver s0. Type (TDA vs Full) follows the request; a CIS/TDA RSPVEC (no Y
-// block) seeding a Full solve gets y = 0. A usable bundle already on disk is
-// never overwritten. No EXCITLAB records in the RSPVEC = a warning (the
-// directory may be an FD-only run), not an error.
+// occupied_gauge_rotation), Q-project, and write the seed of the excited-state
+// set as
+//     <run>/seeds/response/excited-<model>/   (archive/root_<slot>)
+// which the ES node starts from when it has no save of its own. Type (TDA vs
+// Full) follows the request; a CIS/TDA RSPVEC (no Y block) seeding a Full
+// solve gets y = 0. A set with a save of its own, or a seed with matching
+// settings, is not seeded again. No EXCITLAB records in the RSPVEC = a
+// warning (the directory may be an FD-only run), not an error.
 // ---------------------------------------------------------------------------
 inline DaltonSeedReport
 seed_es_from_dalton(madness::World &world, GroundState &gs,
                     const std::vector<ESRequest> &es_reqs,
-                    const std::string &calc_dir, const DaltonManifest &m,
+                    const DaltonSeedTargets &targets, const DaltonManifest &m,
                     double scale = std::sqrt(2.0), bool y_from_dalton = false) {
   using namespace madness;
   DaltonSeedReport rep;
@@ -901,23 +909,14 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
   }
   if (n_roots <= 0) return rep;
 
-  const std::string active_key = protocol_key();
   const double active_thresh   = FunctionDefaults<3>::get_thresh();
 
-  // A usable bundle (any protocol) already present -> do not overwrite.
-  {
-    bool have = false;
-    try {
-      have = full ? try_load_es_bundle<Full, ClosedShell>(world, calc_dir).has_value()
-                  : try_load_es_bundle<TDA,  ClosedShell>(world, calc_dir).has_value();
-    } catch (const std::exception &) { have = false; }
-    if (have) {
-      ++rep.n_skipped;
-      if (world.rank() == 0)
-        print("[DALTON-SEED] ES bundle already present in", calc_dir,
-              "— NOT overwriting with the DALTON seed");
-      return rep;
-    }
+  // A set with a save of its own, or a seed with matching settings: not again.
+  const std::string name =
+      response_shared::excited_folder(full ? "full" : "tda").filename().string();
+  if (!dalton_seed_needed(world, targets.excited, targets.root, name)) {
+    ++rep.n_skipped;
+    return rep;
   }
 
   // ---- RSPVEC: the EXCITLAB records, lowest excitation energies first ------
@@ -1013,8 +1012,9 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
             full ? "  (full X,Y)" : "  (TDA X)");
   }
 
-  // ---- write the bundle at the ACTIVE key, converged=false -----------------
-  const std::string bundle = calc_dir + "/es__" + active_key;
+  // ---- write the seed at the active level ------------------------------------
+  const madness::iteration::Protocol level{active_thresh, FunctionDefaults<3>::get_k()};
+  const nlohmann::json details = {{"y_block", any_y ? "dalton" : "zero"}, {"source", m.provenance()}};
   auto set_common = [&](auto &s) {
     s.omega = Tensor<double>(static_cast<long>(n_roots));
     for (int r = 0; r < n_roots; ++r) s.omega(static_cast<long>(r)) = omegas[static_cast<size_t>(r)];
@@ -1032,11 +1032,8 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
       s.roots.push_back(std::move(root));
     }
     set_common(s);
-    save_es_roots<Full, ClosedShell>(world, s, bundle, /*converged=*/false);
-    // Preserved twin: the solve REWRITES es__<key> every iteration, so the
-    // seed guard (es_seed_guard.hpp) compared the solve with itself (attempt 9:
-    // overlap 1.000000 on every root). The executor points the guard here.
-    save_es_roots<Full, ClosedShell>(world, s, bundle + ".dseed", /*converged=*/false);
+    response_seed::save_excited_seed(world, targets.root, name, level, targets.excited.at(name),
+                                     dalton_seed_lineage(m), details, s);
   } else {
     ESSolver<TDA, ClosedShell>::State s;
     for (int r = 0; r < n_roots; ++r) {
@@ -1045,17 +1042,18 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
       s.roots.push_back(std::move(root));
     }
     set_common(s);
-    save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
-    save_es_roots<TDA, ClosedShell>(world, s, bundle + ".dseed", /*converged=*/false);
+    response_seed::save_excited_seed(world, targets.root, name, level, targets.excited.at(name),
+                                     dalton_seed_lineage(m), details, s);
   }
   if (world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(calc_dir + "/response_metadata.json");
+    auto meta = ResponseMetadata::load_or_create(targets.calc_dir + "/response_metadata.json");
     meta.set_seeded_from(m.provenance());
     meta.save();
-    print("[DALTON-SEED] wrote ES seed bundle", bundle, " (+ preserved twin .dseed)  roots =", n_roots,
-          " type =", full ? "full" : "tda", " y-block =", any_y ? "DALTON" : "zero",
-          " (converged=false -> the ES node Resumes from it)");
+    print("[DALTON-SEED] wrote the excited-state seed", response_seed::seed_folder(name).generic_string(),
+          " roots =", n_roots, " type =", full ? "full" : "tda", " y-block =", any_y ? "DALTON" : "zero",
+          " (the set starts from it)");
   }
+  world.gop.fence();
   rep.n_seeded += n_roots;
   return rep;
 }
@@ -1183,7 +1181,7 @@ dalton_fd_guess(madness::World &world, GroundState &gs,
 inline DaltonSeedReport
 run_dalton_import(madness::World &world, GroundState &gs,
                   const madness::Molecule &molecule,
-                  const ResponsePlan &plan, const std::string &calc_dir,
+                  const ResponsePlan &plan, const DaltonSeedTargets &targets,
                   const std::string &dalton_dir,
                   const std::string &molden_override = {},
                   const std::string &rspvec_override = {},
@@ -1199,7 +1197,7 @@ run_dalton_import(madness::World &world, GroundState &gs,
   int ok = 0;
   if (world.rank() == 0) {
     try {
-      m = locate_dalton_dir(dalton_dir, calc_dir + "/dalton_import",
+      m = locate_dalton_dir(dalton_dir, targets.calc_dir + "/dalton_import",
                             molden_override, rspvec_override, out_override);
       if (molecule.natom() == 0)
         throw std::runtime_error(
@@ -1253,9 +1251,9 @@ run_dalton_import(madness::World &world, GroundState &gs,
     print(report);
   }
 
-  auto rep = seed_fd_from_dalton(world, gs, plan.fd, calc_dir, m);
+  auto rep = seed_fd_from_dalton(world, gs, plan.fd, targets, m);
   // ES seed (EXCITLAB eigenvectors), when the plan has an ES request.
-  const auto es_rep = seed_es_from_dalton(world, gs, plan.es, calc_dir, m,
+  const auto es_rep = seed_es_from_dalton(world, gs, plan.es, targets, m,
                                           std::sqrt(2.0), es_y_from_dalton);
   rep.n_seeded  += es_rep.n_seeded;
   rep.n_skipped += es_rep.n_skipped;

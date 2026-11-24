@@ -17,7 +17,6 @@
 #include "../calc/calc_executor.hpp"        // ExecutorSettings/Context, FdResponseExecutor, assemble_*
 #include "../solvers/raman_analysis.hpp"    // full Raman: Hessian + normal-mode spectrum
 #include "../calc/calc_manager.hpp"         // CalcManager
-#include "../solvers/gs_fingerprint.hpp"    // GS-archive restart-safety gate
 #include "../solvers/response_metadata.hpp"
 
 #include <nlohmann/json.hpp>
@@ -105,98 +104,6 @@ inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohma
 // ---------------------------------------------------------------------------
 // run_response_with_ground — plan -> CalcManager -> assemble -> Output.
 // ---------------------------------------------------------------------------
-
-/// The GS-archive fingerprint gate (restart safety — see gs_fingerprint.hpp
-/// for the failure mode: phase-flipped regenerated orbitals + cached X/Y =>
-/// silently wrong properties), run before anything touches restart state in
-/// `calc_dir`. Rank 0 hashes the archive and reads the stamp; the verdict is
-/// broadcast so an abort is collective (a rank-0-only throw would hang the
-/// other ranks in the solve). MADRESPONSE_ALLOW_GS_MISMATCH=1 downgrades the
-/// abort to a restamp — the stale states then remain loadable, so it is only
-/// sane when the caller KNOWS the states match this archive. D-120: one
-/// function, called before a Dalton import writes its seeds into `calc_dir`
-/// by the adapter, so a fresh directory is stamped before any state is
-/// written there.
-inline void gs_fingerprint_gate(madness::World &world,
-                                const std::string &archive_file,
-                                const std::string &calc_dir) {
-  const std::string meta_path =
-      calc_dir + "/response_metadata.json";
-  // 0 = match/proceed, 1 = stamped fresh, 2 = warned+restamped, 3 = abort,
-  // 4 = rank-0 error (unreadable archive / corrupt or newer-schema metadata /
-  //     ENOSPC on stamp save). Everything inside the rank-0 block can throw,
-  //     and a rank-0-only unwind BEFORE the broadcast strands the other ranks
-  //     in it — so catch, encode as gate=4, and abort collectively.
-  int gate = 0;
-  if (world.rank() == 0) try {
-    // The gate stamps the metadata BEFORE mgr.run creates anything, so the
-    // calc dir may not exist yet (standalone runs point calc_dir at a fresh
-    // subdir; the madqc path happens to run in an existing cwd). Create it
-    // first — otherwise the stamp save() fails to open its .tmp and the
-    // collective error path aborts a perfectly good run.
-    std::filesystem::create_directories(calc_dir);
-    const GsFingerprint fp = gs_archive_fingerprint(archive_file);
-    auto meta = ResponseMetadata::load_or_create(meta_path);
-    const std::string stored = meta.ground_state_fingerprint();
-    switch (gs_fingerprint_verdict(meta.json(), fp.hex)) {
-      case GsGateVerdict::Match:    gate = 0; break;
-      case GsGateVerdict::FreshDir: gate = 1; break;
-      case GsGateVerdict::MissingStamp:
-        gate = 2;
-        madness::print(
-            "[GS-FINGERPRINT] WARNING: this calc dir has response states "
-            "but no ground-state stamp (metadata predates the gate). "
-            "Cannot verify they belong to", archive_file,
-            "— stamping it now; if the archive was regenerated since those "
-            "states were written, start a fresh calc dir.");
-        break;
-      case GsGateVerdict::Mismatch: {
-        const char *env = std::getenv("MADRESPONSE_ALLOW_GS_MISMATCH");
-        if (env && env[0] == '1') {
-          gate = 2;
-          madness::print(
-              "[GS-FINGERPRINT] OVERRIDE (MADRESPONSE_ALLOW_GS_MISMATCH=1): "
-              "stamp", stored, "!= current", fp.hex,
-              "— restamping and continuing. The existing response states "
-              "remain loadable; results are only trustworthy if these "
-              "archives are phase-identical.");
-        } else {
-          gate = 3;
-          madness::print(
-              "[GS-FINGERPRINT] MISMATCH in", meta_path, "\n"
-              "  stored :", stored,
-              "(stamped when this dir's response states were written)\n"
-              "  current:", fp.hex, "(", archive_file, ",", fp.bytes,
-              "bytes,", fp.nparts, "part(s))\n"
-              "  The cached response states belong to a DIFFERENT ground-state "
-              "archive. Orbitals of a regenerated ground state can be "
-              "phase-flipped (identical physics, opposite signs), and reusing "
-              "these states would corrupt properties silently. Point the run "
-              "at the original archive, or use a fresh calc dir, or set "
-              "MADRESPONSE_ALLOW_GS_MISMATCH=1 if you know better.");
-        }
-        break;
-      }
-    }
-    if (gate == 1 || gate == 2) {
-      meta.set_ground_state(archive_file, fp.hex, fp.bytes, fp.nparts);
-      meta.save();
-    }
-  } catch (const std::exception &e) {
-    gate = 4;
-    madness::print("[GS-FINGERPRINT] ERROR during gate on rank 0:", e.what());
-  }
-  world.gop.broadcast_serializable(gate, 0);
-  if (gate == 3)
-    MADNESS_EXCEPTION(
-        "GS-archive fingerprint mismatch — refusing to reuse restart state "
-        "(details printed by rank 0; see [GS-FINGERPRINT])", 0);
-  if (gate == 4)
-    MADNESS_EXCEPTION(
-        "GS-fingerprint gate failed on rank 0 (unreadable archive, corrupt "
-        "or newer-schema metadata, or stamp-save error — see "
-        "[GS-FINGERPRINT] ERROR); aborting collectively", 0);
-}
 
 /// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
 /// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the

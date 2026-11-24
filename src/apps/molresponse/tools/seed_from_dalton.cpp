@@ -3,10 +3,14 @@
 // intermediate). Projects the per-occupied-orbital response function
 //   x_i(r) = sum_mu D[mu,i] chi_mu(r),  D = C_vir @ X.T
 // into MADNESS Function<double,3> via a DaltonResponseFunctor, wraps all N
-// functions as a one-root ESSolver<TDA,ClosedShell>::State, and calls
-// save_es_roots(..., converged=false). The resulting bundle is identical in
-// schema to the HDF5-seeded one produced by seed_es_from_hdf5; the ES node
-// Resumes from it on the next run.
+// functions as an ESSolver<TDA,ClosedShell>::State, and writes it as a SEED of
+// the excited-state set (solvers/response_seed.hpp) into a madqc run folder:
+//   <run>/seeds/response/excited-<tda|full>/
+// The seed carries the run's ground-state model and geometry (from
+// <run>/states/ground_state/description.json) as its settings, so madqc starts
+// the set from it when the set has no save of its own. Unlike the in-solver
+// import (dalton.dir), this tool picks any DALTON roots (--roots), takes their
+// energies from --omegas, can write a TDA seed, and offers --yflip / --yzero.
 //
 // Constraints: NP=1 only (same as seed_es_from_hdf5).
 //
@@ -25,7 +29,7 @@
 //
 // Usage:
 //   seed_from_dalton --rspvec=RSPVEC --molden=molden.inp --n-occ=N
-//                    --root=0 --omega=<au> --calc-dir=DIR
+//                    --root=0 --omega=<au> --run-dir=<madqc run folder>
 //                    [--archive=<moldft restartdata>]
 //                    [--thresh=1e-4] [--scale=1.41421356]
 
@@ -39,7 +43,7 @@
 #include "../kernels/tags.hpp"
 #include "../solvers/response_state.hpp"
 #include "../solvers/es_solver.hpp"
-#include "../solvers/es_save_load.hpp"
+#include "../solvers/response_seed.hpp"
 
 #include <nlohmann/json.hpp>
 #include <madness/mra/mra.h>
@@ -75,12 +79,12 @@ int main(int argc, char** argv) {
     }
 
     if (!parser.key_exists("rspvec") || !parser.key_exists("molden") ||
-        !parser.key_exists("n-occ")  || !parser.key_exists("calc-dir") ||
+        !parser.key_exists("n-occ")  || !parser.key_exists("run-dir") ||
         !(parser.key_exists("root") || parser.key_exists("roots")) ||
         !(parser.key_exists("omega") || parser.key_exists("omegas"))) {
         if (world.rank() == 0) {
             print("Usage: seed_from_dalton --rspvec=RSPVEC --molden=molden.inp "
-                  "--n-occ=N --root=IDX --omega=<au> --calc-dir=DIR");
+                  "--n-occ=N --root=IDX --omega=<au> --run-dir=<madqc run folder>");
             print("  multi-root: --roots=0,1,2 --omegas=w0,w1,w2 (one N-root bundle)");
             print("  [--archive=<moldft restartdata>] (load the MADNESS ground "
                   "state, take box/k from its header, and ROTATE the seed into "
@@ -95,7 +99,7 @@ int main(int argc, char** argv) {
 
     const std::string rspvec_path = parser.value_raw("rspvec");
     const std::string molden_path = parser.value_raw("molden");
-    const std::string calc_dir   = parser.value_raw("calc-dir");
+    const std::string run_dir    = parser.value_raw("run-dir");
     const int         n_occ      = std::stoi(parser.value("n-occ"));
     // Multi-root: --roots=0,1,2 --omegas=w0,w1,w2 build ONE N-root seed
     // bundle (what a production --es-roots=N solve warm-starts from).
@@ -264,7 +268,6 @@ int main(int argc, char** argv) {
         }
 
         const std::string key    = protocol_key(thresh, k);
-        const std::string bundle = calc_dir + "/es__" + key;
 
         // --full: write a Full (X,Y) bundle the RPA/--es-full solve resumes
         // from (default: TDA, X-only). DALTON stores the RPA de-excitation
@@ -329,6 +332,35 @@ int main(int argc, char** argv) {
             s.last_density_residual = std::vector<double>(NR, 1.0);
             s.last_omega_residual   = std::vector<double>(NR, 1.0);
         };
+        // The seed's settings: the run's ground-state model and geometry, and
+        // the excited-state set it is for (as madqc defines that set).
+        const std::string model = full ? "full" : "tda";
+        const auto seed_name =
+            response_shared::excited_folder(model).filename().string();
+        nlohmann::json settings;
+        {
+            std::ifstream in(std::filesystem::path(run_dir) / "states" /
+                             "ground_state" / "description.json");
+            if (!in) throw std::runtime_error(
+                "seed_from_dalton: no ground-state node in " + run_dir +
+                " (run madqc there first)");
+            const auto ground = madness::iteration::read_description(
+                nlohmann::json::parse(in));
+            settings = response_seed::seed_settings(
+                {{"excited_model", model},
+                 {"layout", "closed_shell_" + model},
+                 {"ground_settings", ground.settings}});
+        }
+        const nlohmann::json lineage = {
+            {"kind", "dalton"},
+            {"directory", std::filesystem::path(rspvec_path).parent_path().string()}};
+        nlohmann::json roots_used = nlohmann::json::array();
+        for (int ri : root_list) roots_used.push_back(ri);
+        const nlohmann::json details = {
+            {"writer", "seed_from_dalton"}, {"rspvec", rspvec_path},
+            {"molden", molden_path}, {"dalton_roots", roots_used},
+            {"gauge", U.size() > 0 ? "rotated" : "unrotated"}};
+        const madness::iteration::Protocol level{thresh, k};
         if (full) {
             ESSolver<Full, ClosedShell>::State s;
             for (size_t rr = 0; rr < NR; ++rr) {
@@ -338,7 +370,8 @@ int main(int argc, char** argv) {
                 s.roots.push_back(std::move(root));
             }
             set_common(s);
-            save_es_roots<Full, ClosedShell>(world, s, bundle, /*converged=*/false);
+            response_seed::save_excited_seed(world, run_dir, seed_name, level,
+                                             settings, lineage, details, s);
         } else {
             ESSolver<TDA, ClosedShell>::State s;
             for (size_t rr = 0; rr < NR; ++rr) {
@@ -347,7 +380,8 @@ int main(int argc, char** argv) {
                 s.roots.push_back(std::move(root));
             }
             set_common(s);
-            save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
+            response_seed::save_excited_seed(world, run_dir, seed_name, level,
+                                             settings, lineage, details, s);
         }
 
         if (world.rank() == 0) {
@@ -375,10 +409,11 @@ int main(int argc, char** argv) {
                       ? "ROTATED into the MADNESS occupied gauge (--archive)"
                       : "UNROTATED (no --archive; canonical ground state only)");
             print("  protocol_key =", key, "  k =", k, "  thresh =", thresh);
-            print("  bundle    =", bundle);
-            print("  Run (NP=1): test_calc_manager_run --archive=<gs> --calc-dir=",
-                  calc_dir, " --es-roots=", static_cast<int>(NR),
-                  " --protocol=", thresh, " -> ES node Resumes from seed.");
+            print("  seed      =", (std::filesystem::path(run_dir) /
+                                    response_seed::seed_folder(seed_name)).string());
+            print("  madqc --wf=response with excited.num_states", static_cast<int>(NR),
+                  "and excited.tda", full ? "false" : "true",
+                  "in this run folder starts the set from it.");
         }
     }  // all Function/State objects destruct here, before finalize()
 

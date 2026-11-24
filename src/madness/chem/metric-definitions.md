@@ -68,7 +68,7 @@ components. Invalid individual scalars are rejected before reuse/publication.
 
 The two density and BSH reductions above are existing solver conventions, not
 interchangeable definitions. This refactor does not relabel them as equivalent
-or change their thresholds. See `MoldftCheckpoint.hpp`, `fd_save_load.hpp` and
+or change their thresholds. See `MoldftCheckpoint.hpp`, `shared_response_checkpoint.hpp` and
 `ConvergenceReport.hpp` for the current report fields; see the native SCF and
 static/full kernels for the numerical construction.
 

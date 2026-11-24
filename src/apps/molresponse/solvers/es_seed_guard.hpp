@@ -20,9 +20,10 @@
 //   seed_overlap  — normalized response-metric overlap of the converged
 //                   root with its identity-matched seed root (matched via
 //                   stable_index, which travels through slot sorts),
-//   omega_seed    — the seed's recorded ω for that root. For a bundle
-//                   written by seed_from_dalton this IS the DALTON ladder
-//                   value passed via --omegas (saved into roots.json).
+//   omega_seed    — the seed's recorded ω for that root (the details of
+//                   the seed's description). For a seed written by
+//                   seed_from_dalton this IS the DALTON ladder value passed
+//                   via --omegas.
 //   omega_shift   — ω_converged − ω_seed,
 //
 // prints a rank-0 summary table, records the block into
@@ -41,7 +42,6 @@
 // =========================================================================
 
 #include "es_root_identity.hpp"           // make_root_id
-#include "es_save_load.hpp"               // load_es_roots (guard-time reload)
 #include "response_metadata.hpp"          // ResponseMetadata (aggregate writer)
 #include "response_state.hpp"             // ResponseStateX/XY storage
 #include "../kernels/response_space_ops.hpp"  // rs::metric (RPA-metric overlap)
@@ -64,20 +64,6 @@ inline constexpr double kSeedGuardOverlapWarn = 0.5;
 /// Pure-tracking threshold: when every root overlaps its seed above this
 /// AND the solve took <= n_roots iterations, the tracking note prints.
 inline constexpr double kSeedGuardTrackingOverlap = 0.9;
-
-/// WHERE the seed bundle lives — strings only. The guard RELOADS the bundle
-/// from disk at evaluation time (2026-09-05) instead of holding a deep copy
-/// in memory for the whole solve: the old capture cost a full extra bundle
-/// of resident memory (fine for h2o, real at 30+ occupied orbitals) while
-/// the bundle sits unchanged on disk anyway. The solve never rewrites the
-/// seed's own bundle dir (converged states save under their own
-/// protocol-keyed dirs), so the reload sees exactly what the solve started
-/// from.
-struct EsSeedReference {
-  std::string bundle_path;           // calc_dir + '/' + bundle basename
-  std::string bundle_dir;            // basename (provenance/report)
-  std::string source_protocol_key;
-};
 
 /// Per-root guard record (one converged slot).
 struct EsSeedGuardRoot {
@@ -147,14 +133,17 @@ struct EsSeedGuardReport {
 /// the converged roots and the seed roots, identity-matched via stable_index,
 /// plus the tracking / basin-escape verdicts. Collective.
 ///
-/// The seed is RELOADED from disk here (bundle-native (k, thresh)) and
-/// re-projected to the ACTIVE FunctionDefaults so the inner products are
-/// well-defined at the final protocol (same path prepare() uses).
-/// Type/Shell select the bundle format (TDA vs Full), matching the solve.
-template <typename Type, typename Shell, typename StateT>
+/// The seed is RELOADED from its folder here by `load_seed` (the solve never
+/// changes it, so the reload sees exactly what the solve started from; no
+/// copy is held during the solve) and re-projected to the ACTIVE
+/// FunctionDefaults so the inner products are well-defined at the final
+/// protocol (same path prepare() uses). `seed_folder` and `seed_protocol_key`
+/// name it in the report.
+template <typename Type, typename Shell, typename StateT, typename LoadSeed>
 EsSeedGuardReport
 evaluate_es_seed_guard(madness::World &world, const StateT &sf, bool converged,
-                       const EsSeedReference &seed) {
+                       const LoadSeed &load_seed, const std::string &seed_folder,
+                       const std::string &seed_protocol_key) {
   (void)world;  // collectivity contract: the rs:: inner products below are
                 // collective on the functions' world; keep the parameter so
                 // call sites read as the collective they are.
@@ -163,11 +152,11 @@ evaluate_es_seed_guard(madness::World &world, const StateT &sf, bool converged,
   rep.iters             = sf.iter;
   rep.n_roots           = static_cast<int>(sf.roots.size());
   rep.converged         = converged;
-  rep.seed_bundle_dir   = seed.bundle_dir;
-  rep.seed_protocol_key = seed.source_protocol_key;
+  rep.seed_bundle_dir   = seed_folder;
+  rep.seed_protocol_key = seed_protocol_key;
 
   // Disk reload — one read at guard time, zero memory held during the solve.
-  auto seed_state = load_es_roots<Type, Shell>(world, seed.bundle_path);
+  auto seed_state = load_seed();
   std::vector<int> seed_stable = seed_state.stable_index;
   if (seed_stable.size() != seed_state.roots.size()) {
     seed_stable.resize(seed_state.roots.size());
@@ -295,7 +284,7 @@ inline void print_es_seed_guard(madness::World &world,
 
 /// Record the guard block into the calc-level aggregate at
 /// excited_states/<protocol_key>/seed_guard — through the ResponseMetadata
-/// layer. Rank-0 write + fence (same discipline as save_es_roots).
+/// layer. Rank-0 write + fence.
 inline void record_es_seed_guard(madness::World &world,
                                  const std::string &calc_dir,
                                  const std::string &protocol_key,

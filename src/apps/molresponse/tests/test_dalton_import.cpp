@@ -15,6 +15,10 @@
 //   8. basis + method parsed from the .out (HF and KS-DFT variants)
 //   9. exact 1-to-1 frequency matching: all-present -> "", one absent ->
 //      message lists BOTH the missing request and the available ladder
+//  10. seeds (solvers/response_seed.hpp): the node module accepts kind
+//      "seed"; a seed whose settings match is found, one made for another
+//      geometry is refused; the ground state's save time and numerical
+//      options are not part of a seed's settings; a node is never a seed
 // =========================================================================
 
 #include "../solvers/dalton_import.hpp"
@@ -343,6 +347,74 @@ int main() {
         match_dalton_frequencies(entries, {{1, 0.0596000625}}, "RSPVEC");
     EXPECT(!ey.empty() && ey.find("YDIPLEN") != std::string::npos,
            "right frequency, wrong operator label -> error");
+  }
+
+  // ---- 10. seeds ---------------------------------------------------------
+  std::printf("\n-- seeds --\n");
+  {
+    namespace it = madness::iteration;
+    using nlohmann::json;
+    // A ground-state settings snapshot with the fields scf_model_settings reads.
+    const auto ground = [](double z, double eprec) {
+      return json{{"version", 1}, {"unavailable", json::array()},
+                  {"dft", {{"lo", 1e-10}, {"deriv", "abgv"}, {"dft_deriv", "bspline"},
+                           {"orbitalshift", 0.0}, {"xc", "hf"}, {"localize", "new"}}},
+                  {"molecule", {{"atoms", json::array({{{"atomic_number", 8}, {"coordinates", {0.0, 0.0, z}}}})},
+                                {"parameters", {{"eprec", eprec}}},
+                                {"smoothing_radii_inverse", json::array({1.0 / eprec})},
+                                {"core_potentials", json::array()}}},
+                  {"xc", {{"rhomin", 0.0}, {"rhotol", 1e-7}, {"tautol", 1e-12}, {"tauwmargin", 1e-6},
+                          {"specification", "hf"}}}};
+    };
+    // The excited-state set's settings as its node holds them.
+    const auto set = [&](double z, double eprec, const std::string &saved_at) {
+      return json{{"excited_model", "full"}, {"layout", "closed_shell_full"},
+                  {"ground_settings", ground(z, eprec)},
+                  {"ground_saved", {{"protocol", "1e-04_k6"}, {"saved_at", saved_at}}}};
+    };
+    const auto wanted = response_seed::seed_settings(set(0.19, 1e-6, "2026-11-24T10:00:00Z"));
+    EXPECT(response_seed::seed_settings(set(0.19, 1e-6, "2026-11-24T11:00:00Z")) == wanted,
+           "a ground state saved again keeps the seed's settings");
+    EXPECT(response_seed::seed_settings(set(0.19, 1e-8, "2026-11-24T10:00:00Z")) == wanted,
+           "a numerical option of the ground state is not a seed setting");
+    const auto moved = response_seed::seed_settings(set(0.25, 1e-6, "2026-11-24T10:00:00Z"));
+    EXPECT(moved != wanted, "another geometry changes the seed's settings");
+    EXPECT(response_seed::seed_folder("excited-full").generic_string() == "seeds/response/excited-full",
+           "a seed is named by the node it is for, under seeds/response");
+
+    const fs::path run = tmp / "run";
+    const fs::path folder = run / response_seed::seed_folder("excited-full");
+    it::NodeDescription d;
+    d.kind = "seed";
+    d.protocol = {1e-4, 6};
+    d.settings = wanted;
+    d.metrics = json::array();
+    d.lineage = {{"kind", "dalton"}, {"directory", "/dalton"}};
+    d.code_version = "test";
+    d.details = {{"seed_for", "excited_set"}, {"n_roots", 1}};
+    const std::string err = err_of([&] {
+      it::Node(folder).save(d, [](const fs::path &a) { write_file(a / "root_0.00000", "x"); });
+    });
+    if (!err.empty()) std::printf("  save error: %s\n", err.c_str());
+    EXPECT(err.empty(), "the node module accepts kind seed");
+    const auto found = response_seed::inspect_seed(folder);
+    EXPECT(found.has_value() && found->kind == "seed" && found->lineage == d.lineage,
+           "the seed's description reads back");
+    EXPECT(!fs::exists(folder / "history.jsonl"), "a seed has no history");
+    EXPECT(response_seed::match_seed(found, wanted) == response_seed::SeedMatch::matches,
+           "a seed whose settings match is found");
+    EXPECT(response_seed::match_seed(found, moved) == response_seed::SeedMatch::differs,
+           "a seed made for another geometry is refused");
+    EXPECT(response_seed::match_seed(response_seed::inspect_seed(run / response_seed::seed_folder("excited-tda")),
+                                     wanted) == response_seed::SeedMatch::missing,
+           "no seed folder: nothing found");
+
+    // A solved node in the same layout is never taken for a seed.
+    const fs::path node = run / "states" / "response" / "excited-full";
+    auto solved = d;
+    solved.kind = "excited_set";
+    it::Node(node).save(solved, [](const fs::path &a) { write_file(a / "root_0.00000", "x"); });
+    EXPECT(!response_seed::inspect_seed(node).has_value(), "a node of another kind is not a seed");
   }
 
   fs::remove_all(tmp);

@@ -82,13 +82,6 @@ add_mad_executable(test_vbc_pq_terms
 add_mad_executable(test_step_restriction
                    "tests/test_step_restriction.cpp"
                    "MADchem")
-# k-CONSISTENCY regression (review fix, confirmed HIGH): try_load_fd_state must
-# re-project a coarser-rung source to the active (k, thresh) inside the loader,
-# so beta assembly can never contract mixed-k functions ("functions have
-# different k" abort). Synthetic state, no ground-state fixture needed.
-add_mad_executable(test_fd_kfallback_load
-                   "tests/test_fd_kfallback_load.cpp"
-                   "MADchem")
 # Slot-identity contract of rs::diagonalize (dominance order, phase fix,
 # rank-deficient dim padding) — guards against re-introducing the
 # ascending-omega re-sort that caused the coarse-rung slot churn.
@@ -174,14 +167,15 @@ if(MADNESS_ENABLE_HDF5)
     endif()
   endforeach()
   # dalton-cis-seed thread: converter that turns pymra per-occ-orbital .mad.h5
-  # response functions into a TDA excited-state seed bundle (save_es_roots,
-  # converged=false) the ES node Resumes from. HDF5-only (uses load_function_hdf5).
+  # response functions into a TDA excited-state seed, <run>/seeds/response/
+  # excited-tda/, that the set starts from. HDF5-only (uses load_function_hdf5).
   add_mad_executable(seed_es_from_hdf5 "tools/seed_es_from_hdf5.cpp;GroundState.cpp" "MADchem")
   target_include_directories(seed_es_from_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(seed_es_from_hdf5 PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(seed_es_from_hdf5 PRIVATE MADNESS_HAS_HDF5)
   # dalton-cis-seed (b): overlap-based pinning — identify which converged ES root
   # matches the operator-selected seed by |<seed|root>| (character, not energy).
+  # Its reader of the older bundle layout is gone; node folders arrive in step 4c part 5d.
   add_mad_executable(es_overlap "tools/es_overlap.cpp;GroundState.cpp" "MADchem")
   target_include_directories(es_overlap PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(es_overlap PRIVATE ${HDF5_LIBRARIES})
@@ -189,23 +183,14 @@ if(MADNESS_ENABLE_HDF5)
 endif()
 
 # dalton-cis-seed (c): native DALTON reader — reads RSPVEC + molden.inp directly,
-# projects x_i onto MRA, and emits the ES seed bundle without a Python/HDF5
-# intermediate. Writes the NATIVE save_es_roots bundle (converged=false) that the
-# ES node Resumes from — no HDF5 at runtime, and every HDF5 path in
+# projects x_i onto MRA, and emits the ES seed without a Python/HDF5
+# intermediate. Writes <run>/seeds/response/excited-<model>/ (native archives)
+# that the set starts from — no HDF5 at runtime, and every HDF5 path in
 # response_state.hpp is #ifdef MADNESS_HAS_HDF5 guarded, so this compiles in a
 # plain (non-HDF5) build. Kept OUT of the MADNESS_ENABLE_HDF5 block so it is
 # always available (enabling HDF5 here drags parallel-HDF5's Intel-MPI include
 # path in and breaks the xeonmax toolchain — see es_bench MPI notes).
 add_mad_executable(seed_from_dalton "tools/seed_from_dalton.cpp;GroundState.cpp" "MADchem")
-
-# Standalone writer of the production ES seed bundle (seed_es_from_dalton), for
-# es_overlap diagnostics against a converged cold bundle.
-add_mad_executable(dalton_es_seed_bundle "tools/dalton_es_seed_bundle.cpp;GroundState.cpp" "MADchem")
-if(MADNESS_ENABLE_HDF5)
-  target_include_directories(dalton_es_seed_bundle PRIVATE ${HDF5_INCLUDE_DIRS})
-  target_link_libraries(dalton_es_seed_bundle PRIVATE ${HDF5_LIBRARIES})
-  target_compile_definitions(dalton_es_seed_bundle PRIVATE MADNESS_HAS_HDF5)
-endif()
 
 # dalton-cis-seed (GS): project the occupied DALTON/molden MOs and write a
 # moldft version-4 .restartdata (native path only, no HDF5). Ground-state analogue
@@ -234,8 +219,7 @@ if (BUILD_TESTING)
   # multi-rank coverage of these paths lives in the es_bench state-parallel
   # gates. Serial runs still validate the numerics end-to-end.
   foreach(_t test_exchange_ctx test_node_subworlds test_node_phi
-             test_subspace_allreduce test_es_build_subworld test_step_restriction
-             test_fd_kfallback_load)
+             test_subspace_allreduce test_es_build_subworld test_step_restriction)
     add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
     set_property(TEST madness/test/molresponse/${_t}/run
                  PROPERTY LABELS "response-small;response;medium" APPEND)
@@ -270,18 +254,6 @@ endif (BUILD_TESTING)
 
 # Per-function kinetic diagonals: analytic functions, no external fixtures.
 if(BUILD_TESTING)
-  add_mad_executable(test_es_kinetic_archive "tests/test_es_kinetic_archive.cpp" "MADchem")
-  add_test(NAME madness/test/molresponse/test_es_kinetic_archive/run COMMAND test_es_kinetic_archive)
-  set_tests_properties(madness/test/molresponse/test_es_kinetic_archive/run
-    PROPERTIES LABELS "response;medium" TIMEOUT 120)
-  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
-    add_test(NAME madness/test/molresponse/test_es_kinetic_archive/mpi2
-      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-              $<TARGET_FILE:test_es_kinetic_archive> ${MPIEXEC_POSTFLAGS})
-    set_tests_properties(madness/test/molresponse/test_es_kinetic_archive/mpi2
-      PROPERTIES LABELS "response;medium" TIMEOUT 120)
-  endif()
-
   add_mad_executable(test_es_kinetic_evidence "tests/test_es_kinetic_evidence.cpp" "MADchem")
   add_test(NAME madness/test/molresponse/test_es_kinetic_evidence/run COMMAND test_es_kinetic_evidence)
   set_tests_properties(madness/test/molresponse/test_es_kinetic_evidence/run

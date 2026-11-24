@@ -5,18 +5,18 @@
 //
 // It loads the N functions into a ResponseStateX<ClosedShell> (one Function per
 // occupied orbital), wraps them as a 1-root ESSolver<TDA,ClosedShell>::State,
-// and calls save_es_roots(..., converged=false). That writes
-//   <calc-dir>/es__<protocol_key>/{root_0.*, roots.json}
-// and upserts <calc-dir>/response_metadata.json (excited_states/<key>). When the
-// normal executor runs its ES node at that protocol, reconcile_protocol finds a
-// non-converged exact-key entry -> Resume -> try_load_es_bundle sets s0 to this
-// guess -> iterate. Zero solver-code changes; this is the "warm start MADNESS ES
-// from a DALTON CIS guess" seam (dalton-cis-seed thread).
+// and writes it as a SEED of the TDA excited-state set (solvers/response_seed.hpp)
+// into a madqc run folder:
+//   <run>/seeds/response/excited-tda/{description.json, archive/root_0.*}
+// The seed carries the run's ground-state model and geometry (from
+// <run>/states/ground_state/description.json) as its settings, so madqc starts
+// the set from it when the set has no save of its own. The in-solver import
+// (dalton.dir) reads DALTON files only; this converter reads pymra functions.
 //
 // Constraints:
 //   * NP=1 only. load_function_hdf5 is single-rank (local container == whole
 //     tree), and the native seed archive is nio=1, so the ES run that Resumes
-//     from it must ALSO be NP=1 (else the writer_nproc np-guard trips).
+//     from it must ALSO be NP=1 (the seed records one writer).
 //   * cell/k must match the solver: load_function_hdf5 calls
 //     FunctionDefaults::set_cell(<file cell>), so the pymra projection MUST use
 //     the solver's cell (moldft L=200 -> [-200,200]^3) and the protocol's k.
@@ -26,14 +26,14 @@
 //     matching the convention makes it a faithful warm start.
 //
 // Usage:
-//   seed_es_from_hdf5 --calc-dir=DIR --omega=<au> --x=x0.mad.h5,x1.mad.h5,...
+//   seed_es_from_hdf5 --run-dir=<madqc run folder> --omega=<au> --x=x0.mad.h5,x1.mad.h5,...
 //                     [--seed-dir=DIR] [--thresh=1e-4] [--scale=1.41421356]
 
 #include "../ResponseProtocol.hpp"          // protocol_key, default_k_for_thresh
 #include "../kernels/tags.hpp"              // TDA, ClosedShell
 #include "../solvers/response_state.hpp"    // ResponseStateX<ClosedShell>
 #include "../solvers/es_solver.hpp"         // ESSolver<TDA,ClosedShell>::State
-#include "../solvers/es_save_load.hpp"      // save_es_roots
+#include "../solvers/response_seed.hpp"     // save_excited_seed
 #include "../solvers/function_hdf5_io.hpp"  // load_function_hdf5
 
 #include <madness/misc/info.h>
@@ -41,6 +41,8 @@
 #include <madness/world/MADworld.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -78,10 +80,10 @@ int main(int argc, char **argv) {
     finalize();
     return 2;
   }
-  if (!parser.key_exists("calc-dir") || !parser.key_exists("x") ||
+  if (!parser.key_exists("run-dir") || !parser.key_exists("x") ||
       !parser.key_exists("omega")) {
     if (world.rank() == 0) {
-      print("Usage: seed_es_from_hdf5 --calc-dir=DIR --omega=<au> "
+      print("Usage: seed_es_from_hdf5 --run-dir=<madqc run folder> --omega=<au> "
             "--x=x0.mad.h5,x1.mad.h5,...");
       print("  [--seed-dir=DIR] [--thresh=1e-4] [--scale=<sqrt2>]");
     }
@@ -89,7 +91,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  const std::string calc_dir = parser.value_raw("calc-dir");
+  const std::string run_dir = parser.value_raw("run-dir");
   const std::string seed_dir =
       parser.key_exists("seed-dir") ? parser.value_raw("seed-dir") : "";
   const double omega = std::stod(parser.value("omega"));
@@ -100,12 +102,29 @@ int main(int argc, char **argv) {
                                  : std::sqrt(2.0);
   const auto xfiles = split_csv(parser.value_raw("x"));
 
-  // Protocol the seed belongs to: reconcile_protocol looks the seed up by
-  // protocol_key(thresh, default_k_for_thresh(thresh)); save_es_roots records
-  // k/thresh into roots.json from FunctionDefaults.
+  // The level the seed is represented at.
   const int k = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
-  const std::string bundle = calc_dir + "/es__" + key;
+
+  // The seed's settings: the run's ground-state model and geometry, and the
+  // TDA excited-state set it is for (as madqc defines that set).
+  nlohmann::json settings;
+  {
+    std::ifstream in(std::filesystem::path(run_dir) / "states" / "ground_state" /
+                     "description.json");
+    if (!in) {
+      print("ERROR: no ground-state node in", run_dir, "(run madqc there first)");
+      finalize();
+      return 2;
+    }
+    const auto ground =
+        madness::iteration::read_description(nlohmann::json::parse(in));
+    settings = response_seed::seed_settings({{"excited_model", "tda"},
+                                             {"layout", "closed_shell_tda"},
+                                             {"ground_settings", ground.settings}});
+  }
+  const std::string seed_name =
+      response_shared::excited_folder("tda").filename().string();
 
   // All MADNESS Function/State objects live in this inner scope so their
   // destructors (which touch WorldContainer mutexes) run BEFORE finalize();
@@ -133,27 +152,23 @@ int main(int argc, char **argv) {
     s.omega = Tensor<double>(1L);
     s.omega(0L) = omega;
     s.iter = 0;
-    // A never-iterated seed has no residuals; save_es_roots writes NaN (-> JSON
-    // null) for empty residual vectors, and load_es_roots' value(key, default)
-    // THROWS json type_error.302 on a present-but-null number (the default is
-    // only used for a MISSING key, not a null one). Stamp a finite,
-    // clearly-unconverged sentinel so the bundle round-trips and the ES node
-    // Resumes + iterates from this guess.
-    s.last_bsh_residual     = std::vector<double>(1, 1.0);
-    s.last_density_residual = std::vector<double>(1, 1.0);
-    s.last_omega_residual   = std::vector<double>(1, 1.0);
-
-    save_es_roots<TDA, ClosedShell>(world, s, bundle, /*converged=*/false);
+    nlohmann::json files = nlohmann::json::array();
+    for (const auto &f : xfiles) files.push_back(f);
+    response_seed::save_excited_seed(
+        world, run_dir, seed_name, {thresh, k}, settings,
+        {{"kind", "pymra_hdf5"},
+         {"directory", seed_dir.empty() ? std::string(".") : seed_dir}},
+        {{"writer", "seed_es_from_hdf5"}, {"files", files}, {"scale", scale}}, s);
 
     if (world.rank() == 0) {
       print("seed_es_from_hdf5: wrote",
             static_cast<int>(s.roots[0].x_alpha.size()), "orbital functions");
       print("  omega(au) =", omega, "  protocol_key =", key, "  k =", k,
             "  thresh =", thresh, "  scale =", scale);
-      print("  bundle    =", bundle);
-      print("  Run (NP=1): test_calc_manager_run --archive=<gs> --calc-dir=",
-            calc_dir, " --es-roots=1 --protocol=", thresh,
-            " -> ES node Resumes from seed.");
+      print("  seed      =", (std::filesystem::path(run_dir) /
+                               response_seed::seed_folder(seed_name)).string());
+      print("  madqc --wf=response with excited.num_states 1 and excited.tda true,");
+      print("  run NP=1 in this run folder, starts the set from it.");
     }
   }  // s / root / loaded functions destruct here, before finalize()
 

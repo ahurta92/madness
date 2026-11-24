@@ -83,7 +83,7 @@ void put_es(json &m, double thresh, bool converged, bool diverged = false) {
                               {"diverged", diverged}};
 }
 
-// ES bundle entry with the identity + progress fields save_es_roots writes
+// ES bundle entry with the identity + progress fields an excited-state save records
 // (type "tda"/"full", shell, n_roots, iter, stalled). put_es above writes the
 // legacy shape (no identity fields).
 void put_es_bundle(json &m, double thresh, bool converged, const std::string &type,
@@ -375,7 +375,7 @@ int main() {
   }
 
   // ====== ES restart source: never a diverged bundle ==========================
-  // review/findings C4: try_load_es_bundle preferred the exact-key bundle even
+  // review/findings C4: the ES loader preferred the exact-key bundle even
   // when it had diverged, so a Restart re-seeded from the blown-up state. The
   // selection is now a pure helper shared with the loader (mirrors the FD one).
   std::printf("=== best_usable_es_source_key ===\n");

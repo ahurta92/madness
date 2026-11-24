@@ -39,7 +39,7 @@
 // report ledger (reports/2026-09-04_report_pq_vbc_reconciliation).
 //
 //   test_vbc_pq_terms --archive=<moldft restartdata> [--thresh=X] [--k=N]
-//       [--calc-dir=<dir> --freq=<omega_f/2> [--baxis=N --caxis=N]]
+//   (--calc-dir / --es-root, which read stored states, return with node folders in part 5d)
 // ===========================================================================
 
 #include "../GroundState.hpp"
@@ -52,8 +52,6 @@
 #include "../kernels/tpa_source_spec.hpp"
 #include "../kernels/vbc.hpp"
 #include "../solvers/build_response_ground_state.hpp"
-#include "../solvers/es_save_load.hpp"
-#include "../solvers/fd_save_load.hpp"
 #include "../solvers/response_state.hpp"
 
 #include <madness/misc/info.h>
@@ -219,51 +217,13 @@ int main(int argc, char **argv) {
       vecfuncT xf = comb(1.0, d1, -0.37, d2, -0.19);
       vecfuncT yf = comb(1.0, d2,  0.71, d0,  0.43);
 
-      std::string src = "stand-in (dipole combinations + phi admixture)";
-      // --es-root=N (+ --calc-dir): use the CONVERGED eigenvector of root N as
-      // (x^f,y^f), and default --freq to omega_N/2 (the physical leg freq).
-      double freq_from_root = -1.0;
-      if (parser.key_exists("calc-dir") && parser.key_exists("es-root")) {
-        const std::string cdir = parser.value_raw("calc-dir");
-        const int nroot = std::stoi(parser.value("es-root"));
-        auto es = try_load_es_bundle<Full, ClosedShell>(world, cdir);
-        if (es && nroot < static_cast<int>(es->state.roots.size())) {
-          xf = madness::copy(world, es->state.roots[nroot].x_alpha);
-          yf = madness::copy(world, es->state.roots[nroot].y_alpha);
-          freq_from_root = 0.5 * es->state.omega(nroot);
-          if (world.rank() == 0)
-            print("[TERMS] eigenvector: CONVERGED root", nroot,
-                  " omega=", es->state.omega(nroot),
-                  " -> leg freq", freq_from_root,
-                  " (", es->source_protocol_key, ")");
-        } else if (world.rank() == 0) {
-          print("  !! --es-root requested but no usable ES bundle — stand-in f");
-        }
-      }
-      if (parser.key_exists("calc-dir") &&
-          (parser.key_exists("freq") || freq_from_root > 0.0)) {
-        const std::string cdir = parser.value_raw("calc-dir");
-        const double freq = parser.key_exists("freq")
-                                ? std::stod(parser.value("freq"))
-                                : freq_from_root;
-        const int ba = parser.key_exists("baxis") ? std::stoi(parser.value("baxis")) : 2;
-        const int ca = parser.key_exists("caxis") ? std::stoi(parser.value("caxis")) : 2;
-        auto rb = try_load_fd_state<Full, ClosedShell>(
-            world, cdir, Perturbation::dipole(ba), freq);
-        auto rcc = try_load_fd_state<Full, ClosedShell>(
-            world, cdir, Perturbation::dipole(ca), freq);
-        if (rb && rcc) {
-          xb = madness::copy(world, rb->state.responses[0].x_alpha);
-          yb = madness::copy(world, rb->state.responses[0].y_alpha);
-          xc = madness::copy(world, rcc->state.responses[0].x_alpha);
-          yc = madness::copy(world, rcc->state.responses[0].y_alpha);
-          char fbuf[64];
-          std::snprintf(fbuf, sizeof fbuf, "%.5f", freq);
-          src = std::string("STORED FD responses @ omega=") + fbuf;
-        } else if (world.rank() == 0) {
-          print("  !! no stored FD record at (pert,freq) — using stand-ins");
-        }
-      }
+      // Stored responses (--calc-dir, --es-root): the older response layout
+      // these options read is gone; reading node folders arrives in step 4c
+      // part 5d. Until then only the stand-ins run.
+      const std::string src = "stand-in (dipole combinations + phi admixture)";
+      if (parser.key_exists("calc-dir") || parser.key_exists("es-root"))
+        throw std::runtime_error("--calc-dir read the older response layout, which is gone; "
+                                 "reading response node folders arrives in step 4c part 5d");
       if (world.rank() == 0) {
         print("\n[TERMS] source vectors:", src);
         print("[TERMS] archive:", archive_path, " thresh:", t,

@@ -172,9 +172,10 @@ given.
   `XDIPLEN` record to 1e-9 au starts from that vector. Derived legs (the two-photon
   legs at ω_f/2) never match; `seed.freq_tol > 0` takes the closest record within
   the tolerance as the initial guess (`seed_kind = dalton_nearest` in the metadata).
-- **Excited states.** `EXCITLAB` records (sorted by energy) become the initial
-  `es__<key>` bundle at the active protocol, gauge-rotated onto the MRA orbitals,
-  Q-projected, marked unconverged (iteration 0); an existing bundle wins. The Full
+- **Excited states.** `EXCITLAB` records (sorted by energy) become the seed
+  `<run>/seeds/response/excited-<model>/` at the active protocol, gauge-rotated
+  onto the MRA orbitals and Q-projected; a set with a save of its own wins, and a
+  seed is only a starting guess (never a saved state, never changed by a solve). The Full
   solver does not start from that bundle directly: an iteration-0 bundle is routed
   seed → KAIN-free TDA warm-up (`excited.tda_warmup_iters` steps from the seed's X
   block) → promotion to Full with y = 0, the same path the cold guess takes. A

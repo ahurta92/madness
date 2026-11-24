@@ -35,33 +35,12 @@
 #include "../solvers/build_response_ground_state.hpp"
 #include "../solvers/convergence_policy.hpp"
 #include "../solvers/fd_problem.hpp"
-#include "../solvers/fd_save_load.hpp"
 #include "../solvers/dalton_import.hpp"   // dalton_fd_guess (seed.freq_tol)
 #include "../kernels/beta.hpp"
 #include "../kernels/tpa_source_spec.hpp"
 #include "../solvers/es_analysis.hpp"
-#include "../solvers/es_save_load.hpp"
 #include "../solvers/es_seed_guard.hpp"
-
-namespace molresponse_v3 {
-/// Where the seed guard should reload the seed from. A DALTON seed written at
-/// the ACTIVE key (es__<key>) is overwritten by the solve itself every
-/// iteration, so seed_es_from_dalton also writes a preserved twin es__<key>.dseed;
-/// prefer it when present (rank-0 existence check, broadcast — every rank must
-/// build the same reference). Collective.
-inline EsSeedReference make_es_seed_reference(madness::World &world,
-                                              const std::string &calc_dir,
-                                              const std::string &bundle_dir,
-                                              const std::string &source_key) {
-  const std::string live = calc_dir + "/" + bundle_dir;
-  int have_twin = 0;
-  if (world.rank() == 0)
-    have_twin = std::filesystem::exists(live + ".dseed/roots.json") ? 1 : 0;
-  world.gop.broadcast(have_twin, 0);
-  if (have_twin) return EsSeedReference{live + ".dseed", bundle_dir + ".dseed", source_key};
-  return EsSeedReference{live, bundle_dir, source_key};
-}
-}  // namespace molresponse_v3
+#include "../solvers/response_seed.hpp"
 #include "../solvers/es_solver.hpp"
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
@@ -471,22 +450,30 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_timing))
       it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
   }
-  if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
+  // With no saved state to start from, a seed of this node (seeds/), else the
+  // nearest Dalton record computed now (seed.freq_tol), else the zero guess.
+  std::optional<response_seed::Seed> seed;
+  if(!binding.has_saved())
+    seed=response_seed::find_seed(world,ctx.shared_response->root(),binding.name(),
+        response_seed::seed_settings(binding.scientific_settings()),ctx.verbosity);
+  if(!binding.has_saved() && (seed || !ctx.dalton_dir.empty())) {
     auto& timing=ctx.shared_response->timing();timing.begin("imported_guess");
     bool imported=false;
-    if(auto loaded=try_load_fd_state<Type,Shell>(world,ctx.calc_dir,pert,freq)) {
-      s0=std::move(loaded->state);s0.iter=0;imported=true;
+    if(seed) {
+      s0.responses.front()=response_seed::load_driven_seed<typename Solver::Storage>(world,*seed);
+      s0.iter=0;imported=true;
+      binding.note_guess(seed->guess());
+      if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::start_source))
+        it::write_seed_start(std::cout,binding.name(),seed->shown());
     }
     if constexpr(std::is_same_v<Type,Full> && std::is_same_v<Shell,ClosedShell>) {
-      if(!imported && ctx.seed_freq_tol>0.0 && pert.kind==Perturbation::Kind::Dipole)
+      if(!imported && !ctx.dalton_dir.empty() && ctx.seed_freq_tol>0.0 && pert.kind==Perturbation::Kind::Dipole)
         if(auto guess=dalton_fd_guess(world,gs,ctx.dalton_dir,ctx.calc_dir,pert.axis,freq,ctx.seed_freq_tol)) {
           s0.responses.front()=std::move(*guess);imported=true;
+          binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
         }
     }
-    if(imported) {
-      binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
-      if(world.rank()==0) print("response: imported driven guess; fresh convergence checks");
-    }
+    if(imported && world.rank()==0) print("response: imported driven guess; fresh convergence checks");
     timing.end();
   }
   std::size_t evaluations=0;
@@ -580,16 +567,30 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
           it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::excited_metric_labels());
     }
   }
-  std::optional<EsSeedReference> imported_seed;
-  if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
-    timing.begin("imported_guess");
-    if(auto loaded=try_load_es_bundle<Type,ClosedShell>(world,ctx.calc_dir,n_roots)) {
-      imported_seed=make_es_seed_reference(world,ctx.calc_dir,loaded->bundle_dir,loaded->source_protocol_key);
-      state=std::move(loaded->state);state.iter=0;
-      binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
-      if(world.rank()==0) print("response: imported excited bundle; fresh convergence checks");
+  // With no saved set, the seed of this set (seeds/) when it holds as many roots.
+  std::optional<response_seed::Seed> imported_seed;
+  if(!binding.has_saved()) {
+    const auto name=std::filesystem::path(binding.folder()).filename().string();
+    auto seed=response_seed::find_seed(world,session.root(),name,
+        response_seed::seed_settings(binding.scientific_settings()),ctx.verbosity);
+    if(seed && seed->description.details.at("n_roots").template get<int>()!=n_roots) {
+      if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::seed_refused))
+        print("Seed ignored:",seed->shown(),"holds",seed->description.details.at("n_roots").template get<int>(),
+              "roots; this set has",n_roots);
+      seed.reset();
     }
-    timing.end();
+    if(seed || !ctx.dalton_dir.empty()) {
+      timing.begin("imported_guess");
+      if(seed) {
+        state=response_seed::load_excited_seed<Type,ClosedShell>(world,*seed);
+        binding.note_guess(seed->guess());
+        if(world.rank()==0) print("response: imported excited bundle; fresh convergence checks");
+        if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::start_source))
+          it::write_seed_start(std::cout,name,seed->shown());
+        imported_seed=std::move(seed);
+      }
+      timing.end();
+    }
   }
   if(state.roots.size()<static_cast<std::size_t>(n_roots)) {
     timing.begin("guess");
@@ -655,7 +656,9 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
   }
   if(imported_seed) {
     it::ElapsedTimer<> guard_timer;
-    const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,state,binding.complete(),*imported_seed);
+    const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,state,binding.complete(),
+        [&] {return response_seed::load_excited_seed<Type,ClosedShell>(world,*imported_seed);},
+        imported_seed->shown(),protocol_key(imported_seed->description.protocol.thresh,imported_seed->description.protocol.k));
     const auto seconds=guard_timer.seconds();
     print_es_seed_guard(world,guard);
     record_es_seed_guard(world,ctx.calc_dir,protocol_key(),guard,seconds);

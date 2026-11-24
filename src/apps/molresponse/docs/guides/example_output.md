@@ -181,7 +181,6 @@ Three conventions worth knowing:
 ```
 <calc-dir>/
   response_metadata.json          the record above
-  es__<protocol>/                 excited-state bundles (one archive per root)
   <pert>__<protocol>__<freq>      converged response states (restartable)
   es_analysis__<protocol>.json    transition properties
 <prefix>.out                      the human summary
