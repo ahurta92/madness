@@ -77,14 +77,6 @@ inline std::vector<std::string> two_photon_removals(const std::string& bundle,co
 inline json ground_identity(const json& settings) {
   return {{"ground_settings",settings.value("ground_settings",json())},{"ground_saved",settings.value("ground_saved",json())}};
 }
-// A driven node folder whose save is complete: its description and archive
-// are present and no save is under way or was left unfinished.
-inline bool completely_saved(const std::filesystem::path& folder) {
-  if(!std::filesystem::is_directory(it::Node(folder).archive())) return false;
-  for(const auto* name:{"archive.new","archive.old","archive.staging","description.json.new","description.json.tmp"})
-    if(std::filesystem::exists(folder/name)) return false;
-  return std::filesystem::is_regular_file(folder/"description.json");
-}
 // Every completely saved driven node under <root>/states/response, by name.
 // Run on the root process only; unreadable nodes are skipped.
 inline std::vector<std::pair<std::string,it::NodeDescription>> saved_driven_nodes(const std::filesystem::path& root) {
@@ -190,6 +182,43 @@ public:
     const it::ExpectedTask expected{task,context,{subjects.begin(),subjects.end()}};
     try {
       return it::saved_completion(settings,expected,it::stored_metrics(d,{task,d.protocol,0,context}),true).has_value();
+    } catch(const std::exception&) {return false;}
+  }
+  // Whether the saved node `name` (description `d`, read now) meets the
+  // current request, as the restart would judge it. `nodes` are all the saved
+  // nodes, by folder name. A state or set of this request is judged by its
+  // binding (meets_request). A driven node this request has not bound (a
+  // two-photon state whose root is not expanded yet) is judged against its own
+  // settings at the final level, with the current ground state. A VBC source
+  // meets it when it was built at the final level from the current saves of
+  // its two inputs, and both meet it. Nothing else does. Root process only.
+  [[nodiscard]] bool node_meets_request(const std::string& name,const it::NodeDescription& d,
+                                        const std::map<std::string,it::NodeDescription>& nodes,int depth=0) const {
+    if(d.kind=="driven") {
+      for(const auto& [id,state]:states) if(state->name()==name) return state->meets_request(d);
+      const json ground{{"ground_settings",ground_.identity.at("settings")},
+                        {"ground_saved",{{"protocol",ground_.identity.at("protocol")},{"saved_at",ground_.identity.at("saved_at")}}}};
+      return d.settings.is_object() && ground_identity(d.settings)==ground && meets_request(d);
+    }
+    if(d.kind=="excited_set") {
+      for(const auto& [id,set]:excited)
+        if(std::filesystem::path(set->folder()).filename().string()==name) return set->meets_request(d);
+      return false;
+    }
+    if(d.kind!="second_order" || depth>0 || d.settings!=vbc_source_settings(final_) || d.protocol!=final_ ||
+       !d.lineage.is_array() || d.lineage.empty())
+      return false;
+    try {
+      for(const auto& input:d.lineage) {
+        const auto found=nodes.find(input.at("name").get<std::string>());
+        if(found==nodes.end()) return false;
+        const auto& saved=found->second;
+        if(input.at("protocol")!=cp::records::protocol_record(saved.protocol) ||
+           input.at("identity").at("saved_at")!=saved.saved_at ||
+           !node_meets_request(found->first,saved,nodes,depth+1))
+          return false;
+      }
+      return true;
     } catch(const std::exception&) {return false;}
   }
   // An ordinary driven state with no saved state of its own starts from the

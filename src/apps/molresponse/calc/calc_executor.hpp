@@ -14,8 +14,9 @@
 //
 //   CalcManager
 //       build(n_atoms) -> dag from the plan; run(world, exec) -> the
-//       one-wave-per-pass reschedule loop. Each pass reloads the aggregate
-//       metadata and re-schedules from the session's plan for every state.
+//       one-wave-per-pass reschedule loop. Each pass reads what is saved from
+//       the node folders (node_snapshot.hpp) and re-schedules from the
+//       session's plan for every state.
 //
 // The assemble_* functions contract the qualified states of the session into
 // the requested properties.
@@ -24,6 +25,7 @@
 #include "../solvers/shared_response_session.hpp"
 #include "../solvers/response_property_metadata.hpp"
 #include "calc_manager.hpp"
+#include "node_snapshot.hpp"
 
 #include "../GroundState.hpp"
 #include "../Perturbations.hpp"
@@ -47,6 +49,7 @@
 #include "../solvers/node_subworlds.hpp"
 #include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
+#include "../solvers/saved_states.hpp"
 
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
@@ -77,7 +80,7 @@ struct ExecutorSettings {
   PrintLevel        print_level = PrintLevel::Normal;
   // Guards the shared print functions (IterationOutput.h); from the same print_level.
   madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::detail;
-  std::string       calc_dir;      // holds response_metadata.json + archives
+  std::string       calc_dir;      // holds response_metadata.json (output only)
   // DALTON nearest-frequency seed for FD legs absent from the RSPVEC (the
   // derived two-photon legs at omega_f/2). Set from the deck (`dalton.dir`,
   // `seed.freq_tol`) or --dalton-dir/--seed-freq-tol. 0 = off (2026-09-09).
@@ -178,17 +181,17 @@ struct ExecutorContext : ExecutorSettings {
 // ---------------------------------------------------------------------------
 namespace detail_exec {
 
-/// Collective: rank 0 reads response_metadata.json (ResponseMetadata is
-/// rank-0 only) and broadcasts it, so every rank schedules from the same
+/// Collective: rank 0 builds the scheduler's snapshot with `read` (run on
+/// rank 0 only) and broadcasts it, so every rank schedules from the same
 /// bytes rather than from whatever its own filesystem view shows after the
-/// fence. A rank-0 read failure is broadcast too, so all ranks throw together
+/// fence. A rank-0 failure is broadcast too, so all ranks throw together
 /// instead of the others waiting in the broadcast.
-inline nlohmann::json load_metadata_rank0(madness::World &world,
-                                          const std::string &path) {
+inline nlohmann::json snapshot_rank0(madness::World &world,
+                                     const std::function<nlohmann::json()> &read) {
   std::string text, err;
   if (world.rank() == 0) {
     try {
-      text = ResponseMetadata::load_or_create(path).json().dump();
+      text = read().dump();
     } catch (const std::exception &e) {
       err = e.what();
       if (err.empty()) err = "unknown error";
@@ -266,6 +269,21 @@ inline void strip_volatile_metrics(nlohmann::json &j) {
 
 
 inline bool is_static_freq(double freq) { return std::abs(freq) < 1e-12; }
+
+/// Rank 0 only. The scheduler's snapshot of the session's run folder: every
+/// completely saved node under states/response/, read without changing it,
+/// each judged against the current request (Session::node_meets_request).
+inline nlohmann::json session_snapshot(const response_shared::Session &session) {
+  const auto saved = saved_states::completed_response_nodes(session.root());
+  std::map<std::string, madness::iteration::NodeDescription> by_name;
+  for (const auto &node : saved)
+    by_name.emplace(node.folder.filename().string(), node.description);
+  std::vector<SnapshotNode> nodes;
+  nodes.reserve(saved.size());
+  for (const auto &[name, d] : by_name)
+    nodes.push_back({name, d, session.node_meets_request(name, d, by_name)});
+  return node_snapshot(nodes);
+}
 
 /// The saved state another node holds, as the starting guess of a shared
 /// driven state with no node of its own. A static state (X only) becomes
@@ -795,9 +813,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   if(!B_state.complete() || !C_state.complete()) {
     session.timing().end();return {false,"",{}};
   }
-  const nlohmann::json definition{{"kind","VBC"},{"binding_version",1},
-      {"protocol",madness::checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})},
-      {"source","pq"}};
+  const auto definition=response_shared::vbc_source_settings({thresh,default_k_for_thresh(thresh)});
   auto* shared=&session.bind_second_order(node.id,vbc_node_name(node.pert,node.pert_c,node.freq,node.freq_c),definition,
       nlohmann::json::array({response_shared::lineage_entry("B",B_state),response_shared::lineage_entry("C",C_state)}));
   if(shared->reusable()) {
@@ -933,6 +949,9 @@ private:
 /// complete type when used as a `= {}` default argument inside CalcManager.
 enum class SeedStrategy { NearestConverged };
 struct CalcManagerPolicy {
+  // Rank 0 only: the snapshot of what is saved (node_snapshot.hpp), read at
+  // the start of every pass. Required.
+  std::function<nlohmann::json()> saved_states;
   std::function<StatePlan(const CalcNode&)> plan_derived;
   std::function<void()> collect_subworlds;
   std::function<bool(const CalcNode&)> dependencies_ready;
@@ -959,9 +978,9 @@ struct CalcManagerPolicy {
 // Consequence — DETERMINISM. Every rank runs schedule() independently, then all
 // ranks collectively solve waves.front()[i] together. If two ranks computed
 // different waves they would issue mismatched collective calls and DEADLOCK.
-// So the schedule must come out byte-identical on every rank: same
-// response_metadata.json in (all ranks read the same file after a fence),
-// deterministic logic out (sorted ramp + std::map perturbation order + pure
+// So the schedule must come out byte-identical on every rank: same snapshot
+// in (rank 0 builds it from the node folders after a fence and broadcasts
+// it), deterministic logic out (sorted ramp + std::map perturbation order + pure
 // reconcile). The std::map (not unordered_map) is a correctness requirement,
 // not a style choice.
 //
@@ -985,16 +1004,16 @@ public:
   const std::string &calc_dir() const { return calc_dir_; }
 
   /// Drive every node to its target protocol against `exec`. One wave per
-  /// pass: each pass reloads the aggregate metadata, re-schedules (so actions
-  /// reflect current disk), runs the first non-empty wave, fences, then
-  /// expands any newly-converged ES bundle into concrete DerivedFD nodes.
+  /// pass: each pass reads the snapshot of the node folders, expands any
+  /// converged ES bundle into concrete DerivedFD nodes, re-schedules (so
+  /// actions reflect current disk) and runs the first non-empty wave.
   /// Terminates when the schedule is empty (all Skip). A wave that repeats
   /// with no progress is QUARANTINED (its nodes leave the schedule; trace
   /// records a stall_event) and the loop continues with independent work —
   /// stop_reason is 'complete_with_stalled' + diag.stalled_nodes when
   /// anything was quarantined, so a stuck node neither spins the loop nor
   /// starves unrelated perturbation channels (review fix). On exit the plan
-  /// is audited against the metadata: planned VBC nodes that never converged
+  /// is audited against the snapshot: planned VBC nodes that never converged
   /// at their top rung (gated out by unconverged prerequisites, or stalled)
   /// are reported via stop_reason 'complete_with_dropped_beta' (or
   /// '..._stalled_and_dropped_beta') + diag.dropped_beta, and recorded under
@@ -1016,7 +1035,11 @@ public:
   nlohmann::json run(madness::World &world, ICalcExecutor &exec,
                      SubworldSolve fan_out = {}) {
     const std::vector<double> ramp = global_ramp();
+    // Output only: the end-of-run audit is recorded in it. Nothing is read
+    // from it to decide.
     const std::string meta_path = calc_dir_ + "/response_metadata.json";
+    if (!policy_.saved_states)
+      throw std::logic_error("the response scheduler needs the snapshot of the saved states");
 
     nlohmann::json diag;                       // R1c scheduler trace
     diag["schedule"] = nlohmann::json::array();
@@ -1028,9 +1051,10 @@ public:
     std::set<std::string> stalled_ids;   // quarantined no-progress nodes
     for (;;) {
       world.gop.fence();
-      const nlohmann::json meta_json = detail_exec::load_metadata_rank0(world, meta_path);
+      // What is saved, from the node folders, judged against this request.
+      const nlohmann::json meta_json = detail_exec::snapshot_rank0(world, policy_.saved_states);
       // Grow the DAG from any ES bundle converged ON DISK (idempotent and
-      // restart-safe: reads roots from metadata, not in-memory run state).
+      // restart-safe: reads roots from the snapshot, not in-memory run state).
       expand_converged_es(world, meta_json);
       auto waves = schedule(dag_, ramp, meta_json, policy_.state_plans, solved_);
       // Native shared completion is judged against this invocation's request.
@@ -1061,8 +1085,8 @@ public:
         // stubborn FD prerequisite up the whole ladder unconverged; the
         // dependent VBC node is then gated out of every wave (gated nodes are
         // invisible to schedule()), and the beta/raman it feeds is dropped
-        // without a trace. Audit the plan against the on-disk metadata: any
-        // VBC node without a converged entry at its top rung never delivered.
+        // without a trace. Audit the plan against the snapshot: any VBC node
+        // without a converged entry at its top rung never delivered.
         // (audit_dropped_work, calc_manager.hpp: undelivered VBC sources and
         // two-photon legs whose ES bundle never converged.)
         const nlohmann::json dropped = audit_dropped_work(dag_, meta_json, stalled_ids);
@@ -1413,11 +1437,11 @@ private:
 
   /// Turn each symbolic DerivedFD "*" whose ES bundle has CONVERGED ON DISK into
   /// one promoted FD node per root (freq = root energy at the ES bundle's top
-  /// protocol). Reads roots straight from response_metadata.json so it is
-  /// restart-safe (works on a resumed run where the ES converged in a previous
-  /// process) and idempotent (new nodes are deduped against existing dag_ ids;
-  /// re-running is a no-op). Deterministic across ranks: same metadata + same
-  /// dag_ in, same nodes appended in the same order.
+  /// protocol). Reads roots from the snapshot of the excited set's node
+  /// folder, so it is restart-safe (works on a resumed run where the ES
+  /// converged in a previous process) and idempotent (new nodes are deduped
+  /// against existing dag_ ids; re-running is a no-op). Deterministic across
+  /// ranks: same snapshot + same dag_ in, same nodes appended in the same order.
   void expand_converged_es(madness::World &world, const nlohmann::json &meta) {
     if (!meta.contains("excited_states")) return;
     std::map<std::string,std::pair<double,std::string>> have;
@@ -1474,7 +1498,7 @@ private:
     if (!additions.empty()) {
       if (world.rank() == 0)
         madness::print("[CALC] expanded", (int)additions.size(),
-                       "derived FD node(s) at ω = es_freq_factor·ωₙ from converged ES roots (metadata)");
+                       "derived FD node(s) at ω = es_freq_factor·ωₙ from converged ES roots");
       for (auto &c : additions) dag_.push_back(std::move(c));
     }
   }

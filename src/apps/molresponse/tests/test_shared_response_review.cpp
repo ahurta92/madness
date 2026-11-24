@@ -16,15 +16,14 @@ void frequency_collision(World& world,const std::string& directory,bool explicit
   plan.derived_fd.push_back({Perturbation::dipole(2),"*",{1e-4},0.5});
   if(explicit_leg) plan.fd.push_back({Perturbation::dipole(2),0.1,{1e-4}});
   const double second=identical ? 0.2 : 0.20000002;
-  cp::detail::on_root(world,[&] {
-    json roots=json::array({{{"root_id","es_root_0000"},{"omega",explicit_leg ? second : 0.2}}});
-    if(!explicit_leg) roots.push_back({{"root_id","es_root_0001"},{"omega",second}});
-    json metadata{{"schema_version",1},{"protocols",{{key,{{"thresh",1e-4},{"k",6},{"index",0}}}}},
-      {"excited_states",{{key,{{"type","tda"},{"n_roots",explicit_leg ? 1 : 2},{"converged",true},{"roots",roots}}}}}};
-    std::filesystem::create_directories(directory);
-    std::ofstream(directory+"/response_metadata.json") << metadata.dump(); return std::string{};
-  });
+  // The scheduler's snapshot of the saved states, written by hand.
+  json roots=json::array({{{"root_id","es_root_0000"},{"omega",explicit_leg ? second : 0.2}}});
+  if(!explicit_leg) roots.push_back({{"root_id","es_root_0001"},{"omega",second}});
+  json snapshot{{"protocols",{{key,{{"thresh",1e-4},{"k",6}}}}},{"fd_states",json::object()},{"vbc_states",json::object()},
+    {"excited_states",{{key,{{"type","tda"},{"shell","closed_shell"},{"n_roots",explicit_leg ? 1 : 2},{"converged",true},{"roots",roots}}}}}};
+  cp::detail::on_root(world,[&] {std::filesystem::create_directories(directory);return std::string{};});
   CalcManager::Policy policy;
+  policy.saved_states=[&snapshot]{return snapshot;}; // read every pass; snapshot outlives the run
   policy.dependencies_ready=[](const CalcNode&){return false;};
   // The session plans every state; scheduling refuses a state without a plan.
   policy.state_plans[es_node_id(true,explicit_leg ? 1 : 2)]={StatePlan::Kind::load,1e-4,key,true};

@@ -10,8 +10,9 @@
 // perturbation-parallel schedule of (node, protocol) WorkItems.
 //
 // Nothing here touches madness::World, MPI, MRA functions, or the archive.
-// Every function takes the aggregate metadata as a const nlohmann::json& so a
-// test can pass a literal blob. The single World-bound seam is the abstract
+// Every function takes the snapshot of what is saved (node_snapshot.hpp,
+// built from the node folders each pass; the parameter is still named `meta`)
+// as a const nlohmann::json& so a test can pass a literal blob. The single World-bound seam is the abstract
 // ICalcExecutor (declared at the bottom): the real FD/ES executor and
 // CalcManager::run() live in calc/calc_executor.hpp (next increment) and are
 // validated on the allocation.
@@ -614,7 +615,7 @@ inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturba
 
 /// An empty schedule does NOT mean every planned node executed: honest-climb can
 /// walk a stubborn prerequisite up the whole ladder unconverged, and nodes gated
-/// on it are then invisible to schedule(). Audit the plan against the metadata.
+/// on it are then invisible to schedule(). Audit the plan against the snapshot.
 /// Returns [{id, top_protocol_key, reason}]. The run records this under
 /// run_summary/dropped_work and names it in stop_reason.
 inline nlohmann::json audit_dropped_work(const std::vector<CalcNode> &dag,
@@ -669,8 +670,8 @@ struct NodeResult {
   bool                converged = false;
   std::string         reached_protocol_key;
   std::vector<double> es_root_freqs;   // vestigial: DerivedFD expansion is now
-                                       // metadata-driven (expand_converged_es
-                                       // reads roots from response_metadata.json).
+                                       // snapshot-driven (expand_converged_es
+                                       // reads roots from the excited set's node).
                                        // run()'s loop discards NodeResult, so this
                                        // is no longer populated or read.
 };

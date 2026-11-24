@@ -155,6 +155,18 @@ public:
   [[nodiscard]] bool has_saved() const {return saved_.has_value();}
   [[nodiscard]] bool reusable() const {return reusable_;}
   [[nodiscard]] bool complete() const {return complete_;}
+  // Whether `d`, a save of this set read now, meets the current request: the
+  // judgement activate makes for reuse, from the stored metrics against the
+  // current targets. Only a save at the final level, with this set's settings
+  // and every requested root, can; nothing in `d` says whether it did.
+  [[nodiscard]] bool meets_request(const it::NodeDescription& d) const {
+    const auto final=protocols_.back();
+    if(d.kind!="excited_set" || d.settings!=settings_ || d.protocol!=final) return false;
+    try {
+      const auto resolved=it::resolve(request_,definition_.model(final),final,true,definition_.application);
+      return it::saved_completion(resolved,expected(),stored(d),true).has_value();
+    } catch(const std::exception&) {return false;}
+  }
   [[nodiscard]] const TaskDefinition& definition() const {return definition_;}
   // The node folder relative to the run folder, for metadata and results.
   [[nodiscard]] std::string folder() const {return excited_folder(settings_.at("excited_model")).generic_string();}

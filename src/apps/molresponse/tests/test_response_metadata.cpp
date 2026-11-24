@@ -75,7 +75,7 @@ int main() {
         {"converged",    true},
         {"iter",         8},
         {"bsh_residual", 1.2e-7},
-        {"archive",      "dipole_x__1e-06_k8__f0.05700"}};
+        {"node",         "states/response/dipole_x-f0.05700"}};
     m.set_fd_state("dipole_x", "1e-06_k8",
                    ResponseMetadata::freq_key(0.057), fd_entry);
 
@@ -83,7 +83,7 @@ int main() {
         {"type",             "tda"},
         {"shell",            "closed_shell"},
         {"n_roots",          2},
-        {"bundle_dir",       "es_bundle__1e-06_k8"},
+        {"node",             "states/response/excited-tda"},
         {"converged",        true},
         {"slot_permutation", nlohmann::json::array({0, 1})},
         {"roots", nlohmann::json::array({
@@ -116,11 +116,11 @@ int main() {
     const auto &fd = j["fd_states"]["dipole_x"]["1e-06_k8"]["f0.05700"];
     EXPECT(fd["freq"]      == 0.057,                               "fd freq");
     EXPECT(fd["converged"] == true,                                "fd converged");
-    EXPECT(fd["archive"]   == "dipole_x__1e-06_k8__f0.05700",      "fd archive");
+    EXPECT(fd["node"]      == "states/response/dipole_x-f0.05700", "fd node");
 
     const auto &es = j["excited_states"]["1e-06_k8"];
     EXPECT(es["n_roots"]                       == 2,               "es n_roots");
-    EXPECT(es["bundle_dir"]                    == "es_bundle__1e-06_k8", "es bundle_dir");
+    EXPECT(es["node"]                          == "states/response/excited-tda", "es node");
     EXPECT(es["slot_permutation"]              == nlohmann::json::array({0, 1}), "es slot_permutation");
     EXPECT(es["roots"][1]["root_id"]           == "es_root_0001", "es root[1] id");
     EXPECT(es["roots"][1]["display_name"]      == "S2",           "es root[1] display");

@@ -19,7 +19,7 @@ Workflow seam that, given a prepared ground state and a response session, builds
 
 ## Side Effects
 
-- Merges stale per-state metadata shards before restart reconciliation; shard-sweep failures become collective failures [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
+- Merges stale per-state metadata shards into the output file at launch (the scheduler reads node folders); shard-sweep failures become collective failures [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 - Changes response protocol defaults, runs solver/checkpoint writes, optionally loads separate ground states in FD subworlds, assembles alpha/beta/Raman/2PA as requested, and records effective native/HDF5 backend [response_workflow.hpp:run_response_with_ground](./response_workflow.hpp).
 
 ## Source files

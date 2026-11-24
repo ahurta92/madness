@@ -61,6 +61,26 @@ inline std::vector<SavedNode> response_nodes(madness::World& world, const fs::pa
   return nodes;
 }
 
+// The completely saved nodes under <run>/states/response/, in folder-name
+// order, each read without changing it. A folder with a save under way or
+// left unfinished, or with no readable description, is passed over, and a run
+// folder with no states/response/ has none. Not collective: for the root
+// process (the response scheduler's snapshot).
+inline std::vector<SavedNode> completed_response_nodes(const fs::path& run) {
+  const auto root = fs::absolute(run).lexically_normal() / "states" / "response";
+  std::vector<SavedNode> nodes;
+  if (!fs::is_directory(root)) return nodes;
+  std::vector<fs::path> folders;
+  for (const auto& entry : fs::directory_iterator(root))
+    if (entry.is_directory()) folders.push_back(entry.path());
+  std::sort(folders.begin(), folders.end());
+  for (const auto& folder : folders) {
+    if (!response_shared::completely_saved(folder)) continue;
+    if (auto d = response_shared::read_node_description(folder)) nodes.push_back({folder, std::move(*d)});
+  }
+  return nodes;
+}
+
 // The node or seed at `folder`, which must hold a saved state. Collective.
 inline SavedNode require_node(madness::World& world, const fs::path& folder) {
   auto node = read_saved_node(world, fs::absolute(folder));

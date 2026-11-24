@@ -273,8 +273,8 @@ Verify no solver evaluation/update, new convergence assessment, protocol advance
 checkpoint publication or changed completion claim. Requested plot files may be
 written; compare solver records, pointers and payloads before and after.
 
-**Planned implementation:** `src/apps/madqc/test_native_inspection.py`, registered
-with the relevant tool/fixture dependencies. Production consumers are
+**Planned implementation:** none at present; `test_native_inspection.py` was
+deleted when the inspection tools moved to node folders. Production consumers are
 [VizManifest.hpp](../../src/madness/chem/VizManifest.hpp) and the native-loading
 parts of [dump_mra_trees.cpp](../../src/apps/molresponse/tools/dump_mra_trees.cpp).
 Use the shared records and native loader, with no legacy metadata authority.
@@ -402,8 +402,7 @@ solver work or checkpoint publication.
 `shared_records.py`; extend
 [test_results_summary.cc](../../src/madness/chem/test_results_summary.cc) and
 [test_response_properties.cc](../../src/apps/madqc/test_response_properties.cc)
-for serialization/association. Integrate with the planned
-`src/apps/madqc/test_native_inspection.py` and existing
+for serialization/association. Integrate with the existing
 [test_workflow_builders.cpp](../../src/apps/madqc/test_workflow_builders.cpp).
 Use synthetic records first, then the owning engine fixtures. Preserve all
 scientific comparison tolerances and measure integration-test cost tiers.
@@ -1023,7 +1022,6 @@ Focused lifecycle tests have separate purposes:
 | `test_shared_response_seed.py` | Existing DALTON functions enter as guesses, receive new metrics, then reuse native records. | Loose BSH gate and zero updates intentionally isolate import/restart; not a DALTON accuracy check. |
 | `test_shared_derived_response.py --full-raman` | Full coordinate selection reaches Hessian/modes/spectrum output and exact native reuse. | Numeric array contract; loose integration gates, no independent full-Raman oracle. Partial-coordinate mode is a separate test. |
 | `test_shared_quadratic_response.py --ranks 2 --subworlds 2` | Independent Worlds publish/reuse states and exact VBC dependencies without collective or writer conflicts. | Includes participating-rank timing scope; numerical comparisons are separate. |
-| `test_native_inspection.py` | FD, ES and VBC inspection reads exact native sources and stored metrics without solving or changing run files. | Optional HDF5 analysis tools remain separate. |
 | `test_shared_es_iteration` | Actual native root functions agree with saved omega, density norms and positive kinetic sums; residual reduction/scales, update ownership and missing history are consistent. | TDA/full, batched/streamed, serial/two-rank fixtures; root-matching boundary cases in `test_es_comparison`. |
 
 All these tests preserve existing solver kernels. Truncated ES analysis explicitly

@@ -162,19 +162,33 @@ inline std::filesystem::path response_node_folder(const std::string& name,const 
   return std::filesystem::path("states")/"response"/name;
 }
 inline std::filesystem::path driven_folder(const std::string& name) {return response_node_folder(name,"driven-state");}
-// Another node's description, read without finishing or discarding anything
-// in its folder: a node this launch does not own is never changed. Nothing
-// when it has no readable description and archive. Collective.
+// A node's description, read without finishing or discarding anything in its
+// folder. Nothing when it has no readable description and archive. Not
+// collective: for code already on the root process.
+inline std::optional<it::NodeDescription> read_node_description(const std::filesystem::path& folder) {
+  try {
+    if(!std::filesystem::is_directory(it::Node(folder).archive())) return std::nullopt;
+    std::ifstream file(folder/"description.json");
+    return it::read_description(json::parse(file));
+  } catch(const std::exception&) {return std::nullopt;}
+}
+// Another node's description, read as read_node_description reads it: a node
+// this launch does not own is never changed. Collective.
 inline std::optional<it::NodeDescription> read_other_node(madness::World& world,const std::filesystem::path& folder) {
   const auto text=cp::detail::on_root(world,[&] {
-    try {
-      if(!std::filesystem::is_directory(it::Node(folder).archive())) return std::string{};
-      std::ifstream file(folder/"description.json");
-      return it::description_record(it::read_description(json::parse(file))).dump();
-    } catch(const std::exception&) {return std::string{};}
+    const auto d=read_node_description(folder);
+    return d ? it::description_record(*d).dump() : std::string{};
   });
   if(text.empty()) return std::nullopt;
   return it::read_description(json::parse(text));
+}
+// A node folder whose save is complete: its description and archive are
+// present and no save is under way or was left unfinished.
+inline bool completely_saved(const std::filesystem::path& folder) {
+  if(!std::filesystem::is_directory(it::Node(folder).archive())) return false;
+  for(const auto* name:{"archive.new","archive.old","archive.staging","description.json.new","description.json.tmp"})
+    if(std::filesystem::exists(folder/name)) return false;
+  return std::filesystem::is_regular_file(folder/"description.json");
 }
 
 // The functions of a saved driven state (archive/response in `directory`) at
@@ -337,6 +351,18 @@ public:
   }
   [[nodiscard]] bool reusable() const {return reusable_;}
   [[nodiscard]] bool complete() const {return complete_;}
+  // Whether `d`, a save of this node read now, meets the current request: the
+  // judgement activate makes for reuse, from the stored metrics against the
+  // current targets. Only a save at the final level, with this state's
+  // settings, can; nothing in `d` says whether it did.
+  [[nodiscard]] bool meets_request(const it::NodeDescription& d) const {
+    const auto final=protocols_.back();
+    if(d.kind!="driven" || d.settings!=settings_ || d.protocol!=final) return false;
+    try {
+      const auto resolved=it::resolve(request_,definition_.model(final),final,true,definition_.application);
+      return it::saved_completion(resolved,expected(),stored(d),true).has_value();
+    } catch(const std::exception&) {return false;}
+  }
   [[nodiscard]] const TaskDefinition& definition() const {return definition_;}
   [[nodiscard]] const std::string& name() const {return name_;}
   // The node folder relative to the run folder, for metadata and results.
@@ -429,6 +455,10 @@ public:
 // hyphens; a name holds only letters, digits, '.', '_' and '-'.
 inline std::filesystem::path second_order_folder(const std::string& name) {
   return response_node_folder(name,"second-order");
+}
+// The settings of a VBC quadratic source built at `protocol`.
+inline json vbc_source_settings(it::Protocol protocol) {
+  return {{"kind","VBC"},{"binding_version",1},{"protocol",cp::records::protocol_record(protocol)},{"source","pq"}};
 }
 // One lineage entry: which input state (its node name), at which level, and
 // its identity, the save time from the input's own node description.

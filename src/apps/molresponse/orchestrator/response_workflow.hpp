@@ -141,6 +141,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   mgr_policy.state_plans        = in.settings.state_plans;     // D-016
   {
     auto session=in.settings.shared_response;
+    mgr_policy.saved_states=[session]{return detail_exec::session_snapshot(*session);};
     mgr_policy.collect_subworlds=[session]{session->collect_subworlds();};
     mgr_policy.dependencies_ready=[session](const CalcNode& node) {
       return std::all_of(node.prerequisites.begin(),node.prerequisites.end(),[&](const auto& id) {
@@ -168,10 +169,10 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   timing["plan_build"] = t_build.lap();
   in.settings.shared_response->timing().end();
 
-  // 2a''. F2 restart safety: sweep in any metadata shards stranded by an
-  // interrupted subworld run, BEFORE reconcile reads the canonical file —
-  // otherwise finished states would be invisible and silently re-solved.
-  // Same collective-error discipline as the gate: a rank-0 throw here
+  // 2a''. Sweep any metadata shards stranded by an interrupted subworld run
+  // into the canonical file, so the summary lists the states those groups
+  // saved. Output only: the scheduler reads the node folders. Same
+  // collective-error discipline as the gate: a rank-0 throw here
   // (corrupt shard, ENOSPC on the canonical save) must not strand the other
   // ranks at the fence.
   {

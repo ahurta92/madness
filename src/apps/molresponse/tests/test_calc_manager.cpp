@@ -1,10 +1,12 @@
 // ===========================================================================
 // CalcManager scheduling-core tests (doc 15, 15a). Pure C++, no MPI / no MRA
 // runtime — exercises build_dag, planned_action, prerequisites_converged, and
-// schedule against hand-written response_metadata.json blobs.
+// schedule against hand-written snapshots of the saved states, and
+// node_snapshot, which builds that snapshot from node descriptions.
 // ===========================================================================
 
 #include "../calc/calc_manager.hpp"
+#include "../calc/node_snapshot.hpp"
 #include "../ResponsePropertyPlanner.hpp"
 
 #include <nlohmann/json.hpp>
@@ -45,20 +47,18 @@ bool wave_has(const std::vector<WorkItem> &w, const std::string &id) {
   return NodeAction::Skip; // sentinel "not present"
 }
 
-// Minimal empty aggregate.
+// An empty snapshot (nothing saved), in node_snapshot's shape.
 json empty_meta() {
-  return json{{"schema_version", 1},
-              {"protocols", json::object()},
+  return json{{"protocols", json::object()},
               {"fd_states", json::object()},
               {"excited_states", json::object()},
-              {"properties", json::object()}};
+              {"vbc_states", json::object()}};
 }
 
 // Register a protocol key in the registry.
 void put_protocol(json &m, double thresh) {
   const int k = default_k_for_thresh(thresh);
-  m["protocols"][protocol_key(thresh, k)] = {{"thresh", thresh}, {"k", k},
-                                             {"index", -1}};
+  m["protocols"][protocol_key(thresh, k)] = {{"thresh", thresh}, {"k", k}};
 }
 
 // Write an fd_states entry. `iter` = the last attempt's iteration count
@@ -83,16 +83,16 @@ void put_es(json &m, double thresh, bool converged, bool diverged = false) {
                               {"diverged", diverged}};
 }
 
-// ES bundle entry with the identity + progress fields an excited-state save records
-// (type "tda"/"full", shell, n_roots, iter, stalled). put_es above writes the
-// legacy shape (no identity fields).
+// ES bundle entry with the identity + progress fields node_snapshot records
+// (type "tda"/"full", shell, n_roots, iter). put_es above writes an entry
+// with no identity fields.
 void put_es_bundle(json &m, double thresh, bool converged, const std::string &type,
                    int n_roots, bool stalled = false, int iter = 0,
                    bool diverged = false) {
   const std::string key = protocol_key_at(thresh);
   put_protocol(m, thresh);
   m["excited_states"][key] = {{"type", type},         {"shell", "closed"},
-                              {"n_roots", n_roots},   {"bundle_dir", "es__" + key},
+                              {"n_roots", n_roots},
                               {"converged", converged}, {"diverged", diverged},
                               {"stalled", stalled},   {"iter", iter}};
 }
@@ -579,6 +579,83 @@ int main() {
                 .contains("met") &&
                !prerequisites_converged(dag[2], dag, m, 1e-4, unmet),
            "an unmet load (R2) is neither met nor a converged prerequisite");
+  }
+
+  // ====== node_snapshot: the snapshot from node descriptions (part 5e) ======
+  // The scheduler reads node folders only. node_snapshot turns each node's
+  // description into the entry the functions above read; `converged` is the
+  // caller's verdict, never a stored field.
+  std::printf("=== node_snapshot ===\n");
+  {
+    namespace it = madness::iteration;
+    const std::string k4 = protocol_key_at(1e-4);
+    auto driven = [](const std::string &pert, double freq, it::Protocol level, std::size_t updates) {
+      it::NodeDescription d;
+      d.kind = "driven"; d.protocol = level; d.updates_at_protocol = updates;
+      d.settings = {{"perturbation", pert}, {"frequency", freq}, {"layout", "closed_shell_full"}};
+      d.metrics = json::array({{{"subject", "response"}, {"metric", "bsh_residual"},
+                                {"status", "measured"}, {"value", 2.5e-4}}});
+      return d;
+    };
+    it::NodeDescription es;
+    es.kind = "excited_set"; es.protocol = {1e-4, 6}; es.updates_at_protocol = 7;
+    es.settings = {{"excited_model", "full"}, {"layout", "closed_shell_full"}};
+    es.details = {{"n_roots", 2},
+                  {"roots", json::array({{{"slot", 0}, {"root_id", "es_root_0000"}, {"omega", 0.4}},
+                                         {{"slot", 1}, {"root_id", "es_root_0001"}, {"omega", 0.5}}})}};
+    it::NodeDescription vbc;
+    vbc.kind = "second_order"; vbc.protocol = {1e-4, 6};
+    vbc.settings = {{"kind", "VBC"}, {"binding_version", 1}, {"source", "pq"}};
+    vbc.lineage = json::array({{{"role", "B"}, {"name", "dipole_x-f0.05000"}},
+                               {{"role", "C"}, {"name", "dipole_y-f-0.05000"}}});
+    it::NodeDescription seed;
+    seed.kind = "seed"; seed.protocol = {1e-6, 8};
+    const std::vector<SnapshotNode> nodes{
+        {"dipole_x-f0.05000", driven("dipole_x", 0.05, {1e-4, 6}, 3), true},
+        {"dipole_y-f-0.05000", driven("dipole_y", -0.05, {1e-4, 6}, 4), false},
+        {"excited-full", es, true},
+        {"vbc-dipole_x-dipole_y-f0.05000-f-0.05000", vbc, true},
+        {"some-seed", seed, true}};
+    const json snap = node_snapshot(nodes);
+    const json &x = snap["fd_states"]["dipole_x"][k4]["f0.05000"];
+    EXPECT(x.value("converged", false) && x.value("freq", 0.0) == 0.05 && x.value("iter", 0) == 3 &&
+               x.value("bsh_residual", 0.0) == 2.5e-4 && x.value("node", "") == "states/response/dipole_x-f0.05000",
+           "driven node: the caller's verdict, frequency, updates, stored residual, folder");
+    EXPECT(!snap["fd_states"]["dipole_y"][k4]["f-0.05000"].value("converged", true),
+           "an unconverged verdict is kept");
+    const json &e = snap["excited_states"][k4];
+    EXPECT(e.value("type", "") == "full" && e.value("n_roots", 0) == 2 && e["roots"].size() == 2 &&
+               e["roots"][1].value("omega", 0.0) == 0.5 && e.value("shell", "") == "closed_shell",
+           "excited set: model, root count and root energies from the description");
+    EXPECT(snap["vbc_states"].contains("vbc:dipole_x__dipole_y@f0.05000_f-0.05000") &&
+               snap["vbc_states"]["vbc:dipole_x__dipole_y@f0.05000_f-0.05000"][k4].value("converged", false),
+           "VBC source: id from its two inputs' names, a negative frequency included");
+    EXPECT(snap["protocols"].size() == 1 && snap["protocols"][k4].value("k", 0) == 6,
+           "protocols: the levels the nodes are saved at; a seed adds none");
+    EXPECT(snap.dump().find("some-seed") == std::string::npos, "a seed is not a saved state");
+
+    // The snapshot drives the same functions: the VBC gate and the audit.
+    std::vector<CalcNode> dag(3);
+    dag[0].kind = CalcKind::FD; dag[0].pert = Perturbation::dipole(0); dag[0].freq = 0.05;
+    dag[0].id = fd_node_id(dag[0].pert, 0.05); dag[0].protocols = {1e-4};
+    dag[1].kind = CalcKind::FD; dag[1].pert = Perturbation::dipole(1); dag[1].freq = -0.05;
+    dag[1].id = fd_node_id(dag[1].pert, -0.05); dag[1].protocols = {1e-4};
+    dag[2].kind = CalcKind::VBC; dag[2].pert = dag[0].pert; dag[2].freq = 0.05;
+    dag[2].pert_c = dag[1].pert; dag[2].freq_c = -0.05; dag[2].protocols = {1e-4};
+    dag[2].id = vbc_node_id(dag[2].pert, dag[2].pert_c, 0.05, -0.05);
+    dag[2].prerequisites = {dag[0].id, dag[1].id};
+    EXPECT(!prerequisites_converged(dag[2], dag, snap, 1e-4),
+           "a source whose input is not judged converged stays gated");
+    auto both = nodes;
+    both[1].converged = true;
+    EXPECT(prerequisites_converged(dag[2], dag, node_snapshot(both), 1e-4),
+           "both inputs judged converged -> the source is ready");
+    EXPECT(audit_dropped_work(dag, snap, {}).empty(), "a converged source is delivered");
+    auto stale = nodes;
+    stale[3].converged = false;
+    EXPECT(audit_dropped_work(dag, node_snapshot(stale), {}).size() == 1,
+           "a source not judged converged is reported dropped");
+    EXPECT(node_snapshot({}) == empty_meta(), "no nodes -> the empty snapshot");
   }
 
   std::printf("\n%s  (%d failures)\n", failed ? "FAILED" : "PASSED", failed);
