@@ -435,6 +435,15 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   // assemble_tpa self-guards (returns if no ES bundle; ClosedShell only).
   if (!in.plan.derived_fd.empty())
     assemble_tpa(ctx, in.plan, in.protocols.back());
+  // The two-photon states of earlier excitation energies go once the current
+  // roots' states are saved (step 4d); every process group has finished.
+  if (in.settings.shared_response && !in.plan.derived_fd.empty()) {
+    const auto removed = in.settings.shared_response->prune_two_photon();
+    if (world.rank() == 0 && !removed.empty() &&
+        madness::iteration::prints(in.settings.verbosity, madness::iteration::needed::checkpoint_saved))
+      for (const auto& name : removed)
+        std::cout << "Removed: " << name << ", a two-photon state no current root needs\n";
+  }
   timing["assemble"] = t_assemble.lap();
   if (in.settings.shared_response) {
     auto& session=*in.settings.shared_response;

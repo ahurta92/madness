@@ -56,6 +56,24 @@ int main(int argc, char** argv) {
                 auto unsettled=c("u",0.05);unsettled.settled=false;
                 require(rs::nearest_start(0.05,g1,m,{c("a",0.0),other_model,unsettled})==std::optional<std::string>("a"));
             }
+            // The two-photon states to remove: only derived nodes of the set
+            // that no current root needs.
+            {
+                const auto derived=[](const std::string& bundle,const std::string& root) {
+                    return cp::json{{"perturbation","dipole_x"},{"derived_from",{{"bundle",bundle},{"root",root},{"factor",0.5}}}};
+                };
+                const std::vector<std::pair<std::string,cp::json>> nodes{
+                    {"dipole_x-f0.16139",derived("es:full","es_root_0000")},   // needed
+                    {"dipole_x-f0.16205",derived("es:full","es_root_0000")},   // superseded
+                    {"dipole_x-f0.20000",derived("es:tda","es_root_0000")},    // another set
+                    {"dipole_x-f0.05000",{{"perturbation","dipole_x"},{"frequency",0.05}}}, // ordinary
+                    {"dipole_x-f0.16000",{{"perturbation","dipole_x"},{"frequency",0.16},{"derived_from",nullptr}}}};
+                const auto removed=rs::two_photon_removals("es:full",{"dipole_x-f0.16139"},nodes);
+                require(removed==std::vector<std::string>{"dipole_x-f0.16205"});
+                // Nothing needed: still only the set's derived nodes, never an ordinary state.
+                require(rs::two_photon_removals("es:full",{},nodes)==
+                        std::vector<std::string>{"dipole_x-f0.16139","dipole_x-f0.16205"});
+            }
             const cp::json model{{"version",1},{"dft",{{"xc","HF"}}},
                 {"molecule",{{"parameters",cp::json::object()},{"core_potentials",cp::json::array()}}},
                 {"xc",{{"specification","HF"}}}};

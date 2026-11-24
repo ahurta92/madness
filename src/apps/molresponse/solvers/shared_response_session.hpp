@@ -59,6 +59,20 @@ inline std::optional<std::string> nearest_start(double frequency,const json& gro
   if(best==nullptr) return std::nullopt;
   return best->name;
 }
+// The two-photon nodes of excited-state set `bundle` that no current root
+// needs: driven nodes (name, settings) whose settings name the set as their
+// origin and that are not in `needed`. An ordinary driven state names no
+// origin, so it is never on the list.
+inline std::vector<std::string> two_photon_removals(const std::string& bundle,const std::set<std::string>& needed,
+                                                    const std::vector<std::pair<std::string,json>>& nodes) {
+  std::vector<std::string> result;
+  for(const auto& [name,settings]:nodes) {
+    const auto origin=settings.find("derived_from");
+    if(origin==settings.end() || !origin->is_object() || origin->value("bundle",std::string())!=bundle) continue;
+    if(!needed.contains(name)) result.push_back(name);
+  }
+  return result;
+}
 // The ground state's identity in a driven state's settings.
 inline json ground_identity(const json& settings) {
   return {{"ground_settings",settings.value("ground_settings",json())},{"ground_saved",settings.value("ground_saved",json())}};
@@ -239,6 +253,45 @@ public:
     specifications_[id]=task;
     if(binding->reusable()) record_summary(*binding,0);
     auto& result=*binding;states[id]=std::move(binding);return result;
+  }
+  // Once every two-photon state the current roots need has met the request,
+  // the two-photon nodes of the same excited-state set that no current root
+  // needs are removed. Ordinary driven states are never removed. Main session
+  // only, after every process group has finished. Collective. Returns the
+  // names removed.
+  std::vector<std::string> prune_two_photon() {
+    cp::records::require(scope_.group<0,"only the main session removes two-photon states");
+    std::map<std::string,std::set<std::string>> needed;
+    std::set<std::string> unfinished;
+    for(const auto& [id,state]:states) {
+      const auto& settings=state->scientific_settings();
+      if(!settings.contains("derived_from")) continue;
+      const auto bundle=settings.at("derived_from").at("bundle").get<std::string>();
+      needed[bundle].insert(state->name());
+      if(!state->complete() || !state->has_node()) unfinished.insert(bundle);
+    }
+    const auto removed=json::parse(cp::detail::on_root(world_,[&] {
+      json result=json::array();
+      std::vector<std::pair<std::string,json>> nodes;
+      for(const auto& [name,d]:saved_driven_nodes(root_)) nodes.emplace_back(name,d.settings);
+      std::vector<std::string> names_removed;
+      for(const auto& [bundle,names]:needed) {
+        if(unfinished.contains(bundle)) continue;
+        for(const auto& name:two_photon_removals(bundle,names,nodes)) names_removed.push_back(name);
+      }
+      if(names_removed.empty()) return result.dump();
+      // The metadata stops naming a state before its folder goes, so a run
+      // stopped in between leaves only a folder, which the next run removes.
+      auto meta=ResponseMetadata::load_or_create(metadata_path());
+      for(const auto& name:names_removed) meta.drop_fd_node(driven_folder(name).generic_string());
+      meta.save();
+      for(const auto& name:names_removed) {
+        std::filesystem::remove_all(root_/driven_folder(name));
+        result.push_back(name);
+      }
+      return result.dump();
+    }));
+    return removed.get<std::vector<std::string>>();
   }
   // The lineage names response states, whose settings carry the ground identity.
   SecondOrderNode& bind_second_order(const std::string& id,const std::string& name,const json& settings,const json& lineage) {

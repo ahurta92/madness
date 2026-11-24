@@ -138,6 +138,26 @@ public:
     }
   }
 
+  /// A driven node removed from disk: every FD entry whose `node` is that
+  /// folder is dropped, with the quadratic sources built from it. A channel
+  /// or rung left empty is dropped too, so no entry names a removed state.
+  void drop_fd_node(const std::string &node) {
+    if (!j_.contains("fd_states")) return;
+    auto &fd = j_["fd_states"];
+    for (auto pert = fd.begin(); pert != fd.end();) {
+      for (auto rung = pert->begin(); rung != pert->end();) {
+        for (auto point = rung->begin(); point != rung->end();) {
+          if (point->is_object() && point->value("node", std::string{}) == node) {
+            drop_vbc_built_from(pert.key(), point.key(), rung.key());
+            point = rung->erase(point);
+          } else ++point;
+        }
+        if (rung->empty()) rung = pert->erase(rung); else ++rung;
+      }
+      if (pert->empty()) pert = fd.erase(pert); else ++pert;
+    }
+  }
+
   /// Upsert one FD point: fd_states/<pert>/<protocol_key>/<freq_key> = entry.
   /// Replacing a different entry (the leg solved again at this rung) drops
   /// the quadratic sources built from the old one; merging an identical entry

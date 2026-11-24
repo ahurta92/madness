@@ -422,6 +422,34 @@ int main() {
            "a redefined key drops its sources too");
   }
 
+  // ---- a removed driven node is no longer named ----------------------------
+  std::printf("=== drop_fd_node ===\n");
+  {
+    auto m = ResponseMetadata::load_or_create((tmp / "prune.json").string());
+    const std::string old_f = ResponseMetadata::freq_key(0.16205);
+    const std::string new_f = ResponseMetadata::freq_key(0.16139);
+    const auto entry = [](const std::string &node) {
+      return nlohmann::json{{"converged", true}, {"node", node}};
+    };
+    m.set_fd_state("dipole_x", "1e-04_k6", old_f, entry("states/response/dipole_x-f0.16205"));
+    m.set_fd_state("dipole_x", "1e-04_k6", new_f, entry("states/response/dipole_x-f0.16139"));
+    m.set_fd_state("dipole_y", "1e-04_k6", old_f, entry("states/response/dipole_y-f0.16205"));
+    m.set_vbc_state("vbc:dipole_x__dipole_x@f0.16205_f0.16205", "1e-04_k6", {{"converged", true}});
+    m.set_vbc_state("vbc:dipole_x__dipole_x@f0.16139_f0.16139", "1e-04_k6", {{"converged", true}});
+    m.drop_fd_node("states/response/dipole_x-f0.16205");
+    m.drop_fd_node("states/response/dipole_y-f0.16205");
+    m.drop_fd_node("states/response/dipole_z-f0.16205");  // never recorded
+    const auto &fd = m.json()["fd_states"];
+    EXPECT(!fd["dipole_x"]["1e-04_k6"].contains(old_f), "the removed node's entry is gone");
+    EXPECT(fd["dipole_x"]["1e-04_k6"].contains(new_f), "another node's entry is kept");
+    EXPECT(!fd.contains("dipole_y"), "a channel left empty is dropped");
+    const auto &vbc = m.json()["vbc_states"];
+    EXPECT(!vbc["vbc:dipole_x__dipole_x@f0.16205_f0.16205"].contains("1e-04_k6"),
+           "a source built from the removed node is dropped");
+    EXPECT(vbc["vbc:dipole_x__dipole_x@f0.16139_f0.16139"].contains("1e-04_k6"),
+           "a source built from the kept node stays");
+  }
+
   // ---- best_usable_fd_source_key: an aliased entry is not a source --------
   std::printf("=== best_usable_fd_source_key, aliased key ===\n");
   {
