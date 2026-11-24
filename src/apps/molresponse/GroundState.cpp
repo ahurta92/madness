@@ -1,4 +1,5 @@
 #include "GroundState.hpp"
+#include "solvers/saved_fock.hpp"
 
 #include <madness/chem/Restart.h>
 #include <madness/chem/SCFOperators.h>
@@ -438,23 +439,37 @@ void GroundState::build_fock_matrices(World& world, double vtol,
     auto thresh = FunctionDefaults<3>::get_thresh();
     auto current_k = FunctionDefaults<3>::get_k();
 
-    // Try loading Fock matrices from JSON file first
+    // Read the saved matrices only at the level they were saved at: for a
+    // node, its description's thresh and k, compared as numbers. Otherwise
+    // build them from the orbitals. One line says which.
+    const auto protocol_key = fock_level_name(thresh, current_k);
     bool loaded_from_file = false;
+    std::string reason = "no Fock file given";
     if (!fock_json_file.empty() && std::filesystem::exists(fock_json_file)) {
         auto fock_json = broadcast_json_file(world, fock_json_file);
         world.gop.fence();
 
-        auto protocol_key = std::string("thresh: ") + std::to_string(thresh)
-                          + std::string(" k: ") + std::to_string(current_k);
-        if (fock_json.contains(protocol_key)) {
-            focka_ = tensor_from_json<double>(fock_json[protocol_key]["focka"]);
-            if (!is_spin_restricted() && fock_json[protocol_key].contains("fockb")) {
-                fockb_ = tensor_from_json<double>(fock_json[protocol_key]["fockb"]);
+        const auto choice = choose_saved_fock(fock_json, fock_level_, thresh, current_k);
+        reason = choice.reason;
+        if (!choice.entry.empty()) {
+            const auto& entry = fock_json[choice.entry];
+            focka_ = tensor_from_json<double>(entry["focka"]);
+            if (!is_spin_restricted() && entry.contains("fockb")) {
+                fockb_ = tensor_from_json<double>(entry["fockb"]);
             } else {
                 fockb_ = copy(focka_);
             }
-            loaded_from_file = true;
+            loaded_from_file = focka_.ndim() == 2 && focka_.dim(0) == static_cast<long>(scf_->amo.size());
+            if (!loaded_from_file) reason = "the saved matrix does not match the orbital count";
         }
+    } else if (!fock_json_file.empty()) {
+        reason = "no Fock file saved";
+    }
+    if (world.rank() == 0) {
+        if (loaded_from_file)
+            print("Ground-state Fock matrix: read from", fock_json_file, "(" + protocol_key + ")");
+        else
+            print("Ground-state Fock matrix: rebuilt from the orbitals (" + protocol_key + "):", reason);
     }
 
     if (!loaded_from_file) {

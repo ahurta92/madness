@@ -1,6 +1,7 @@
 #ifndef MOLRESPONSE_V3_GROUNDSTATE_HPP
 #define MOLRESPONSE_V3_GROUNDSTATE_HPP
 
+#include <madness/chem/IterationMetrics.h>
 #include <madness/chem/SCF.h>
 #include <madness/chem/projector.h>
 #include <madness/world/world.h>
@@ -77,6 +78,13 @@ public:
                  const std::string& fock_json_file = "",
                  bool verbose = true);   // F2d-ii: false in subworlds (suppress print_info)
 
+    /// The level in the node description of the ground state the orbitals and
+    /// the Fock file came from. Once set, prepare() reads the file only at
+    /// exactly this thresh and k (solvers/saved_fock.hpp); unset (a standalone
+    /// archive), the file's own level names decide.
+    void set_fock_level(const madness::iteration::Protocol& level) { fock_level_ = level; }
+    const std::optional<madness::iteration::Protocol>& fock_level() const { return fock_level_; }
+
     /// Local potential: V_nuc + V_coul + V_xc (for response multiplicative term)
     const real_function_3d& V_local() const;
 
@@ -125,6 +133,7 @@ private:
     // truncated). A tighter-thresh climb must reload pristine MOs — merely
     // re-truncating cannot restore precision already discarded (review fix).
     double current_thresh_ = -1.0;
+    std::optional<madness::iteration::Protocol> fock_level_;  ///< see set_fock_level
 
     // Cached response-specific data (rebuilt per protocol step)
     real_function_3d v_local_;

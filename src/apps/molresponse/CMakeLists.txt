@@ -258,6 +258,12 @@ if(BUILD_TESTING)
   set_tests_properties(madness/test/molresponse/test_es_kinetic_evidence/run
     PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
 
+  # The saved ground-state Fock matrix is read only at the node's level.
+  add_mad_executable(test_saved_fock "tests/test_saved_fock.cpp" "MADchem")
+  add_test(NAME madness/test/molresponse/test_saved_fock/run COMMAND test_saved_fock)
+  set_tests_properties(madness/test/molresponse/test_saved_fock/run
+    PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
+
   add_mad_executable(test_fd_explicit_accuracy "tests/test_fd_explicit_accuracy.cpp" "MADchem")
   add_test(NAME madness/test/molresponse/test_fd_explicit_accuracy/run COMMAND test_fd_explicit_accuracy)
   set_tests_properties(madness/test/molresponse/test_fd_explicit_accuracy/run

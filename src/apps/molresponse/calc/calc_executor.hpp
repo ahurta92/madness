@@ -169,7 +169,7 @@ struct ExecutorContext : ExecutorSettings {
   madness::World   &world;
   GroundState      &gs;            // mutable: re-prepared at each protocol
   double            L = 0.0;       // cubic cell half-edge (from archive header)
-  std::string       fock_json;     // moldft.fock.json path ("" -> none)
+  std::string       fock_json;     // the ground-state node's Fock file ("" -> none)
   bool final_protocol = true; // role of the current work item in its full ladder
 
   ExecutorContext(madness::World &w, GroundState &g, double L_,

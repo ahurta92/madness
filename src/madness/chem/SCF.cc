@@ -3091,6 +3091,13 @@ void SCF::validate_progress_controls() const {
 }
 
 // For given protocol, solve the DFT/HF/response equations
+json SCF::fock_record(double thresh, int k) const {
+    const auto level = std::string("thresh: ") + std::to_string(thresh) + " k: " + std::to_string(k);
+    json fock{{"focka", tensor_to_json(last_fock_alpha)}};
+    if (!param.spin_restricted() && param.nbeta() != 0) fock["fockb"] = tensor_to_json(last_fock_beta);
+    return {{level, fock}};
+}
+
 void SCF::solve(World& world, std::optional<int> iteration_cap) {
     PROFILE_MEMBER_FUNC(SCF);
     solve_impl(world, iteration_cap, nullptr);
@@ -3147,7 +3154,8 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
     double previous_energy = 0.0, previous_kinetic = 0.0;
     FunctionResidualBlocks previous_kinetic_diagonal;
     subspaceT subspace;
-    tensorT Q, focka_json, fockb_json;
+    tensorT Q;
+    last_fock_alpha = last_fock_beta = tensorT();
     const auto explicit_targets = checkpoint_observer ? requested_targets(param) : json::object();
     const bool collect_kinetic = checkpoint_observer || explicit_targets.contains("absolute_kinetic_trace_change");
     const auto decider = param.get<bool>(convergence::use_default_criteria_key)
@@ -3396,8 +3404,8 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
         step.final_rotation = stopped;
         current_energy = evaluation.energy;
         e_data.add_data(evaluation.energies);
-        focka_json = evaluation.fock_alpha;
-        fockb_json = evaluation.fock_beta;
+        last_fock_alpha = evaluation.fock_alpha;
+        last_fock_beta = evaluation.fock_beta;
         if (!control) progress_history.push_back(step.explicit_accuracy.at("criteria"));
         if (world.rank() == 0 && param.print_level() > 1) {
             std::vector<std::pair<std::string, double>> energies;
@@ -3482,34 +3490,16 @@ std::optional<iteration::Decision> SCF::solve_impl(World& world, std::optional<i
         timing.steps.emplace_back("advance", iteration_timer.lap());
         report_timing();
     }
-    // save the converged fock matix
-    //
-    json fock_data;
-
-
-    // write the fock matrix to a file
-    if(world.rank() == 0) {
-        auto protocol = std::string("thresh: ") + std::to_string(FunctionDefaults<3>::get_thresh());
-    protocol += std::string(" k: ")+std::to_string(FunctionDefaults<3>::get_k());
-    fock_data[protocol] = json::object();
-    fock_data[protocol]["focka"] = tensor_to_json(focka_json);
-    if (!param.spin_restricted() && param.nbeta() != 0) {
-        fock_data[protocol]["fockb"] = tensor_to_json(fockb_json);
-    }
-        std::string name=param.prefix()+".fock.json";
-        // Read in the existing data if it exists
+    // The converged Fock matrices, merged by level into <prefix>.fock.json.
+    // A solve bound to a node (control) saves them in the node archive
+    // instead (SCFCheckpoint::save), and nothing reads this copy there.
+    if (!control && world.rank() == 0) {
+        const std::string name = param.prefix() + ".fock.json";
         json fock_json;
-        std::ifstream fock_file(name);
-    if (fock_file) {
-        fock_file >> fock_json;
-        }
-    fock_file.close();
-    // Merge the new data with the existing data
-    fock_json.merge_patch(fock_data);
-    // Write the merged data back to the file
-    std::ofstream fock_out(name);
-    fock_out << std::setw(4) << fock_json << std::endl;
-    fock_out.close();
+        if (std::ifstream fock_file(name); fock_file) fock_file >> fock_json;
+        fock_json.merge_patch(fock_record(FunctionDefaults<3>::get_thresh(), FunctionDefaults<3>::get_k()));
+        std::ofstream fock_out(name);
+        fock_out << std::setw(4) << fock_json << std::endl;
     }
 
     // compute the dipole moment

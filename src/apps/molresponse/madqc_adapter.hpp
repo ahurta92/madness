@@ -324,9 +324,11 @@ struct molresponse_v3_lib {
     // Named stages supply absolute paths and never change process cwd.
     const fs::path& source_prefix = reference_prefix;
     const std::string archive = source_prefix.string() + ".restartdata";
-    const std::string fock_json = source_prefix.string() + ".fock.json";
+    const std::string fock_json = source_prefix.string() + ".fock.json"; // in the node archive
     GroundState gs
         = GroundState::from_archive(world, archive, reference_molecule, verified_reference, verified_pcm);
+    // The node's Fock file is read only at the level its description records.
+    if (shared_source) gs.set_fock_level(shared_source->protocol);
     const double thresh = FunctionDefaults<3>::get_thresh();
     auto coulop = poperatorT(
         CoulombOperatorPtr(world, gs.params().lo(), 0.001 * thresh));
@@ -722,10 +724,9 @@ struct molresponse_v3_lib {
       in.settings.shared_response->timing().end();
     }
 
-    // Pass the RESOLVED fock path through (review finding: "" here made every
-    // per-rung re-prepare and every subworld GS reload RECOMPUTE the Fock
-    // instead of loading moldft's per-protocol entries — silently diverging
-    // from the standalone CLI path this adapter is supposed to match).
+    // Pass the RESOLVED fock path through (the ground-state node's
+    // scf.fock.json): every per-rung re-prepare and subworld GS reload reads
+    // it at the node's level and rebuilds the matrix at any other.
     ResponseWorkflowOutput out =
         run_response_with_ground(world, gs, L, fock_json, in);
 

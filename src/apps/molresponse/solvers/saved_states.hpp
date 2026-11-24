@@ -171,10 +171,12 @@ inline std::optional<SavedNode> find_excited(madness::World& world, const fs::pa
 }
 
 // The ground state of a run folder, read from its node without changing it:
-//   <run>/states/ground_state/            the node: description (level, box) and archive
+//   <run>/states/ground_state/            the node: description (level, box) and archive,
+//                                         with the Fock matrix of its level when the
+//                                         description's details name it (details.fock)
 //   <run>/analysis/ground_state/          the SCF stage's analysis files, where the
 //                                         node layout keeps moldft.calc_info.json
-//                                         (the molecule) and <prefix>.fock.json
+//                                         (the molecule)
 // The analysis folder is the workflow's analysis/<calculation id> folder
 // (Drivers.hpp, Applications.hpp); no library function names it.
 struct GroundNode {
@@ -209,12 +211,12 @@ inline GroundNode read_ground(madness::World& world, const fs::path& run) {
     else
       molecule = calc_info.value("molecule", json());
     cp::records::require(!molecule.is_null(), "no molecule in " + info.string());
-    std::vector<std::string> fock;
-    for (const auto& entry : fs::directory_iterator(analysis))
-      if (entry.is_regular_file() && entry.path().filename().string().ends_with(".fock.json"))
-        fock.push_back(entry.path().string());
-    cp::records::require(fock.size() <= 1, "more than one Fock file in " + analysis.string());
-    return json{{"molecule", molecule}, {"fock", fock.empty() ? std::string() : fock.front()}}.dump();
+    // A node saved before the Fock file existed names none: the matrix is then
+    // built from the orbitals.
+    const auto name = node->description.details.value("fock", std::string());
+    const auto fock = it::Node(folder).archive() / name;
+    return json{{"molecule", molecule},
+                {"fock", !name.empty() && fs::is_regular_file(fock) ? fock.string() : std::string()}}.dump();
   }));
   ground.molecule.from_json(found.at("molecule"));
   ground.fock_json = found.at("fock").get<std::string>();
@@ -228,7 +230,9 @@ inline GroundNode read_ground(madness::World& world, const fs::path& run) {
 inline GroundState load_ground(madness::World& world, const GroundNode& ground, double thresh, int k) {
   set_response_protocol(world, ground.L, thresh, k);
   print_loaded(world, ground.node);
-  return GroundState::from_archive(world, ground.archive.string(), ground.molecule);
+  auto gs = GroundState::from_archive(world, ground.archive.string(), ground.molecule);
+  gs.set_fock_level(ground.protocol());  // its Fock file is read only at the node's level
+  return gs;
 }
 
 // An excited-state set's (or seed's) roots at the active level. Collective.

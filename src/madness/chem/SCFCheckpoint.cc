@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
 
 namespace madness {
 namespace cp = checkpoint;
@@ -26,6 +27,9 @@ bool same_occupation_request(const json& stored, const json& current) {
         return stored.at("dft").contains(key) && stored.at("dft").at(key) == current.at("dft").at(key);
     });
 }
+// The ground state's Fock matrix in its node archive, in the form
+// SCF::fock_record writes and the response reads.
+constexpr const char* fock_file = "scf.fock.json";
 // The archive's facts this binding checks before loading it.
 const json& orbitals(const it::NodeDescription& d) { return d.details.at("orbitals"); }
 } // namespace
@@ -362,9 +366,18 @@ void SCFCheckpoint::save(const it::IterationMetrics& metrics, const it::Decision
         d.level_finished = decision.action == it::Action::finish_protocol || decision.action == it::Action::complete;
         d.details = {{"scf_node_version", 1}, {"orbitals", layout_}, {"energy", scf_.current_energy},
                      {"writers", writers}};
+        // A ground state also keeps the Fock matrix of the saved orbitals at
+        // this level, in the same save, so it never describes other orbitals.
+        const bool fock = kind() == "ground_state" && scf_.last_fock_alpha.ndim() == 2 &&
+                          scf_.last_fock_alpha.dim(0) == scf_.param.nmo_alpha();
+        if (fock) d.details["fock"] = fock_file;
         it::Node(folder_).save(d, [&](const std::filesystem::path& archive) {
             for (const auto& file : std::filesystem::directory_iterator(staging))
                 std::filesystem::rename(file.path(), archive / file.path().filename());
+            if (!fock) return;
+            std::ofstream file(archive / fock_file);
+            file.exceptions(std::ios::failbit | std::ios::badbit);
+            file << std::setw(4) << scf_.fock_record(d.protocol.thresh, d.protocol.k) << '\n';
         });
         std::filesystem::remove_all(staging);
         return std::string{};

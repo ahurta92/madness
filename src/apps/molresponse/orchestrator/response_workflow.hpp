@@ -107,7 +107,7 @@ inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohma
 
 /// Core (stages 2–4): DAG build → CalcManager solve → Tier-A assembly → collect.
 /// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the
-/// cubic-cell half-edge and `fock_json` the moldft Fock path ("" = compute).
+/// cubic-cell half-edge and `fock_json` the ground-state node's Fock file ("" = compute).
 /// Fills `Output.timing` for plan_build/solve/assemble (the caller owns load +
 /// total). Called by the madqc adapter.
 inline ResponseWorkflowOutput
@@ -217,9 +217,10 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     const std::string  archive = in.archive_file;
     const madness::Molecule mol = gs.molecule();
     const std::string  fock = fock_json;
+    const auto         fock_level = gs.fock_level();
     const double       L_   = L;
     const ExecutorSettings base = in.settings;
-    fan_out = [archive, mol, fock, L_, base](
+    fan_out = [archive, mol, fock, fock_level, L_, base](
                   madness::World &sub, const std::vector<WorkItem> &items,
                   double thresh, int gid, const std::string &log_prefix) {
       std::set<std::string> states;
@@ -234,6 +235,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
         shared->timing().begin("reference_load");
         set_response_protocol(sub,L_,thresh,-1,false);
         auto gs_s=GroundState::from_archive(sub,archive,mol);
+        if(fock_level) gs_s.set_fock_level(*fock_level);
         shared->timing().end();
         ExecutorSettings settings=base;
         settings.shared_response=shared;

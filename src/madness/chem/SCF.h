@@ -263,6 +263,12 @@ public:
     std::optional<CalculationOutcome> last_calculation_outcome;
     std::optional<std::filesystem::path> last_node; ///< the node folder of the last saved or reused state
     bool last_load_padded = false;
+    /// The Fock matrices of the orbitals solve() last evaluated, in their basis
+    /// (canonical or localized); set before the checkpoint observers run.
+    tensorT last_fock_alpha, last_fock_beta;
+    /// Those matrices as the response reads them:
+    /// {"thresh: <thresh> k: <k>": {"focka": ..., "fockb": ...}}, fockb for open shells only.
+    nlohmann::json fock_record(double thresh, int k) const;
 
     /// what amo/bmo actually hold, recorded in the restartdata header
     ///
