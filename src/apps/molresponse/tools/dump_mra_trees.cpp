@@ -1,7 +1,6 @@
 // Offline MRA tree-skeleton dumper  (molresponse_v3 — R2/L4 export, structural target)
 //
-// Loads already-converged ground-state orbitals from a moldft restart archive
-// and dumps each orbital's adaptive multiresolution octree as JSON, in TWO
+// Loads the saved ground-state orbitals of a madqc run folder and dumps each orbital's adaptive multiresolution octree as JSON, in TWO
 // representations:
 //
 //   mo_<i>_recon.json  reconstructed: leaves hold scaling coefficients, so the
@@ -26,16 +25,18 @@
 // norm2) are COLLECTIVE -- they run on every rank; only printing is gated on
 // rank 0.
 //
-// With --fd and --es it also dumps the saved response states of a madqc run
-// folder (--run-dir, default the archive's directory): it lists the node
-// folders under <run>/states/response/, reads each description, and loads the
-// driven states (--fd) and excited-state sets (--es) through the node module.
-// It never writes into the run folder.
+// The run folder is --run-dir (default: the current directory). The ground
+// state comes from its node, <run>/states/ground_state/, at the level its
+// description records, with the molecule from the run's analysis files
+// (saved_states.hpp:read_ground). With --fd and --es it also dumps the saved
+// response states: it lists the node folders under <run>/states/response/,
+// reads each description, and loads the driven states (--fd) and excited-state
+// sets (--es) through the node module. It never writes into the run folder.
 //
 // Usage:
-//   dump_mra_trees --archive=<prefix>.restartdata [--out=DIR]
+//   dump_mra_trees [--run-dir=<madqc run folder>] [--out=DIR]
 //                  [--maxlevel=N] [--k=N] [--thresh=X] [--max-orbitals=N]
-//                  [--fd] [--es] [--run-dir=<madqc run folder>]
+//                  [--fd] [--es]
 
 #include "../GroundState.hpp"
 #include "../ResponseProtocol.hpp"
@@ -97,31 +98,6 @@ using namespace madness;
 using namespace molresponse_v3;
 
 namespace {
-
-// Mirror the molecule sourcing the FD/ES skeletons use: read the geometry from
-// the moldft calc_info JSON sitting next to the archive. from_archive needs a
-// Molecule to derive electron counts; an empty one starts the closed-shell load
-// path but matching the canonical path avoids surprises.
-Molecule load_molecule_near(const std::string& archive_path) {
-  Molecule molecule;
-  auto archive_dir = std::filesystem::path(archive_path).parent_path();
-  for (const auto& name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
-    auto candidate = archive_dir / name;
-    if (std::filesystem::exists(candidate)) {
-      std::ifstream ifs(candidate);
-      nlohmann::json j;
-      ifs >> j;
-      nlohmann::json mol_json;
-      if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
-        mol_json = j["tasks"][0]["molecule"];
-      else if (j.contains("molecule"))
-        mol_json = j["molecule"];
-      if (!mol_json.is_null()) molecule.from_json(mol_json);
-      break;
-    }
-  }
-  return molecule;
-}
 
 // Write one Function's octree as JSON, MPI-safe. `Function::print_tree_json` is
 // COLLECTIVE -- every rank must call it (rank 0 walks the tree and pulls remote
@@ -762,13 +738,18 @@ int main(int argc, char** argv) {
     startup(world, argc, argv, true);
 
     commandlineparser parser(argc, argv);
-    if (!parser.key_exists("archive")) {
+    if (parser.key_exists("help") || parser.key_exists("archive")) {
       if (world.rank() == 0) {
-        print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
+        if (parser.key_exists("archive"))
+          print("  --archive is replaced by --run-dir: the ground state is read from "
+                "<run>/states/ground_state/.");
+        print("Usage: dump_mra_trees [--run-dir=DIR] "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--htg] [--amr] [--amr-m=N] [--coeffs] [--fd] [--es] [--run-dir=DIR]");
-        print("  Loads ground-state orbitals at their native (k, thresh) and");
+              "[--htg] [--amr] [--amr-m=N] [--coeffs] [--fd] [--es]");
+        print("  Loads the ground-state orbitals of the madqc run folder --run-dir");
+        print("  (default: the current directory) from states/ground_state/ at the");
+        print("  level its description records (--k/--thresh override), and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
         print("  With --htg (needs a -DMADNESS_ENABLE_VTK=ON build), also writes");
@@ -782,8 +763,8 @@ int main(int argc, char** argv) {
         print("  /coeffs: per-leaf n,l,s[k^3] + cell,k,thresh) -- the exact basis");
         print("  for offline reconstruction, not a point sample like .cube/.vthb.");
         print("  With --fd, also dumps the saved closed-shell driven states of the");
-        print("  madqc run folder --run-dir (default: the archive's directory; the");
-        print("  older name --fd-calc-dir is still accepted) from its node folders");
+        print("  run folder (the older name --fd-calc-dir of --run-dir is still");
+        print("  accepted) from its node folders");
         print("  under states/response/: x_i (+ y_i for a dynamic state) and rho^(1),");
         print("  stems fd_<perturbation>__<protocol>__<frequency>_*.");
         print("  With --es, also dumps every excited-state set there (TDA or full):");
@@ -796,7 +777,6 @@ int main(int argc, char** argv) {
 
     // Inner scope so MADNESS objects destruct before finalize().
     {
-      const std::string archive_path = parser.value_raw("archive");
       const std::string out_dir =
           parser.key_exists("out") ? parser.value_raw("out")
                                    : std::string("mra_trees");
@@ -819,9 +799,10 @@ int main(int argc, char** argv) {
       const std::string run_dir =
           parser.key_exists("run-dir")       ? parser.value_raw("run-dir")
           : parser.key_exists("fd-calc-dir") ? parser.value_raw("fd-calc-dir")
-                                             : std::filesystem::path(archive_path).parent_path().string();
-      // Find the states before any output, so a run folder without them stops
-      // with nothing written.
+                                             : std::string(".");
+      // Find the ground state and the response states before any output, so a
+      // run folder without them stops with nothing written.
+      const auto ground = saved_states::read_ground(world, run_dir);
       ResponseNodes response_states;
       if (dump_fd || dump_es)
         response_states = find_response_states(world, run_dir, dump_fd, dump_es);
@@ -853,21 +834,16 @@ int main(int argc, char** argv) {
               "(JSON/.vtk/.cube/.vthb output is unaffected).");
 #endif
 
-      auto header = GroundState::read_archive_header(world, archive_path);
-
-      // Load at NATIVE resolution unless explicitly overridden. Matching the
-      // archive's (k, thresh) means SCF::load_mos performs no reprojection, so
-      // the tree we walk is exactly the one the solver produced. Reprojecting
-      // would rebuild the tree and we'd be visualizing a different object.
-      const int k =
-          parser.key_exists("k") ? std::stoi(parser.value("k")) : header.k;
+      // Load at the node's saved level unless explicitly overridden. Matching
+      // it means SCF::load_mos performs no reprojection, so the tree we walk
+      // is exactly the one the solver produced. Reprojecting would rebuild the
+      // tree and we'd be visualizing a different object.
+      const int k = parser.key_exists("k") ? std::stoi(parser.value("k"))
+                                           : ground.protocol().k;
       const double thresh = parser.key_exists("thresh")
                                 ? std::stod(parser.value("thresh"))
-                                : header.converged_for_thresh;
-      set_response_protocol(world, header.L, thresh, k);
-
-      auto molecule = load_molecule_near(archive_path);
-      auto gs = GroundState::from_archive(world, archive_path, molecule);
+                                : ground.protocol().thresh;
+      auto gs = saved_states::load_ground(world, ground, thresh, k);
       if (world.rank() == 0) gs.print_info();
 
       if (world.rank() == 0) std::filesystem::create_directories(out_dir);
@@ -886,7 +862,7 @@ int main(int argc, char** argv) {
               : mos.size();
 
       if (world.rank() == 0) {
-        print("DUMP_MRA  archive=", archive_path, "  out=", out_dir,
+        print("DUMP_MRA  run=", run_dir, "  out=", out_dir,
               "  k=", k, "  thresh=", thresh, "  n_orbitals=", n);
       }
 
@@ -905,11 +881,11 @@ int main(int argc, char** argv) {
       world.gop.fence();
 
       // Response states, after the ground dump: each is loaded at its own saved
-      // level (this changes FunctionDefaults). header.L is the box length.
+      // level (this changes FunctionDefaults). ground.L is the box length.
       if (dump_fd || dump_es) {
         const DumpOptions o{out_dir, max_orbitals, cube, cube_npoints, cube_pad,
                             htg, amr, amr_m, coeffs};
-        dump_response_states(world, header.L, run_dir, response_states, mos,
+        dump_response_states(world, ground.L, run_dir, response_states, mos,
                              gs.molecule(), o);
         world.gop.fence();
       }

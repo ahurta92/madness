@@ -25,9 +25,12 @@
 // symmetric molecule zero further terms by selection rule. Either makes the
 // test pass without testing anything.
 //
-//   test_tpa_pq_vs_vbc --archive=<moldft restartdata> [--thresh=X] [--k=N]
-//       [--calc-dir=<madqc run folder> --freq=<omega_f/2> [--baxis=N --caxis=N]]
-// With --calc-dir, b and c are the saved driven states dipole_<baxis> and
+//   test_tpa_pq_vs_vbc (--archive=<moldft restartdata> | --calc-dir=<madqc run folder>)
+//       [--thresh=X] [--k=N] [--freq=<omega_f/2> [--baxis=N --caxis=N]]
+// --archive is a standalone moldft archive with its calc_info and Fock files
+// beside it (the response fixtures). With --calc-dir the ground state is the
+// run folder's node, states/ground_state/, at its saved level (--thresh/--k
+// override), and with --freq b and c are the saved driven states dipole_<baxis> and
 // dipole_<caxis> (default z) at --freq, found among the run folder's node
 // folders (states/response/) and loaded at this test's level. A static state
 // (X only) is used as (X, Y = X). A missing state stops the test.
@@ -51,6 +54,7 @@
 #include <madness/world/MADworld.h>
 
 #include <array>
+#include <optional>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -69,43 +73,62 @@ int main(int argc, char **argv) {
     startup(world, argc, argv, true);
     {
       commandlineparser parser(argc, argv);
-      if (!parser.key_exists("archive")) {
+      if (!parser.key_exists("archive") && !parser.key_exists("calc-dir")) {
         if (world.rank() == 0)
-          print("Usage: test_tpa_pq_vs_vbc --archive=<path> [--thresh=X] [--k=N] "
-                "[--calc-dir=<run folder> --freq=<omega_f/2> [--baxis=N --caxis=N]]");
+          print("Usage: test_tpa_pq_vs_vbc (--archive=<path> | --calc-dir=<run folder>) [--thresh=X] [--k=N] "
+                "[--freq=<omega_f/2> [--baxis=N --caxis=N]]");
         finalize();
         return 1;
       }
-      const std::string archive_path = parser.value_raw("archive");
-      auto header = GroundState::read_archive_header(world, archive_path);
+      MADNESS_CHECK_THROW(!(parser.key_exists("archive") && parser.key_exists("calc-dir")),
+                          "give --archive or --calc-dir, not both: with --calc-dir the ground "
+                          "state is the run folder's");
       const int override_k = parser.key_exists("k") ? std::stoi(parser.value("k")) : -1;
-      const double thresh = parser.key_exists("thresh")
-                                ? std::stod(parser.value("thresh"))
-                                : default_thresh_for_k(header.k);
-      set_response_protocol(world, header.L, thresh, override_k);
-
-      Molecule molecule;
-      auto dir = std::filesystem::path(archive_path).parent_path();
-      for (const auto &name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
-        auto cand = dir / name;
-        if (std::filesystem::exists(cand)) {
-          std::ifstream ifs(cand);
-          nlohmann::json j;
-          ifs >> j;
-          nlohmann::json mj;
-          if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
-            mj = j["tasks"][0]["molecule"];
-          else if (j.contains("molecule")) mj = j["molecule"];
-          if (!mj.is_null()) molecule.from_json(mj);
-          break;
+      std::string archive_path, fock_json;
+      std::optional<GroundState> loaded;
+      if (parser.key_exists("calc-dir")) {
+        // The run folder's ground-state node, at the level its description
+        // records (--thresh/--k override), read without changing anything.
+        const auto ground = saved_states::read_ground(world, parser.value_raw("calc-dir"));
+        const auto level = ground.protocol();
+        loaded.emplace(saved_states::load_ground(
+            world, ground,
+            parser.key_exists("thresh") ? std::stod(parser.value("thresh")) : level.thresh,
+            override_k > 0 ? override_k : level.k));
+        archive_path = ground.archive.string();
+        fock_json = ground.fock_json;
+      } else {
+        // A standalone moldft archive with its calc_info and Fock files beside
+        // it (the response fixtures).
+        archive_path = parser.value_raw("archive");
+        auto header = GroundState::read_archive_header(world, archive_path);
+        const double thresh = parser.key_exists("thresh")
+                                  ? std::stod(parser.value("thresh"))
+                                  : default_thresh_for_k(header.k);
+        set_response_protocol(world, header.L, thresh, override_k);
+        Molecule molecule;
+        auto dir = std::filesystem::path(archive_path).parent_path();
+        for (const auto &name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
+          auto cand = dir / name;
+          if (std::filesystem::exists(cand)) {
+            std::ifstream ifs(cand);
+            nlohmann::json j;
+            ifs >> j;
+            nlohmann::json mj;
+            if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
+              mj = j["tasks"][0]["molecule"];
+            else if (j.contains("molecule")) mj = j["molecule"];
+            if (!mj.is_null()) molecule.from_json(mj);
+            break;
+          }
+        }
+        loaded.emplace(GroundState::from_archive(world, archive_path, molecule));
+        for (const auto &name : {"moldft.fock.json", "mad.fock.json"}) {
+          auto cand = dir / name;
+          if (std::filesystem::exists(cand)) { fock_json = cand.string(); break; }
         }
       }
-      auto gs = GroundState::from_archive(world, archive_path, molecule);
-      std::string fock_json;
-      for (const auto &name : {"moldft.fock.json", "mad.fock.json"}) {
-        auto cand = dir / name;
-        if (std::filesystem::exists(cand)) { fock_json = cand.string(); break; }
-      }
+      auto &gs = *loaded;
       const double t = FunctionDefaults<3>::get_thresh();
       auto coulop = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t));
       gs.prepare(world, 0.001 * t, coulop, fock_json);
@@ -140,8 +163,8 @@ int main(int argc, char **argv) {
       // The stand-ins above exercise the algebra; real responses give physical
       // magnitudes for the (p,q)-vs-V^{bc} comparison.
       std::string src = "stand-in (dipole combinations + phi admixture)";
-      if (parser.key_exists("calc-dir")) {
-        MADNESS_CHECK_THROW(parser.key_exists("freq"), "--calc-dir needs --freq");
+      if (parser.key_exists("freq")) {
+        MADNESS_CHECK_THROW(parser.key_exists("calc-dir"), "--freq needs --calc-dir");
         const std::string cdir = parser.value_raw("calc-dir");
         const double freq = std::stod(parser.value("freq"));
         const int ba = parser.key_exists("baxis") ? std::stoi(parser.value("baxis")) : 2;
