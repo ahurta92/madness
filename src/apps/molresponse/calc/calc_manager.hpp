@@ -5,9 +5,9 @@
 // CalcManager — the scheduling core (doc 15, increment 15a).
 //
 // This header is the WORLD-FREE, PURE half of the calc manager: it turns a
-// ResponsePlan (doc 14 Tier A) into a DAG of CalcNodes, reconciles each node
-// against what is already on disk (response_metadata.json), and emits the
-// two-phase, perturbation-parallel schedule of (node, protocol) WorkItems.
+// ResponsePlan (doc 14 Tier A) into a DAG of CalcNodes and emits, from the
+// response session's plan for every state, the two-phase,
+// perturbation-parallel schedule of (node, protocol) WorkItems.
 //
 // Nothing here touches madness::World, MPI, MRA functions, or the archive.
 // Every function takes the aggregate metadata as a const nlohmann::json& so a
@@ -22,7 +22,7 @@
 //     one node per atom; n_atoms is all that requires. CalcManager::build()
 //     (executor side) extracts natom() from the Molecule and forwards it. This
 //     keeps the whole header molecule-independent and trivially testable.
-//   * reconcile_protocol / prerequisites_converged / schedule are keyed off the protocol step THRESHOLD
+//   * planned_action / prerequisites_converged / schedule are keyed off the protocol step THRESHOLD
 //     (a double), not a pre-built protocol_key string. k is derived once via
 //     default_k_for_thresh, so callers only thread the ramp of thresholds.
 //     (15a assumes the standard thresh->k table; an override_k ramp is a
@@ -33,11 +33,6 @@
 //     symbolic expansion template, excluded from scheduling until ES
 //     converges); prerequisites_converged becomes load-bearing for VBC in 15b and is
 //     implemented + tested now so 15b inherits a working gate.
-//   * The reconcile diverged-split reads `entry.value("diverged", false)`
-//     defensively: the FD/ES save paths record `converged` today but not
-//     `diverged`. Recording it is a one-line follow-up on the persistence
-//     side; until then a missing field reads as not-diverged (-> Resume),
-//     which is the safe default.
 // ===========================================================================
 
 #include "../Perturbations.hpp"          // Perturbation
@@ -72,7 +67,6 @@
 //   wave           a set of states with no prerequisite between them — safe to
 //                  solve concurrently.
 //   prerequisite   a state that must be CONVERGED before this one (correctness).
-//   seed_from      a soft starting-guess hint (efficiency; falls back to fresh).
 // ---------------------------------------------------------------------------
 
 namespace molresponse_v3 {
@@ -123,11 +117,6 @@ struct CalcNode {
   // node runs. Resolved by prerequisites_converged against the DAG + metadata.
   std::vector<std::string> prerequisites;
 
-  // Soft edge: a seed HINT (node id), never required for correctness. The
-  // executor always picks the nearest converged state via try_load_fd_state's
-  // restart precedence; this only biases intra-perturbation ordering.
-  std::string         seed_from;
-
   /// A symbolic node is an expansion template, not directly schedulable:
   /// a DerivedFD that still references "*" (or no concrete frequency yet).
   bool is_symbolic() const {
@@ -156,30 +145,21 @@ struct WorkItem {
   NodeAction      action = NodeAction::Fresh;
 };
 
-/// DESIGN B6, D-016: what the madqc planner (madness::planning::plan_ladder)
-/// decided on `--continue` for one FD state. Named stages pass one per
-/// requested state; the unnamed path passes none, and scheduling is
-/// reconcile_protocol's alone, as before.
+/// DESIGN B6, D-016: what the response session decided for one state. The
+/// session gives every state a plan; schedule() refuses a state without one.
 ///   load    the saved state is used as it is: Skip at every rung. When it
-///           meets today's request (`met`), the analysis counts the leg as
-///           met, decided by the planner; a stalled final rung loaded with
-///           the request unmet (R2) is not met.
+///           meets today's request (`met`), a dependent state counts it as
+///           converged.
 ///   resume  Skip every rung looser than start_thresh (a finished rung is never
-///           redone). Each rung from start_thresh on is solved once in this run
-///           (Resume an entry at that rung, else Restart from the nearest
-///           coarser one, else Fresh); after that, reconcile_protocol decides.
-///   fresh   as resume, but the start rung solves from a zero guess.
-///   seed    as fresh, but the start rung starts from the same perturbation's
-///           saved state at seed_frequency (R4/R7: the nearest saved
-///           frequency; R6: the state's own converged coarser rung).
+///           redone). Each rung from start_thresh on is scheduled once in this
+///           run; the session's node decides how far the state goes.
+///   fresh   as resume, but the start rung is marked Fresh.
 struct StatePlan {
-  enum class Kind : std::uint8_t { load, resume, fresh, seed };
+  enum class Kind : std::uint8_t { load, resume, fresh };
   Kind        kind = Kind::fresh;
   double      start_thresh = 0.0;
   std::string loaded_key;   ///< load: protocol key of the saved state loaded
   bool        met = false;  ///< load: the saved state meets today's request
-  double      seed_frequency = 0.0;  ///< seed: the frequency it starts from
-  bool        controller_owned = false; // shared controller owns completion and update allowance
 };
 /// The plans of one run, by fd_node_id.
 using StatePlans = std::map<std::string, StatePlan>;
@@ -253,9 +233,6 @@ inline bool ramp_contains(const std::vector<double> &ramp, double thresh) {
 inline bool entry_converged(const nlohmann::json &e) {
   return e.value("converged", false);
 }
-inline bool entry_diverged(const nlohmann::json &e) {
-  return e.value("diverged", false);
-}
 
 /// FD status entry at an exact (pert, key, freq) or nullptr. D-115: the
 /// frequency key is "f%.5f", so two frequencies closer than its last digit
@@ -279,12 +256,6 @@ fd_entry(const nlohmann::json &meta, const std::string &pert,
     return nullptr;
   return &e;
 }
-
-// FD coarser-source selection now lives in one shared helper —
-// best_usable_fd_source_key (response_metadata.hpp) — used by both the
-// reconcile verdict here and the archive load in try_load_fd_state, so the two
-// can never disagree. (Replaced the old converged-only has_coarser_converged_fd,
-// which missed coarser PARTIALS and didn't exclude diverged seeds.)
 
 /// Is this excited_states entry the bundle `node` asks for? The entry must
 /// record the same type (tda/full) and root count. A legacy entry that records
@@ -311,50 +282,6 @@ inline const nlohmann::json *es_entry(const nlohmann::json &meta,
   return es_entry_matches(e, node) ? &e : nullptr;
 }
 
-/// VBC status entry at vbc_states/<id>/<key>, or nullptr.
-inline const nlohmann::json *
-vbc_entry(const nlohmann::json &meta, const std::string &id,
-          const std::string &key) {
-  if (!meta.contains("vbc_states")) return nullptr;
-  const auto &vs = meta["vbc_states"];
-  if (!vs.contains(id) || !vs[id].contains(key)) return nullptr;
-  return &vs[id][key];
-}
-
-inline bool has_coarser_converged_vbc(const nlohmann::json &meta,
-                                      const std::string &id,
-                                      double target_thresh, int target_k) {
-  if (!meta.contains("vbc_states") || !meta["vbc_states"].contains(id))
-    return false;
-  if (!meta.contains("protocols")) return false;
-  const auto &protos = meta["protocols"];
-  for (const auto &[k2, ent] : meta["vbc_states"][id].items()) {
-    if (!entry_converged(ent)) continue;
-    if (!protos.contains(k2)) continue;
-    const double t  = protos[k2].value("thresh", 0.0);
-    const int    kk = protos[k2].value("k", 0);
-    if (t >= target_thresh && kk <= target_k) return true;
-  }
-  return false;
-}
-
-inline bool has_coarser_converged_es(const nlohmann::json &meta,
-                                     const CalcNode &node,
-                                     double target_thresh, int target_k) {
-  if (!meta.contains("excited_states") || !meta.contains("protocols"))
-    return false;
-  const auto &protos = meta["protocols"];
-  for (const auto &[key, ent] : meta["excited_states"].items()) {
-    if (!es_entry_matches(ent, node)) continue;
-    if (!entry_converged(ent)) continue;
-    if (!protos.contains(key)) continue;
-    const double t  = protos[key].value("thresh", 0.0);
-    const int    kk = protos[key].value("k", 0);
-    if (t >= target_thresh && kk <= target_k) return true;
-  }
-  return false;
-}
-
 } // namespace detail_calc
 
 // ---------------------------------------------------------------------------
@@ -362,8 +289,7 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 // ---------------------------------------------------------------------------
 
 /// Expand a ResponsePlan into schedulable nodes:
-///   * fd          -> one FD node each; dynamic ω gets seed_from = the same
-///                    perturbation's static (ω=0) node if the plan has one.
+///   * fd          -> one FD node each.
 ///   * es          -> one ES node each.
 ///   * derived_fd  -> one SYMBOLIC DerivedFD node each (es_root_id kept),
 ///                    prerequisites = {the plan's ES node id}. Expanded to
@@ -376,14 +302,6 @@ inline bool has_coarser_converged_es(const nlohmann::json &meta,
 std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
   std::vector<CalcNode> dag;
 
-  // Pre-index static dipole frequencies per perturbation for seed hints.
-  auto has_static_fd = [&](const std::string &pdesc) {
-    for (const auto &r : plan.fd)
-      if (r.pert.description() == pdesc && std::abs(r.freq) < 1e-12)
-        return true;
-    return false;
-  };
-
   for (const auto &r : plan.fd) {
     CalcNode n;
     n.kind      = CalcKind::FD;
@@ -391,8 +309,6 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
     n.freq      = r.freq;
     n.protocols = r.protocols;
     n.id        = fd_node_id(r.pert, r.freq);
-    if (std::abs(r.freq) >= 1e-12 && has_static_fd(r.pert.description()))
-      n.seed_from = fd_node_id(r.pert, 0.0);
     dag.push_back(std::move(n));
   }
 
@@ -464,124 +380,14 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
 }
 
 // ---------------------------------------------------------------------------
-// reconcile_protocol — what to do with one node at one protocol step. Pure.
-// ---------------------------------------------------------------------------
-
-/// Implements the doc-15 reconcile table at threshold `thresh`:
-///   converged at this protocol step                       -> Skip
-///   else converged at a coarser-or-equal protocol step    -> Restart
-///   else present, not converged, not diverged    -> Resume
-///   else present, diverged                        -> Fresh
-///   else absent                                   -> Fresh
-///
-/// HONEST-CLIMB refinement (FD family, active when max_iters > 0): a rung whose
-/// last attempt already used >= max_iters iterations without diverging is DONE
-/// for this rung -> Skip. The ladder is a guess-refinement scheme: the coarse
-/// rung's job is to produce the best seed for the next rung (which Restart-seeds
-/// from it and projects up), NOT to block the climb. `converged` stays honestly
-/// false — the property layer's per-row accuracy carries the verdict, and the
-/// consumer (cm_record/cm_check) applies the dconv policy. Re-running with a
-/// LARGER --maxiter turns the same entry back into Resume (iter < max_iters), so
-/// "continue iterating" is still available. max_iters == 0 = legacy strict
-/// behavior (Resume forever; run() then halts on no-progress).
-///
-/// `es_max_iters` > 0 replaces max_iters for ES nodes (deck excited.maxiter);
-/// 0 inherits max_iters. FD and VBC nodes never see it.
-NodeAction reconcile_protocol(const CalcNode &node, const nlohmann::json &meta,
-                          double thresh, int max_iters = 0,
-                          int es_max_iters = 0) {
-  const int         k   = default_k_for_thresh(thresh);
-  const std::string key = protocol_key(thresh, k);
-
-  // A DIVERGED exact-key entry must NOT resume the blown-up state — but it
-  // should still re-seed from the nearest COARSER converged neighbor when one
-  // exists (doc-15 reconcile table), not fall back to a bare x0=0 Fresh solve
-  // and throw away the coarse-to-fine ladder. Restart re-seeds; Fresh only
-  // when there is no usable coarser source. (Safe against a persistently-
-  // diverging channel: a deterministic re-solve from the same coarser seed
-  // saves identical metadata, which run()'s progress-aware no-progress guard
-  // then quarantines — no infinite Restart loop.)
-  if (node.kind == CalcKind::ES) {
-    if (const auto *e = detail_calc::es_entry(meta, key, node)) {
-      if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
-      if (detail_calc::entry_diverged(*e))
-        return detail_calc::has_coarser_converged_es(meta, node, thresh, k)
-                   ? NodeAction::Restart : NodeAction::Fresh;
-      // Honest climb, as for FD below (review finding C12): a stalled or
-      // budget-exhausted bundle is done at this rung. Without this a stalled
-      // bundle came back Resume on every pass, and the no-progress guard only
-      // stops it if a re-solve writes byte-identical metadata.
-      const int budget = es_max_iters > 0 ? es_max_iters : max_iters;
-      if (budget > 0 &&
-          (e->value("iter", 0) >= budget || e->value("stalled", false)))
-        return NodeAction::Skip;
-      return NodeAction::Resume;
-    }
-    return detail_calc::has_coarser_converged_es(meta, node, thresh, k)
-               ? NodeAction::Restart
-               : NodeAction::Fresh;
-  }
-
-  if (node.kind == CalcKind::VBC) {
-    if (const auto *e = detail_calc::vbc_entry(meta, node.id, key)) {
-      if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
-      if (detail_calc::entry_diverged(*e))
-        return detail_calc::has_coarser_converged_vbc(meta, node.id, thresh, k)
-                   ? NodeAction::Restart : NodeAction::Fresh;
-      return NodeAction::Resume;
-    }
-    return detail_calc::has_coarser_converged_vbc(meta, node.id, thresh, k)
-               ? NodeAction::Restart
-               : NodeAction::Fresh;
-  }
-
-  // FD / NuclearFD / (concrete) DerivedFD all live in fd_states.
-  const std::string pert = node.pert.description();
-  const std::string fkey = ResponseMetadata::freq_key(node.freq);
-  if (const auto *e = detail_calc::fd_entry(meta, pert, key, fkey, node.freq)) {
-    if (detail_calc::entry_converged(*e)) return NodeAction::Skip;
-    if (detail_calc::entry_diverged(*e))
-      // Re-seed from the nearest coarser NON-diverged source (best_usable
-      // excludes the diverged exact entry itself); Fresh only if none exists.
-      return best_usable_fd_source_key(meta, pert, fkey, thresh, k, key).empty()
-                 ? NodeAction::Fresh : NodeAction::Restart;
-    // Honest-climb: budget exhausted at this rung -> done here, climb (see
-    // the doc block above). `iter` is the last attempt's count (save-side).
-    //
-    // A STALLED attempt counts as exhausted too. The plateau detector (off by
-    // default since D-133; a deck can write stall.window for the excited-state
-    // bundle) gives up at stall_window iterations, well short of max_iters (60
-    // in the shipped decks), so `iter >= max_iters` never fires for it: the
-    // rung came back Resume, re-solved from the same state, plateaued in the
-    // same place, and came back Resume again. The no-progress guard in run() is
-    // the second net, and it was not catching this either (its fingerprint
-    // included wall_s/rss_gb) -- so the default path on any ladder tighter than
-    // two rungs did not terminate. A re-solve of a plateaued state is
-    // deterministic; there is nothing to gain by running it again.
-    if (max_iters > 0 &&
-        (e->value("iter", 0) >= max_iters || e->value("stalled", false) || e->value("rung_exhausted", false)))
-      return NodeAction::Skip;
-    return NodeAction::Resume;
-  }
-  // No exact entry: a coarser-or-equal NON-diverged snapshot (converged OR a
-  // partial) is a usable restart seed — a coarse partial need not be converged
-  // to seed the finer step. Same helper try_load_fd_state uses, so the verdict
-  // and the load can never disagree (doc-15 reconcile refinement #5).
-  return !best_usable_fd_source_key(meta, pert, fkey, thresh, k, key).empty()
-             ? NodeAction::Restart
-             : NodeAction::Fresh;
-}
-
-// ---------------------------------------------------------------------------
 // planned_action — what a planner decision (StatePlan) forces at one rung. Pure.
 // ---------------------------------------------------------------------------
 
-/// The action `plan` forces on an FD-family or ES `node` at `thresh`, or
-/// nullopt when reconcile_protocol decides (a rung this run has already
-/// solved). The forced source is the one the loader will pick
-/// (best_usable_fd_source_key, best_usable_es_source_key), so the trace names
-/// what is actually loaded.
-inline std::optional<NodeAction>
+/// The action `plan` gives `node` at `thresh`. A rung this run has already
+/// scheduled is Skip: the session's node owns completion. Otherwise the
+/// action names the source the metadata holds (best_usable_fd_source_key,
+/// best_usable_es_source_key), for the scheduler trace.
+inline NodeAction
 planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
                const StatePlan &plan, const SolvedRungs &solved) {
   if (plan.kind == StatePlan::Kind::load) return NodeAction::Skip;
@@ -591,11 +397,8 @@ planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
   if (!at_start && thresh > start) return NodeAction::Skip;
   const int         k   = default_k_for_thresh(thresh);
   const std::string key = protocol_key(thresh, k);
-  if (solved.contains(node.id + "|" + key))
-    return plan.controller_owned ? std::optional<NodeAction>(NodeAction::Skip) : std::nullopt;
+  if (solved.contains(node.id + "|" + key)) return NodeAction::Skip;
   if (at_start && plan.kind == StatePlan::Kind::fresh) return NodeAction::Fresh;
-  // The executor loads the seed (seed_start) for a Restart at the start rung.
-  if (at_start && plan.kind == StatePlan::Kind::seed) return NodeAction::Restart;
   // An excited-state bundle (D-025): the source the bundle loader picks.
   if (node.kind == CalcKind::ES) {
     const std::string source = best_usable_es_source_key(
@@ -609,16 +412,6 @@ planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
       thresh, k, key);
   if (source.empty()) return NodeAction::Fresh;
   return source == key ? NodeAction::Resume : NodeAction::Restart;
-}
-
-/// The seed frequency `plan` starts `node` from at `thresh`, or nullopt: only a
-/// seed plan, only at its start rung. The executor asks this before solving.
-inline std::optional<double> seed_start(const StatePlan &plan, double thresh) {
-  const double start = plan.start_thresh;
-  if (plan.kind != StatePlan::Kind::seed ||
-      std::abs(thresh - start) > 1e-12 * std::max(thresh, start))
-    return std::nullopt;
-  return plan.seed_frequency;
 }
 
 // ---------------------------------------------------------------------------
@@ -680,7 +473,7 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 ///   Phase B (protocol step in ramp[1..]): one wave per protocol step of every participating
 ///     node (embarrassingly parallel).
 /// A node participates in a protocol step only if the protocol step is in its protocols ladder
-/// and reconcile_protocol != Skip. Symbolic nodes (DerivedFD "*") are excluded —
+/// and planned_action != Skip. Symbolic nodes (DerivedFD "*") are excluded —
 /// they are expansion templates resolved post-ES. Gated nodes (deps not
 /// ready) are dropped from the wave and picked up on a later re-schedule
 /// (after run() updates the metadata). Empty waves are omitted.
@@ -696,14 +489,13 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 /// full list is returned anyway: it is cheap and makes the schedule legible /
 /// unit-testable.)
 ///
-/// `plans` (named path, D-016): a node with a plan takes planned_action's
-/// verdict; `solved` lists the rungs this run has solved, after which
-/// reconcile_protocol decides again. Empty plans: reconcile_protocol alone.
+/// `plans` (D-016): the session's plan for every schedulable node, which
+/// takes planned_action's verdict; a node without a plan is an error.
+/// `solved` lists the rungs this run has scheduled.
 std::vector<std::vector<WorkItem>>
 schedule(const std::vector<CalcNode> &dag,
          const std::vector<double> &global_ramp,
-         const nlohmann::json &meta, int max_iters = 0,
-         int es_max_iters = 0, const StatePlans &plans = {},
+         const nlohmann::json &meta, const StatePlans &plans,
          const SolvedRungs &solved = {}) {
   using detail_calc::ramp_contains;
   std::vector<std::vector<WorkItem>> waves;
@@ -720,13 +512,11 @@ schedule(const std::vector<CalcNode> &dag,
   auto make_item = [&](const CalcNode *n, double thresh,
                        WorkItem &out) -> bool {
     if (!ramp_contains(n->protocols, thresh)) return false;
-    if (!prerequisites_converged(*n, dag, meta, thresh, plans)) return false;
     const auto plan = plans.find(n->id);
-    const auto forced = plan == plans.end()
-        ? std::nullopt
-        : planned_action(*n, meta, thresh, plan->second, solved);
-    const NodeAction a = forced ? *forced
-        : reconcile_protocol(*n, meta, thresh, max_iters, es_max_iters);
+    if (plan == plans.end())
+      throw std::logic_error("response state " + n->id + " has no plan");
+    if (!prerequisites_converged(*n, dag, meta, thresh, plans)) return false;
+    const NodeAction a = planned_action(*n, meta, thresh, plan->second, solved);
     if (a == NodeAction::Skip) return false;
     out = WorkItem{n, thresh, a};
     return true;
@@ -889,14 +679,6 @@ struct NodeResult {
 /// -> save (+metrics). The only World-bound surface of the calc manager.
 struct ICalcExecutor {
   virtual NodeResult run_protocol(const WorkItem &item) = 0;
-  /// D-089: an excited-state bundle the planner loads is not solved, so its
-  /// transition analysis is computed from the saved states when the run has
-  /// none: `n_roots` the saved bundle's, `thresh` the loaded rung's. Returns
-  /// whether an analysis was written. Collective; a no-op by default.
-  virtual bool analyze_loaded_bundle(const CalcNode & /*node*/,
-                                     int /*n_roots*/, double /*thresh*/) {
-    return false;
-  }
   virtual ~ICalcExecutor() = default;
 };
 

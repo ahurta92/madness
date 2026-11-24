@@ -7,29 +7,18 @@
 // order; this header actually drives the solves.
 //
 //   FdResponseExecutor : ICalcExecutor
-//       run_protocol(WorkItem) -> one protocol step of an FD/NuclearFD
-//       solve. Dispatches Static/Full × Closed/Open at runtime, builds the
-//       perturbation source, honors the reconcile action for seed loading,
-//       runs solvers::iterate_protocol over the single protocol step threshold (with
-//       a reproject-prepare and a save post_step), and reports convergence.
+//       run_protocol(WorkItem) -> one protocol step of a driven state, an
+//       excited-state bundle or a VBC source, each through its node in the
+//       response session (solvers/shared_response_session.hpp). Dispatches
+//       Static/Full x Closed/Open at runtime for driven states.
 //
 //   CalcManager
 //       build(n_atoms) -> dag from the plan; run(world, exec) -> the
 //       one-wave-per-pass reschedule loop. Each pass reloads the aggregate
-//       metadata and re-schedules, so every protocol step's action is computed against
-//       up-to-date disk state (the protocol-step-level barrier the design decided on).
+//       metadata and re-schedules from the session's plan for every state.
 //
-// Scope (15a): FD (dipole + nuclear) closed-shell, dipole open-shell. ES
-// bundles and DerivedFD expansion are recognized but not yet solved here —
-// run_protocol returns not-converged with a clear message and run() stops cleanly
-// once it can make no further progress. The ES executor + derived expansion
-// are the next increment; the expansion hook below is already wired so only
-// the ES solve has to land.
-//
-// This header reuses, unchanged, exactly the machinery the FD skeleton test
-// exercises: GroundState::prepare, build_response_ground_state_*,
-// dipole/nuclear_perturbation, FDSolver, iterate_protocol, try_load_fd_state,
-// save_fd_state.
+// The assemble_* functions contract the qualified states of the session into
+// the requested properties.
 // ===========================================================================
 
 #include "../solvers/shared_response_session.hpp"
@@ -50,7 +39,6 @@
 #include "../solvers/dalton_import.hpp"   // dalton_fd_guess (seed.freq_tol)
 #include "../kernels/beta.hpp"
 #include "../kernels/tpa_source_spec.hpp"
-#include "../kernels/vbc.hpp"
 #include "../solvers/es_analysis.hpp"
 #include "../solvers/es_save_load.hpp"
 #include "../solvers/es_seed_guard.hpp"
@@ -80,7 +68,6 @@ inline EsSeedReference make_es_seed_reference(madness::World &world,
 #include "../solvers/node_subworlds.hpp"
 #include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
-#include "../solvers/vbc_save_load.hpp"
 
 #include <madness/mra/mra.h>
 #include <madness/world/MADworld.h>
@@ -101,42 +88,22 @@ inline EsSeedReference make_es_seed_reference(madness::World &world,
 
 namespace molresponse_v3 {
 
-/// Executor configuration carried by ResponseWorkflowInput. The optional shared
-/// checkpoint binding is World-bound; its initial adapter forbids subworlds.
+/// Executor configuration carried by ResponseWorkflowInput. Every response
+/// run has a session (shared_response); it owns the nodes of all states.
 struct ExecutorSettings {
   std::shared_ptr<response_shared::Session> shared_response;
-
-  // Named stages publish a consistent snapshot after a complete FD protocol step.
-  // Empty for legacy callers; this does not change solver steps or stopping tests.
-  std::function<void(madness::World&, const nlohmann::json&)> checkpoint_observer;
-  // Named stages: the planner's decision per FD state (D-016); empty otherwise.
+  // The session's plan for every state (D-016).
   StatePlans        state_plans;
   ConvergencePolicy policy;
   PrintLevel        print_level = PrintLevel::Normal;
   // Guards the shared print functions (IterationOutput.h); from the same print_level.
   madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::detail;
   std::string       calc_dir;      // holds response_metadata.json + archives
-  int               max_iters = 25;
-  // ES iteration budget per rung (deck excited.maxiter); 0 = inherit max_iters.
-  int               es_max_iters = 0;
-  int es_iter_budget() const { return es_max_iters > 0 ? es_max_iters : max_iters; }
-  // Cross-type seed toggle (optional): a derived FD starts from its converged
-  // ES-root vector rather than the perturbation source. Default OFF — measured
-  // neutral-to-slightly-worse at ωₙ/2 (off-resonance, H2); the ES root is the
-  // right guess only for a future AT-resonance (factor 1.0) derived FD. FUTURE:
-  // make the seed selectable per node, and allow a MIXTURE of roots to target
-  // in-between frequencies (not just a single root's vector).
-  bool              seed_derived_from_es_root = false;
   // DALTON nearest-frequency seed for FD legs absent from the RSPVEC (the
   // derived two-photon legs at omega_f/2). Set from the deck (`dalton.dir`,
   // `seed.freq_tol`) or --dalton-dir/--seed-freq-tol. 0 = off (2026-09-09).
   std::string       dalton_dir;
   double            seed_freq_tol         = 0.0;
-  // ES seed handling (2026-09-10): false = the Full solve starts directly from
-  // the seeded (x, y) at the active rung — the seeded workflow's intent (no TDA
-  // warmup at all); true = KAIN-free TDA warmup from the seed's X block, then
-  // promote to Full. Diagnostic only; deck `seed.es_warmup`, --seed-es-warmup.
-  bool              es_seed_warmup        = false;
   // Deck `diagnostics.properties`: cheap property values in each history row
   // (polarizability rows of dipole states against these axes, excitation
   // energies). Information only; never a result, never a second-order step.
@@ -150,63 +117,6 @@ struct ExecutorSettings {
   // #occupied(l), so a larger basis reaches further up the radial ladder
   // (Rydberg series want d-aug-cc-pvtz or similar). Ignored by other modes.
   std::string       es_guess_basis        = "aug-cc-pvdz";
-  // --tpa-residue: contract the 2PA moment with the corrected single-residue
-  // form (tpa::tpa_moment_residue — X_f in the residue slot against V^{bc}
-  // built from the two photon responses) instead of the legacy beta-reuse
-  // candidate. --tpa-prefactor scales the residue moment (normalization C_N).
-  // DEFAULT TRUE since 2026-09-05: running WITHOUT this flag silently used the
-  // legacy beta-reuse contraction, which is the "reuse V^BC and negate" form —
-  // measured 3-11% below the validated composition (and DALTON) on H2O
-  // per-root moments (reports/2026-09-04_report_pq_vbc_reconciliation). The
-  // legacy form is kept behind --tpa-legacy as the measured comparison arm.
-  bool              tpa_residue           = true;
-  // Contraction composition for the two-electron residue when tpa_residue:
-  // false (DEFAULT) = the Parker-style state-free (P,Q) source via the spec
-  // engine (kernels/tpa_source_spec.hpp, symmetrized builder) — the form that
-  // matches V^BC term-for-term (one dagger + one reorientation). true = the
-  // c-grouped composition (tpa_e3_residue) — gate-equal (test_tpa_pq_vs_vbc,
-  // 3e-7) and kept as the production comparison arm (--tpa-cgrouped).
-  bool              tpa_cgrouped          = false;
-  // DIAGNOSTIC (2026-09-08): swap which eigenvector half contracts which
-  // channel, i.e. <y^f|P> + <x^f|Q> instead of <x^f|P> + <y^f|Q>. Parker's
-  // Eqs. (28a,b) can be read — under one inferred index convention for the two
-  // exchange orderings in H^+/H^- — as assigning the daggered Fock operator to
-  // the OPPOSITE channel from ours. This flag makes that reading testable
-  // against DALTON. Never for production.
-  bool              tpa_swap_pq           = false;
-  double            tpa_prefactor         = 1.0;
-  // Quadratic-source builder for beta/Raman (2026-09-09,
-  // reports/2026-09-09_orientation_derivation). Both builders now encode the
-  // ONE second-order source of the theory (Hurtado eq 19): vbc::compute_vbc
-  // (kernels/vbc.hpp, legs written with the source_spec leg dictionary) and
-  // tpa::quadratic_source (the (P,Q) spec of tpa_source_spec.hpp, one call =
-  // both photon orderings, unprojected occupied components that the 2n+1
-  // contraction never sees). They are asserted equal up to Q-projection by
-  // tests/test_vbc_spec_equivalence. Before 2026-09-09 vbc.hpp built every
-  // response density transposed (H2O SHG omega=0.1 vs DALTON d-aug-cc-pVQZ:
-  // beta_zxx +12.9%, beta_xxz -4.0%); --beta-vbc-source therefore no longer
-  // selects a "legacy" object, only the other of two equivalent builders.
-  // DEFAULT: the (P,Q) builder (validated against DALTON for 2PA and SHG).
-  bool              beta_pq_source        = true;
-  // --beta-compare-sources: at beta/Raman contraction time, rebuild the OTHER
-  // builder's source from the same loaded (B,C) legs and print both beta
-  // values with their difference (an equality check on real states).
-  // Diagnostic only; costs one extra source build per pair.
-  bool              beta_compare_sources  = false;
-  // --tpa-decompose: also compute the zero-operator (pure two-electron E3)
-  // variant of the residue and print the per-element E3/1e split + the
-  // phase- and normalization-invariant fraction f = E3/total (compare vs the
-  // patched-DALTON 'E3 CONTRIBUTION TO SMOM' ledger, TPA_SCOPING §5n).
-  bool              tpa_decompose         = false;
-  // --tpa-diag-only: print the cross-code diagnostics (norms, transition
-  // dipoles, alpha(w/2)) from the loaded states and SKIP the contraction and
-  // all metadata writes — a fast read-only pass over a converged calc dir.
-  bool              tpa_diag_only         = false;
-  // --tpa-roots=0,2 : restrict the TPA loop to these root indices (0-based).
-  // Enables poor-man's macrotasking: N independent single-rank processes, one
-  // per root, on one node. When set, the metadata/property write is SKIPPED
-  // (read-only pass) so concurrent per-root processes cannot race.
-  std::vector<int>  tpa_roots;
   int               es_tda_warmup_iters   = 10;
   // Warmup oversampling: keep the lowest n_roots of ceil(factor*n_roots)
   // partially-converged warmup trials. 3.0 (was 2.0) because on the PRODUCTION
@@ -243,37 +153,12 @@ struct ExecutorSettings {
   // Off unless written; the driven legs' policy keeps it off.
   int               es_stall_window       = 0;
   double            es_stall_ratio        = 0.10;
-  // Cache the (promoted) TDA warmup guess to a side bundle es_warmup__<pkey> and
-  // reuse it on later runs, so iterating on the Full main solve skips the warmup.
-  // Opt-in; the main solve never overwrites the cache (stable fixed start point).
-  bool              es_warmup_cache       = false;
-  // Persistent location for the warmup cache (empty = ctx.calc_dir). Set this to
-  // a fixed per-fixture path so the cached guess survives across fresh calc dirs
-  // (cm_es makes a new timestamped calc dir each run). Setting it implies caching.
-  std::string       es_warmup_cache_dir;
   // Inc-3c tensor-layer ES γ (--es-tensor; TDA/ClosedShell only): the bundle's
   // exchange runs off the per-protocol cached g0 tensor + per-root contractions
   // (ESSolver::set_gamma_tensor / tda_batch::compute_gamma_flat) instead of one
   // Exchange operator per root per iter. A/B-to-floor vs the reference (~1e-3
   // rel in θ → ~1e-6 in a converged ω), NOT bitwise. Off by default.
   bool              es_gamma_tensor   = false;
-  // Best-effort acceptance at maxiter (FD nodes). When true, a non-diverged FD
-  // solve that exhausts max_iters WITHOUT meeting the strict target is recorded
-  // converged (with an `accepted` marker + its real residual). NOTE: ladder
-  // CLIMBING no longer needs this — reconcile's honest-climb rule (a budget-
-  // exhausted rung Skips forward with `converged` honestly false; see
-  // calc_manager.hpp reconcile_protocol) is the default. This flag's remaining
-  // purpose is to FORCE `converged=true` so the downstream VBC/property
-  // prerequisite gates unblock on a stubborn channel (e.g. the cusped
-  // nuclear-displacement Raman FD). Off by default (honest verdicts). The finest
-  // protocol in --protocol is the de-facto "final" rung; its recorded
-  // bsh_residual is the verdict either way.
-  bool              accept_at_maxiter = false;
-  // --hylleraas: after each FD solve, also evaluate the STATIONARY estimate of
-  // <v|x> and the error bound docs/guides/convergence.md states but nothing
-  // computed (|d alpha| <= |c| ||theta|| ||r_B||), plus a stationarity
-  // self-check. Static only. Off by default.
-  bool              hylleraas             = false;
   // F2 (doc 32 §5): fan independent states out across subworlds. This is the
   // number of subworlds PER PHYSICAL NODE (F2f): 0 = single-World reference
   // (byte-identical); 1 = one subworld per node (node-aligned); >1 = sub-node /
@@ -287,17 +172,11 @@ struct ExecutorSettings {
   // (valinomycin, 300 MOs: one SCF wants 6-8 nodes x 8 ranks, so each state
   // needs a 48-64-rank subworld). 0 = per-node packing (fd_subworlds).
   int               fd_subworld_ranks = 0;
-  // F2 (doc 32 §5.3): when non-empty, FD metadata writes go to a per-group shard
-  // response_metadata.group<tag>.json instead of the canonical file, so concurrent
-  // subworlds never race it; universe rank 0 merges the shards after the fence.
-  // "" = write the canonical file directly (the default / single-World path).
-  std::string       metadata_shard;
-  // F2d (doc 32 §5.6): per-subworld log attribution. Both are the EMPTY/-1
-  // sentinel in single-World mode ⇒ output byte-identical to the G=0 reference.
-  // Set by the fan-out closure. A non-empty log_prefix is ALSO the "I am in a
+  // F2d (doc 32 §5.6): per-subworld log attribution. Empty in single-World
+  // mode ⇒ output byte-identical to the G=0 reference. Set by the fan-out
+  // closure. A non-empty log_prefix is ALSO the "I am in a
   // subworld" signal that suppresses the redundant GS/protocol banners (F2d-ii).
   std::string       log_prefix;     // "[g2/3 xm005] " prepended to per-state human lines
-  int               log_group = -1; // node index → MEMORY_HWM `group=` field (-1 = omit)
 };
 
 /// Everything an FD protocol step solve needs beyond the node itself. The
@@ -409,37 +288,6 @@ inline void strip_volatile_metrics(nlohmann::json &j) {
 
 inline bool is_static_freq(double freq) { return std::abs(freq) < 1e-12; }
 
-/// Parse a derived-FD provenance label "es_root_NNNN" -> NNNN; -1 otherwise.
-inline int es_root_index(const std::string &label) {
-  const std::string pre = "es_root_";
-  if (label.rfind(pre, 0) != 0) return -1;
-  try { return std::stoi(label.substr(pre.size())); } catch (...) { return -1; }
-}
-
-/// Load a converged first-order state as an (X,Y) pair for the VBC build.
-/// Dynamic (freq != 0): the Full FD state directly. Static (freq == 0): the
-/// Static FD state with Y = X (the static limit). nullopt if not on disk.
-template <class Shell>
-inline std::optional<ResponseStateXY<Shell>>
-load_fd_as_xy(madness::World &world, const std::string &calc_dir,
-              const Perturbation &pert, double freq) {
-  if (is_static_freq(freq)) {
-    auto r = try_load_fd_state<Static, Shell>(world, calc_dir, pert, freq);
-    if (!r) return std::nullopt;
-    ResponseStateXY<Shell> xy;
-    xy.x_alpha = madness::copy(world, r->state.responses[0].x_alpha);
-    xy.y_alpha = madness::copy(world, r->state.responses[0].x_alpha);  // static: Y = X
-    if constexpr (std::is_same_v<Shell, OpenShell>) {
-      xy.x_beta = madness::copy(world, r->state.responses[0].x_beta);
-      xy.y_beta = madness::copy(world, r->state.responses[0].x_beta);
-    }
-    return xy;
-  }
-  auto r = try_load_fd_state<Full, Shell>(world, calc_dir, pert, freq);
-  if (!r) return std::nullopt;
-  return r->state.responses[0];
-}
-
 /// The saved state another node holds, as the starting guess of a shared
 /// driven state with no node of its own. A static state (X only) becomes
 /// (X, Y = X) for a dynamic target; a dynamic state gives a static target
@@ -537,22 +385,18 @@ void reproject_state(State &st, int k, double thresh) {
 // One protocol step of one FD node.
 // ---------------------------------------------------------------------------
 
-/// Solve (pert, freq) at a single protocol `thresh`. `action` is the reconcile
-/// verdict: Fresh starts from the perturbation guess (never loads, so a
-/// diverged archive can't poison the solve); Restart/Resume load the nearest
-/// converged-or-partial seed via try_load_fd_state (which re-projects a
-/// coarser source to the active key). Saves the result (+ metrics) through
-/// save_fd_state.
+/// Solve (pert, freq) at a single protocol `thresh` through the session's
+/// node for the state: it starts from its own saved state, from the nearest
+/// saved frequency, from an imported guess, or from zero, and the session
+/// decides when it stops and saves.
 template <typename Type, typename Shell>
 NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
-                         double freq, double thresh, NodeAction action,
-                         const std::string &es_root_id = std::string()) {
+                             double freq, double thresh) {
   using namespace madness;
   using Solver = FDSolver<Type, Shell>;
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
-  const double step_w0 = madness::wall_time();   // R1b: point-solve wall timer
-  if (ctx.shared_response) {
+  {
     auto& timing=ctx.shared_response->timing();
     timing.begin("protocol",{{"protocol",checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})}});
     timing.begin("task",{{"task_id",fd_node_id(pert,freq)}});
@@ -578,11 +422,7 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   detail_exec::fill_source<Type, Shell>(world, gs, pert,
                                         tgt.responses[0].source);
 
-  // Initial-guess precedence (the source carrier IS a valid Storage):
-  //   1. disk FD partial at this (pert, freq) — restart (skipped if Fresh);
-  //   2. else the converged ES-root vector if this is a derived FD and the
-  //      cross-type seed is enabled (optional, ctx.seed_derived_from_es_root);
-  //   3. else the perturbation source.
+  // Initial guess: zero, replaced below by a saved or imported state.
   typename Solver::State s0;
   s0.responses.resize(1);
   // Fresh guess x0 = 0 (matches molresponse_v2, which zero-allocates the response):
@@ -602,423 +442,110 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     madness::scale(world, zflat, 0.0);
     s0.responses[0].from_flat(zflat);           // independent zeros
   }
-  if (ctx.shared_response) {
-    namespace it=madness::iteration;
-    // With no saved state of its own, the state starts from the nearest
-    // frequency saved now (section 2 of step 4d).
-    auto& binding=ctx.shared_response->start_nearby(fd_node_id(pert,freq));
-    ctx.shared_response->timing().end();
-    binding.activate({t0,FunctionDefaults<3>::get_k()});
-    // Suppress the legacy stopping table; report the shared controller's checks.
-    Solver solver(world,std::move(tgt),ctx.policy,PrintLevel::Silent,ctx.log_prefix);
-    solver.set_print_level(ctx.print_level);
-    if (binding.has_saved()) {
-      it::ElapsedTimer<> load_timer;
-      const auto started_from=binding.started_from();
-      if (started_from) s0.responses.front()=detail_exec::load_start<Shell,typename Solver::Storage>(world,binding);
-      else s0.responses.front()=binding.template load<typename Solver::Storage>();
-      const double load_seconds=load_timer.seconds();
-      ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
-      if (started_from) {
-        // Only a starting guess: no measured value or update count is carried.
-        if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::start_source))
-          it::write_start_source(std::cout,pert.description(),freq,
-                                 binding.source_settings().at("frequency").template get<double>());
-      } else if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
-        const auto saved=binding.saved_metrics();
-        it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
-            it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());
-      }
-      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_timing))
-        it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
+  namespace it=madness::iteration;
+  // With no saved state of its own, the state starts from the nearest
+  // frequency saved now (section 2 of step 4d).
+  auto& binding=ctx.shared_response->start_nearby(fd_node_id(pert,freq));
+  ctx.shared_response->timing().end();
+  binding.activate({t0,FunctionDefaults<3>::get_k()});
+  // Suppress the legacy stopping table; report the shared controller's checks.
+  Solver solver(world,std::move(tgt),ctx.policy,PrintLevel::Silent,ctx.log_prefix);
+  solver.set_print_level(ctx.print_level);
+  if (binding.has_saved()) {
+    it::ElapsedTimer<> load_timer;
+    const auto started_from=binding.started_from();
+    if (started_from) s0.responses.front()=detail_exec::load_start<Shell,typename Solver::Storage>(world,binding);
+    else s0.responses.front()=binding.template load<typename Solver::Storage>();
+    const double load_seconds=load_timer.seconds();
+    ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
+    if (started_from) {
+      // Only a starting guess: no measured value or update count is carried.
+      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::start_source))
+        it::write_start_source(std::cout,pert.description(),freq,
+                               binding.source_settings().at("frequency").template get<double>());
+    } else if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
+      const auto saved=binding.saved_metrics();
+      it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
+          it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());
     }
-    if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
-      auto& timing=ctx.shared_response->timing();timing.begin("imported_guess");
-      bool imported=false;
-      if(auto loaded=try_load_fd_state<Type,Shell>(world,ctx.calc_dir,pert,freq)) {
-        s0=std::move(loaded->state);s0.iter=0;imported=true;
-      }
-      if constexpr(std::is_same_v<Type,Full> && std::is_same_v<Shell,ClosedShell>) {
-        if(!imported && ctx.seed_freq_tol>0.0 && pert.kind==Perturbation::Kind::Dipole)
-          if(auto guess=dalton_fd_guess(world,gs,ctx.dalton_dir,ctx.calc_dir,pert.axis,freq,ctx.seed_freq_tol)) {
-            s0.responses.front()=std::move(*guess);imported=true;
-          }
-      }
-      if(imported) {
-        binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
-        if(world.rank()==0) print("response: imported driven guess; fresh convergence checks");
-      }
-      timing.end();
+    if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_timing))
+      it::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
+  }
+  if(!binding.has_saved() && !ctx.dalton_dir.empty()) {
+    auto& timing=ctx.shared_response->timing();timing.begin("imported_guess");
+    bool imported=false;
+    if(auto loaded=try_load_fd_state<Type,Shell>(world,ctx.calc_dir,pert,freq)) {
+      s0=std::move(loaded->state);s0.iter=0;imported=true;
     }
-    std::size_t evaluations=0;
-    if (!binding.reusable()) {
-      // Diagnostic polarizability row: the assembly's own inner products, at
-      // this protocol, from the state just updated. One per requested axis.
-      std::map<int,vector_real_function_3d> dipoles;
+    if constexpr(std::is_same_v<Type,Full> && std::is_same_v<Shell,ClosedShell>) {
+      if(!imported && ctx.seed_freq_tol>0.0 && pert.kind==Perturbation::Kind::Dipole)
+        if(auto guess=dalton_fd_guess(world,gs,ctx.dalton_dir,ctx.calc_dir,pert.axis,freq,ctx.seed_freq_tol)) {
+          s0.responses.front()=std::move(*guess);imported=true;
+        }
+    }
+    if(imported) {
+      binding.note_guess({{"kind","dalton"},{"directory",ctx.dalton_dir}});
+      if(world.rank()==0) print("response: imported driven guess; fresh convergence checks");
+    }
+    timing.end();
+  }
+  std::size_t evaluations=0;
+  if (!binding.reusable()) {
+    // Diagnostic polarizability row: the assembly's own inner products, at
+    // this protocol, from the state just updated. One per requested axis.
+    std::map<int,vector_real_function_3d> dipoles;
+    if constexpr (std::is_same_v<Shell,ClosedShell>)
+      if (ctx.diagnostic_properties && pert.kind==Perturbation::Kind::Dipole)
+        for (int column:ctx.diagnostic_dipole_axes) dipoles[column]=dipole_perturbation(world,gs,column);
+    const auto observe=[&](const typename Solver::State& state,const it::IterationMetrics& metrics,
+                           const it::Decision& decision,const it::Progress& progress) {
+      ++evaluations;
+      std::vector<it::Diagnostic> diagnostics;
       if constexpr (std::is_same_v<Shell,ClosedShell>)
-        if (ctx.diagnostic_properties && pert.kind==Perturbation::Kind::Dipole)
-          for (int column:ctx.diagnostic_dipole_axes) dipoles[column]=dipole_perturbation(world,gs,column);
-      const auto observe=[&](const typename Solver::State& state,const it::IterationMetrics& metrics,
-                             const it::Decision& decision,const it::Progress& progress) {
-        ++evaluations;
-        std::vector<it::Diagnostic> diagnostics;
-        if constexpr (std::is_same_v<Shell,ClosedShell>)
-          for (const auto& [column,v]:dipoles) {
-            const auto& x=state.responses.front();
-            double value=0.0;
-            if constexpr (requires {x.y_alpha;}) value=-2.0*(inner(x.x_alpha,v)+inner(x.y_alpha,v));
-            else value=-2.0*(inner(x.x_alpha,v)+inner(x.x_alpha,v));
-            diagnostics.push_back({"polarizability",metrics.states.front().id,
-                                   std::string{char('x'+pert.axis),char('x'+column)},value});
-          }
-        if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
-          it::write_iteration_metrics(std::cout,"response",metrics,decision,
-              response_shared::metric_labels(),binding.final_level());
-        binding.record_evaluation(metrics,decision,diagnostics);
-        binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
-          MADNESS_CHECK_THROW(state.responses.size()==1,"driven task must contain one response state");
-          state.responses.front().save(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
+        for (const auto& [column,v]:dipoles) {
+          const auto& x=state.responses.front();
+          double value=0.0;
+          if constexpr (requires {x.y_alpha;}) value=-2.0*(inner(x.x_alpha,v)+inner(x.y_alpha,v));
+          else value=-2.0*(inner(x.x_alpha,v)+inner(x.x_alpha,v));
+          diagnostics.push_back({"polarizability",metrics.states.front().id,
+                                 std::string{char('x'+pert.axis),char('x'+column)},value});
+        }
+      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
+        it::write_iteration_metrics(std::cout,"response",metrics,decision,
+            response_shared::metric_labels(),binding.final_level());
+      binding.record_evaluation(metrics,decision,diagnostics);
+      binding.publish(metrics,decision,progress,[&](const std::filesystem::path& directory) {
+        MADNESS_CHECK_THROW(state.responses.size()==1,"driven task must contain one response state");
+        state.responses.front().save(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
+      });
+      if (decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
+        it::write_checkpoint_saved(std::cout,decision);
+      if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
+          it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
+        it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::metric_labels());
+    };
+    const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.final_level(),binding.expected(),
+        binding.info(),binding.previous_updates(),observe,
+        [&](const it::IterationInfo& info,const it::IterationTiming& timing) {
+          ctx.shared_response->record_iteration(info,timing);
+          if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_timing))
+            it::write_iteration_timing(std::cout,"response",info,timing);
         });
-        if (decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
-          it::write_checkpoint_saved(std::cout,decision);
-        if (world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
-            it::prints(ctx.verbosity,it::needed::unconverged_diagnostics))
-          it::write_unconverged_diagnostics(std::cout,metrics,decision,diagnostics,response_shared::metric_labels());
-      };
-      const auto decision=solvers::iterate_shared(solver,s0,binding.controls(),binding.final_level(),binding.expected(),
-          binding.info(),binding.previous_updates(),observe,
-          [&](const it::IterationInfo& info,const it::IterationTiming& timing) {
-            ctx.shared_response->record_iteration(info,timing);
-            if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_timing))
-              it::write_iteration_timing(std::cout,"response",info,timing);
-          });
-      MADNESS_CHECK_THROW(decision.checkpoint,"driven response stopped without a valid current checkpoint");
-    }
-    ctx.shared_response->record_summary(binding,evaluations);
-    ctx.shared_response->timing().end();
-    ctx.shared_response->timing().end();
-    ctx.shared_response->publish_timings();
-    return {binding.complete(),protocol_key(),{}};
+    MADNESS_CHECK_THROW(decision.checkpoint,"driven response stopped without a valid current checkpoint");
   }
-
-  const char *seed_kind = "zero";
-  double seed_wall_s = -1.0; // D-118: set when the Dalton seed is tried
-
-  bool seeded = false;
-  if (action != NodeAction::Fresh) {
-    auto loaded =
-        try_load_fd_state<Type, Shell>(world, ctx.calc_dir, pert, freq);
-    if (loaded) {
-      s0 = std::move(loaded->state);
-      seeded = true;
-      seed_kind = "fd_restart";
-    }
-  }
-  // Named --continue (R4/R7): a new state starts from the same perturbation's
-  // saved state at the nearest frequency, at the start rung only. Any saved
-  // state comes back as (X, Y) (static: Y = X); a static target keeps X.
-  if (!seeded && action != NodeAction::Fresh) {
-    const auto plan = ctx.state_plans.find(fd_node_id(pert, freq));
-    const auto from = plan == ctx.state_plans.end()
-                          ? std::nullopt
-                          : seed_start(plan->second, thresh);
-    if (from) {
-      if (auto xy = detail_exec::load_fd_as_xy<Shell>(world, ctx.calc_dir, pert,
-                                                      *from)) {
-        if constexpr (std::is_same_v<Type, Full>) {
-          s0.responses[0] = std::move(*xy);
-        } else {
-          s0.responses[0].x_alpha = std::move(xy->x_alpha);
-          if constexpr (std::is_same_v<Shell, OpenShell>)
-            s0.responses[0].x_beta = std::move(xy->x_beta);
-        }
-        seeded = true;
-        seed_kind = "nearest_frequency";
-      }
-    }
-  }
-  // Cross-type seed: a derived FD (es_root_id set) starts from its converged
-  // ES-root vector. The root is ResponseStateX (X only); for FD Full we seed
-  // x = y = X. Only Full/ClosedShell derived FDs use it, and only when enabled.
-  if constexpr (std::is_same_v<Type, Full> &&
-                std::is_same_v<Shell, ClosedShell>) {
-    if (!seeded && ctx.seed_derived_from_es_root && !es_root_id.empty()) {
-      const int idx = detail_exec::es_root_index(es_root_id);
-      if (idx >= 0) {
-        auto esb = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir);
-        if (esb && idx < static_cast<int>(esb->state.roots.size())) {
-          s0.responses[0].x_alpha =
-              madness::copy(world, esb->state.roots[idx].x_alpha);
-          s0.responses[0].y_alpha =
-              madness::copy(world, esb->state.roots[idx].x_alpha);
-          seeded = true;
-          seed_kind = "es_root";
-        }
-      }
-    }
-    // DALTON nearest-frequency seed (seed.freq_tol > 0): the derived legs sit
-    // at MADNESS's omega_f/2, never exactly in the RSPVEC; use the closest
-    // DALTON N(omega) within the tolerance as the initial guess.
-    if (!seeded && ctx.seed_freq_tol > 0.0 && !ctx.dalton_dir.empty() &&
-        pert.kind == Perturbation::Kind::Dipole) {
-      const double seed_started = madness::wall_time();
-      auto guess = dalton_fd_guess(world, gs, ctx.dalton_dir, ctx.calc_dir,
-                                   pert.axis, freq, ctx.seed_freq_tol);
-      // D-118: the seed's own time, kept apart from the solve's.
-      seed_wall_s = madness::wall_time() - seed_started;
-      if (guess) {
-        s0.responses[0].x_alpha = std::move(guess->x_alpha);
-        s0.responses[0].y_alpha = std::move(guess->y_alpha);
-        seeded = true;
-        seed_kind = "dalton_nearest";
-      }
-    }
-  }
-
-  // Say which guess this leg starts from BEFORE it iterates. Printing it only
-  // in the final line meant a leg that had silently lost its DALTON seed (B24)
-  // looked like a slow solve for as long as it ran.
-  // D-096: one identified start line and one end line per state and rung.
-  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
-    const std::string start = pert.description() + " "
-                              + ResponseMetadata::freq_key(freq) + " at "
-                              + protocol_key() + ": start, seed " + seed_kind;
-    if (ctx.log_prefix.empty())
-      madness::print(start);
-    else
-      madness::print(ctx.log_prefix, start);
-  }
-
-  Solver solver(world, tgt, ctx.policy, ctx.print_level, ctx.log_prefix);  // F2d tag
-  solver.record_function_metrics(bool(ctx.checkpoint_observer));
-
-  // The protocol + ground state + target are already set up above for `thresh`.
-  // iterate_protocol calls prepare() before the (single) step; re-doing the
-  // expensive gs.prepare()/build_gs() there would DOUBLE the per-step prep cost
-  // (ground-state projection dominates — ~half of wall time per solve). So only
-  // re-prepare if the protocol actually changed; otherwise just re-project the
-  // (possibly coarser-loaded) state into the active basis.
-  double prepared_t = t0;
-  auto prepare = [&](double th, Solver &solv, typename Solver::State &st) {
-    const double cur_t = FunctionDefaults<3>::get_thresh();
-    const bool changed =
-        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
-        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
-    if (changed) {
-      set_response_protocol(world, ctx.L, th, /*override_k=*/-1, gs_verbose);
-      const double new_t = FunctionDefaults<3>::get_thresh();
-      auto coulop = poperatorT(
-          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json, gs_verbose);
-
-      FDProblem<Type, Shell> nt;
-      nt.gs = detail_exec::build_gs<Shell>(world, gs);
-      nt.responses.resize(1);
-      nt.responses[0].omega = freq;
-      detail_exec::fill_source<Type, Shell>(world, gs, pert,
-                                            nt.responses[0].source);
-      solv.set_target(std::move(nt));
-      prepared_t = new_t;
-    }
-    // Reprojection begins a new comparison segment, even for a loaded seed.
-    st.kinetic_history.clear();
-    st.bsh_history.clear();
-    st.function_residuals.clear();
-    st.explicit_accuracy = nlohmann::json::array();
-    st.saved_explicit_accuracy = nlohmann::json::array();
-    st.progress_criteria_history = nlohmann::json::array();
-    st.configured_progress_history = nlohmann::json::array();
-    st.configured_progress = nlohmann::json::object();
-    st.rung_exhausted = false;
-    detail_exec::reproject_state(st, FunctionDefaults<3>::get_k(),
-                                 FunctionDefaults<3>::get_thresh());
-  };
-
-  // The strict verdict saved for restart and property prerequisites is the
-  // exit rung_exit chose (B5); a diverged solve never reaches it.
-  using madness::convergence::StopReason;
-  auto converged_now = [](const typename Solver::State& st, const Solver&) {
-    return !st.diverged && st.stop == StopReason::converged;
-  };
-
-  // Best-effort acceptance (--accept-at-maxiter): a non-diverged solve that
-  // exhausts max_iters without meeting the strict target is accepted so the
-  // node climbs the ladder / unblocks VBC instead of stalling. The `accepted`
-  // flag + recorded residual keep the verdict honest.
-  // A plateau (State::stalled, ConvergencePolicy::stall_*) is treated exactly
-  // like exhausting max_iters: same acceptance rule, fewer wasted iterations.
-  auto accepted_now = [&](const typename Solver::State& st, const Solver&) {
-    const int diagnostic = ctx.policy.diagnostic_iterations_per_rung;
-    // Best-effort acceptance belongs to the engine check; when the written
-    // targets decide, an unmet target is never accepted (B5, B8).
-    if (ctx.policy.decider == madness::convergence::Decider::requested_criteria)
-      return false;
-    // Accepted only on the cap or stall exit rung_exit chose (B5).
-    return (ctx.accept_at_maxiter || diagnostic > 0) && !st.diverged
-           && (st.stop == StopReason::iteration_limit
-               || st.stop == StopReason::stalled);
-  };
-
-  auto post_step = [&](double, Solver &solv, typename Solver::State &st) {
-    const double wall_s = madness::wall_time() - step_w0;   // R1b
-    // Diagnostics are opt-in through named checkpointing and do not advance
-    // the solver. The legacy application incurs no additional operator work.
-    typename Solver::State validation;
-    if (ctx.checkpoint_observer) validation = solv.evaluate_saved_state(st);
-    if (!ctx.policy.explicit_accuracy_targets.empty()) {
-      MADNESS_CHECK_THROW(bool(ctx.checkpoint_observer), "explicit FD accuracy requires saved-state validation");
-      st.saved_explicit_accuracy = solv.evaluate_requested_accuracy(st, &validation);
-      st.rung_exhausted = !st.diverged && ctx.policy.diagnostic_iterations_per_rung > 0;
-    }
-    const bool strict = converged_now(st, solv);
-    const bool accepted = accepted_now(st, solv);
-    save_fd_state<Type, Shell>(
-        world, st, ctx.calc_dir, pert, freq,
-        /*converged=*/strict || accepted,
-        /*seed=*/seed_kind, /*accepted=*/accepted,
-        /*wall_s=*/wall_s,
-        /*metadata_shard=*/ctx.metadata_shard,
-        /*log_prefix=*/ctx.log_prefix,
-        /*log_group=*/ctx.log_group,
-        /*checkpoint_native=*/bool(ctx.checkpoint_observer),
-        /*checkpoint_dconv=*/ctx.policy.dconv_user,
-        /*checkpoint_targets=*/&solv.targets(),
-        /*checkpoint_validation=*/ctx.checkpoint_observer ? &validation
-                                                          : nullptr,
-        /*checkpoint_accuracy_targets=*/&ctx.policy.explicit_accuracy_targets,
-        /*checkpoint_diagnostic_iterations=*/
-        ctx.policy.diagnostic_iterations_per_rung,
-        /*checkpoint_progress=*/&ctx.policy.explicit_progress_configuration,
-        /*checkpoint_decider=*/ctx.policy.decider,
-        /*print_level=*/ctx.print_level,
-        /*seed_wall_s=*/seed_wall_s);
-    if (ctx.checkpoint_observer)
-      ctx.checkpoint_observer(world, {{"perturbation", pert.description()},
-          {"frequency", freq}, {"protocol", protocol_key()},
-          {"iterations", st.iter}, {"seed", seed_kind}});
-  };
-
-  solvers::IterateProtocolPolicy pp;
-  pp.max_iters_per_step = ctx.max_iters;
-  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
-  pp.final_protocol = ctx.final_protocol;
-  const std::vector<double> one_protocol = {thresh};
-  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
-                                      prepare, post_step, pp);
-
-  // Property-accuracy report: the documented error bound, evaluated, and the
-  // stationary estimate beside the naive one. AFTER iterate_protocol, so the
-  // measurement cannot perturb the solve.
-  if (ctx.hylleraas)
-    solver.report_property_accuracy(sf, pert.description(), freq);
-
-  NodeResult r;
-  const bool strict   = converged_now(sf, solver);
-  const bool accepted = accepted_now(sf, solver);
-  r.converged = strict || accepted;
-  r.reached_protocol_key = protocol_key();  // active defaults reflect this protocol step
-  // D-096: the one solve-end line at Normal: the state, the rung, the exit
-  // as the solver's print_final words it, the iterations, the seed and the
-  // last residuals; the solver's residual block and the [SAVE] line are
-  // detail at Verbose.
-  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
-    double max_bsh = 0.0, max_drho = 0.0;
-    for (double v : sf.last_bsh_residual)
-      max_bsh = std::max(max_bsh, v);
-    for (double v : sf.last_density_residual)
-      max_drho = std::max(max_drho, v);
-    std::ostringstream line;
-    line << pert.description() << " " << ResponseMetadata::freq_key(freq)
-         << " at " << protocol_key() << ": ";
-    if (sf.diverged)
-      line << "stopped at iteration " << sf.iter << " (diverged)";
-    else if (strict)
-      line << "converged in " << sf.iter << " iterations";
-    else if (sf.stalled)
-      line << "stopped at iteration " << sf.iter << " (stalled"
-           << (accepted ? ", accepted best-effort)" : ", not converged)");
-    else
-      line << "stopped at iteration " << sf.iter << " (max iterations"
-           << (accepted ? ", accepted best-effort)" : ", not converged)");
-    line << " (seed " << seed_kind << "; bsh " << max_bsh << ", dρ " << max_drho
-         << ")";
-    if (ctx.log_prefix.empty())
-      madness::print(line.str());
-    else
-      madness::print(ctx.log_prefix, line.str());
-  }
-  return r;
+  ctx.shared_response->record_summary(binding,evaluations);
+  ctx.shared_response->timing().end();
+  ctx.shared_response->timing().end();
+  ctx.shared_response->publish_timings();
+  return {binding.complete(),protocol_key(),{}};
 }
 
 // ---------------------------------------------------------------------------
-// Excited-state bundle solve (15b-i: TDA closed-shell only).
+// Excited-state bundle solve (closed shell).
 // ---------------------------------------------------------------------------
 
-/// D-089 (a): the transition analysis is written after a solve, and a bundle
-/// the planner loads is not solved, so a restart between the bundle's
-/// save-boundary publish and its analysis left the transition properties
-/// missing for good. For an excited-state node the manager skips under a
-/// load plan: when the bundle saved at this rung's exact key is converged and
-/// calc_dir has no es_analysis__<key>.json, prepare the ground state at the
-/// rung as the solvers do and compute the analysis from the saved states
-/// (analyze_es_bundle_from_disk: load, reproject, report; no iterations).
-/// Returns whether an analysis was written. Collective: rank 0 decides from
-/// the metadata and broadcasts.
-template <typename Type, typename Shell>
-bool analyze_loaded_es_bundle(ExecutorContext& ctx, int n_roots,
-                              double thresh) {
-  using namespace madness;
-  World& world = ctx.world;
-  set_response_protocol(world, ctx.L, thresh);
-  const std::string key = protocol_key();
-  const std::string analysis = ctx.calc_dir + "/es_analysis__" + key + ".json";
-  int needed = 0;
-  if (world.rank() == 0) {
-    const std::string meta_path = ctx.calc_dir + "/response_metadata.json";
-    if (std::filesystem::exists(meta_path)
-        && !std::filesystem::exists(analysis)) {
-      auto meta = ResponseMetadata::load_or_create(meta_path);
-      const auto& j = meta.json();
-      if (j.contains("excited_states")
-          && j.at("excited_states").contains(key)) {
-        const auto& e = j.at("excited_states").at(key);
-        needed = e.value("converged", false) && !e.value("diverged", false)
-                 && e.value("type", std::string{})
-                        == detail_save_load::type_tag<Type>()
-                 && e.value("shell", std::string{})
-                        == detail_save_load::shell_tag<Shell>()
-                 && (n_roots <= 0 || e.value("n_roots", 0) == n_roots);
-      }
-    }
-  }
-  world.gop.broadcast_serializable(needed, 0);
-  if (!needed)
-    return false;
-  GroundState& gs = ctx.gs;
-  const double t0 = FunctionDefaults<3>::get_thresh();
-  {
-    auto coulop
-        = poperatorT(CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
-  }
-  if (world.rank() == 0)
-    madness::print("[ANALYZE] D-089: bundle", key,
-                   "loaded converged without its transition analysis; "
-                   "computing it from the saved states (no iterations)");
-  return analyze_es_bundle_from_disk<Type, Shell>(world, gs, ctx.calc_dir,
-                                                  ctx.print_level)
-         == 0;
-}
-
-/// Solve a TDA closed-shell excited-state bundle of `n_roots` at one protocol
-/// step. Mirrors solve_fd_protocol: set protocol -> prepare GS -> build problem
-/// -> guess (Fresh = fresh solid-harmonics trial; else nearest on-disk bundle
-/// via the restart precedence) -> iterate_protocol over the single step (guarded
-/// set_gs/reproject prepare + save_es_roots post-step). The bundle saves to a
-/// per-protocol subdir `es__<key>` under calc_dir so lower-protocol restart
-/// works; the converged excitation energies are persisted to
-/// response_metadata.json (excited_states/<key>/roots[].omega), which is what
-/// DerivedFD expansion (expand_converged_es) reads — making expansion restart-safe.
+/// Solve the closed-shell excited-state bundle of `n_roots` at one protocol
+/// step through the session's node for the set.
 // Shared ES binding; the existing task DAG still schedules the whole bundle.
 template<class Type>
 NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
@@ -1212,437 +739,6 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
   session.set_properties({{"excitation_energy",energies},{"oscillator_strength",strengths},{"transition_dipole",dipoles},{"transition_quadrupole",quadrupoles}});
 }
 
-inline NodeResult solve_es_tda_closed_shell(ExecutorContext &ctx, int n_roots,
-                                            double thresh, NodeAction action) {
-  using namespace madness;
-  using Solver = ESSolver<TDA, ClosedShell>;
-  World &world = ctx.world;
-  GroundState &gs = ctx.gs;
-  const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
-
-  set_response_protocol(world, ctx.L, thresh);
-  const double t0 = FunctionDefaults<3>::get_thresh();
-  {
-    auto coulop = poperatorT(
-        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
-  }
-
-  const double c_xc = gs.hf_exchange_coefficient();
-  const double lo   = gs.params().lo();
-  auto problem = build_es_problem_tda<ClosedShell>(world, gs, n_roots, c_xc, lo);
-
-  // Warmup policy (KAIN on, kain_maxsub/maxrotn from ctx); the main solve
-  // disables the warmup window — the fresh guess is an oversampled TDA warmup
-  // (>= 2x roots by default), same recipe as the Full path.
-  const detail_exec::EsIterationPolicies es_policies =
-      detail_exec::es_iteration_policies(ctx);
-  const ConvergencePolicy &warm_policy = es_policies.warm;
-
-  Solver::State s0;
-  bool seeded = false;
-  // Root-identity guard (W5): remember WHERE the seed came from; the guard
-  // reloads it from disk at evaluation time (no bundle copy held in memory
-  // during the solve — see es_seed_guard.hpp).
-  std::optional<EsSeedReference> seed_ref;
-  // Where the bundle started, for the checkpoint observer (D-025): the
-  // oversampled warmup, or a saved bundle (es_restart) at seed_protocol.
-  std::string seed_kind = "warmup", seed_protocol;
-  if (action != NodeAction::Fresh) {
-    auto loaded = try_load_es_bundle<TDA, ClosedShell>(world, ctx.calc_dir, n_roots);
-    if (loaded) {
-      seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
-                                        loaded->source_protocol_key);
-      seed_kind = "es_restart";
-      seed_protocol = loaded->source_protocol_key;
-      s0 = std::move(loaded->state);
-      seeded = true;
-    }
-  }
-  if (!seeded) {
-    const long n_warm = std::max<long>(
-        n_roots, static_cast<long>(
-                     std::ceil(ctx.es_warmup_oversample *
-                               static_cast<double>(n_roots))));
-    s0 = run_oversampled_tda_warmup<ClosedShell>(
-        world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
-        c_xc, lo, ctx.print_level, ctx.es_guess, ctx.es_guess_basis);
-  }
-  const int iter_at_start = s0.iter;
-
-  // D-122: the main policy once the start is known (no hold-off after its
-  // own TDA warm-up, fresh or cached; 0.1 after a seed or a saved bundle).
-  const ConvergencePolicy main_policy =
-      detail_exec::es_iteration_policies(ctx, /*own_warmup=*/!seeded).main;
-  detail_exec::print_es_kain_hold_off(world, main_policy, ctx, !seeded);
-  Solver solver(world, std::move(problem), main_policy, ctx.print_level);
-  solver.set_gamma_tensor(ctx.es_gamma_tensor);  // Inc-3c: tensor-layer γ gate
-  // Review HIGH: the locked step variant (lock_converged, the production
-  // default) uses the per-root REFERENCE γ path and ignores gamma_tensor_, so
-  // --es-tensor is a silent no-op unless --no-lock-converged is also set. Warn
-  // loudly rather than let a user believe the untiled-crash mitigation is
-  // active when it is not. (Teaching the locked variant to use the tensor path
-  // is tracked as a follow-up.)
-  if (ctx.es_gamma_tensor && ctx.es_lock_converged && world.rank() == 0)
-    madness::print(
-        "[ES-TENSOR] WARNING: --es-tensor was requested but lock_converged is "
-        "on (the default) — the locked step uses the REFERENCE gamma path, so "
-        "the tensor (Inc-3c) path is NOT active. Pass --no-lock-converged to "
-        "actually use --es-tensor (e.g. to avoid the untiled n_occ>=34 crash).");
-
-  // Single-step guard (as in solve_fd_protocol): re-prepare the ground state
-  // only on an actual protocol change; otherwise just re-project the roots.
-  double prepared_t = t0;
-  auto prepare = [&](double th, Solver &solv, Solver::State &st) {
-    const double cur_t = FunctionDefaults<3>::get_thresh();
-    const bool changed =
-        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
-        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
-    if (changed) {
-      set_response_protocol(world, ctx.L, th);
-      const double new_t = FunctionDefaults<3>::get_thresh();
-      auto coulop = poperatorT(
-          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
-      solv.set_gs(build_response_ground_state_closed_shell(
-          world, gs, gs.hf_exchange_coefficient(), gs.params().lo()));
-      prepared_t = new_t;
-    }
-    const int    k  = FunctionDefaults<3>::get_k();
-    const double tt = FunctionDefaults<3>::get_thresh();
-    for (auto &root : st.roots)
-      for (auto &fn : root.x_alpha) fn = madness::project(fn, k, tt);
-    for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
-  };
-
-  // The verdict saved and reported is the exit rung_exit chose (DESIGN B5);
-  // a diverged solve never reaches it. The engine check behind it is energy
-  // + density per root (ESSolver::es_root_converged), not the jittering BSH
-  // amplitude.
-  auto converged_now = [](const Solver::State& st, const Solver&) {
-    return !st.diverged
-           && st.stop == madness::convergence::StopReason::converged;
-  };
-
-  auto post_step = [&](double, Solver &solv, Solver::State &st) {
-    const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
-    const double wall_s = madness::wall_time() - step_w0;   // R1b
-    save_es_roots<TDA, ClosedShell>(world, st, dir,
-                                    /*converged=*/converged_now(st, solv),
-                                    /*wall_s=*/wall_s,
-                                    /*register_aggregate=*/true,
-                                    /*print_level=*/ctx.print_level);
-    // The named checkpoint publishes at the bundle's save boundary as at the
-    // dipole legs' (DESIGN A3; the FD executor's call in solve_fd_protocol):
-    // the bundle's node id as the perturbation, the rung, the iterations
-    // (the bundle's count, and this rung's) and the seed. D-025.
-    if (ctx.checkpoint_observer)
-      ctx.checkpoint_observer(
-          world, {{"kind", "excited_states"},
-                  {"perturbation", es_node_id(/*tda=*/true, n_roots)},
-                  {"protocol", protocol_key()},
-                  {"iterations", st.iter},
-                  {"iterations_this_rung", st.iter - iter_at_start},
-                  {"seed", seed_kind},
-                  {"seed_protocol", seed_protocol}});
-  };
-
-  solvers::IterateProtocolPolicy pp;
-  pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
-  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
-  pp.final_protocol = ctx.final_protocol;
-  const std::vector<double> one_protocol = {thresh};
-  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
-                                      prepare, post_step, pp);
-
-  NodeResult r;
-  r.converged = converged_now(sf, solver);
-  r.reached_protocol_key = protocol_key();
-  // D-096: the one bundle-end line at Normal (the solver's print_final block
-  // and the [SAVE] line are detail at Verbose).
-  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
-    std::ostringstream line;
-    line << es_node_id(std::is_same_v<Solver, ESSolver<TDA, ClosedShell>>,
-                       n_roots)
-         << " at " << protocol_key() << ": ";
-    if (sf.diverged)
-      line << "stopped at iteration " << sf.iter << " (diverged)";
-    else if (r.converged)
-      line << "converged in " << sf.iter << " iterations";
-    else
-      line << "stopped at iteration " << sf.iter << " ("
-           << madness::convergence::to_string(sf.stop) << ", not converged)";
-    line << ", " << n_roots << " root(s) (seed " << seed_kind << ")";
-    madness::print(line.str());
-  }
-  // Root-identity guard (W5): visibility on what a SEEDED solve actually did
-  // (seed overlap / ω shift per root, basin-escape + pure-tracking warnings)
-  // Collective evaluate; rank-0 print + metadata write. Fresh (unseeded)
-  // solves skip the guard entirely.
-  if (seed_ref) {
-    const double guard_started = madness::wall_time(); // D-118
-    auto guard = evaluate_es_seed_guard<TDA, ClosedShell>(world, sf, r.converged, *seed_ref);
-    print_es_seed_guard(world, guard);
-    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard,
-                         madness::wall_time() - guard_started);
-  }
-  // Post-convergence transition-property report (legacy TDDFT::analysis +
-  // analyze_vectors). Runs on the IN-MEMORY converged state `sf` at the solve's
-  // own process count and writes only a rank-0 JSON — it does NOT reload the
-  // bundle, so it never hits the cross-np load path that caused the parked ES
-  // heap-OOB (now guarded in load_es_roots). Re-enabled with that guard in place.
-  // Ungated (was print_level-gated): oscillator strengths / transition moments
-  // are part of the machine-readable property set — computing them and throwing
-  // them away at low print levels made the ES output incomplete (madqc review).
-  if (r.converged)
-    report_es_analysis<TDA, ClosedShell>(
-        world, gs, sf, ctx.print_level,
-        ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
-  // NB: ES roots are persisted to response_metadata.json via save_es_roots;
-  // DerivedFD expansion reads them from there (expand_converged_es), NOT from
-  // this return value (run()'s loop discards it). So no in-memory copy here.
-  return r;
-}
-
-// ---------------------------------------------------------------------------
-// Excited-state bundle solve — Full (paired X,Y) closed-shell (15b-ii).
-// ---------------------------------------------------------------------------
-
-/// Solve a Full (paired X,Y) closed-shell ES bundle of `n_roots` at one protocol
-/// step via the direct ESSolver<Full, ClosedShell>. Fresh guess: a random-guess
-/// TDA warmup (es_tda_warmup_iters, oversampled by es_warmup_oversample)
-/// promoted to (X, Y=0) — the Full solver couples X and Y from iter 1. Restart:
-/// load the (X,Y) bundle directly (no promote). Saves a proper "full" (X,Y)
-/// bundle. Convergence is residual-based (same fields as TDA).
-inline NodeResult solve_es_full_closed_shell(ExecutorContext &ctx, int n_roots,
-                                             double thresh, NodeAction action) {
-  using namespace madness;
-  using Solver = ESSolver<Full, ClosedShell>;
-  World &world = ctx.world;
-  GroundState &gs = ctx.gs;
-  const double step_w0 = madness::wall_time();   // R1b: bundle-solve wall timer
-
-  set_response_protocol(world, ctx.L, thresh);
-  const double t0 = FunctionDefaults<3>::get_thresh();
-  {
-    auto coulop = poperatorT(
-        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
-  }
-
-  const double c_xc = gs.hf_exchange_coefficient();
-  const double lo   = gs.params().lo();
-  auto problem = build_es_problem_full<ClosedShell>(world, gs, n_roots, c_xc, lo);
-
-  // Warmup policy (KAIN on, kain_maxsub / maxrotn from ctx); the main solve
-  // disables the TDA warmup window (it was done explicitly for the fresh guess).
-  const detail_exec::EsIterationPolicies es_policies =
-      detail_exec::es_iteration_policies(ctx);
-  const ConvergencePolicy &warm_policy = es_policies.warm;
-
-  Solver::State s0;
-  bool seeded = false;
-  // Root-identity guard (W5): deep-copy the seed for the post-solve overlap /
-  // ω-shift report (see es_seed_guard.hpp). NB: the cached TDA warmup guess
-  // below is NOT a seed in this sense (it is this solver's own cold-start
-  // artifact), so seed_ref stays empty on that path.
-  std::optional<EsSeedReference> seed_ref;
-  // Where the bundle started, for the checkpoint observer (D-025): the
-  // warmup (fresh or from the es_warmup cache), or a saved bundle
-  // (es_restart) at seed_protocol.
-  std::string seed_kind = "warmup", seed_protocol;
-  if (action != NodeAction::Fresh) {
-    auto loaded = try_load_es_bundle<Full, ClosedShell>(world, ctx.calc_dir, n_roots);
-    if (loaded) {
-      seed_ref = make_es_seed_reference(world, ctx.calc_dir, loaded->bundle_dir,
-                                        loaded->source_protocol_key);
-      seed_kind = "es_restart";
-      seed_protocol = loaded->source_protocol_key;
-      s0 = std::move(loaded->state);
-      seeded = true;
-      // An EXTERNAL seed (iteration-0 bundle: DALTON EXCITLAB vectors written by
-      // seed_es_from_dalton / seed_from_dalton) is not Full-ready — its residual
-      // against the MRA operator is ~0.1 and the Full solver diverges from it
-      // (h2o, lih, c2h4, 2026-09-10). Route it the way the cold path routes its
-      // guess: TDA warmup (KAIN off, es_tda_warmup_iters) from the seed's X
-      // block, then promote to Full with y = 0. A bundle saved mid-solve
-      // (iter > 0) is a genuine restart and is used as is.
-      if (ctx.es_seed_warmup && s0.iter == 0 && ctx.es_tda_warmup_iters > 0) {
-        if (world.rank() == 0)
-          madness::print("[CALC] solve_es_full: iteration-0 seed bundle -> TDA warmup"
-                         " from the seed (", ctx.es_tda_warmup_iters,
-                         "iters, KAIN off) -> promote to Full (y = 0)");
-        ESSolver<TDA, ClosedShell>::State tda;
-        tda.roots.resize(s0.roots.size());
-        for (std::size_t r = 0; r < s0.roots.size(); ++r)
-          tda.roots[r].x_alpha = madness::copy(world, s0.roots[r].x_alpha);
-        tda.omega = madness::copy(s0.omega);
-        tda.iter  = 0;
-        tda = run_tda_warmup_from_state<ClosedShell>(
-            world, gs, std::move(tda), ctx.es_tda_warmup_iters, warm_policy,
-            c_xc, lo, ctx.print_level);
-        s0 = promote_tda_to_full_closed_shell(world, tda);
-      }
-    }
-  }
-  if (!seeded) {
-    const std::string cache_base =
-        ctx.es_warmup_cache_dir.empty() ? ctx.calc_dir : ctx.es_warmup_cache_dir;
-    const std::string warm_cache = cache_base + "/es_warmup__" + protocol_key();
-    bool used_cache = false;
-    if (ctx.es_warmup_cache) {
-      int have = 0;
-      if (world.rank() == 0)
-        have = std::filesystem::exists(warm_cache + "/roots.json") ? 1 : 0;
-      world.gop.broadcast(have, 0);
-      if (have) {
-        try {
-          s0 = load_es_roots<Full, ClosedShell>(world, warm_cache);
-          used_cache = true;
-          seed_kind = "warmup_cache";
-          if (world.rank() == 0)
-            madness::print("[CALC] solve_es_full: reusing cached TDA warmup guess"
-                           " from", warm_cache, "(skipping warmup)");
-        } catch (const std::exception &e) {
-          if (world.rank() == 0)
-            madness::print("[CALC] solve_es_full: cached warmup unusable (",
-                           e.what(), ") — running a fresh warmup");
-        }
-      }
-    }
-    if (!used_cache) {
-      const long n_warm = std::max<long>(
-          n_roots, static_cast<long>(
-                       std::ceil(ctx.es_warmup_oversample *
-                                 static_cast<double>(n_roots))));
-      auto tda = run_oversampled_tda_warmup<ClosedShell>(
-          world, gs, n_roots, n_warm, ctx.es_tda_warmup_iters, warm_policy,
-          c_xc, lo, ctx.print_level, ctx.es_guess, ctx.es_guess_basis);
-      s0 = promote_tda_to_full_closed_shell(world, tda);
-      if (ctx.es_warmup_cache) {
-        save_es_roots<Full, ClosedShell>(world, s0, warm_cache,
-                                         /*converged=*/false, /*wall_s=*/0.0,
-                                         /*register_aggregate=*/false,
-                                         /*print_level=*/ctx.print_level);
-        if (world.rank() == 0)
-          madness::print("[CALC] solve_es_full: cached TDA warmup guess ->",
-                         warm_cache);
-      }
-    }
-  }
-  const int iter_at_start = s0.iter;
-
-  // D-122: the main policy once the start is known (no hold-off after its
-  // own TDA warm-up, fresh or cached; 0.1 after a seed or a saved bundle).
-  const ConvergencePolicy main_policy =
-      detail_exec::es_iteration_policies(ctx, /*own_warmup=*/!seeded).main;
-  detail_exec::print_es_kain_hold_off(world, main_policy, ctx, !seeded);
-  Solver solver(world, std::move(problem), main_policy, ctx.print_level);
-
-  double prepared_t = t0;
-  auto prepare = [&](double th, Solver &solv, Solver::State &st) {
-    const double cur_t = FunctionDefaults<3>::get_thresh();
-    const bool changed =
-        std::abs(th - prepared_t) > 1e-15 * std::max(th, prepared_t) ||
-        std::abs(cur_t - th)      > 1e-15 * std::max(cur_t, th);
-    if (changed) {
-      set_response_protocol(world, ctx.L, th);
-      const double new_t = FunctionDefaults<3>::get_thresh();
-      auto coulop = poperatorT(
-          CoulombOperatorPtr(world, gs.params().lo(), 0.001 * new_t));
-      gs.prepare(world, 0.001 * new_t, coulop, ctx.fock_json);
-      solv.set_gs(build_response_ground_state_closed_shell(world, gs, c_xc, lo));
-      prepared_t = new_t;
-    }
-    const int    k  = FunctionDefaults<3>::get_k();
-    const double tt = FunctionDefaults<3>::get_thresh();
-    for (auto &root : st.roots)
-      for (auto *blk : root.blocks())
-        for (auto &fn : *blk) fn = madness::project(fn, k, tt);
-    for (auto &rho : st.rho_alpha_prev) rho = madness::project(rho, k, tt);
-  };
-
-  // The verdict saved and reported is the exit rung_exit chose (DESIGN B5);
-  // a diverged solve never reaches it. The engine check behind it is energy
-  // + density per root (ESSolver::es_root_converged), not the jittering BSH
-  // amplitude.
-  auto converged_now = [](const Solver::State& st, const Solver&) {
-    return !st.diverged
-           && st.stop == madness::convergence::StopReason::converged;
-  };
-
-  auto post_step = [&](double, Solver &solv, Solver::State &st) {
-    const std::string dir = ctx.calc_dir + "/es__" + protocol_key();
-    const double wall_s = madness::wall_time() - step_w0;   // R1b
-    save_es_roots<Full, ClosedShell>(world, st, dir,
-                                     /*converged=*/converged_now(st, solv),
-                                     /*wall_s=*/wall_s,
-                                     /*register_aggregate=*/true,
-                                     /*print_level=*/ctx.print_level);
-    // The checkpoint observer's event for the bundle, as in the TDA path.
-    if (ctx.checkpoint_observer)
-      ctx.checkpoint_observer(
-          world, {{"kind", "excited_states"},
-                  {"perturbation", es_node_id(/*tda=*/false, n_roots)},
-                  {"protocol", protocol_key()},
-                  {"iterations", st.iter},
-                  {"iterations_this_rung", st.iter - iter_at_start},
-                  {"seed", seed_kind},
-                  {"seed_protocol", seed_protocol}});
-  };
-
-  solvers::IterateProtocolPolicy pp;
-  pp.max_iters_per_step = ctx.es_iter_budget();   // excited.maxiter, else max_iters
-  pp.forced_iterations_per_step = ctx.policy.diagnostic_iterations_per_rung;
-  pp.final_protocol = ctx.final_protocol;
-  const std::vector<double> one_protocol = {thresh};
-  auto sf = solvers::iterate_protocol(solver, std::move(s0), one_protocol,
-                                      prepare, post_step, pp);
-
-  NodeResult r;
-  r.converged = converged_now(sf, solver);
-  r.reached_protocol_key = protocol_key();
-  // D-096: the one bundle-end line at Normal (the solver's print_final block
-  // and the [SAVE] line are detail at Verbose).
-  if (world.rank() == 0 && ctx.print_level >= PrintLevel::Normal) {
-    std::ostringstream line;
-    line << es_node_id(std::is_same_v<Solver, ESSolver<TDA, ClosedShell>>,
-                       n_roots)
-         << " at " << protocol_key() << ": ";
-    if (sf.diverged)
-      line << "stopped at iteration " << sf.iter << " (diverged)";
-    else if (r.converged)
-      line << "converged in " << sf.iter << " iterations";
-    else
-      line << "stopped at iteration " << sf.iter << " ("
-           << madness::convergence::to_string(sf.stop) << ", not converged)";
-    line << ", " << n_roots << " root(s) (seed " << seed_kind << ")";
-    madness::print(line.str());
-  }
-  // Root-identity guard (W5) — same contract as the TDA path above.
-  if (seed_ref) {
-    const double guard_started = madness::wall_time(); // D-118
-    auto guard = evaluate_es_seed_guard<Full, ClosedShell>(world, sf, r.converged, *seed_ref);
-    print_es_seed_guard(world, guard);
-    record_es_seed_guard(world, ctx.calc_dir, protocol_key(), guard,
-                         madness::wall_time() - guard_started);
-  }
-  // Post-convergence transition-property report (legacy TDDFT::analysis +
-  // analyze_vectors). Runs on the in-memory `sf` (no bundle reload), so it never
-  // hits the cross-np load path that caused the parked ES heap-OOB (now guarded
-  // in load_es_roots). See the TDA path above for the full note. Ungated, like the
-  // TDA path: at print_level 0 the RPA transition properties were silently not
-  // written (review finding C7).
-  if (r.converged)
-    report_es_analysis<Full, ClosedShell>(
-        world, gs, sf, ctx.print_level,
-        ctx.calc_dir + "/es_analysis__" + protocol_key() + ".json");
-  // NB: ES roots are persisted to response_metadata.json via save_es_roots;
-  // DerivedFD expansion reads them from there (expand_converged_es), NOT from
-  // this return value (run()'s loop discards it). So no in-memory copy here.
-  return r;
-}
-
 // ---------------------------------------------------------------------------
 // VBC quadratic-source build (beta-ii-b, closed-shell). Not iterative: load the
 // two converged first-order states at this protocol, build the source, save.
@@ -1689,26 +785,23 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   World &world = ctx.world;
   GroundState &gs = ctx.gs;
 
-  response_shared::SecondOrderNode* shared=nullptr;
-  if(ctx.shared_response) {
-    auto& session=*ctx.shared_response;
-    session.timing().begin("vbc",{{"task_id",node.id}});
-    auto& B=session.at(fd_node_id(node.pert,node.freq));
-    auto& C=session.at(fd_node_id(node.pert_c,node.freq_c));
-    if(!B.complete() || !C.complete()) {
-      session.timing().end();return {false,"",{}};
-    }
-    const nlohmann::json definition{{"kind","VBC"},{"binding_version",1},
-        {"protocol",madness::checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})},
-        {"source",ctx.beta_pq_source ? "pq" : "vbc"}};
-    shared=&session.bind_second_order(node.id,vbc_node_name(node.pert,node.pert_c,node.freq,node.freq_c),definition,
-        nlohmann::json::array({response_shared::lineage_entry("B",B),response_shared::lineage_entry("C",C)}));
-    if(shared->reusable()) {
-      session.record_vbc(node.id,*shared);session.timing().end();
-      return {true,protocol_key(thresh,default_k_for_thresh(thresh)),{}};
-    }
-    session.timing().begin("prepare");
+  auto& session=*ctx.shared_response;
+  session.timing().begin("vbc",{{"task_id",node.id}});
+  auto& B_state=session.at(fd_node_id(node.pert,node.freq));
+  auto& C_state=session.at(fd_node_id(node.pert_c,node.freq_c));
+  if(!B_state.complete() || !C_state.complete()) {
+    session.timing().end();return {false,"",{}};
   }
+  const nlohmann::json definition{{"kind","VBC"},{"binding_version",1},
+      {"protocol",madness::checkpoint::records::protocol_record({thresh,default_k_for_thresh(thresh)})},
+      {"source","pq"}};
+  auto* shared=&session.bind_second_order(node.id,vbc_node_name(node.pert,node.pert_c,node.freq,node.freq_c),definition,
+      nlohmann::json::array({response_shared::lineage_entry("B",B_state),response_shared::lineage_entry("C",C_state)}));
+  if(shared->reusable()) {
+    session.record_vbc(node.id,*shared);session.timing().end();
+    return {true,protocol_key(thresh,default_k_for_thresh(thresh)),{}};
+  }
+  session.timing().begin("prepare");
 
   const bool gs_verbose = ctx.log_prefix.empty();  // F2d-ii: quiet in subworlds
   set_response_protocol(world, ctx.L, thresh, /*override_k=*/-1, gs_verbose);
@@ -1719,12 +812,9 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
     gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json, gs_verbose);
   }
 
-  // The two converged first-order states (X,Y) at this protocol. The
-  // prerequisites_converged gate guarantees they are converged before we run.
-  auto B = shared ? detail_exec::qualified_fd_as_xy(ctx,node.pert,node.freq)
-      : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,node.pert,node.freq);
-  auto C = shared ? detail_exec::qualified_fd_as_xy(ctx,node.pert_c,node.freq_c)
-      : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,node.pert_c,node.freq_c);
+  // The two first-order states (X,Y) at this protocol, from their nodes.
+  auto B = detail_exec::qualified_fd_as_xy(ctx,node.pert,node.freq);
+  auto C = detail_exec::qualified_fd_as_xy(ctx,node.pert_c,node.freq_c);
   if (!B || !C) {
     if (world.rank() == 0)
       madness::print("[CALC] solve_vbc:", node.id,
@@ -1732,8 +822,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
     return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
   }
 
-  if(shared) {ctx.shared_response->timing().end();ctx.shared_response->timing().begin("build_source");}
-  const double step_w0 = madness::wall_time();   // R1b: VBC build wall timer
+  session.timing().end();session.timing().begin("build_source");
   const double c_xc = gs.hf_exchange_coefficient();
   const double lo   = gs.params().lo();
   auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
@@ -1744,31 +833,17 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto VB_op = perturbation_operator(world, gs, node.pert);
   auto VC_op = perturbation_operator(world, gs, node.pert_c);
 
-  // Source selection (see ExecutorContext::beta_pq_source). Both builders sum
-  // the two photon orderings; the (P,Q) builder does so in one call.
-  auto vbc_src = ctx.beta_pq_source
-      ? tpa::quadratic_source(world, g0, *B, *C, VB_op, VC_op)
-      : vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op);
+  // The (P,Q) builder sums the two photon orderings in one call.
+  auto vbc_src = tpa::quadratic_source(world, g0, *B, *C, VB_op, VC_op);
   if (world.rank() == 0)
     madness::print(ctx.log_prefix, "[CALC] solve_vbc: source =",
-                   ctx.beta_pq_source ? "tpa::quadratic_source (P,Q)"
-                                      : "vbc::compute_vbc (spec build, same source)");
-  const double wall_s = madness::wall_time() - step_w0;   // R1b
-  if(shared) {
-    auto& session=*ctx.shared_response;
-    session.timing().end();session.timing().begin("checkpoint");
-    shared->save({"response"},[&](const std::filesystem::path& directory) {
-      vbc_src.save(world,native_archive_name((directory/"response").string()),IoBackend::Native);
-    });
-    session.record_vbc(node.id,*shared);
-    session.timing().end();session.timing().end();session.publish_timings();
-  } else {
-  save_vbc_state<ClosedShell>(world, vbc_src, ctx.calc_dir, node.id,
-                              /*converged=*/true, /*wall_s=*/wall_s,
-                              /*metadata_shard=*/ctx.metadata_shard,  // F2g
-                              /*log_prefix=*/ctx.log_prefix,          // F2d
-                              /*log_group=*/ctx.log_group);           // F2d
-  }
+                   "tpa::quadratic_source (P,Q)");
+  session.timing().end();session.timing().begin("checkpoint");
+  shared->save({"response"},[&](const std::filesystem::path& directory) {
+    vbc_src.save(world,native_archive_name((directory/"response").string()),IoBackend::Native);
+  });
+  session.record_vbc(node.id,*shared);
+  session.timing().end();session.timing().end();session.publish_timings();
 
   if (world.rank() == 0) {
     if (ctx.log_prefix.empty())
@@ -1788,17 +863,6 @@ class FdResponseExecutor : public ICalcExecutor {
 public:
   explicit FdResponseExecutor(ExecutorContext ctx) : ctx_(ctx) {}
 
-  // D-089: closed shell only, as the solvers.
-  bool analyze_loaded_bundle(const CalcNode &n, int n_roots,
-                             double thresh) override {
-    if(ctx_.shared_response) return true; // exact native load in shared property assembly
-    if (!ctx_.gs.is_spin_restricted())
-      return false;
-    if (n.tda)
-      return analyze_loaded_es_bundle<TDA, ClosedShell>(ctx_, n_roots, thresh);
-    return analyze_loaded_es_bundle<Full, ClosedShell>(ctx_, n_roots, thresh);
-  }
-
   NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
     // Each solve receives one threshold, but its role belongs to the full
@@ -1807,32 +871,9 @@ public:
         node.protocols.begin(), node.protocols.end(),
         [&](double threshold) { return threshold < item.thresh; });
 
-    if (node.kind == CalcKind::ES) {
-      if(ctx_.shared_response)
-        return node.tda ? solve_shared_excited<TDA>(ctx_,node.n_roots,item.thresh) :
-                          solve_shared_excited<Full>(ctx_,node.n_roots,item.thresh);
-      const bool restricted = ctx_.gs.is_spin_restricted();
-      if (restricted) {
-        if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
-          madness::print("[CALC] run_protocol: ES bundle", node.id,
-                         " n_roots=", node.n_roots, " thresh=", item.thresh,
-                         (node.tda ? " (TDA closed-shell)"
-                                   : " (Full closed-shell)"),
-                         " action=", node_action_name(item.action));
-        return node.tda
-                   ? solve_es_tda_closed_shell(ctx_, node.n_roots, item.thresh,
-                                               item.action)
-                   : solve_es_full_closed_shell(ctx_, node.n_roots, item.thresh,
-                                                item.action);
-      }
-      // Open-shell excited states are out of scope (closed-shell only; future).
-      if (ctx_.world.rank() == 0)
-        madness::print("[CALC] run_protocol: ES bundle", node.id,
-                       "on an OPEN-SHELL ground state — open-shell excited "
-                       "states are OUT OF SCOPE (closed-shell only; future "
-                       "research). Skipping.");
-      return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
-    }
+    if (node.kind == CalcKind::ES)
+      return node.tda ? solve_shared_excited<TDA>(ctx_,node.n_roots,item.thresh) :
+                        solve_shared_excited<Full>(ctx_,node.n_roots,item.thresh);
     if (node.kind == CalcKind::VBC) {
       if (ctx_.gs.is_spin_restricted()) {
         if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
@@ -1868,16 +909,12 @@ public:
     }
 
     if (restricted && is_static)
-      return solve_fd_protocol<Static, ClosedShell>(ctx_, node.pert, node.freq,
-                                                 item.thresh, item.action, node.es_root_id);
+      return solve_fd_protocol<Static, ClosedShell>(ctx_, node.pert, node.freq, item.thresh);
     if (restricted && !is_static)
-      return solve_fd_protocol<Full, ClosedShell>(ctx_, node.pert, node.freq,
-                                               item.thresh, item.action, node.es_root_id);
+      return solve_fd_protocol<Full, ClosedShell>(ctx_, node.pert, node.freq, item.thresh);
     if (!restricted && is_static)
-      return solve_fd_protocol<Static, OpenShell>(ctx_, node.pert, node.freq,
-                                               item.thresh, item.action, node.es_root_id);
-    return solve_fd_protocol<Full, OpenShell>(ctx_, node.pert, node.freq,
-                                          item.thresh, item.action, node.es_root_id);
+      return solve_fd_protocol<Static, OpenShell>(ctx_, node.pert, node.freq, item.thresh);
+    return solve_fd_protocol<Full, OpenShell>(ctx_, node.pert, node.freq, item.thresh);
   }
 
 private:
@@ -1898,12 +935,9 @@ struct CalcManagerPolicy {
   std::function<bool(const CalcNode&)> dependencies_ready;
   std::function<bool(const std::string&)> qualified_bundle;
   SeedStrategy seed = SeedStrategy::NearestConverged;
-  int          max_iters_per_step = 25;
-  int          es_max_iters_per_step = 0;   // ES budget; 0 = max_iters_per_step
   int          fd_subworlds = 0;   // F2f: subworlds PER NODE (0=off, 1=node-aligned)
   int          fd_subworld_ranks = 0;   // ranks per subworld; >0 = universe split (may span nodes)
-  // Named stages: the planner's decision per FD state (D-016). Empty on the
-  // unnamed path, where reconcile_protocol alone schedules.
+  // The session's plan for every state (D-016); schedule() requires one.
   StatePlans   state_plans;
 };
 
@@ -1985,30 +1019,6 @@ public:
     diag["schedule"] = nlohmann::json::array();
     int pass = 0;
 
-    // D-089: each excited-state bundle the planner loads is not solved, so
-    // its transition analysis is computed from the saved bundle when the run
-    // has none (a restart between the bundle's publish and its analysis).
-    // Every rank, the DAG's order; a no-op when the analysis exists.
-    {
-      const nlohmann::json meta0
-          = detail_exec::load_metadata_rank0(world, meta_path);
-      for (const auto &n : dag_) {
-        if (n.kind != CalcKind::ES) continue;
-        const auto plan = policy_.state_plans.find(n.id);
-        if (plan == policy_.state_plans.end()
-            || plan->second.kind != StatePlan::Kind::load)
-          continue;
-        const auto &key = plan->second.loaded_key;
-        if (!meta0.contains("excited_states")
-            || !meta0.at("excited_states").contains(key)
-            || !meta0.contains("protocols")
-            || !meta0.at("protocols").contains(key))
-          continue;
-        exec.analyze_loaded_bundle(
-            n, meta0.at("excited_states").at(key).value("n_roots", 0),
-            meta0.at("protocols").at(key).at("thresh").get<double>());
-      }
-    }
 
     std::string last_sig;
     std::string last_progress;           // fingerprint of the saved solve state
@@ -2019,11 +1029,7 @@ public:
       // Grow the DAG from any ES bundle converged ON DISK (idempotent and
       // restart-safe: reads roots from metadata, not in-memory run state).
       expand_converged_es(world, meta_json);
-      // max_iters flows into reconcile so a budget-exhausted rung climbs the
-      // ladder (honest-climb) instead of Resume-looping into the no-progress halt.
-      auto waves = schedule(dag_, ramp, meta_json, policy_.max_iters_per_step,
-                            policy_.es_max_iters_per_step,
-                            policy_.state_plans, solved_);
+      auto waves = schedule(dag_, ramp, meta_json, policy_.state_plans, solved_);
       // Native shared completion is judged against this invocation's request.
       // Legacy analysis flags can describe an earlier, looser request.
       if(policy_.dependencies_ready) for(auto& wave:waves)
@@ -2160,7 +1166,7 @@ public:
                                  {"thresh", it.thresh},
                                  {"action", node_action_name(it.action)}});
       diag["schedule"].push_back(std::move(wrec));
-      // A planned rung is forced once; from here reconcile_protocol decides.
+      // A planned rung is scheduled once; the session's node owns completion.
       for (const auto &it : wave)
         solved_.insert(it.node->id + "|" + protocol_key_at(it.thresh));
 
@@ -2491,8 +1497,8 @@ private:
 
 inline char beta_axis_name(int a) { return a == 0 ? 'x' : a == 1 ? 'y' : 'z'; }
 
-// Shared publication uses the same source/contraction kernels as the legacy
-// analysis path, but only exact checkpoints qualified for this request.
+// Contract each VBC source node with the qualified driven states of this
+// request.
 inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,double thresh) {
   using namespace madness;
   using json=nlohmann::json;
@@ -2522,21 +1528,13 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
               {"components",json::object()},{"availability",json::object()}};
       if(nuclear) tensor["coordinate"]=request.pert_c.description();
     }
-    std::optional<ResponseStateXY<ClosedShell>> source,B,C,alternate;
+    std::optional<ResponseStateXY<ClosedShell>> source,B,C;
     const auto selected=session.second_order.find(id);
     if(supported && selected!=session.second_order.end() && selected->second->reusable()) {
       B=detail_exec::qualified_fd_as_xy(ctx,request.pert_b,request.freq_b);
       C=detail_exec::qualified_fd_as_xy(ctx,request.pert_c,request.freq_c);
       if(B && C) {
         source=detail_exec::load_shared_vbc(ctx,*selected->second);
-        if(ctx.beta_compare_sources) {
-          session.timing().begin("compare_source");
-          auto VB=perturbation_operator(world,gs,request.pert_b);
-          auto VC=perturbation_operator(world,gs,request.pert_c);
-          alternate=ctx.beta_pq_source ? vbc::compute_vbc<ClosedShell>(world,*ground,*B,*C,VB,VC)
-              : tpa::quadratic_source(world,*ground,*B,*C,VB,VC);
-          session.timing().end();
-        }
       }
     }
     for(int axis=0;axis<3;++axis) {
@@ -2553,10 +1551,6 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       session.timing().begin("contraction",{{"task_id",id},{"component",component}});
       auto VA=dipole_operator(world,axis);
       const double value=beta::beta_abc<ClosedShell>(world,*ground,*A,*source,*B,*C,VA);
-      if(alternate) {
-        const double other=beta::beta_abc<ClosedShell>(world,*ground,*A,*alternate,*B,*C,VA);
-        if(world.rank()==0) print("[BETA-COMPARE]",component,"saved",value,"other",other,"difference",other-value);
-      }
       session.timing().end();
       tensor["components"][component]=value;
       if(world.rank()==0) print(nuclear ? "[RAMAN]" : "[BETA]",component,
@@ -2593,177 +1587,8 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
 
 inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
                           double thresh) {
-  using namespace madness;
-  World &world = ctx.world;
-  GroundState &gs = ctx.gs;
   if (plan.vbc.empty()) return;
-  if(ctx.shared_response) {assemble_shared_beta(ctx,plan,thresh);return;}
-  // Same ClosedShell-only reader constraint as assemble_alpha — refuse loudly.
-  if (!gs.is_spin_restricted()) {
-    if (world.rank() == 0)
-      print("[ASSEMBLE] open-shell beta/raman assembly is not implemented — "
-            "SKIPPED (ClosedShell-only readers; see REVIEW_FINDINGS).");
-    return;
-  }
-
-  set_response_protocol(world, ctx.L, thresh);
-  const double t0 = FunctionDefaults<3>::get_thresh();
-  {
-    auto coulop = poperatorT(
-        CoulombOperatorPtr(world, gs.params().lo(), 0.001 * t0));
-    gs.prepare(world, 0.001 * t0, coulop, ctx.fock_json);
-  }
-  const double c_xc = gs.hf_exchange_coefficient();
-  const double lo   = gs.params().lo();
-  auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
-  const std::string key = protocol_key();
-
-  if (world.rank() == 0)
-    madness::print("\n=== beta assembly  protocol_key=", key, " ===");
-
-  // Accumulate property rows and write them to response_metadata.json in ONE
-  // load/add-all/save after the loops (rank 0), instead of reloading + rewriting
-  // the whole file per (vbc, axis). `key` is constant across all rows.
-  std::vector<std::pair<std::string, nlohmann::json>> rows;  // (property key, row)
-
-  // Rank-0 metadata snapshot for per-row accuracy: each beta/raman row records
-  // the honest verdict of the FD states that built it (same discipline as
-  // alpha's row_accuracy; madqc review R4). Uses the SAME source-selection
-  // helper the loader uses, so reported accuracy == the state actually loaded.
-  nlohmann::json acc_meta;
-  acc_meta=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
-  const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
-  const int    acc_k   = madness::FunctionDefaults<3>::get_k();
-  auto fd_acc = [&](const Perturbation &p, double f) -> nlohmann::json {
-    return fd_leg_accuracy(acc_meta, p, f, acc_thr, acc_k, key,
-                           ctx.state_plans);  // rank-0 only
-  };
-
-  // Full Raman plans carry the all-atoms nuclear sentinel on the C side; the
-  // saved sources are per atom (build_dag expanded them), so expand here too.
-  const auto vbc_requests = expand_vbc_requests(
-      plan.vbc, static_cast<int>(gs.molecule().natom()));
-  for (const auto &vr : vbc_requests) {
-    const double ws = vr.freq_b + vr.freq_c;   // omega_sigma = omega_B + omega_C
-    const std::string vbc_id =
-        vbc_node_id(vr.pert_b, vr.pert_c, vr.freq_b, vr.freq_c);
-
-    const bool is_raman =
-        (vr.pert_c.kind == Perturbation::Kind::NuclearDisplacement);
-    const char *pkey = is_raman ? "raman" : "beta";
-    const char *ptag = is_raman ? "[RAMAN]" : "[BETA]";
-    auto vbc = load_vbc<ClosedShell>(world, ctx.calc_dir, vbc_id);
-    auto B = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_b, vr.freq_b);
-    auto C = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, vr.pert_c, vr.freq_c);
-    if (!vbc || !B || !C) {
-      if (world.rank() == 0)
-        madness::print("[BETA] skip", vbc_id, "— missing VBC or FD input");
-      continue;
-    }
-    // --beta-compare-sources: the OTHER source from the same legs (the saved
-    // one is whichever ctx.beta_pq_source selected at build time).
-    std::optional<ResponseStateXY<ClosedShell>> vbc_alt;
-    if (ctx.beta_compare_sources) {
-      auto VB_op = perturbation_operator(world, gs, vr.pert_b);
-      auto VC_op = perturbation_operator(world, gs, vr.pert_c);
-      vbc_alt = ctx.beta_pq_source
-          ? vbc::compute_vbc<ClosedShell>(world, g0, *B, *C, VB_op, VC_op)
-          : tpa::quadratic_source(world, g0, *B, *C, VB_op, VC_op);
-    }
-
-    for (int a = 0; a < 3; ++a) {
-      const Perturbation pA = Perturbation::dipole(a);
-      auto xA = detail_exec::load_fd_as_xy<ClosedShell>(world, ctx.calc_dir, pA, ws);
-      if (!xA) {
-        // D-104: an axis the deck never asked for (no dipole leg of this
-        // axis at omega_sigma in the plan) is channel detail; a requested
-        // leg that is missing stays a warning at every print level.
-        const bool requested
-            = std::any_of(plan.fd.begin(), plan.fd.end(), [&](const auto& leg) {
-                return leg.pert.kind == Perturbation::Kind::Dipole
-                       && leg.pert.axis == a
-                       && ResponseMetadata::freq_key(leg.freq)
-                              == ResponseMetadata::freq_key(ws);
-              });
-        if (world.rank() == 0
-            && (requested || ctx.print_level >= PrintLevel::Verbose))
-          madness::print("[BETA] skip A=", beta_axis_name(a), "— missing FD",
-                         pA.description(), "@", ws,
-                         requested ? "(a requested leg is unavailable)"
-                                   : "(not requested)");
-        continue;
-      }
-      auto VA_op = dipole_operator(world, a);
-      const double b = beta::beta_abc<ClosedShell>(world, g0, *xA, *vbc, *B, *C, VA_op);
-      if (vbc_alt) {
-        const double b_alt =
-            beta::beta_abc<ClosedShell>(world, g0, *xA, *vbc_alt, *B, *C, VA_op);
-        if (world.rank() == 0)
-          printf("%s-COMPARE A=%c B=%s C=%s fB=%g fC=%g  saved[%s]=%+.8e  other[%s]=%+.8e  "
-                 "diff=%+.3e (%.2f%%)\n", ptag, beta_axis_name(a),
-                 vr.pert_b.description().c_str(), vr.pert_c.description().c_str(),
-                 vr.freq_b, vr.freq_c,
-                 ctx.beta_pq_source ? "pq" : "vbc", b,
-                 ctx.beta_pq_source ? "vbc" : "pq", b_alt,
-                 b_alt - b, (b != 0.0 ? 100.0 * (b_alt - b) / b : 0.0));
-      }
-
-      if (world.rank() == 0) {
-        madness::print(ptag, " A=", beta_axis_name(a),
-                       "  B=", vr.pert_b.description(),
-                       "  C=", vr.pert_c.description(),
-                       "  fB=", vr.freq_b, "  fC=", vr.freq_c,
-                       "  value=", b);
-        nlohmann::json row{{"A", std::string(1, beta_axis_name(a))},
-                           {"B", vr.pert_b.description()},
-                           {"C", vr.pert_c.description()},
-                           {"freq_b", vr.freq_b},
-                           {"freq_c", vr.freq_c},
-                           {"beta", b}};
-        // Honest per-row accuracy: the three FD inputs (A@ws, B@fB, C@fC) and
-        // the VBC state's own verdict at this protocol.
-        row["row_accuracy"] = nlohmann::json::array(
-            {fd_acc(pA, ws), fd_acc(vr.pert_b, vr.freq_b),
-             fd_acc(vr.pert_c, vr.freq_c)});
-        if (acc_meta.contains("vbc_states") &&
-            acc_meta["vbc_states"].contains(vbc_id) &&
-            acc_meta["vbc_states"][vbc_id].contains(key)) {
-          const auto &v = acc_meta["vbc_states"][vbc_id][key];
-          row["vbc_accuracy"] = {{"converged", v.value("converged", false)},
-                                 {"diverged", v.value("diverged", false)}};
-        }
-        // Aggregate row verdict (review MED): mirror alpha's row-level
-        // converged/max_bsh_residual so the .out summary and the website viewer
-        // get ONE honest flag per beta/raman row instead of only the per-leg
-        // sub-structures. The row is converged iff all three FD legs met the
-        // strict target (VBC itself is non-iterative, so its always-true
-        // verdict adds no signal — the FD legs carry the real accuracy).
-        // A leg the planner loaded counts as met, and the row says the
-        // planner decided (D-016), as alpha's rows do.
-        {
-          bool all_conv = true, planner = false; double max_res = 0.0;
-          for (const auto &leg : row["row_accuracy"]) {
-            const bool met = leg.value("met", false);
-            all_conv = all_conv && (leg.value("converged", false) || met);
-            planner  = planner || met;
-            max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
-          }
-          row["converged"]        = all_conv;
-          row["max_bsh_residual"] = max_res;
-          if (planner) row["decided_by"] = "planner";
-        }
-        rows.emplace_back(pkey, std::move(row));
-      }
-      world.gop.fence();
-    }
-  }
-
-  if (world.rank() == 0 && !rows.empty()) {
-    auto meta = ResponseMetadata::load_or_create(
-        ctx.calc_dir + "/response_metadata.json");
-    for (const auto &[pk, row] : rows) meta.add_property(pk, key, row);
-    meta.save();
-  }
+  assemble_shared_beta(ctx,plan,thresh);
 }
 
 // ---------------------------------------------------------------------------
@@ -2779,26 +1604,19 @@ inline void assemble_beta(ExecutorContext &ctx, const ResponsePlan &plan,
 /// (RPA) carries the real de-excitation Y; TDA sets Y=0. Templated so the
 /// EsType Storage (X-only vs X,Y) is handled at compile time.
 template <typename EsType>
-inline bool load_tpa_es_xy(madness::World &world, const std::string &calc_dir,
+inline bool load_tpa_es_xy(madness::World &world,
                            std::vector<double> &omega_out,
                            std::vector<ResponseStateXY<ClosedShell>> &Xf_out,
-                           response_shared::ExcitedSet* binding=nullptr,
-                           std::vector<std::string>* root_ids=nullptr) {
-  typename ESSolver<EsType,ClosedShell>::State state;
-  if(binding) {
-    if(!binding->complete()) return false;
-    state=binding->load([&](const auto& directory,const auto& description) {
-      return response_shared::load_excited_functions<EsType,ClosedShell>(world,directory,description,binding->controls().protocol);
-    },true);
-  } else {
-    auto es=try_load_es_bundle<EsType,ClosedShell>(world,calc_dir);
-    if(!es) return false;
-    state=std::move(es->state);
-  }
+                           response_shared::ExcitedSet& binding,
+                           std::vector<std::string>& root_ids) {
+  if(!binding.complete()) return false;
+  const auto state=binding.load([&](const auto& directory,const auto& description) {
+    return response_shared::load_excited_functions<EsType,ClosedShell>(world,directory,description,binding.controls().protocol);
+  },true);
   const long nr = state.omega.dim(0);
   for (long f = 0; f < nr; ++f) {
     omega_out.push_back(state.omega(f));
-    if(root_ids) root_ids->push_back(make_root_id(state.stable_index[f]));
+    root_ids.push_back(make_root_id(state.stable_index[f]));
     ResponseStateXY<ClosedShell> Xf;
     Xf.x_alpha = state.roots[f].x_alpha;
     if constexpr (std::is_same_v<EsType, Full>) {
@@ -2824,10 +1642,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     return;
   }
 
-  response_shared::ExcitedSet* shared_bundle=nullptr;
   nlohmann::json shared_values=nlohmann::json::array();
   auto finish_shared=[&] {
-    if(!ctx.shared_response) return;
     ctx.shared_response->set_properties({{"two_photon_absorption",{
         {"value_type","real"},{"scientific_status","preliminary"},
         {"units",{{"transition_tensor","atomic_units"},{"energy","hartree"},
@@ -2839,14 +1655,12 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     shared_values.push_back({{"state",id},{"status","unavailable"},
         {"components",nlohmann::json::object()},{"availability",{{"two_photon_absorption",reason}}}});
   };
-  if(ctx.shared_response) {
-    ctx.shared_response->timing().begin("two_photon_properties");
-    const auto& request=plan.es.front();
-    shared_bundle=&ctx.shared_response->excited_at(es_node_id(request.tda,request.n_roots));
-    if(!shared_bundle->complete()) {
-      for(const auto& id:shared_bundle->expected().states) unavailable(id,"excited bundle has not met the final request");
-      finish_shared();return;
-    }
+  ctx.shared_response->timing().begin("two_photon_properties");
+  const auto& request=plan.es.front();
+  auto& shared_bundle=ctx.shared_response->excited_at(es_node_id(request.tda,request.n_roots));
+  if(!shared_bundle.complete()) {
+    for(const auto& id:shared_bundle.expected().states) unavailable(id,"excited bundle has not met the final request");
+    finish_shared();return;
   }
   set_response_protocol(world, ctx.L, thresh);
   const double t0 = FunctionDefaults<3>::get_thresh();
@@ -2860,21 +1674,16 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   auto g0 = build_response_ground_state_closed_shell(world, gs, c_xc, lo);
   const std::string key = protocol_key();
 
-  // Dispatch on the ES method recorded in the bundle metadata (tda vs full/RPA).
-  // Dalton's TPA reference is full RPA; --es-full gives the matching v3 bundle.
-  int es_full=plan.es.front().tda ? 0 : 1;
-  if(!shared_bundle) {
-    const auto metadata=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
-    if(metadata.contains("excited_states") && metadata["excited_states"].contains(key))
-      es_full=metadata["excited_states"][key].value("type","tda")=="full" ? 1 : 0;
-  }
+  // The ES method of the requested bundle (tda vs full/RPA). Dalton's TPA
+  // reference is full RPA.
+  const int es_full=request.tda ? 0 : 1;
   std::vector<std::string> root_ids;
   std::vector<double> omegas;
   std::vector<ResponseStateXY<ClosedShell>> Xfs;
   const double t_es0 = madness::wall_time();
   const bool loaded =
-      es_full ? load_tpa_es_xy<Full>(world, ctx.calc_dir, omegas, Xfs,shared_bundle,&root_ids)
-              : load_tpa_es_xy<TDA>(world, ctx.calc_dir, omegas, Xfs,shared_bundle,&root_ids);
+      es_full ? load_tpa_es_xy<Full>(world, omegas, Xfs, shared_bundle, root_ids)
+              : load_tpa_es_xy<TDA>(world, omegas, Xfs, shared_bundle, root_ids);
   if (world.rank() == 0) {
     printf("[TPA timing] ES bundle load: %.1f s\n", madness::wall_time() - t_es0);
     fflush(stdout);
@@ -2896,24 +1705,12 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     print("\n=== TPA assembly  protocol_key=", key, "  n_roots=", nroots, " ===");
 
   std::vector<nlohmann::json> rows;
-  // Rank-0 metadata snapshot for per-row accuracy (the three FD legs at w_f/2),
-  // same discipline as alpha/beta (review finding C9): a 2PA row built on an
-  // unconverged or accepted-at-maxiter leg says so.
-  nlohmann::json acc_meta;
-  if(!shared_bundle)
-    acc_meta=detail_exec::load_metadata_rank0(world,ctx.calc_dir+"/response_metadata.json");
-  const double acc_thr = madness::FunctionDefaults<3>::get_thresh();
-  const int    acc_k   = madness::FunctionDefaults<3>::get_k();
   // rank-0 table data (S tensor + observables per root) for the Dalton-style print.
   std::vector<int>                     tbl_f;
   std::vector<double>                  tbl_w;
   std::vector<madness::Tensor<double>> tbl_S;
   std::vector<tpa::Observables>        tbl_o;
   for (long f = 0; f < nroots; ++f) {
-    if (!ctx.tpa_roots.empty() &&
-        std::find(ctx.tpa_roots.begin(), ctx.tpa_roots.end(),
-                  static_cast<int>(f)) == ctx.tpa_roots.end())
-      continue;   // --tpa-roots filter (parallel per-root verification)
     const double wf = omegas[f];
     const double wf_half = 0.5 * wf;
     const ResponseStateXY<ClosedShell> &Xf = Xfs[f];   // real Y for RPA, 0 for TDA
@@ -2922,8 +1719,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     bool ok = true;
     const double t_fd0 = madness::wall_time();
     for (int a = 0; a < 3; ++a) {
-      auto r = shared_bundle ? detail_exec::qualified_fd_as_xy(ctx,Perturbation::dipole(a),wf_half)
-          : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,Perturbation::dipole(a),wf_half);
+      auto r = detail_exec::qualified_fd_as_xy(ctx,Perturbation::dipole(a),wf_half);
       if (!r) { ok = false; break; }
       mu_resp[a] = std::move(*r);
     }
@@ -2935,15 +1731,15 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       if (world.rank() == 0)
         print("[TPA] root", f, " omega_f=", wf,
               " — missing dipole FD @", wf_half, " — skip");
-      if(shared_bundle) unavailable(root_ids[f],"required driven response has not met the final request");
+      unavailable(root_ids[f],"required driven response has not met the final request");
       continue;
     }
 
-    // ---- cross-code diagnostics (PrintLevel >= Normal or --tpa-diag-only):
+    // ---- cross-code diagnostics (PrintLevel >= Normal):
     // vector norms, transition dipoles/oscillators, and alpha(omega_f/2) from
     // the SAME loaded states the contraction uses — line-for-line comparable
     // with the patched-DALTON QRSMONORM + QRLRVE output (TPA_SCOPING §5n/§5o).
-    if (static_cast<int>(ctx.print_level) >= 1 || ctx.tpa_diag_only) {
+    if (static_cast<int>(ctx.print_level) >= 1) {
       const double xx = inner(Xf.x_alpha, Xf.x_alpha);
       const double yy = inner(Xf.y_alpha, Xf.y_alpha);
       if (world.rank() == 0)
@@ -2979,129 +1775,55 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       }
       if (world.rank() == 0) printf("   (DALTON: QRLRVE <<A;A>> at same w)\n");
     }
-    if(ctx.tpa_diag_only && shared_bundle) unavailable(root_ids[f],"diagnostics requested without contraction");
-    if (ctx.tpa_diag_only) continue;   // diagnostics only — no contraction,
-                                       // no metadata writes (read-only pass)
 
     madness::Tensor<double> S;
-    if(shared_bundle) ctx.shared_response->timing().begin("contraction",{{"state",root_ids[f]}});
-    if (ctx.tpa_residue) {
-      // PRODUCTION composition (TPA_SCOPING §5m + §5q, verified 6/6 vs DALTON
-      // d-aug-QZ 2026-07-22 via verify_e3_k6.py):
-      //   S = C_N * ( S_1e + S_E3corr ),   C_N = sqrt(2)
-      // S_1e: mu-operator terms of V^{bc} only (tpa_moment_residue_1e; cheap).
-      // S_E3corr: corrected two-electron composition (tpa_e3_residue; DALTON
-      // units WITH the sqrt2 — divided out here so C_N is applied exactly
-      // once and ctx.tpa_prefactor stays a pure A/B knob on top).
-      // BOTH orderings are computed off-diagonal: the composition is
-      // analytically b<->c symmetric, so the asymmetry is a built-in
-      // correctness assertion (DALTON's E3 shows the same invariance).
-      if (world.rank() == 0) {
-        print("[TPA] contraction: single-residue, S = sqrt2*(1e + E3corr),"
-              " 2e composition =",
-              (ctx.tpa_cgrouped ? "c-grouped (tpa_e3_residue)"
-                                : "Parker (P,Q) spec [production]"),
-              " prefactor =", ctx.tpa_prefactor);
-        fflush(stdout);
-      }
-      const auto S_1e =
-          tpa::tpa_moment_residue_1e(world, g0, Xf, mu_resp, mu_op, 1.0);
-      madness::Tensor<double> S_e3c(3L, 3L);
-      double max_asym = 0.0;
-      for (int b3 = 0; b3 < 3; ++b3) {
-        for (int c3 = b3; c3 < 3; ++c3) {
-          if (world.rank() == 0) {
-            printf("  [TPA e3corr] root %ld pair %c%c%s (%s) ...\n", f,
-                   "xyz"[b3], "xyz"[c3],
-                   (b3 != c3 ? " (both orderings)" : ""),
-                   (ctx.tpa_cgrouped ? "c-grouped" : "Parker spec"));
-            fflush(stdout);
-          }
-          double e = 0.0;
-          if (!ctx.tpa_cgrouped) {
-            // PRODUCTION (2026-09-05): the Parker-style state-free (P,Q)
-            // source, symmetrized builder (family-D collapse). Gate 1 of
-            // test_tpa_pq_vs_vbc pins <x^f|P>+<y^f|Q> (one ordering, 2e)
-            // == tpa_e3_residue/sqrt2, and the sym builder returns the
-            // ordering SUM, so 0.5*<f|P_sym,Q_sym> lands in the same units
-            // as the averaged e/sqrt2 below — the outer sqrt2*(1e+E3corr)
-            // stays untouched.
-            auto pq = source_spec::assemble_source(
-                world, g0,
-                tpa::tpa_pq_spec_sym(world, g0,
-                                     mu_resp[static_cast<size_t>(b3)],
-                                     mu_resp[static_cast<size_t>(c3)]));
-            const double sp =
-                ctx.tpa_swap_pq
-                    ? (inner(world, Xf.y_alpha, pq[0]).sum() +
-                       inner(world, Xf.x_alpha, pq[1]).sum())
-                    : (inner(world, Xf.x_alpha, pq[0]).sum() +
-                       inner(world, Xf.y_alpha, pq[1]).sum());
-            e = 0.5 * sp;
-            S_e3c(b3, c3) = S_e3c(c3, b3) = e;
-          } else {
-            const double ebc = tpa::tpa_e3_residue(
-                world, g0, mu_resp[static_cast<size_t>(b3)],
-                mu_resp[static_cast<size_t>(c3)], Xf);
-            e = ebc;
-            if (b3 != c3) {
-              const double ecb = tpa::tpa_e3_residue(
-                  world, g0, mu_resp[static_cast<size_t>(c3)],
-                  mu_resp[static_cast<size_t>(b3)], Xf);
-              max_asym = std::max(max_asym, std::abs(ebc - ecb));
-              e = 0.5 * (ebc + ecb);
-            }
-            S_e3c(b3, c3) = S_e3c(c3, b3) = e / std::sqrt(2.0);
-          }
-        }
-      }
-      S = madness::copy(S_1e);
-      S += S_e3c;
-      S.scale(std::sqrt(2.0) * ctx.tpa_prefactor);
-      if (world.rank() == 0)
-        printf("  [TPA] root %ld assembled: S = sqrt2*(1e + E3corr)   "
-               "b<->c max asym = %.2e\n", f, max_asym);
-      if (ctx.tpa_decompose) {
-        // A/B diagnostics vs the LEGACY vbc-based contraction (old E3
-        // composition, kept for comparison): table stays in prefactor-1
-        // "ours" units so verify_e3_k6.py's x sqrt(2) recovers DALTON.
-        auto S_full = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, mu_op,
-                                              1.0);
-        real_function_3d zop = madness::copy(mu_op[0]); zop.scale(0.0);
-        std::array<real_function_3d, 3> zops{zop, madness::copy(zop),
-                                             madness::copy(zop)};
-        auto S_e3 = tpa::tpa_moment_residue(world, g0, Xf, mu_resp, zops,
-                                            1.0);
-        if (world.rank() == 0) {
-          double max_1e_dev = 0.0;   // direct 1e vs (legacy full - legacy E3)
-          for (int b3 = 0; b3 < 3; ++b3)
-            for (int c3 = 0; c3 < 3; ++c3)
-              max_1e_dev = std::max(
-                  max_1e_dev, std::abs(S_1e(b3, c3) - (S_full(b3, c3) -
-                                                       S_e3(b3, c3))));
-          printf("  [TPA decompose] root %ld (E3old, E3corr, 1e, total)   "
-                 "b<->c max asym = %.2e   1e direct-vs-derived max dev = %.2e\n",
-                 f, max_asym, max_1e_dev);
-          const char *nm[6] = {"xx", "yy", "zz", "xy", "xz", "yz"};
-          const int ii[6] = {0, 1, 2, 0, 0, 1}, jj[6] = {0, 1, 2, 1, 2, 2};
-          for (int e = 0; e < 6; ++e) {
-            const double tot = S_full(ii[e], jj[e]), e3 = S_e3(ii[e], jj[e]);
-            printf("    %s: E3=%+.6f  E3corr=%+.6f  1e=%+.6f  tot=%+.6f  "
-                   "totcorr=%+.6f\n",
-                   nm[e], e3, S_e3c(ii[e], jj[e]), tot - e3, tot,
-                   tot - e3 + S_e3c(ii[e], jj[e]));
-                   fflush(stdout);
-          }
-        }
-      }
-    } else {
-      // Legacy candidate: build the 3 axis sources (the TPA analogue of beta's
-      // VBC quadratic source), then contract. The sources are not saved.
-      const auto vbc_b=tpa::tpa_sources(world,g0,Xf,mu_resp,mu_op);
-      S = tpa::tpa_moment(world, g0, Xf, mu_resp, mu_op, vbc_b);
+    ctx.shared_response->timing().begin("contraction",{{"state",root_ids[f]}});
+    // PRODUCTION composition (TPA_SCOPING §5m + §5q, verified 6/6 vs DALTON
+    // d-aug-QZ 2026-07-22 via verify_e3_k6.py):
+    //   S = C_N * ( S_1e + S_E3corr ),   C_N = sqrt(2)
+    // S_1e: mu-operator terms of V^{bc} only (tpa_moment_residue_1e; cheap).
+    // S_E3corr: the two-electron part from the Parker-style state-free (P,Q)
+    // source (symmetrized builder; it returns the sum of both orderings).
+    // The printed text, prefactor included, is unchanged from before the
+    // other compositions were removed.
+    if (world.rank() == 0) {
+      print("[TPA] contraction: single-residue, S = sqrt2*(1e + E3corr),"
+            " 2e composition =", "Parker (P,Q) spec [production]",
+            " prefactor =", 1.0);
+      fflush(stdout);
     }
+    const auto S_1e =
+        tpa::tpa_moment_residue_1e(world, g0, Xf, mu_resp, mu_op, 1.0);
+    madness::Tensor<double> S_e3c(3L, 3L);
+    const double max_asym = 0.0;
+    for (int b3 = 0; b3 < 3; ++b3) {
+      for (int c3 = b3; c3 < 3; ++c3) {
+        if (world.rank() == 0) {
+          printf("  [TPA e3corr] root %ld pair %c%c%s (%s) ...\n", f,
+                 "xyz"[b3], "xyz"[c3],
+                 (b3 != c3 ? " (both orderings)" : ""), "Parker spec");
+          fflush(stdout);
+        }
+        // 0.5*<f|P_sym,Q_sym> is one ordering in the units of the outer
+        // sqrt2*(1e+E3corr).
+        auto pq = source_spec::assemble_source(
+            world, g0,
+            tpa::tpa_pq_spec_sym(world, g0,
+                                 mu_resp[static_cast<size_t>(b3)],
+                                 mu_resp[static_cast<size_t>(c3)]));
+        const double sp = inner(world, Xf.x_alpha, pq[0]).sum() +
+                          inner(world, Xf.y_alpha, pq[1]).sum();
+        S_e3c(b3, c3) = S_e3c(c3, b3) = 0.5 * sp;
+      }
+    }
+    S = madness::copy(S_1e);
+    S += S_e3c;
+    S.scale(std::sqrt(2.0));
+    if (world.rank() == 0)
+      printf("  [TPA] root %ld assembled: S = sqrt2*(1e + E3corr)   "
+             "b<->c max asym = %.2e\n", f, max_asym);
     const auto obs = tpa::observables(S, wf);
-    if(shared_bundle) {
+    {
       ctx.shared_response->timing().end();
       nlohmann::json components=nlohmann::json::object();
       for(int a=0;a<3;++a) for(int b=0;b<3;++b) components[std::string(1,"xyz"[a])+"xyz"[b]]=S(a,b);
@@ -3135,9 +1857,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
         nlohmann::json legs = nlohmann::json::array();
         bool all_conv = true; double max_res = 0.0;
         for (int a = 0; a < 3; ++a) {
-          auto leg = shared_bundle ? nlohmann::json{
-              {"converged",true},{"bsh_residual",ctx.shared_response->at(fd_node_id(Perturbation::dipole(a),wf_half)).measured_values().at("values").at("bsh_residual")}}
-              : fd_leg_accuracy(acc_meta,Perturbation::dipole(a),wf_half,acc_thr,acc_k,key);
+          auto leg = nlohmann::json{
+              {"converged",true},{"bsh_residual",ctx.shared_response->at(fd_node_id(Perturbation::dipole(a),wf_half)).measured_values().at("values").at("bsh_residual")}};
           all_conv = all_conv && leg.value("converged", false);
           max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
           legs.push_back(std::move(leg));
@@ -3187,21 +1908,11 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     fflush(stdout);
   }
 
-  if(shared_bundle) {
-    checkpoint::detail::on_root(world,[&] {
-      auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
-      meta.replace_property("tpa",key,rows);meta.save();return std::string{};
-    });
-    finish_shared();return;
-  }
-  // Root-filtered runs are read-only (concurrent per-root processes must not
-  // race on the metadata file); full runs record properties/tpa as before.
-  if (world.rank() == 0 && !rows.empty() && ctx.tpa_roots.empty()) {
-    auto meta = ResponseMetadata::load_or_create(
-        ctx.calc_dir + "/response_metadata.json");
-    for (auto &row : rows) meta.add_property("tpa", key, row);
-    meta.save();
-  }
+  checkpoint::detail::on_root(world,[&] {
+    auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
+    meta.replace_property("tpa",key,rows);meta.save();return std::string{};
+  });
+  finish_shared();
 }
 
 // ---------------------------------------------------------------------------
@@ -3212,7 +1923,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
 //
 // where x_i,y_i are the converged FD response (direction i, frequency omega) and
 // v_j = Q(mu_j * phi0) is the dipole perturbation source (direction j). For the
-// static case load_fd_as_xy supplies y = x, so this reduces to -4<x|v> -- the
+// static case y = x, so this reduces to -4<x|v> -- the
 // same factors as molresponse_v2 PropertyManager::compute_alpha (-2 dynamic /
 // -4 static). Printed as [ALPHA ...] and recorded under properties/alpha.
 // ---------------------------------------------------------------------------
@@ -3231,7 +1942,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
       print("[ASSEMBLE] open-shell property assembly is not implemented yet — "
             "response states are solved and saved, but alpha assembly is "
             "SKIPPED (ClosedShell-only readers; see REVIEW_FINDINGS).");
-    if (ctx.shared_response) {
+    {
       std::set<int> axes;
       std::set<double> frequencies;
       for (const auto& request:plan.fd) if (request.pert.kind==Perturbation::Kind::Dipole) {
@@ -3280,7 +1991,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
     madness::print("=== polarizability (alpha) assembly  protocol_key=", key,
                    " ===");
 
-  if (ctx.shared_response) {
+  {
     nlohmann::json tensors=nlohmann::json::array(),qualified=nlohmann::json::array();
     for (double frequency:fr) {
       nlohmann::json components=nlohmann::json::object(),availability=nlohmann::json::object();
@@ -3328,126 +2039,6 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
     }
     replace_alpha_properties(world,ctx.calc_dir+"/response_metadata.json",key,qualified);
     ctx.shared_response->set_properties({{"polarizability",{{"units","bohr^3"},{"value_type","real"},{"values",tensors}}}});
-    return;
-  }
-
-  const int k_now = madness::FunctionDefaults<3>::get_k();
-
-  for (double w : fr) {
-    Tensor<double> alpha(static_cast<long>(ax.size()),
-                         static_cast<long>(ax.size()));
-    // Per-ROW accuracy: the honest verdict of the state that built each direction
-    // row — tied to the SOURCE protocol it came from, NOT the reprojection k below.
-    std::vector<std::string> src_key (ax.size());
-    std::vector<int>         row_conv(ax.size(), 0);   // converged AND not accepted@maxiter
-    std::vector<int>         row_acc (ax.size(), 0);   // accepted@maxiter (converged forced true)
-    std::vector<double>      row_res (ax.size(), 0.0); // bsh residual at the source
-    std::vector<int>         row_met (ax.size(), 0);   // loaded by the planner (D-016)
-    bool present = true;   // does every channel have SOME usable (non-diverged) state?
-
-    for (size_t i = 0; i < ax.size() && present; ++i) {
-      const std::string chan = Perturbation::dipole(ax[i]).description();
-      const std::string fkey = ResponseMetadata::freq_key(w);
-      // Pick the SAME source the loader will use (shared best-usable helper) and
-      // read its honest accuracy, so the reported accuracy matches the state that
-      // actually builds the row. Rank 0 decides; broadcasts keep the collective
-      // load + reproject below in lockstep across ranks.
-      const auto metadata=read_response_property_metadata(world,ctx.calc_dir+"/response_metadata.json");
-      const auto a = fd_leg_accuracy(metadata, Perturbation::dipole(ax[i]), w,
-                                       thresh, k_now, key, ctx.state_plans);
-      const auto sk = a.value("source_protocol_key", std::string{});
-      const int cv = a.value("converged", false) ? 1 : 0;
-      const int ac = a.value("accepted", false) ? 1 : 0;
-      const int mt = a.value("met", false) ? 1 : 0;
-      const double rs = a.value("bsh_residual", 0.0);
-
-      if (sk.empty()) {   // no usable state at all -> cannot form this row
-        if (world.rank() == 0)
-          madness::print("[ALPHA] omega=", w, " dir=", beta_axis_name(ax[i]),
-                         " — no usable FD state; tensor not assembled");
-        present = false;
-        break;
-      }
-      src_key[i] = sk; row_conv[i] = cv; row_acc[i] = ac; row_res[i] = rs;
-      row_met[i] = mt;
-
-      auto Xi=detail_exec::load_fd_as_xy<ClosedShell>(
-          world, ctx.calc_dir, Perturbation::dipole(ax[i]), w);
-      if (!Xi) { present = false; break; }   // metadata usable but archive gone
-
-      // k-CONSISTENCY: try_load_fd_state re-projects any coarser source to the
-      // active (k, thresh) inside the loader, so Xi is at k_now here — inner()
-      // below is well-defined no matter which protocol the source came from.
-      // The per-row verdict recorded above stays tied to the source protocol.
-
-      for (size_t j = 0; j < ax.size(); ++j)
-        alpha(static_cast<long>(i), static_cast<long>(j)) =
-            -2.0 * (inner(Xi->x_alpha, v[ax[j]]) + inner(Xi->y_alpha, v[ax[j]]));
-    }
-    if (!present) continue;   // a whole direction had NO usable state at all
-
-    bool all_conv = true; double max_res = 0.0;
-    for (size_t i = 0; i < ax.size(); ++i) {
-      // A row the planner loaded is met (D-016); its engine flag stays as saved.
-      all_conv = all_conv && (row_conv[i] != 0 || row_met[i] != 0);
-      if (row_res[i] > max_res) max_res = row_res[i];
-    }
-
-    nlohmann::json row;
-    if (world.rank() == 0) {
-      madness::print("[ALPHA] omega=", w, "  directions=",
-                     [&]{ std::string d; for (int a : ax) d += beta_axis_name(a); return d; }(),
-                     "  converged=", all_conv, "  max_bsh_res=", max_res);
-      for (size_t i = 0; i < ax.size(); ++i) {
-        madness::print("[ALPHA]  row dir=", beta_axis_name(ax[i]),
-                       " source_protocol=", src_key[i],
-                       " converged=", (row_conv[i] != 0),
-                       (row_acc[i] ? " (ACCEPTED best-effort: maxiter or stall; see the fd_states entry)" : ""),
-                       (row_met[i] != 0 ? " (met: loaded by the planner)" : ""),
-                       " bsh_res=", row_res[i]);
-        for (size_t j = 0; j < ax.size(); ++j)
-          madness::print("[ALPHA]  alpha_", beta_axis_name(ax[i]),
-                         beta_axis_name(ax[j]), " (omega=", w, ") =",
-                         alpha(static_cast<long>(i), static_cast<long>(j)));
-      }
-      madness::print("[ALPHA] tensor(omega=", w, ") =\n", alpha);
-
-      row["omega"] = w;
-      std::string dirs; for (int a : ax) dirs += beta_axis_name(a);
-      row["directions"] = dirs;
-      nlohmann::json mat = nlohmann::json::array();
-      for (size_t i = 0; i < ax.size(); ++i) {
-        nlohmann::json r = nlohmann::json::array();
-        for (size_t j = 0; j < ax.size(); ++j)
-          r.push_back(alpha(static_cast<long>(i), static_cast<long>(j)));
-        mat.push_back(r);
-      }
-      row["alpha"] = mat;
-      // Per-row accuracy (honest: reflects each row's SOURCE protocol, not k_now).
-      nlohmann::json racc = nlohmann::json::array();
-      for (size_t i = 0; i < ax.size(); ++i) {
-        std::string dname; dname += beta_axis_name(ax[i]);
-        racc.push_back({{"direction", dname},
-                        {"source_protocol_key", src_key[i]},
-                        {"converged", row_conv[i] != 0},
-                        {"accepted",  row_acc[i]  != 0},
-                        {"bsh_residual", row_res[i]}});
-        if (row_met[i] != 0) {
-          racc.back()["met"] = true;
-          racc.back()["decided_by"] = "planner";
-        }
-      }
-      row["row_accuracy"]     = racc;
-      row["converged"]        = all_conv;    // tensor-level: every row met dconv
-                                             // (or was loaded by the planner)
-      // D-016: a tensor built from a planner load says so.
-      if (std::any_of(row_met.begin(), row_met.end(),
-                      [](int met) { return met != 0; }))
-        row["decided_by"] = "planner";
-      row["max_bsh_residual"] = max_res;
-    }
-    save_alpha_property(world,ctx.calc_dir+"/response_metadata.json",key,row);
-    world.gop.fence();
   }
 }
 

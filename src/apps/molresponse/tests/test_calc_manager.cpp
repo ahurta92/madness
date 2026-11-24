@@ -1,7 +1,7 @@
 // ===========================================================================
 // CalcManager scheduling-core tests (doc 15, 15a). Pure C++, no MPI / no MRA
-// runtime — exercises build_dag, reconcile_protocol, prerequisites_converged, and schedule
-// against hand-written response_metadata.json blobs.
+// runtime — exercises build_dag, planned_action, prerequisites_converged, and
+// schedule against hand-written response_metadata.json blobs.
 // ===========================================================================
 
 #include "../calc/calc_manager.hpp"
@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 
 using namespace molresponse_v3;
@@ -61,7 +62,7 @@ void put_protocol(json &m, double thresh) {
 }
 
 // Write an fd_states entry. `iter` = the last attempt's iteration count
-// (save-side state.iter) — drives reconcile's honest-climb rule.
+// (save-side state.iter).
 void put_fd(json &m, const std::string &pert, double thresh, double freq,
             bool converged, bool diverged = false, int iter = 0,
             bool stalled = false) {
@@ -103,6 +104,15 @@ void put_vbc(json &m, const std::string &id, double thresh, bool converged,
   m["vbc_states"][id][key] = {{"converged", converged}, {"diverged", diverged}};
 }
 
+// The session gives every schedulable state a plan; a fresh one starting at
+// `start` for each node of `dag`.
+StatePlans fresh_plans(const std::vector<CalcNode> &dag, double start) {
+  StatePlans plans;
+  for (const auto &n : dag)
+    if (!n.is_symbolic()) plans[n.id] = StatePlan{StatePlan::Kind::fresh, start, ""};
+  return plans;
+}
+
 } // namespace
 
 int main() {
@@ -121,23 +131,6 @@ int main() {
     const CalcNode *zx = find_id(dag, "fd:dipole_z@f0.05700");
     EXPECT(zx && zx->kind == CalcKind::FD && std::abs(zx->freq - 0.057) < 1e-9,
            "dipole_z node fields");
-    EXPECT(zx && zx->seed_from.empty(),
-           "no static seed hint when no ω=0 in plan");
-  }
-
-  // ====== build_dag: SHG seeds dynamics from static of same perturbation ========
-  std::printf("=== build_dag: static-seed hint ===\n");
-  {
-    // Two dipole_x FD: ω=0 and ω=0.1 -> dynamic should hint at the static.
-    ResponsePlan plan;
-    plan.fd.push_back({Perturbation::dipole(0), 0.0, P});
-    plan.fd.push_back({Perturbation::dipole(0), 0.1, P});
-    auto dag = build_dag(plan, 0);
-    const CalcNode *dyn = find_id(dag, "fd:dipole_x@f0.10000");
-    EXPECT(dyn && dyn->seed_from == "fd:dipole_x@f0.00000",
-           "dynamic seeds from same-perturbation static");
-    const CalcNode *stat = find_id(dag, "fd:dipole_x@f0.00000");
-    EXPECT(stat && stat->seed_from.empty(), "static has no seed hint");
   }
 
   // ====== build_dag: nuclear_all expands to 3N ============================
@@ -195,132 +188,6 @@ int main() {
            "derived FD hard-deps the ES bundle");
   }
 
-  // ====== reconcile_protocol: the 5-row table =================================
-  std::printf("=== reconcile_protocol table ===\n");
-  {
-    CalcNode fd;
-    fd.kind = CalcKind::FD;
-    fd.pert = Perturbation::dipole(0);
-    fd.freq = 0.057;
-    fd.protocols = P;
-    fd.id = fd_node_id(fd.pert, fd.freq);
-
-    EXPECT(reconcile_protocol(fd, empty_meta(), 1e-6) == NodeAction::Fresh,
-           "absent -> Fresh");
-
-    json m1 = empty_meta();
-    put_fd(m1, "dipole_x", 1e-6, 0.057, /*converged=*/true);
-    EXPECT(reconcile_protocol(fd, m1, 1e-6) == NodeAction::Skip,
-           "converged at protocol step -> Skip");
-
-    json m2 = empty_meta();
-    put_fd(m2, "dipole_x", 1e-4, 0.057, /*converged=*/true);  // coarser only
-    EXPECT(reconcile_protocol(fd, m2, 1e-6) == NodeAction::Restart,
-           "converged at coarser protocol step -> Restart");
-
-    json m3 = empty_meta();
-    put_fd(m3, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false);
-    EXPECT(reconcile_protocol(fd, m3, 1e-6) == NodeAction::Resume,
-           "present, not converged, not diverged -> Resume");
-
-    json m4 = empty_meta();
-    put_fd(m4, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true);
-    EXPECT(reconcile_protocol(fd, m4, 1e-6) == NodeAction::Fresh,
-           "present, diverged -> Fresh");
-
-    // D-115: the frequency key is "f%.5f". A converged entry under the same
-    // key whose stored freq is another frequency (a deck stored at five
-    // digits before D-115) is another state: Restart from it, never Skip. An
-    // entry with no stored freq (an older writer) matches by its key.
-    {
-      CalcNode written = fd;
-      written.freq = 0.0198666875;
-      written.id = fd_node_id(written.pert, written.freq);
-      json other = empty_meta();
-      put_fd(other, "dipole_x", 1e-6, 0.019867, /*converged=*/true);
-      EXPECT(ResponseMetadata::freq_key(0.019867) == ResponseMetadata::freq_key(0.0198666875),
-             "the two frequencies share the engine's key");
-      EXPECT(reconcile_protocol(written, other, 1e-6) == NodeAction::Restart,
-             "same key, another stored freq -> Restart (a seed, not the same state)");
-      json legacy = other;
-      legacy["fd_states"]["dipole_x"][protocol_key_at(1e-6)]
-            [ResponseMetadata::freq_key(0.019867)].erase("freq");
-      EXPECT(reconcile_protocol(written, legacy, 1e-6) == NodeAction::Skip,
-             "same key, no stored freq (older writer) -> Skip, as before");
-      json same = empty_meta();
-      put_fd(same, "dipole_x", 1e-6, 0.0198666875 * (1 + 1e-15), /*converged=*/true);
-      EXPECT(reconcile_protocol(written, same, 1e-6) == NodeAction::Skip,
-             "same frequency to roundoff -> Skip");
-    }
-
-    // refinement #5: a coarser-or-equal PARTIAL (not converged, not diverged) is
-    // a usable restart seed — must be Restart, not Fresh (else the good partial
-    // is discarded and the finer step re-seeds from zero).
-    json m5 = empty_meta();
-    put_fd(m5, "dipole_x", 1e-4, 0.057, /*converged=*/false, /*diverged=*/false);
-    EXPECT(reconcile_protocol(fd, m5, 1e-6) == NodeAction::Restart,
-           "coarser PARTIAL (not converged, not diverged) -> Restart");
-
-    // but a coarser DIVERGED-only snapshot is never a seed -> Fresh.
-    json m6 = empty_meta();
-    put_fd(m6, "dipole_x", 1e-4, 0.057, /*converged=*/false, /*diverged=*/true);
-    EXPECT(reconcile_protocol(fd, m6, 1e-6) == NodeAction::Fresh,
-           "coarser DIVERGED only -> Fresh (never seed a blown-up state)");
-
-    // ---- honest-climb: a budget-exhausted rung is DONE, the ladder climbs ----
-    // (`converged` stays false; only the reconcile verdict flips to Skip so the
-    // next rung's Restart takes over. max_iters == 0 keeps legacy semantics.)
-    json m7 = empty_meta();
-    put_fd(m7, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
-           /*iter=*/8);
-    EXPECT(reconcile_protocol(fd, m7, 1e-6, /*max_iters=*/8) == NodeAction::Skip,
-           "budget exhausted (iter >= max_iters), not diverged -> Skip (climb)");
-    EXPECT(reconcile_protocol(fd, m7, 1e-6, /*max_iters=*/25) == NodeAction::Resume,
-           "budget remains (iter < max_iters) -> Resume (continue iterating)");
-    EXPECT(reconcile_protocol(fd, m7, 1e-6) == NodeAction::Resume,
-           "max_iters unspecified (0) -> legacy Resume");
-    // ---- a STALLED rung is exhausted too, however few iterations it used ----
-    // The plateau detector (when a deck writes stall.window; off by default
-    // since D-133) gives up at stall_window iterations, far short
-    // of the shipped decks' max_iters (60), so `iter >= max_iters` never fired
-    // for it: reconcile said Resume, the re-solve plateaued in the same place,
-    // and reconcile said Resume again — forever. Re-solving a plateaued state
-    // is deterministic, so there is nothing to gain from the next attempt.
-    json m7s = empty_meta();
-    put_fd(m7s, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
-           /*iter=*/6, /*stalled=*/true);
-    EXPECT(reconcile_protocol(fd, m7s, 1e-6, /*max_iters=*/60) == NodeAction::Skip,
-           "stalled well under the budget -> Skip (climb), not Resume-forever");
-    // Not stalled at the same iteration count keeps the old answer.
-    json m7n = empty_meta();
-    put_fd(m7n, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/false,
-           /*iter=*/6, /*stalled=*/false);
-    EXPECT(reconcile_protocol(fd, m7n, 1e-6, /*max_iters=*/60) == NodeAction::Resume,
-           "same iter, not stalled -> Resume (still converging)");
-
-    // A diverged state never climbs — divergence beats the exhausted-budget rule.
-    json m8 = empty_meta();
-    put_fd(m8, "dipole_x", 1e-6, 0.057, /*converged=*/false, /*diverged=*/true,
-           /*iter=*/8);
-    EXPECT(reconcile_protocol(fd, m8, 1e-6, /*max_iters=*/8) == NodeAction::Fresh,
-           "diverged at budget -> Fresh (divergence beats honest-climb)");
-  }
-
-  // ====== reconcile_protocol: ES path =========================================
-  std::printf("=== reconcile_protocol ES ===\n");
-  {
-    CalcNode es;
-    es.kind = CalcKind::ES; es.tda = true; es.n_roots = 3; es.protocols = P;
-    es.id = es_node_id(true, 3);
-    json m = empty_meta();
-    put_es(m, 1e-6, /*converged=*/true);
-    EXPECT(reconcile_protocol(es, m, 1e-6) == NodeAction::Skip, "ES converged -> Skip");
-    json m2 = empty_meta();
-    put_es(m2, 1e-4, /*converged=*/true);
-    EXPECT(reconcile_protocol(es, m2, 1e-6) == NodeAction::Restart,
-           "ES coarser converged -> Restart");
-  }
-
   // ====== prerequisites_converged: VBC-like synthetic dep ==============================
   std::printf("=== prerequisites_converged (synthetic VBC dep) ===\n");
   {
@@ -355,7 +222,7 @@ int main() {
     r.frequencies = {0.0, 0.1};            // static + dynamic per axis
     r.protocol_thresholds = P;
     auto dag = build_dag(plan_one(r), 0);  // 6 FD nodes (3 axes × 2 freqs)
-    auto waves = schedule(dag, P, empty_meta());
+    auto waves = schedule(dag, P, empty_meta(), fresh_plans(dag, 1e-4));
 
     // Expect: A1 (3 seed states = the ω=0 of each axis), A2 (3 dynamics @1e-4),
     //         then B (all 6 @1e-6).
@@ -390,7 +257,7 @@ int main() {
     r.tpa = true;
     r.protocol_thresholds = P;
     auto dag = build_dag(plan_one(r), 0);
-    auto waves = schedule(dag, P, empty_meta());
+    auto waves = schedule(dag, P, empty_meta(), fresh_plans(dag, 1e-4));
     for (const auto &w : waves)
       EXPECT(!wave_has(w, "dfd:dipole_x@*"),
              "symbolic derived FD never scheduled");
@@ -399,12 +266,20 @@ int main() {
     for (const auto &w : waves) es_seen |= wave_has(w, "es:tda_n2");
     EXPECT(es_seen, "ES node is scheduled");
 
-    // Now mark the ES bundle converged at both protocol steps -> everything Skips.
+    // Now the session loads the ES bundle as it is -> everything Skips.
     json m = empty_meta();
     put_es(m, 1e-4, true);
     put_es(m, 1e-6, true);
-    auto waves2 = schedule(dag, P, m);
-    EXPECT(waves2.empty(), "fully-converged plan schedules no work");
+    StatePlans loaded;
+    loaded[es_node_id(true, 2)] = StatePlan{StatePlan::Kind::load, 1e-6, protocol_key_at(1e-6), true};
+    auto waves2 = schedule(dag, P, m, loaded);
+    EXPECT(waves2.empty(), "fully-loaded plan schedules no work");
+
+    // A schedulable state without a plan is refused.
+    bool refused = false;
+    try { (void)schedule(dag, P, m, StatePlans{}); }
+    catch (const std::logic_error &) { refused = true; }
+    EXPECT(refused, "a state without a plan is refused");
   }
 
   // ====== build_dag: Hyperpolarizability SHG -> FD + VBC nodes =============
@@ -454,8 +329,8 @@ int main() {
            "FD(x,0.05) converged -> VBC ready");
   }
 
-  // ====== reconcile_protocol VBC branch + schedule gating =================
-  std::printf("=== reconcile_protocol VBC + schedule gating ===\n");
+  // ====== schedule gating of a VBC node ===================================
+  std::printf("=== VBC schedule gating ===\n");
   {
     ResponsePropertyRequest r;
     r.kind = ResponsePropertyKind::Hyperpolarizability;
@@ -466,47 +341,27 @@ int main() {
     auto dag = build_dag(plan_one(r), 0);
     const CalcNode *vbc =
         find_id(dag, "vbc:dipole_x__dipole_x@f0.05000_f0.05000");
-    json m = empty_meta();
-    EXPECT(reconcile_protocol(*vbc, m, 1e-4) == NodeAction::Fresh,
-           "VBC absent -> Fresh");
-    put_vbc(m, vbc->id, 1e-4, /*converged=*/true);
-    EXPECT(reconcile_protocol(*vbc, m, 1e-4) == NodeAction::Skip,
-           "VBC converged -> Skip");
 
     // schedule: VBC excluded until its FD prereqs converge.
     json m0 = empty_meta();
-    auto w0 = schedule(dag, {1e-4}, m0);
+    auto w0 = schedule(dag, {1e-4}, m0, fresh_plans(dag, 1e-4));
     bool vbc_scheduled = false;
     for (const auto &wave : w0)
       if (wave_has(wave, vbc->id)) vbc_scheduled = true;
     EXPECT(!vbc_scheduled, "VBC not scheduled while FD prereq unconverged");
   }
 
-  // ====== reconcile ES: the bundle on disk must BE the requested bundle ======
-  // review/findings C5: the ES verdict keyed on protocol only, so a converged TDA
-  // bundle satisfied a later RPA (or larger n_roots) request in the same calc dir.
-  std::printf("=== reconcile ES: bundle identity (type, n_roots) ===\n");
+  // ====== ES prerequisite: the bundle on disk must BE the requested bundle ===
+  // review/findings C5: a converged TDA bundle must not satisfy a later RPA (or
+  // larger n_roots) request in the same calc dir.
+  std::printf("=== ES prerequisite: bundle identity (type, n_roots) ===\n");
   {
     ResponsePlan plan;
     plan.es.push_back({/*tda=*/false, /*n_roots=*/2, {1e-4}});
-    auto dag = build_dag(plan, 0);
-    const CalcNode *es = find_id(dag, es_node_id(false, 2));
     json m = empty_meta();
     put_es_bundle(m, 1e-4, /*converged=*/true, "tda", 2);
-    EXPECT(reconcile_protocol(*es, m, 1e-4) != NodeAction::Skip,
-           "converged TDA bundle does not satisfy an RPA request");
-    json m2 = empty_meta();
-    put_es_bundle(m2, 1e-4, /*converged=*/true, "full", 1);
-    EXPECT(reconcile_protocol(*es, m2, 1e-4) != NodeAction::Skip,
-           "converged 1-root bundle does not satisfy a 2-root request");
     json m3 = empty_meta();
     put_es_bundle(m3, 1e-4, /*converged=*/true, "full", 2);
-    EXPECT(reconcile_protocol(*es, m3, 1e-4) == NodeAction::Skip,
-           "matching converged bundle -> Skip");
-    json m4 = empty_meta();
-    put_es(m4, 1e-4, /*converged=*/true);   // legacy entry: no type / n_roots
-    EXPECT(reconcile_protocol(*es, m4, 1e-4) == NodeAction::Skip,
-           "legacy entry without identity fields still Skips");
 
     // The derived-FD prerequisite must see the same identity: a converged TDA
     // bundle does not unblock legs planned for the RPA bundle.
@@ -517,92 +372,6 @@ int main() {
            "TDA bundle does not satisfy the RPA bundle prerequisite");
     EXPECT(dfd && prerequisites_converged(*dfd, dag2, m3, 1e-4),
            "matching bundle satisfies the prerequisite");
-  }
-
-  // ====== reconcile ES: honest climb (a stalled / exhausted rung is done) =====
-  // review/findings C12: ES had no analogue of the FD honest-climb rule, so a
-  // stalled bundle was re-queued as Resume on every pass with no bound.
-  std::printf("=== reconcile ES: honest climb ===\n");
-  {
-    ResponsePlan plan;
-    plan.es.push_back({/*tda=*/true, /*n_roots=*/1, {1e-4}});
-    auto dag = build_dag(plan, 0);
-    const CalcNode *es = find_id(dag, es_node_id(true, 1));
-    json ms = empty_meta();
-    put_es_bundle(ms, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/true, /*iter=*/7);
-    EXPECT(reconcile_protocol(*es, ms, 1e-4, /*max_iters=*/30) == NodeAction::Skip,
-           "stalled unconverged ES bundle -> Skip");
-    json mx = empty_meta();
-    put_es_bundle(mx, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/30);
-    EXPECT(reconcile_protocol(*es, mx, 1e-4, /*max_iters=*/30) == NodeAction::Skip,
-           "budget-exhausted ES bundle -> Skip");
-    json mp = empty_meta();
-    put_es_bundle(mp, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/5);
-    EXPECT(reconcile_protocol(*es, mp, 1e-4, /*max_iters=*/30) == NodeAction::Resume,
-           "partial ES bundle with budget left -> Resume");
-    EXPECT(reconcile_protocol(*es, ms, 1e-4, /*max_iters=*/0) == NodeAction::Resume,
-           "max_iters == 0 keeps the legacy Resume");
-    // B1 (DESIGN B5, B2): the saved bundle now carries stop_reason and
-    // per-root verdicts; reconcile still reads converged, diverged, iter and
-    // stalled only, so the new keys change no action.
-    json mr = empty_meta();
-    put_es_bundle(mr, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false,
-                  /*iter=*/5);
-    {
-      json& e = mr["excited_states"][protocol_key_at(1e-4)];
-      e["stop_reason"] = "in_progress";
-      e["roots"] = json::array({{{"slot", 0},
-                                 {"root_id", "es_root_0000"},
-                                 {"converged", false},
-                                 {"locked", false},
-                                 {"stalled", false},
-                                 {"omega_residual", 2.0e-3},
-                                 {"density_target", 5.0e-4},
-                                 {"omega_target", 5.0e-4}}});
-    }
-    EXPECT(reconcile_protocol(*es, mr, 1e-4, /*max_iters=*/30)
-               == NodeAction::Resume,
-           "stop_reason and per-root verdict keys are ignored by reconcile");
-    json mc = empty_meta();
-    put_es_bundle(mc, 1e-4, /*converged=*/true, "tda", 1, /*stalled=*/false,
-                  /*iter=*/8);
-    mc["excited_states"][protocol_key_at(1e-4)]["stop_reason"] = "converged";
-    EXPECT(reconcile_protocol(*es, mc, 1e-4, /*max_iters=*/30)
-               == NodeAction::Skip,
-           "a converged bundle with stop_reason recorded -> Skip as before");
-  }
-
-  // ====== reconcile: excited.maxiter is the ES budget ========================
-  // review/findings C2: the deck's excited.maxiter never reached the ES solve;
-  // ES ran (and honest-climbed) on response.maxiter. es_max_iters > 0 is the
-  // ES budget, 0 inherits max_iters, and FD nodes never see it.
-  std::printf("=== reconcile: ES iteration budget ===\n");
-  {
-    ResponsePlan plan;
-    plan.es.push_back({/*tda=*/true, /*n_roots=*/1, {1e-4}});
-    auto dag = build_dag(plan, 0);
-    const CalcNode *es = find_id(dag, es_node_id(true, 1));
-    json m = empty_meta();
-    put_es_bundle(m, 1e-4, /*converged=*/false, "tda", 1, /*stalled=*/false, /*iter=*/20);
-    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/30, /*es_max_iters=*/20) ==
-               NodeAction::Skip,
-           "ES bundle at its own budget -> Skip though max_iters has room");
-    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/30, /*es_max_iters=*/0) ==
-               NodeAction::Resume,
-           "es_max_iters == 0 inherits max_iters");
-    EXPECT(reconcile_protocol(*es, m, 1e-4, /*max_iters=*/10, /*es_max_iters=*/40) ==
-               NodeAction::Resume,
-           "a larger ES budget keeps the bundle going past max_iters");
-    EXPECT(schedule(dag, {1e-4}, m, /*max_iters=*/30, /*es_max_iters=*/20).empty(),
-           "schedule passes the ES budget to reconcile");
-
-    CalcNode fd; fd.kind = CalcKind::FD; fd.pert = Perturbation::dipole(2);
-    fd.freq = 0.0; fd.protocols = {1e-4}; fd.id = fd_node_id(fd.pert, fd.freq);
-    json mf = empty_meta();
-    put_fd(mf, "dipole_z", 1e-4, 0.0, /*converged=*/false, false, /*iter=*/20);
-    EXPECT(reconcile_protocol(fd, mf, 1e-4, /*max_iters=*/30, /*es_max_iters=*/20) ==
-               NodeAction::Resume,
-           "FD ignores the ES budget");
   }
 
   // ====== ES restart source: never a diverged bundle ==========================
@@ -699,7 +468,7 @@ int main() {
   }
 
   // ====== StatePlan (named --continue, D-016): the planner's decision ======
-  // planned_action forces each planned rung once; after that, reconcile.
+  // planned_action forces each planned rung once; after that, Skip.
   std::printf("=== planned_action / schedule with plans ===\n");
   {
     ResponsePropertyRequest r;
@@ -724,11 +493,9 @@ int main() {
     EXPECT(fd && planned_action(*fd, m, 1e-4, resume, {}) == NodeAction::Skip,
            "resume: a rung looser than the start is never redone");
     EXPECT(fd && planned_action(*fd, m, 1e-6, resume, {}) == NodeAction::Resume,
-           "resume: the start rung's own entry resumes, past reconcile's honest climb");
-    EXPECT(fd && reconcile_protocol(*fd, m, 1e-6, /*max_iters=*/8) == NodeAction::Skip,
-           "(reconcile alone would Skip that rung at max_iters 8)");
-    EXPECT(fd && !planned_action(*fd, m, 1e-6, resume, {fd->id + "|" + k6}),
-           "resume: once this run solved the rung, reconcile decides");
+           "resume: the start rung's own entry resumes");
+    EXPECT(fd && planned_action(*fd, m, 1e-6, resume, {fd->id + "|" + k6}) == NodeAction::Skip,
+           "resume: once this run scheduled the rung, Skip");
 
     json coarse = empty_meta();
     put_fd(coarse, "dipole_z", 1e-4, 0.1, /*converged=*/true, false, 5);
@@ -741,18 +508,6 @@ int main() {
     EXPECT(fd && planned_action(*fd, m, 1e-6, fresh, {fd->id + "|" + k4}) ==
                      NodeAction::Resume,
            "fresh: a finer rung is solved once in this run even if an entry exists");
-
-    // seed (R4/R7): no entry of its own; the start rung loads the neighbour.
-    StatePlan seed{StatePlan::Kind::seed, 1e-4, ""};
-    seed.seed_frequency = 0.05;
-    EXPECT(fd && planned_action(*fd, empty_meta(), 1e-4, seed, {}) == NodeAction::Restart,
-           "seed: the start rung restarts (from the seed)");
-    EXPECT(seed_start(seed, 1e-4) == std::optional<double>(0.05) &&
-               !seed_start(seed, 1e-6) && !seed_start(resume, 1e-6),
-           "seed_start: the seed frequency at the start rung only, seed plans only");
-    EXPECT(fd && planned_action(*fd, coarse, 1e-6, seed, {fd->id + "|" + k4}) ==
-                     NodeAction::Restart,
-           "seed: a finer rung restarts from the state's own coarser rung");
 
     // An excited-state bundle (D-025): the source the bundle loader picks,
     // the same type and root count only.
@@ -774,17 +529,15 @@ int main() {
     EXPECT(planned_action(es, bundles, 1e-6, resume, {}) == NodeAction::Fresh,
            "ES: a bundle with another root count is not a source");
 
-    // schedule: the planned state takes the plan; an unplanned one reconciles.
+    // schedule: the planned state takes the plan.
     const StatePlans plans{{fd ? fd->id : "", resume}};
-    auto waves = schedule(dag, P, m, /*max_iters=*/8, 0, plans);
+    auto waves = schedule(dag, P, m, plans);
     EXPECT(waves.size() == 1 && waves[0].size() == 1 &&
                waves[0][0].thresh == 1e-6 && waves[0][0].action == NodeAction::Resume,
            "schedule: one wave, the planned Resume at rung 2");
-    EXPECT(schedule(dag, P, m, /*max_iters=*/8).empty(),
-           "schedule without plans: unchanged (honest climb Skips both rungs)");
-    EXPECT(schedule(dag, P, m, 8, 0, plans, {fd ? fd->id + "|" + k6 : ""}).empty(),
-           "schedule: after the planned rung ran, reconcile Skips it");
-    EXPECT(schedule(dag, P, m, 8, 0, {{fd ? fd->id : "", load}}).empty(),
+    EXPECT(schedule(dag, P, m, plans, {fd ? fd->id + "|" + k6 : ""}).empty(),
+           "schedule: after the planned rung ran, it is Skipped");
+    EXPECT(schedule(dag, P, m, {{fd ? fd->id : "", load}}).empty(),
            "schedule: a loaded state schedules nothing");
   }
 

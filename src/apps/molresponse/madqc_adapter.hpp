@@ -200,38 +200,29 @@ struct molresponse_v3_lib {
     nlohmann::json raman_spectra;         // full Raman only (raman.nuc_atom -1)
   };
 
-  /// The unnamed path: the reference is the live SCF of the same process. Its
-  /// archive is resolved from the SCF's work directory unless a prefix is
-  /// given, exactly as before; the response itself runs on the archive and
-  /// the molecule (run_response_on_reference).
+  /// The reference is the live SCF of the same process, and the response
+  /// runs in a session on that SCF's checkpoint (run_response_on_reference).
+  /// A session needs the workflow to own the ground-state input and no
+  /// separate reference prefix; any other case is refused.
   inline static Results
   run_response(madness::World &world, const Params &params,
                const std::shared_ptr<madness::SCF> &scf_calc,
                const std::filesystem::path &outdir,
-               const std::filesystem::path &reference_prefix = {},
-               const std::function<void(madness::World&, const nlohmann::json&)>
-                   &checkpoint_observer = {}) {
+               const std::filesystem::path &reference_prefix = {}) {
     const bool shared = reference_prefix.empty() && scf_calc->param.scf_input_owner;
-    auto source_prefix
-        = reference_prefix.empty()
-              ? std::filesystem::proximate(scf_calc->work_dir, outdir)
-                    / params.get<CalculationParameters>().prefix()
-              : reference_prefix;
-    std::optional<molresponse_v3::response_shared::GroundSource> ground;
-    if (shared) {
-      MADNESS_CHECK_THROW(scf_calc->last_calculation_outcome && scf_calc->last_calculation_outcome->complete,
-                         "response requires a qualified SCF reference");
-      const auto reference = scf_ground_reference(world, *scf_calc);
-      ground = molresponse_v3::response_shared::GroundSource{reference.archive, reference.protocol, reference.identity};
-      source_prefix = reference.archive;
-      source_prefix.replace_extension(); // the native loader appends .restartdata
-    }
+    MADNESS_CHECK_THROW(shared,
+        "response requires the workflow's own SCF reference: a separate reference "
+        "prefix, or a workflow that does not own the ground-state input, is not supported");
+    MADNESS_CHECK_THROW(scf_calc->last_calculation_outcome && scf_calc->last_calculation_outcome->complete,
+                       "response requires a qualified SCF reference");
+    const auto reference = scf_ground_reference(world, *scf_calc);
+    const molresponse_v3::response_shared::GroundSource ground{reference.archive, reference.protocol, reference.identity};
+    auto source_prefix = std::filesystem::path(reference.archive);
+    source_prefix.replace_extension(); // the native loader appends .restartdata
     return run_response_on_reference(world, params, scf_calc->molecule, outdir,
-                                     source_prefix, checkpoint_observer, {},
-                                     shared ? &scf_calc->param : nullptr,
-                                     shared ? &scf_calc->pcm_param : nullptr,
-                                     ground,
-                                     shared ? scf_checkpoint_directory(*scf_calc) : std::filesystem::path{});
+                                     source_prefix, {},
+                                     &scf_calc->param, &scf_calc->pcm_param,
+                                     ground, scf_checkpoint_directory(*scf_calc));
   }
 
   /// DESIGN A1: the response on a saved reference alone: its orbital archive
@@ -243,9 +234,6 @@ struct molresponse_v3_lib {
       const madness::Molecule& reference_molecule,
       const std::filesystem::path& outdir,
       const std::filesystem::path& reference_prefix,
-      const std::function<void(madness::World&, const nlohmann::json&)>&
-          checkpoint_observer
-      = {},
       const molresponse_v3::StatePlans& state_plans = {},
       const madness::CalculationParameters* verified_reference = nullptr,
       const madness::PCMParameters* verified_pcm = nullptr,
@@ -536,9 +524,6 @@ struct molresponse_v3_lib {
     // in different places, leaving Output.properties empty. (outdir is still used
     // above to resolve the ground archive relative to this cwd.)
     in.settings.calc_dir = reference_prefix.empty() ? "." : outdir.string();
-    in.settings.max_iters = static_cast<int>(rp.maxiter());
-    in.settings.checkpoint_observer = checkpoint_observer;
-    // Named --continue: the planner's decision per FD state (D-016).
     in.settings.state_plans = state_plans;
     // excited.maxiter / guess_max_iter / maxsub (review C2), when the deck sets them.
     apply_deck_es_knobs(rp, in.settings);
@@ -552,7 +537,6 @@ struct molresponse_v3_lib {
     // the derived (two-photon) FD legs (calc_executor solve_fd seam).
     in.settings.dalton_dir    = dalton_dir;
     in.settings.seed_freq_tol = rp.seed_freq_tol();
-    in.settings.es_seed_warmup = rp.seed_es_warmup();
     in.settings.diagnostic_properties = rp.diagnostic_properties();
     if (rp.diagnostic_properties())
       for (char axis : rp.dipole_directions())
@@ -679,7 +663,7 @@ struct molresponse_v3_lib {
       // The binding then checks exact inputs instead of legacy convergence flags.
       for(const auto& request:expand_vbc_requests(in.plan.vbc,static_cast<int>(gs.molecule().natom()))) {
         StatePlan entry;entry.kind=StatePlan::Kind::fresh;
-        entry.start_thresh=protocol.back();entry.controller_owned=true;
+        entry.start_thresh=protocol.back();
         in.settings.state_plans[vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c)]=entry;
       }
       const auto plan_state=[&](const std::string& id,const auto& binding) {
@@ -687,7 +671,7 @@ struct molresponse_v3_lib {
         entry.kind=binding.reusable() ? StatePlan::Kind::load :
             binding.has_saved() ? StatePlan::Kind::resume : StatePlan::Kind::fresh;
         const auto start=ladder.at(binding.plan().start_protocol);
-        entry.start_thresh=start.thresh;entry.controller_owned=true;
+        entry.start_thresh=start.thresh;
         if (binding.reusable()) {entry.met=true;entry.loaded_key=protocol_key(start.thresh,start.k);}
         in.settings.state_plans[id]=entry;
       };
@@ -701,13 +685,13 @@ struct molresponse_v3_lib {
     // The GS is prepared at protocol.front() above (the documented
     // precondition); geometry-fingerprint / frequency mismatches throw here,
     // failing the response task loudly instead of silently solving cold.
-    const bool need_response_import=!in.settings.shared_response ||
+    const bool need_response_import=
         std::any_of(in.settings.shared_response->states.begin(),in.settings.shared_response->states.end(),
           [](const auto& entry){return !entry.second->has_saved();}) ||
         std::any_of(in.settings.shared_response->excited.begin(),in.settings.shared_response->excited.end(),
           [](const auto& entry){return !entry.second->has_saved();});
     if (!dalton_dir.empty() && need_response_import) {
-      if(in.settings.shared_response) in.settings.shared_response->timing().begin("import_guesses");
+      in.settings.shared_response->timing().begin("import_guesses");
       // D-120: the import writes its seeds into the calc dir, so the
       // ground-state stamp comes first (the same gate the workflow runs): a
       // fresh dir is stamped before any state is written there, and one
@@ -731,7 +715,7 @@ struct molresponse_v3_lib {
         meta.save();
       }
       world.gop.fence();
-      if(in.settings.shared_response) in.settings.shared_response->timing().end();
+      in.settings.shared_response->timing().end();
     }
 
     // Pass the RESOLVED fock path through (review finding: "" here made every

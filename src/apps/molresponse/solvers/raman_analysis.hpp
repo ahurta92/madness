@@ -27,7 +27,7 @@
 // discipline: every MRA inner product runs on all ranks; JSON is rank 0.
 // ===========================================================================
 
-#include "../calc/calc_executor.hpp"      // ExecutorContext, detail_exec::load_fd_as_xy
+#include "../calc/calc_executor.hpp"      // ExecutorContext, detail_exec::qualified_fd_as_xy
 #include "../kernels/raman_spectrum.hpp"
 #include "../ResponsePropertyPlanner.hpp"
 #include "response_metadata.hpp"
@@ -65,8 +65,8 @@ struct VibrationalAnalysis {
   std::vector<std::string> missing_legs;     ///< nuclear legs not on disk (empty on success)
 };
 
-/// Hessian + normal modes from the static nuclear-displacement responses in
-/// `calc_dir` at the ACTIVE protocol (caller has set it and prepared gs).
+/// Hessian + normal modes from the static nuclear-displacement responses of
+/// the session at the ACTIVE protocol (caller has set it and prepared gs).
 /// Returns nullopt, with the missing leg names printed, if any leg is absent.
 inline std::optional<VibrationalAnalysis>
 compute_vibrational_analysis(ExecutorContext &ctx) {
@@ -85,8 +85,7 @@ compute_vibrational_analysis(ExecutorContext &ctx) {
   for (long a = 0; a < natom; ++a)
     for (int ax = 0; ax < 3; ++ax) {
       const Perturbation p = Perturbation::nuclear(static_cast<int>(a), ax);
-      auto st = ctx.shared_response ? detail_exec::qualified_fd_as_xy(ctx,p,0.0)
-          : detail_exec::load_fd_as_xy<ClosedShell>(world,ctx.calc_dir,p,0.0);
+      auto st = detail_exec::qualified_fd_as_xy(ctx,p,0.0);
       if (!st) { out.missing_legs.push_back(p.description()); continue; }
       auto xphi = mul(world, st->x_alpha, phi0, true);
       real_function_3d r = sum(world, xphi, true);
@@ -207,7 +206,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   auto vib = compute_vibrational_analysis(ctx);
   world.gop.fence();
   if(!vib) {
-    if(ctx.shared_response) ctx.shared_response->set_properties({
+    ctx.shared_response->set_properties({
         {"vibrational_analysis",{{"values",nlohmann::json::object()},{"availability",{{"hessian","nuclear response inputs have not met the final request"}}}}},
         {"raman_spectrum",{{"values",nlohmann::json::object()},{"availability",{{"spectrum","qualified Hessian and derivatives are required"}}}}}});
     return;
@@ -347,7 +346,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   rs["raman_spectra"] = spectra;
   rs["completeness"] = complete;
 
-  if(ctx.shared_response) {
+  {
     // Public results are numeric vectors/matrices; keep the existing tensor
     // metadata wrapper only in the application analysis file.
     const auto numeric_values=[](const Tensor<double>& tensor) {

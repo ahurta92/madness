@@ -17,10 +17,11 @@
 //                                       VB_op = mu_b, VC_op = 0 ),
 //                    B, C = X_f, VA_op = mu_a )
 //
-// This is the LEGACY arm (--tpa-legacy): the eigenvector is fed in as the C
-// leg of the driven source. Production 2PA takes the residue in the A channel
-// instead (tpa_pq_spec_sym in calc_executor.hpp; tpa_moment_residue below is
-// the compute_vbc-based diagnostic of the same composition). Since 2026-09-09
+// This is the legacy form, kept for tools/tpa_from_dalton.cpp: the eigenvector
+// is fed in as the C leg of the driven source. Production 2PA takes the
+// residue in the A channel instead (tpa_pq_spec_sym in calc_executor.hpp;
+// tpa_moment_residue below is the compute_vbc-based form of the same
+// composition, also used by that tool). Since 2026-09-09
 // compute_vbc is the spec build of the equation's source (kernels/vbc.hpp), so
 // numbers from this arm differ from those recorded before that date.
 //
@@ -191,99 +192,6 @@ tpa_moment_residue_1e(madness::World &world, const ResponseGroundState &g0,
     for (int c = b; c < 3; ++c)
       S(b, c) = S(c, b) = prefactor * (half(b, c) + half(c, b));
   return S;
-}
-
-/// CORRECTED two-electron E[3] part of the TPA single residue (TPA_SCOPING
-/// §5q — block-level derivation from DALTON Q3FOCK/C3FCKO with the
-/// (x,y)<->(Z,-Y) dictionary and VECB = -swap(N+) [ANTSYM=-1, DIPLEN]).
-/// Returns the DALTON-units per-element scalar (== DALTON 'E3 CONTRIBUTION TO
-/// SMOM' for this pair; the sqrt(2) is INCLUDED). Add to the UNCHANGED
-/// one-electron content. Exactly symmetric under B<->C (analytic proof at the
-/// integral level; assert numerically). Three term families:
-///   T1: G[D12], D12 = |yb><yf| + |xf><xb| - |zetaD><phi|,
-///       zetaD_i = sum_j phi_j (<x^b_j|x^f_i> + <y^f_j|y^b_i>)   [b-f SAME-block]
-///   T2: gamma_B (standard channel) against {x^f, y^c, occ-transfers}
-///   T3: gamma_F (TRANSPOSED channel — the eigenvector's own kernel, missing
-///       from compute_vbc) against {y^b, y^c, occ-transfers}
-inline double
-tpa_e3_residue(madness::World &world, const ResponseGroundState &g0,
-               const ResponseStateXY<ClosedShell> &B,
-               const ResponseStateXY<ClosedShell> &C,
-               const ResponseStateXY<ClosedShell> &F) {
-  using namespace madness;
-  const vecfuncT &phi = g0.amo;
-  const vecfuncT &xb = B.x_alpha, &yb = B.y_alpha;
-  const vecfuncT &xc = C.x_alpha, &yc = C.y_alpha;
-  const vecfuncT &xf = F.x_alpha, &yf = F.y_alpha;
-  const double cxc = g0.c_xc, lo = g0.lo;
-
-  // occ-space transfer functions (transform(w, v, M)_i = sum_j v_j M(j,i))
-  auto zetaD = transform(world, phi,
-                         matrix_inner(world, xb, xf) +
-                             matrix_inner(world, yf, yb), true);
-  vecfuncT nzetaD = copy(world, zetaD);
-  scale(world, nzetaD, -1.0);
-  auto z_xfxc = transform(world, phi, matrix_inner(world, xf, xc), true);
-  auto z_yfyc = transform(world, phi, matrix_inner(world, yf, yc), true);
-  auto z_ybxc = transform(world, phi, matrix_inner(world, yb, xc), true);
-  auto z_xbyc = transform(world, phi, matrix_inner(world, xb, yc), true);
-
-  // T1: G[D12] = 2J[rho12] - K[D12], D12 = |yb><yf| + |xf><xb| - |zetaD><phi|
-  const double t1s = wall_time();
-  real_function_3d rho12 = common_ops::dot(world, yb, yf);
-  rho12 += common_ops::dot(world, xf, xb);
-  rho12 += common_ops::dot(world, phi, nzetaD);
-  rho12.scale(2.0);
-  rho12.truncate();
-  auto J12 = g0.response_local_potential(rho12);  // + f_xc·rho12 for DFT/hybrid
-  auto t1x = two_electron::apply_gamma_raw(
-      world, J12, phi, {{yf, yb}, {xb, xf}, {phi, nzetaD}}, cxc, lo);
-  auto t1y = two_electron::apply_gamma_raw(
-      world, J12, phi, {{yb, yf}, {xf, xb}, {nzetaD, phi}}, cxc, lo);
-  const double T1 = inner(xc, t1x) + inner(yc, t1y);
-
-  // T2: gamma_B, standard channel (same pairs as vbc's gbc call)
-  const double t2s = wall_time();
-  real_function_3d rhoB = common_ops::dot(world, phi, xb);
-  rhoB += common_ops::dot(world, phi, yb);
-  rhoB.scale(2.0);
-  rhoB.truncate();
-  auto JB = g0.response_local_potential(rhoB);  // + f_xc·rhoB for DFT/hybrid
-  auto gB = [&](const vecfuncT &t) {
-    return two_electron::apply_gamma_raw(world, JB, t, {{xb, phi}, {phi, yb}},
-                                         cxc, lo);
-  };
-  const double T2 = -inner(z_xfxc, gB(phi))    // 2a
-                    + inner(xc, gB(xf))        // 2b
-                    + inner(yf, gB(yc))        // 2c
-                    - inner(phi, gB(z_yfyc));  // 2d
-
-  // T3: gamma_F, TRANSPOSED channel (the eigenvector's kernel)
-  real_function_3d rhoF = common_ops::dot(world, phi, xf);
-  rhoF += common_ops::dot(world, phi, yf);
-  rhoF.scale(2.0);
-  rhoF.truncate();
-  auto JF = g0.response_local_potential(rhoF);  // + f_xc·rhoF for DFT/hybrid
-  auto gFt = [&](const vecfuncT &t) {
-    return two_electron::apply_gamma_raw(world, JF, t, {{phi, xf}, {yf, phi}},
-                                         cxc, lo);
-  };
-  const double t3s = wall_time();
-  const double T3 = +inner(xc, gFt(yb))        // 3a
-                    - inner(z_ybxc, gFt(phi))  // 3b
-                    + inner(xb, gFt(yc))       // 3c
-                    - inner(phi, gFt(z_xbyc)); // 3d
-
-  if (world.rank() == 0)
-    printf("      [e3corr timing] T1(G[D12]) %.1fs  T2(gammaB) %.1fs  "
-           "T3(gammaF) %.1fs   [T1=%+.5f T2=%+.5f T3=%+.5f]\n",
-           t2s - t1s, t3s - t2s, wall_time() - t3s, T1, T2, T3);
-           fflush(stdout);
-  // Global minus: DALTON contracts with VECB = -swap(N^B) for antisymmetric
-  // (DIPLEN) operators (ANTSYM=-1, rspprp.F:543); our N^B carries the opposite
-  // overall sign. Verified k6 2026-07-22: without it all six ledger elements
-  // give E3 ratio -1.00 (spread 0.966..1.003), with it +1.00; 1e unaffected.
-  return -std::sqrt(2.0) * (T1 + T2 + T3);
 }
 
 /// Rotationally-invariant two-photon strength for parallel linear polarization:

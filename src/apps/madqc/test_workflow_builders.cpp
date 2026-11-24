@@ -9,7 +9,7 @@
 // the runnable-workflow listing). The v2 StateParallelPlanner half of this test
 // was removed with the v2 engine (M1 decoupling Stage 3); state-parallel
 // planning now lives in molresponse_v3's subworld layer (doc 32) and is
-// covered by test_fd_subworld_fanout / test_node_subworlds.
+// covered by test_node_subworlds.
 
 int main() {
   using madness::workflow_builders::WorkflowKind;

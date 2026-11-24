@@ -23,10 +23,10 @@
 // reading order, which under madness::Exchange's convention builds every
 // response density transposed; the "dagger" this test was written to hunt
 // was in V, not in (P,Q) (reports/2026-09-09_orientation_derivation). With
-// vbc.hpp in the equation's orientation the aligned slots now agree, and the
-// VERDICT line below reads "REPRODUCES". The rows are kept as the term-level
-// audit trail; the equality gates live in test_vbc_spec_equivalence /
-// test_tpa_pq_vs_vbc.
+// vbc.hpp in the equation's orientation the aligned slots now agree. The rows
+// are kept as the term-level audit trail; the equality gates live in
+// test_tpa_pq_vs_vbc. (The eigenvector check against the c-grouped
+// composition, tpa_e3_residue, was removed with it in step 4c part 5b.)
 // The 1e family (v^B / v^C content) is evaluated separately.
 //
 // Also probes the beta contraction convention: b1 = -(<xA|Vx> + <yA|Vy>)
@@ -650,61 +650,6 @@ int main(int argc, char **argv) {
         }
       }
 
-      // ============ THE CLEAN TEST (2026-09-08): does the DRIVEN source
-      // V^BC, contracted with a TRUE eigenvector, equal the residue answer?
-      // The first-principles 2n+1 elimination, read literally, says the
-      // residue hands the eigenvector the SAME V^BC that beta uses. Our code
-      // instead uses the daggered (P,Q). Gate 1 already pins
-      // <x^f|P>+<y^f|Q> == e3/sqrt2 (one ordering), so the NEW information is
-      // whether the V^BC contraction also equals e3/sqrt2. Requires a REAL
-      // eigenvector: with stand-ins the residue identity need not hold,
-      // because it leans on the homogeneous equation (F0-eps-w_f)x^f =
-      // -Q g'[gamma^f]phi.
-      if (world.rank() == 0)
-        print("\n[TERMS] ===== CLEAN TEST: V^BC vs (P,Q) at the eigenvector =====");
-      {
-        // reference: validated c-grouped 2e answer, ONE ordering (B,C)
-        ResponseStateXY<ClosedShell> F;   // the eigenvector as a state
-        F.x_alpha = madness::copy(world, xf); F.y_alpha = madness::copy(world, yf);
-        const double e3   = tpa::tpa_e3_residue(world, g0, B, C, F);
-        const double ref  = e3 / std::sqrt(2.0);
-        // (P,Q), one ordering
-        auto PQ1 = tpa::assemble_tpa_pq(world, g0, B, C);
-        const double s_pq = vinner(world, xf, PQ1.x_alpha) + vinner(world, yf, PQ1.y_alpha);
-        // V^BC (2e only), ONE ordering — vbc_half_spec(B,C) is the (B,C) half
-        auto vhalf = source_spec::assemble_source(
-            world, g0, vbc::vbc_half_spec(world, g0, xb, yb, xc, yc, zeta_bc, zop));
-        const double s_v  =  vinner(world, xf, vhalf[0]) + vinner(world, yf, vhalf[1]);
-        const double s_vn = -s_v;
-        if (world.rank() == 0) {
-          printf("  reference  e3/sqrt2 (c-grouped, validated) = %+.8e\n", ref);
-          printf("  (P,Q)      <x|P>+<y|Q>                     = %+.8e   dev = %+.3e\n",
-                 s_pq, s_pq - ref);
-          printf("  V^BC       <x|Vx>+<y|Vy>                   = %+.8e   dev = %+.3e\n",
-                 s_v, s_v - ref);
-          printf("  V^BC neg  -(<x|Vx>+<y|Vy>)                 = %+.8e   dev = %+.3e\n",
-                 s_vn, s_vn - ref);
-          // ADJOINT HYPOTHESIS: the 2n+1 step moves the resolvent left as its
-          // ADJOINT. The response pencil is non-self-adjoint (paired Delta
-          // metric), so its LEFT eigenvector is the x<->y swap of the right
-          // one. Prediction: contracting the SWAPPED eigenvector against the
-          // driven V^BC must reproduce the reference — equivalently, (P,Q) is
-          // the adjoint image of V^BC.
-          const double s_vsw = vinner(world, yf, vhalf[0]) + vinner(world, xf, vhalf[1]);
-          printf("  V^BC swap  <y|Vx>+<x|Vy>  (LEFT eigvec)     = %+.8e   dev = %+.3e\n",
-                 s_vsw, s_vsw - ref);
-          printf("  V^BC swap neg                              = %+.8e   dev = %+.3e\n",
-                 -s_vsw, -s_vsw - ref);
-          printf("  ratio ref/V^BC = %.6f   ratio ref/V^BCswap = %.6f\n",
-                 ref/s_v, ref/s_vsw);
-          printf("  VERDICT: %s\n",
-                 (std::abs(s_v-ref) < 1e-6*std::max(1.0,std::abs(ref)) ||
-                  std::abs(s_vn-ref) < 1e-6*std::max(1.0,std::abs(ref)))
-                   ? "V^BC REPRODUCES the residue answer (one source; expected since 2026-09-09)"
-                   : "V^BC does NOT reproduce it -> orientation regression in vbc.hpp");
-        }
-      }
-
       // ============ beta contraction convention probe =====================
       // Production (kernels/beta.hpp): b1 = -(<xA|Vx> + <yA|Vy>) with the A
       // leg SOLVED AT +omega_sigma. The x<->y exchange-rule pairing would be
@@ -761,7 +706,7 @@ int main(int argc, char **argv) {
 
       if (world.rank() == 0)
         print("\nVBC_PQ_TERMS DONE (informational — no gate; the equality "
-              "gates live in test_vbc_spec_equivalence / test_tpa_pq_vs_vbc)");
+              "gates live in test_tpa_pq_vs_vbc)");
     }
     world.gop.fence();
   } catch (const std::exception &e) {

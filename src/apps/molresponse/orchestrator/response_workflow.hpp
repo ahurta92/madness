@@ -2,17 +2,13 @@
 #define MOLRESPONSE_V3_ORCHESTRATOR_RESPONSE_WORKFLOW_HPP
 
 // -----------------------------------------------------------------------------
-// run_response — the single public entry point (doc 16, L1).
+// run_response_with_ground — the response workflow (doc 16, L1).
 //
-// One self-contained call: given a checkpoint + a response plan + settings, load
-// the ground state, drive CalcManager, assemble Tier-A properties, and return a
-// structured Output. It owns no scheduling, ownership, or file-format logic —
-// those live in CalcManager and the persistence layer. main.cpp, the test
-// runner, and (later, R3) madqc all build a ResponseWorkflowInput and call this,
-// so the engine is testable, scriptable, and Python-bindable through one seam.
-//
-// R0a scope: wraps EXACTLY today's flow (no behavior change). The timing /
-// diagnostics / exports Output slots are reserved here and filled by R1 / R2.
+// Given a prepared ground state, a response plan and settings that carry the
+// response session, drive CalcManager, assemble Tier-A properties, and return
+// a structured Output. It owns no scheduling, ownership, or file-format logic —
+// those live in CalcManager and the session. The madqc adapter
+// (madqc_adapter.hpp) builds the ResponseWorkflowInput and calls it.
 // -----------------------------------------------------------------------------
 
 #include "../GroundState.hpp"
@@ -45,13 +41,10 @@ namespace molresponse_v3 {
 struct ResponseWorkflowInput {
   std::string         archive_file;   // SCF/moldft checkpoint (ground state)
   std::vector<double> protocols;      // coarse->fine truncation-threshold ladder
-  // R0a: the Tier-A plan is pre-built by the caller (plan_one/merge_plans, plus
-  // any es-full override). FUTURE: carry std::vector<ResponsePropertyRequest>
-  // and lower to a plan inside run_response once the TDA/Full choice is a
-  // request field (needed by madqc, R3).
+  // The Tier-A plan is pre-built by the caller (plan_one/merge_plans, plus
+  // any es-full override).
   ResponsePlan        plan;
-  ExecutorSettings    settings;       // convergence policy + ES/seed/accept knobs (World-free)
-  std::optional<madness::Molecule> molecule;  // else built from the archive dir
+  ExecutorSettings    settings;       // the session, convergence policy and ES knobs
 };
 
 struct ResponseWorkflowOutput {
@@ -65,43 +58,6 @@ struct ResponseWorkflowOutput {
   nlohmann::json debug_log;    // optional iteration-level
   int            rc = 0;
 };
-
-// ---------------------------------------------------------------------------
-// Small helpers factored out of the old driver (the archive-adjacent lookups).
-// ---------------------------------------------------------------------------
-
-/// Build a Molecule from moldft/mad.calc_info.json next to the archive. Returns
-/// an empty Molecule if none is found (harmless for pure-alpha; nuclear/Raman
-/// needs it for the per-atom expansion). Mirrors the old test-runner logic.
-inline madness::Molecule molecule_from_archive_dir(const std::string &archive_file) {
-  madness::Molecule molecule;
-  const auto dir = std::filesystem::path(archive_file).parent_path();
-  for (const auto &name : {"moldft.calc_info.json", "mad.calc_info.json"}) {
-    const auto candidate = dir / name;
-    if (!std::filesystem::exists(candidate)) continue;
-    std::ifstream ifs(candidate);
-    nlohmann::json j;
-    ifs >> j;
-    nlohmann::json mol_json;
-    if (j.contains("tasks") && j["tasks"].is_array() && !j["tasks"].empty())
-      mol_json = j["tasks"][0]["molecule"];
-    else if (j.contains("molecule"))
-      mol_json = j["molecule"];
-    if (!mol_json.is_null()) molecule.from_json(mol_json);
-    break;
-  }
-  return molecule;
-}
-
-/// Resolve the moldft/mad.fock.json path next to the archive ("" if none).
-inline std::string fock_json_from_archive_dir(const std::string &archive_file) {
-  const auto dir = std::filesystem::path(archive_file).parent_path();
-  for (const auto &name : {"moldft.fock.json", "mad.fock.json"}) {
-    const auto candidate = dir / name;
-    if (std::filesystem::exists(candidate)) return candidate.string();
-  }
-  return {};
-}
 
 // ---------------------------------------------------------------------------
 // Stage timing (R1a, doc 16 L3). Rank-0 wall/cpu deltas — the "shape of the
@@ -147,7 +103,7 @@ inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohma
 } // namespace detail_workflow
 
 // ---------------------------------------------------------------------------
-// run_response — load ground -> plan -> CalcManager -> assemble -> Output.
+// run_response_with_ground — plan -> CalcManager -> assemble -> Output.
 // ---------------------------------------------------------------------------
 
 /// The GS-archive fingerprint gate (restart safety — see gs_fingerprint.hpp
@@ -158,9 +114,9 @@ inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohma
 /// other ranks in the solve). MADRESPONSE_ALLOW_GS_MISMATCH=1 downgrades the
 /// abort to a restamp — the stale states then remain loadable, so it is only
 /// sane when the caller KNOWS the states match this archive. D-120: one
-/// function, called by run_response_with_ground and, before a Dalton import
-/// writes its seeds into `calc_dir`, by the adapter, so a fresh directory is
-/// stamped before any state is written there.
+/// function, called before a Dalton import writes its seeds into `calc_dir`
+/// by the adapter, so a fresh directory is stamped before any state is
+/// written there.
 inline void gs_fingerprint_gate(madness::World &world,
                                 const std::string &archive_file,
                                 const std::string &calc_dir) {
@@ -246,8 +202,7 @@ inline void gs_fingerprint_gate(madness::World &world,
 /// `gs` must already be loaded AND prepared at the coarsest protocol; `L` is the
 /// cubic-cell half-edge and `fock_json` the moldft Fock path ("" = compute).
 /// Fills `Output.timing` for plan_build/solve/assemble (the caller owns load +
-/// total). Shared by the CLI entry (run_response) and the madqc adapter, which
-/// supplies a `gs` built from an in-memory SCF rather than an archive (R3).
+/// total). Called by the madqc adapter.
 inline ResponseWorkflowOutput
 run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
                          const std::string &fock_json,
@@ -271,14 +226,13 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
 
   // 2a. Build the DAG.
   detail_workflow::StageTimer t_build;
-  if (in.settings.shared_response) in.settings.shared_response->timing().begin("plan_build");
+  MADNESS_CHECK_THROW(in.settings.shared_response, "response workflow requires a response session");
+  in.settings.shared_response->timing().begin("plan_build");
   CalcManager::Policy mgr_policy;
-  mgr_policy.max_iters_per_step = in.settings.max_iters;
-  mgr_policy.es_max_iters_per_step = in.settings.es_max_iters;
   mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   mgr_policy.fd_subworld_ranks  = in.settings.fd_subworld_ranks;
-  mgr_policy.state_plans        = in.settings.state_plans;     // named, D-016
-  if(in.settings.shared_response) {
+  mgr_policy.state_plans        = in.settings.state_plans;     // D-016
+  {
     auto session=in.settings.shared_response;
     mgr_policy.collect_subworlds=[session]{session->collect_subworlds();};
     mgr_policy.dependencies_ready=[session](const CalcNode& node) {
@@ -296,7 +250,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
           {"derived_from",{{"bundle",bundle.info().task_id},{"root",node.es_root_id},{"factor",node.es_freq_factor}}}});
       StatePlan entry;
       entry.kind=binding.reusable()?StatePlan::Kind::load : binding.has_saved()?StatePlan::Kind::resume:StatePlan::Kind::fresh;
-      entry.controller_owned=true;entry.start_thresh=binding.controls().protocol.thresh;
+      entry.start_thresh=binding.controls().protocol.thresh;
       if(binding.reusable()) {entry.met=true;entry.loaded_key=protocol_key(binding.controls().protocol.thresh,binding.controls().protocol.k);}
       return entry;
     };
@@ -305,23 +259,11 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   CalcManager mgr(in.plan, in.settings.calc_dir, mgr_policy);
   mgr.build(gs.molecule().natom());
   timing["plan_build"] = t_build.lap();
-  if (in.settings.shared_response) in.settings.shared_response->timing().end();
-
-  // 2a'. GS-archive fingerprint gate (restart safety — see gs_fingerprint.hpp
-  // for the failure mode: phase-flipped regenerated orbitals + cached X/Y =>
-  // silently wrong properties). Runs BEFORE mgr.run so no restart state is
-  // touched on a mismatch. Rank 0 hashes the archive and reads the stamp; the
-  // verdict is broadcast so an abort is collective (a rank-0-only throw would
-  // hang the other ranks in the solve). MADRESPONSE_ALLOW_GS_MISMATCH=1
-  // downgrades the abort to a restamp — the stale states then remain loadable,
-  // so it is only sane when the caller KNOWS the states match this archive.
-  if (!in.settings.shared_response && !in.archive_file.empty())
-    gs_fingerprint_gate(world, in.archive_file, in.settings.calc_dir);
+  in.settings.shared_response->timing().end();
 
   // 2a''. F2 restart safety: sweep in any metadata shards stranded by an
   // interrupted subworld run, BEFORE reconcile reads the canonical file —
   // otherwise finished states would be invisible and silently re-solved.
-  // (The stranded shards belong to the same GS the gate above just verified.)
   // Same collective-error discipline as the gate: a rank-0 throw here
   // (corrupt shard, ENOSPC on the canonical save) must not strand the other
   // ranks at the fence.
@@ -372,34 +314,28 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     fan_out = [archive, mol, fock, L_, base](
                   madness::World &sub, const std::vector<WorkItem> &items,
                   double thresh, int gid, const std::string &log_prefix) {
-      std::shared_ptr<response_shared::Session> shared;
-      if(base.shared_response) {
-        std::set<std::string> states;
-        for(const auto& item:items) {
-          if(item.node->kind==CalcKind::VBC) {
-            states.insert(fd_node_id(item.node->pert,item.node->freq));
-            states.insert(fd_node_id(item.node->pert_c,item.node->freq_c));
-          } else states.insert(item.node->id);
-        }
-        shared=base.shared_response->for_world(sub,states,gid);
+      std::set<std::string> states;
+      for(const auto& item:items) {
+        if(item.node->kind==CalcKind::VBC) {
+          states.insert(fd_node_id(item.node->pert,item.node->freq));
+          states.insert(fd_node_id(item.node->pert_c,item.node->freq_c));
+        } else states.insert(item.node->id);
       }
+      auto shared=base.shared_response->for_world(sub,states,gid);
       try {
-        if(shared) shared->timing().begin("reference_load");
+        shared->timing().begin("reference_load");
         set_response_protocol(sub,L_,thresh,-1,false);
         auto gs_s=GroundState::from_archive(sub,archive,mol);
-        if(shared) shared->timing().end();
+        shared->timing().end();
         ExecutorSettings settings=base;
         settings.shared_response=shared;
-        settings.metadata_shard=std::to_string(gid);
-        settings.log_prefix=log_prefix;settings.log_group=gid;
+        settings.log_prefix=log_prefix;
         ExecutorContext context(sub,gs_s,L_,fock,settings);
         FdResponseExecutor executor(context);
         for(const auto& item:items) executor.run_protocol(item);
-        if(shared) {
-          shared->timing().end();shared->timing().end();shared->publish_timings();
-        }
+        shared->timing().end();shared->timing().end();shared->publish_timings();
       } catch(const std::exception& error) {
-        if(shared) try {shared->publish_timings(error.what());} catch(...) {}
+        try {shared->publish_timings(error.what());} catch(...) {}
         throw;
       }
     };
@@ -413,9 +349,9 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   //    if no dipole FD; it ignores nuclear FD) so it is safe to always attempt;
   //    beta/raman come from VBC. (ES-derived scalar properties are a later step.)
   detail_workflow::StageTimer t_assemble;
-  if (in.settings.shared_response) in.settings.shared_response->timing().begin("properties");
+  in.settings.shared_response->timing().begin("properties");
   assemble_alpha(ctx, in.plan, in.protocols.back());
-  if(in.settings.shared_response) for(const auto& bundle:in.plan.es) {
+  for(const auto& bundle:in.plan.es) {
     if(bundle.tda) assemble_shared_excited<TDA>(ctx,bundle.n_roots,in.protocols.back());
     else assemble_shared_excited<Full>(ctx,bundle.n_roots,in.protocols.back());
   }
@@ -426,9 +362,9 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   // normal-mode analysis (Hessian from the nuclear response states, then the
   // per-mode spectrum from the raman rows assemble_beta just wrote).
   if (plan_requests_full_raman(in.plan)) {
-    if(in.settings.shared_response) in.settings.shared_response->timing().begin("vibrational_analysis");
+    in.settings.shared_response->timing().begin("vibrational_analysis");
     assemble_raman_spectrum(ctx,in.plan,in.protocols.back());
-    if(in.settings.shared_response) in.settings.shared_response->timing().end();
+    in.settings.shared_response->timing().end();
   }
   // 2PA: derived FD legs are only planned when the request asked for the
   // two-photon contraction (request.tpa), so their presence IS the gate.
@@ -437,7 +373,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     assemble_tpa(ctx, in.plan, in.protocols.back());
   // The two-photon states of earlier excitation energies go once the current
   // roots' states are saved (step 4d); every process group has finished.
-  if (in.settings.shared_response && !in.plan.derived_fd.empty()) {
+  if (!in.plan.derived_fd.empty()) {
     const auto removed = in.settings.shared_response->prune_two_photon();
     if (world.rank() == 0 && !removed.empty() &&
         madness::iteration::prints(in.settings.verbosity, madness::iteration::needed::checkpoint_saved))
@@ -445,7 +381,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
         std::cout << "Removed: " << name << ", a two-photon state no current root needs\n";
   }
   timing["assemble"] = t_assemble.lap();
-  if (in.settings.shared_response) {
+  {
     auto& session=*in.settings.shared_response;
     session.timing().end();
     session.timing().begin("publish_results");
@@ -455,7 +391,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     session.timing().end(); // run
     session.publish_timings();
   }
-  if (in.settings.shared_response && !in.settings.shared_response->complete())
+  if (!in.settings.shared_response->complete())
     throw std::runtime_error("response convergence criteria unmet; native endpoint and unavailable property recorded");
 
   // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).
@@ -471,15 +407,9 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
 #endif
     meta.save();
     out.metadata = meta.json();
-    if(in.settings.shared_response) {
-      const auto protocol=madness::iteration::Protocol{in.protocols.back(),madness::FunctionDefaults<3>::get_k()};
-      detail_workflow::export_shared_properties(out,in.settings.shared_response->properties(),
-          protocol_key(protocol.thresh,protocol.k));
-    } else {
-      if(out.metadata.contains("properties")) out.properties=out.metadata["properties"];
-      if(out.metadata.contains("vibrational_analysis")) out.vibrational_analysis=out.metadata["vibrational_analysis"];
-      if(out.metadata.contains("raman_spectra")) out.raman_spectra=out.metadata["raman_spectra"];
-    }
+    const auto protocol=madness::iteration::Protocol{in.protocols.back(),madness::FunctionDefaults<3>::get_k()};
+    detail_workflow::export_shared_properties(out,in.settings.shared_response->properties(),
+        protocol_key(protocol.thresh,protocol.k));
     out.timing = std::move(timing);
     out.diagnostics = sched_diag;   // R1c scheduler trace
     return std::string{};
@@ -490,48 +420,9 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
 inline ResponseWorkflowOutput
 run_response_with_ground(madness::World& world,GroundState& gs,double L,
                          const std::string& fock_json,const ResponseWorkflowInput& in) {
+  MADNESS_CHECK_THROW(in.settings.shared_response, "response workflow requires a response session");
   const auto work=[&] {return run_response_with_ground_impl(world,gs,L,fock_json,in);};
-  if(in.settings.shared_response) return in.settings.shared_response->with_failure_timing(work);
-  return work();
-}
-
-inline ResponseWorkflowOutput
-run_response(madness::World &world, const ResponseWorkflowInput &in) {
-  MADNESS_CHECK(!in.protocols.empty());
-  const detail_workflow::StageTimer t_total;
-  detail_workflow::StageTimer t_load;
-
-  // 1. Protocol + ground state from the ARCHIVE (CLI/standalone path).
-  //    set_response_protocol to the coarsest rung; the executor re-prepares per
-  //    protocol during the solve.
-  const auto header = GroundState::read_archive_header(world, in.archive_file);
-  set_response_protocol(world, header.L, in.protocols.front());
-
-  const madness::Molecule molecule =
-      in.molecule ? *in.molecule : molecule_from_archive_dir(in.archive_file);
-  auto gs = GroundState::from_archive(world, in.archive_file, molecule);
-  if (world.rank() == 0) gs.print_info();
-
-  const std::string fock_json = fock_json_from_archive_dir(in.archive_file);
-  const double cur_thresh = madness::FunctionDefaults<3>::get_thresh();
-  auto coulop = madness::poperatorT(
-      madness::CoulombOperatorPtr(world, gs.params().lo(), 0.001 * cur_thresh));
-  gs.prepare(world, 0.001 * cur_thresh, coulop, fock_json);
-  nlohmann::json load_timing = t_load.lap();   // capture before the core
-
-  ResponseWorkflowOutput out =
-      run_response_with_ground(world, gs, header.L, fock_json, in);
-
-  if (world.rank() == 0) {
-    out.timing["load"]  = std::move(load_timing);
-    out.timing["total"] = t_total.lap();
-    if (in.settings.print_level >= PrintLevel::Normal)
-      madness::print("[TIMING] load_wall_s=", out.timing["load"]["wall_s"],
-                     "  solve_wall_s=", out.timing["solve"]["wall_s"],
-                     "  assemble_wall_s=", out.timing["assemble"]["wall_s"],
-                     "  total_wall_s=", out.timing["total"]["wall_s"]);
-  }
-  return out;
+  return in.settings.shared_response->with_failure_timing(work);
 }
 
 } // namespace molresponse_v3

@@ -16,15 +16,7 @@ if(MADNESS_ENABLE_VTK)
   endif()
 endif()
 
-# Legacy direct-FD test binaries (test_v3_solver / test_es_solver) retired in R0b
-# along with the top-level FDSolver.hpp / ESSolver.hpp they exercised; the solver
-# core is covered by test_calc_manager_run / test_run_response / test_v3_*_skeleton.
-add_mad_executable(test_v3_es_skeleton
-                   "tests/test_v3_es_skeleton.cpp;GroundState.cpp"
-                   "MADchem")
-add_mad_executable(test_v3_fd_skeleton
-                   "tests/test_v3_fd_skeleton.cpp;GroundState.cpp"
-                   "MADchem")
+# The solver core is covered by the shared-path tests and the madqc qctests.
 add_mad_executable(test_protocol_key
                    "tests/test_protocol_key.cpp"
                    "MADchem")
@@ -66,12 +58,6 @@ add_mad_executable(test_raman_spectrum
 add_mad_executable(test_calc_manager
                    "tests/test_calc_manager.cpp"
                    "MADchem")
-add_mad_executable(test_calc_manager_run
-                   "tests/test_calc_manager_run.cpp;GroundState.cpp"
-                   "MADchem")
-add_mad_executable(test_run_response
-                   "tests/test_run_response.cpp;GroundState.cpp"
-                   "MADchem")
 add_mad_executable(test_kernel_equivalence
                    "tests/test_kernel_equivalence.cpp;GroundState.cpp"
                    "MADchem")
@@ -92,12 +78,6 @@ add_mad_executable(test_tpa_pq_vs_vbc
 # gates cannot see). Informational — the equality gates stay separate.
 add_mad_executable(test_vbc_pq_terms
                    "tests/test_vbc_pq_terms.cpp;GroundState.cpp"
-                   "MADchem")
-# Gate for the spec-path VBC source (source-unification step 2,
-# kernels/source_spec.hpp + vbc::compute_vbc_spec): per-channel equality with
-# compute_vbc at summation-order precision, beta via both paths, Kleinman pair.
-add_mad_executable(test_vbc_spec_equivalence
-                   "tests/test_vbc_spec_equivalence.cpp;GroundState.cpp"
                    "MADchem")
 add_mad_executable(test_step_restriction
                    "tests/test_step_restriction.cpp"
@@ -143,13 +123,6 @@ add_mad_executable(test_exchange_ctx
 add_mad_executable(test_es_build_subworld
                    "tests/test_es_build_subworld.cpp"
                    "MADchem")
-# F1 of the FD state-parallel design (docs/31,32): independent dipole FD states
-# solved one-per-node-subworld give an alpha tensor bit-identical to the single-
-# World path (pure fan-out -> solve -> filesystem gather). Needs GroundState.cpp
-# (uses a real moldft archive, unlike the synthetic-GS subworld proofs above).
-add_mad_executable(test_fd_subworld_fanout
-                   "tests/test_fd_subworld_fanout.cpp;GroundState.cpp"
-                   "MADchem")
 # Offline MRA tree-skeleton dumper (R2/L4 structural export for viz/partitioning).
 # Loads converged orbitals and dumps the adaptive octree per orbital; never solves.
 add_mad_executable(dump_mra_trees
@@ -187,18 +160,13 @@ if(MADNESS_ENABLE_HDF5)
   target_include_directories(test_function_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(test_function_hdf5 PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(test_function_hdf5 PRIVATE MADNESS_HAS_HDF5)
-  # P2a: ResponseStateX round-trip through the opt-in restart path.
-  add_mad_executable(test_state_archive_hdf5 "tests/test_state_archive_hdf5.cpp" "MADchem")
-  target_include_directories(test_state_archive_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
-  target_link_libraries(test_state_archive_hdf5 PRIVATE ${HDF5_LIBRARIES})
-  target_compile_definitions(test_state_archive_hdf5 PRIVATE MADNESS_HAS_HDF5)
   # Make the real solver binaries HDF5-aware so cm_run / madqc can use the opt-in
   # restart path in response_state.hpp. MADNESS_HAS_HDF5 only enables the path;
   # default (env MADRESPONSE_IO_HDF5 unset) still writes the legacy archive.
   # dump_mra_trees joins the list so its --coeffs native-coefficient export can call
   # save_function_hdf5 (the structured /meta+/keys+/coeffs writer in
   # solvers/function_hdf5_io.hpp); guarded by MADNESS_HAS_HDF5 in the source.
-  foreach(_hdf5_tgt test_calc_manager_run dump_mra_trees)
+  foreach(_hdf5_tgt dump_mra_trees)
     if(TARGET ${_hdf5_tgt})
       target_include_directories(${_hdf5_tgt} PRIVATE ${HDF5_INCLUDE_DIRS})
       target_link_libraries(${_hdf5_tgt} PRIVATE ${HDF5_LIBRARIES})
@@ -275,28 +243,14 @@ if (BUILD_TESTING)
 
   # Tier 3 — "response-fixture": need a moldft ground-state archive; registered
   # only when the fixture tree is available so CI without fixtures stays green.
-  # (test_fd_subworld_fanout is intentionally NOT here — it requires multi-rank
-  # subworlds and is covered by the state-parallel gate.)
   set(MADNESS_RESPONSE_FIXTURE_DIR "" CACHE PATH
       "fixture tree for response regression tests (<dir>/h2o/mad.restartdata.*)")
   if (MADNESS_RESPONSE_FIXTURE_DIR)
     add_test(NAME madness/test/molresponse/test_kernel_equivalence/run
              COMMAND test_kernel_equivalence
                      --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
-    add_test(NAME madness/test/molresponse/test_calc_manager_run/run
-             COMMAND test_calc_manager_run
-                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata
-                     --omega=0.0 --axes=z --protocol=1e-4 --maxiter=25
-                     --calc-dir=ctest_calc_manager_run)
-    add_test(NAME madness/test/molresponse/test_run_response/run
-             COMMAND test_run_response
-                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
-    # Source-unification gates (steps 2+3): spec path == bespoke builders,
-    # plus the M1/M3 regrouping identities the (P,Q) promotion rests on.
-    add_test(NAME madness/test/molresponse/test_vbc_spec_equivalence/run
-             COMMAND test_vbc_spec_equivalence
-                     --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata
-                     --calc-dir=ctest_vbc_spec_equiv)
+    # Source-unification gates: the (P,Q) source and the M1/M3 regrouping
+    # identities the (P,Q) promotion rests on.
     add_test(NAME madness/test/molresponse/test_tpa_pq_vs_vbc/run
              COMMAND test_tpa_pq_vs_vbc
                      --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
@@ -306,8 +260,7 @@ if (BUILD_TESTING)
     add_test(NAME madness/test/molresponse/test_tpa_regroup_identities/run
              COMMAND test_tpa_regroup_identities
                      --archive=${MADNESS_RESPONSE_FIXTURE_DIR}/h2o/mad.restartdata)
-    foreach(_t test_kernel_equivalence test_calc_manager_run test_run_response
-               test_vbc_spec_equivalence test_tpa_pq_vs_vbc test_vbc_pq_terms
+    foreach(_t test_kernel_equivalence test_tpa_pq_vs_vbc test_vbc_pq_terms
                test_tpa_regroup_identities)
       set_property(TEST madness/test/molresponse/${_t}/run
                    PROPERTY LABELS "response-fixture;response;long" APPEND)

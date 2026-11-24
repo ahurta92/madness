@@ -14,9 +14,9 @@
 //
 //     S_bc ∝ <x^f|P^{BC}> + <y^f|Q^{BC}>            (eq:tpa_plain_master)
 //
-// The two-electron content reproduces the c-grouped production composition
-// -(T1+T2+T3) of tpa::tpa_e3_residue to MRA precision (measured 3e-7,
-// gated by tests/test_tpa_pq_vs_vbc.cpp); the optional one-electron content
+// The two-electron content reproduced the c-grouped composition -(T1+T2+T3)
+// (tpa_e3_residue, removed in step 4c part 5b) to MRA precision (measured
+// 3e-7); the optional one-electron content
 // reproduces tpa::tpa_moment_residue_1e's per-ordering halves exactly.
 //
 // WHAT IT IS (2026-09-09, reports/2026-09-09_orientation_derivation): under
@@ -27,7 +27,7 @@
 // "family D" below), and the apply moves are not Q-projected (the occupied
 // components are invisible to every 2n+1 contraction, whose left vector is
 // virtual). Equality with vbc::compute_vbc up to Q-projection is gated by
-// tests/test_vbc_spec_equivalence. The same source is the b1 argument for
+// tests/test_tpa_pq_vs_vbc (gate 5). The same source is the b1 argument for
 // beta/Raman (quadratic_source below) and the residue source for 2PA.
 //
 // Term families, in the (validated) order they are summed, tagged with the
@@ -103,7 +103,7 @@ zblk(madness::World &world, const vecfuncT &phi,
 /// channels[0] = P (contracts with x^f), channels[1] = Q (with y^f).
 /// VB_op / VC_op are the raw one-electron perturbation operators of the two
 /// photon legs; pass default-constructed Functions (or omit) to build the
-/// TWO-ELECTRON part only (the object gated against tpa::tpa_e3_residue).
+/// TWO-ELECTRON part only.
 inline std::vector<source_spec::SourceSpec>
 tpa_pq_spec(madness::World &world, const ResponseGroundState &g0,
             const ResponseStateXY<ClosedShell> &B,
@@ -302,7 +302,7 @@ quadratic_source(madness::World &world, const ResponseGroundState &g0,
 /// y_alpha = Q), truncated. With VB_op/VC_op supplied this is the FULL
 /// state-free residue right-hand side of eq:tpa_compact_P/Q (1e + 2e); with
 /// them omitted it is the two-electron part only, whose contraction
-/// <x^f|P> + <y^f|Q> equals tpa_e3_residue / √2  (== -(T1+T2+T3)).
+/// <x^f|P> + <y^f|Q> equals -(T1+T2+T3) of the c-grouped composition.
 inline ResponseStateXY<ClosedShell>
 assemble_tpa_pq(madness::World &world, const ResponseGroundState &g0,
                 const ResponseStateXY<ClosedShell> &B,

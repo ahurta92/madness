@@ -26,6 +26,10 @@ void frequency_collision(World& world,const std::string& directory,bool explicit
   });
   CalcManager::Policy policy;
   policy.dependencies_ready=[](const CalcNode&){return false;};
+  // The session plans every state; scheduling refuses a state without a plan.
+  policy.state_plans[es_node_id(true,explicit_leg ? 1 : 2)]={StatePlan::Kind::load,1e-4,key,true};
+  if(explicit_leg) policy.state_plans[fd_node_id(Perturbation::dipole(2),0.1)]={StatePlan::Kind::fresh,1e-4,""};
+  policy.plan_derived=[](const CalcNode&){return StatePlan{StatePlan::Kind::fresh,1e-4,""};};
   CalcManager manager(plan,directory,policy);manager.build(0);NoSolve executor;
   bool collision=false;
   try {manager.run(world,executor);}
@@ -39,29 +43,6 @@ void frequency_collision(World& world,const std::string& directory,bool explicit
     for(const auto& node:manager.dag()) if(node.kind==CalcKind::FD) ++concrete;
     require(concrete==1);
   }
-}
-// A native writer whose first shard is deliberately corrupted after closing.
-// This tests the production bundle loop's collective ordering without a solve.
-struct InspectionRoot {
-  int slot;
-  void save(World& world,const std::string& name,IoBackend) const {
-    archive::ParallelOutputArchive out(world,name.c_str(),1);
-    int value=slot;if(out.is_io_node()) out.local_archive() & value;
-    const auto error=cp::close_archive(out);cp::detail::collective_error(world,error);
-    if(world.rank()==0 && slot==0) std::ofstream(name+".00000",std::ios::trunc) << "bad";
-    world.gop.fence();
-  }
-};
-void inspection_failure(World& world,const std::string& directory) {
-  struct Bundle {std::vector<InspectionRoot> roots{{0},{1}};std::vector<int> stable_index{0,1};} bundle;
-  std::string error;
-  try {shared_review::save_excited_functions(world,bundle,directory);}
-  catch(const std::exception& e) {error=e.what();}
-  bool rejected=false;
-  try {cp::detail::collective_error(world,error);} catch(const std::exception&) {rejected=true;}
-  require(rejected);
-  // Every writer reached the second archive before inspection failed.
-  require(std::filesystem::exists(directory+"/root_1.00000"));
 }
 void compatibility_output() {
   const std::string protocol="1e-04_k6";
@@ -97,7 +78,6 @@ int main(int argc,char** argv) {
         return std::string(made);
       });
       compatibility_output();
-      inspection_failure(world,path);
       for(bool explicit_leg:{false,true}) for(bool identical:{false,true})
         frequency_collision(world,path,explicit_leg,identical);
       cp::detail::on_root(world,[&]{std::filesystem::remove_all(path);return std::string{};});

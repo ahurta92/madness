@@ -25,7 +25,7 @@ Header-only linear-response operators, response-subspace algebra, quadratic sour
 
 - Numerical operations create, compress, project, truncate and transform distributed Function trees and invoke collective fences/reductions; rs::inner compresses its shared underlying handles even through const views [response_space_ops.hpp:inner](./response_space_ops.hpp) [response_space_ops.hpp:transform](./response_space_ops.hpp) [assembly.hpp:assemble_theta](./assembly.hpp).
 - Exchange configuration reads MADRESPONSE_HFEXALG (actual default multiworld_row), MADRESPONSE_HFEX_GRANULARITY, MADRESPONSE_HFEX_ACCUMULATION and MADRESPONSE_HFEX_COST_AWARE [common_ops.hpp:configure_exchange](./common_ops.hpp).
-- Diagnostic residue contractions and rank-deficient diagonalization print timing/warnings on rank 0; this directory does not write checkpoint files [tpa.hpp:tpa_moment_residue](./tpa.hpp) [tpa.hpp:tpa_e3_residue](./tpa.hpp) [response_space_ops.hpp:diagonalize](./response_space_ops.hpp).
+- Diagnostic residue contractions and rank-deficient diagonalization print timing/warnings on rank 0; this directory does not write checkpoint files [tpa.hpp:tpa_moment_residue](./tpa.hpp) [response_space_ops.hpp:diagonalize](./response_space_ops.hpp).
 
 ## Source files
 

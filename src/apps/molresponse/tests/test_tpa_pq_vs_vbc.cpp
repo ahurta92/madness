@@ -5,21 +5,18 @@
 //
 // The (P,Q) assembly was derived and validated IN this test (see git history:
 // the regrouping identities are pinned by test_tpa_regroup_identities, and the
-// original inline build agreed with the c-grouped production composition to
-// 3e-7 on stored FD responses). It now lives in kernels/tpa_source_spec.hpp
-// as data over the declarative engine (kernels/source_spec.hpp); this test is
-// the equality gate that promotion must keep passing:
+// original inline build agreed with the c-grouped composition to 3e-7 on
+// stored FD responses; that composition and its gate were removed in step 4c
+// part 5b). It now lives in kernels/tpa_source_spec.hpp as data over the
+// declarative engine (kernels/source_spec.hpp). The gates:
 //
-//   (1) TWO-ELECTRON gate: <x^f|P> + <y^f|Q> from assemble_tpa_pq(B,C) must
-//       equal -(T1+T2+T3) = tpa::tpa_e3_residue(B,C,F)/sqrt(2) to MRA
-//       precision. The only use of a state vector; any stand-in works
-//       because the regrouping identities are algebraic.
 //   (2) ONE-ELECTRON gate: the full assemble_tpa_pq(B,C,vB,vC) adds exactly
-//       tpa::tpa_moment_residue_1e's half(b,c)+half(c,b) content:
-//       contraction == e3/sqrt(2) + S_1e.
-//   (3) COMPARISON (informational): (P,Q) vs V^{bc}'s two-electron part,
-//       family norms + difference — the measured statement that the residue
-//       source is NOT the VBC source (paper "One Right-Hand Side" §obs 1-3).
+//       tpa::tpa_moment_residue_1e's half(b,c)+half(c,b) content to the
+//       two-electron assemble_tpa_pq(B,C): contraction(full) ==
+//       contraction(2e) + S_1e.
+//   (4) the symmetrized builder equals the sum of both orderings.
+//   (5) the two-electron (P,Q) equals V^{bc}'s two-electron part after
+//       Q-projection.
 //
 // Stand-in vectors are used by default (CI needs no external data beyond the
 // ground-state fixture). They must NOT be Q-projected and must admix phi with
@@ -173,14 +170,9 @@ int main(int argc, char **argv) {
       // ============ (P,Q) from the PROMOTED kernel (2e part) ==============
       auto PQ = tpa::assemble_tpa_pq(world, g0, B, C);
 
-      // ============ gate 1: does it reproduce -(T1+T2+T3)? ================
-      // tpa_e3_residue returns -sqrt2*(T1+T2+T3), so +e3/sqrt2 = -(T1+T2+T3),
-      // which is the quantity (P,Q) was constructed to reproduce.
-      const double e3 = tpa::tpa_e3_residue(world, g0, B, C, F);
-      const double cgrouped = e3 / std::sqrt(2.0);    // = -(T1+T2+T3)
       const double sgrouped = inner(xf, PQ.x_alpha) + inner(yf, PQ.y_alpha);
 
-      // ============ gate 2: full (1e + 2e) vs residue_1e + e3 =============
+      // ============ gate 2: full (1e + 2e) vs 2e (P,Q) + residue_1e =======
       const auto mu_b = dipole_operator(world, 0);
       const auto mu_c = dipole_operator(world, 2);
       auto PQ_full = tpa::assemble_tpa_pq(world, g0, B, C, mu_b, mu_c);
@@ -189,7 +181,7 @@ int main(int argc, char **argv) {
           B, C, C};
       const std::array<real_function_3d, 3> ops{mu_b, mu_c, mu_c};
       const auto S1e = tpa::tpa_moment_residue_1e(world, g0, F, resp, ops, 1.0);
-      const double ref_full = cgrouped + S1e(0L, 1L);
+      const double ref_full = sgrouped + S1e(0L, 1L);
       const double got_full =
           inner(xf, PQ_full.x_alpha) + inner(yf, PQ_full.y_alpha);
 
@@ -284,16 +276,9 @@ int main(int argc, char **argv) {
         print("\n=== promoted (P,Q) source (tpa_source_spec)  vs  references ===");
         print("  thresh =", t, "  n_occ =", n, "  c_xc =", cxc);
         print("  b,c source:", src);
-        print("\n--- gate 1: two-electron regrouping vs tpa_e3_residue ---");
-        printf("  c-grouped  -(T1+T2+T3)          = %+.10f\n", cgrouped);
-        printf("  state-grouped <x^f|P>+<y^f|Q>   = %+.10f\n", sgrouped);
-        const double rel = std::abs(cgrouped) > 1e-12
-                             ? std::abs(sgrouped - cgrouped) / std::abs(cgrouped)
-                             : std::abs(sgrouped - cgrouped);
-        printf("  relative difference             = %.3e   %s\n", rel,
-               rel < 200.0 * t ? "PASS" : "FAIL");
-        print("\n--- gate 2: full (1e+2e) vs tpa_moment_residue_1e + e3 ---");
-        printf("  reference  e3/sqrt2 + S_1e      = %+.10f\n", ref_full);
+        print("\n--- gate 2: full (1e+2e) vs 2e (P,Q) + tpa_moment_residue_1e ---");
+        printf("  two-electron <x^f|P>+<y^f|Q>    = %+.10f\n", sgrouped);
+        printf("  reference  2e + S_1e            = %+.10f\n", ref_full);
         printf("  contraction of full (P,Q)       = %+.10f\n", got_full);
         const double relf = std::abs(ref_full) > 1e-12
                               ? std::abs(got_full - ref_full) / std::abs(ref_full)
@@ -307,7 +292,7 @@ int main(int argc, char **argv) {
         printf("  %-28s ||  ||=%10.6f  ||  ||=%10.6f\n", "Q(P,Q) - Q(V^{bc})", ndpx, ndqy);
         printf("  relative:  ||Q(P)-Vx||/||Vx|| = %.3e   ||Q(Q)-Vy||/||Vy|| = %.3e   tol=%.1e   %s\n",
                relx5, rely5, tol5, ok5 ? "PASS" : "FAIL");
-        if (!(rel < 200.0 * t && relf < 200.0 * t)) rc = 1;   // sticky: keep gate-4/5 verdicts
+        if (!(relf < 200.0 * t)) rc = 1;   // sticky: keep gate-4/5 verdicts
         print("\n", rc == 0 ? "PQ_SOURCE_SPEC VALIDATED" : "PQ_SOURCE_SPEC FAILED");
       }
       world.gop.broadcast(rc, 0);

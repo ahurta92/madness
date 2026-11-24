@@ -44,9 +44,9 @@
 // Closed-shell factor 2 lives IN each Coulomb density (v3 convention, matching
 // compute_density: rho1 = 2*sum phi0*(x+y)); exchange is scaled by c_xc.
 //
-// Gates: tests/test_vbc_spec_equivalence (compute_vbc == Q(tpa::quadratic_source)
-// on non-Hermitian stand-ins and in the Hermitian limit; static beta + Kleinman),
-// tests/test_tpa_pq_vs_vbc ((P,Q) vs V^{BC} two-electron equality).
+// Gate: tests/test_tpa_pq_vs_vbc ((P,Q) vs V^{BC} two-electron equality).
+// (tests/test_vbc_spec_equivalence, removed in step 4c part 5b, also compared
+// compute_vbc with Q(tpa::quadratic_source) on non-Hermitian stand-ins.)
 // ===========================================================================
 
 #include "source_spec.hpp"   // declarative source engine + leg dictionary

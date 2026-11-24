@@ -60,7 +60,6 @@ Iterative FD/ES solvers, convergence evidence, state archives, metadata, importe
 | [response_metadata.hpp](./response_metadata.hpp) | JSON registry, property upserts and shard merging |
 | [fd_save_load.hpp](./fd_save_load.hpp) | FD archives and coarser-rung selection |
 | [es_save_load.hpp](./es_save_load.hpp) | ES sidecars/per-root archives and restart |
-| [vbc_save_load.hpp](./vbc_save_load.hpp) | Exact-protocol VBC source persistence |
 | [gs_fingerprint.hpp](./gs_fingerprint.hpp) | Ground-state archive identity gate |
 | [node_subworlds.hpp](./node_subworlds.hpp) | Hostname-aware task partition and World lifetimes |
 | [es_analysis.hpp](./es_analysis.hpp) | Transition properties and AO analysis |
