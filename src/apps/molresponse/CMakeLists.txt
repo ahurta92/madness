@@ -347,7 +347,8 @@ if(BUILD_TESTING)
     add_test(NAME madness/test/molresponse/test_shared_es_iteration/mpi2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
         $<TARGET_FILE:test_shared_es_iteration> ${MPIEXEC_POSTFLAGS})
-    set_tests_properties(madness/test/molresponse/test_shared_es_iteration/mpi2 PROPERTIES LABELS "unit;response;long" TIMEOUT 240)
+    set_tests_properties(madness/test/molresponse/test_shared_es_iteration/mpi2 PROPERTIES LABELS "unit;response;long" TIMEOUT 240
+      ENVIRONMENT "OMPI_MCA_hwloc_base_binding_policy=none")
   endif()
   add_mad_executable(test_es_comparison "tests/test_es_comparison.cpp" "MADchem")
   add_test(NAME madness/test/molresponse/test_es_comparison/run COMMAND test_es_comparison)
