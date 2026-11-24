@@ -39,7 +39,17 @@
 // report ledger (reports/2026-09-04_report_pq_vbc_reconciliation).
 //
 //   test_vbc_pq_terms --archive=<moldft restartdata> [--thresh=X] [--k=N]
-//   (--calc-dir / --es-root, which read stored states, return with node folders in part 5d)
+//       [--calc-dir=<madqc run folder> [--es-root=N] [--freq=<omega_f/2>]
+//        [--baxis=N --caxis=N]]
+// With --calc-dir, states come from the run folder's node folders
+// (states/response/), loaded at this test's level:
+//   --es-root=N  root N of the run's full (RPA) excited-state set is (x^f,
+//                y^f), and the leg frequency defaults to omega_N/2.
+//   --freq       b and c are the saved driven states dipole_<baxis> and
+//                dipole_<caxis> (default z) at that frequency; a missing state
+//                stops the test. Without --freq, the driven states at
+//                omega_N/2 are used when the run has them, else the stand-ins.
+// A static driven state (X only) is used as (X, Y = X).
 // ===========================================================================
 
 #include "../GroundState.hpp"
@@ -53,6 +63,7 @@
 #include "../kernels/vbc.hpp"
 #include "../solvers/build_response_ground_state.hpp"
 #include "../solvers/response_state.hpp"
+#include "../tools/saved_states.hpp"
 
 #include <madness/misc/info.h>
 #include <madness/mra/mra.h>
@@ -155,7 +166,8 @@ int main(int argc, char **argv) {
       commandlineparser parser(argc, argv);
       if (!parser.key_exists("archive")) {
         if (world.rank() == 0)
-          print("Usage: test_vbc_pq_terms --archive=<path> [--thresh=X] [--k=N]");
+          print("Usage: test_vbc_pq_terms --archive=<path> [--thresh=X] [--k=N] "
+                "[--calc-dir=<run folder> [--es-root=N] [--freq=<omega_f/2>] [--baxis=N --caxis=N]]");
         finalize();
         return 1;
       }
@@ -217,13 +229,60 @@ int main(int argc, char **argv) {
       vecfuncT xf = comb(1.0, d1, -0.37, d2, -0.19);
       vecfuncT yf = comb(1.0, d2,  0.71, d0,  0.43);
 
-      // Stored responses (--calc-dir, --es-root): the older response layout
-      // these options read is gone; reading node folders arrives in step 4c
-      // part 5d. Until then only the stand-ins run.
-      const std::string src = "stand-in (dipole combinations + phi admixture)";
-      if (parser.key_exists("calc-dir") || parser.key_exists("es-root"))
-        throw std::runtime_error("--calc-dir read the older response layout, which is gone; "
-                                 "reading response node folders arrives in step 4c part 5d");
+      std::string src = "stand-in (dipole combinations + phi admixture)";
+      MADNESS_CHECK_THROW(!parser.key_exists("es-root") || parser.key_exists("calc-dir"),
+                          "--es-root needs --calc-dir");
+      // --es-root=N (+ --calc-dir): use the CONVERGED eigenvector of root N as
+      // (x^f,y^f), and default --freq to omega_N/2 (the physical leg freq).
+      double freq_from_root = -1.0;
+      if (parser.key_exists("calc-dir") && parser.key_exists("es-root")) {
+        const std::string cdir = parser.value_raw("calc-dir");
+        const int nroot = std::stoi(parser.value("es-root"));
+        const auto node = saved_states::find_excited(world, cdir, /*full=*/true);
+        if (!node)
+          throw std::runtime_error("--es-root: no saved full (RPA) excited-state set in " + cdir +
+                                   "/states/response");
+        saved_states::print_loaded(world, *node);
+        auto es = saved_states::load_excited<Full>(world, *node);
+        if (nroot < 0 || nroot >= static_cast<int>(es.roots.size()))
+          throw std::runtime_error("--es-root=" + std::to_string(nroot) + ": the saved set has " +
+                                   std::to_string(es.roots.size()) + " roots");
+        xf = madness::copy(world, es.roots[nroot].x_alpha);
+        yf = madness::copy(world, es.roots[nroot].y_alpha);
+        freq_from_root = 0.5 * es.omega(nroot);
+        if (world.rank() == 0)
+          print("[TERMS] eigenvector: SAVED root", nroot, " omega=", es.omega(nroot),
+                " -> leg freq", freq_from_root, " (", node->folder.filename().string(), ")");
+      }
+      if (parser.key_exists("calc-dir") &&
+          (parser.key_exists("freq") || freq_from_root > 0.0)) {
+        const std::string cdir = parser.value_raw("calc-dir");
+        const bool explicit_freq = parser.key_exists("freq");
+        const double freq = explicit_freq ? std::stod(parser.value("freq")) : freq_from_root;
+        const int ba = parser.key_exists("baxis") ? std::stoi(parser.value("baxis")) : 2;
+        const int ca = parser.key_exists("caxis") ? std::stoi(parser.value("caxis")) : 2;
+        const auto pert = [](int axis) { return std::string("dipole_") + "xyz"[axis]; };
+        const auto nb = saved_states::find_driven(world, cdir, pert(ba), freq);
+        const auto nc = saved_states::find_driven(world, cdir, pert(ca), freq);
+        char fbuf[64];
+        std::snprintf(fbuf, sizeof fbuf, "%.5f", freq);
+        if (nb && nc) {
+          saved_states::print_loaded(world, *nb);
+          saved_states::print_loaded(world, *nc);
+          const auto rb = saved_states::load_driven_xy(world, *nb);
+          const auto rcc = saved_states::load_driven_xy(world, *nc);
+          xb = madness::copy(world, rb.x_alpha);
+          yb = madness::copy(world, rb.y_alpha);
+          xc = madness::copy(world, rcc.x_alpha);
+          yc = madness::copy(world, rcc.y_alpha);
+          src = std::string("SAVED driven states @ omega=") + fbuf;
+        } else if (explicit_freq) {
+          throw std::runtime_error("no saved driven states " + pert(ba) + " and " + pert(ca) +
+                                   " at frequency " + fbuf + " in " + cdir + "/states/response");
+        } else if (world.rank() == 0) {
+          print("  no saved driven states at the root's leg frequency", fbuf, "-- b, c are stand-ins");
+        }
+      }
       if (world.rank() == 0) {
         print("\n[TERMS] source vectors:", src);
         print("[TERMS] archive:", archive_path, " thresh:", t,

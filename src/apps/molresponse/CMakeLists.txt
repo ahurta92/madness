@@ -173,14 +173,13 @@ if(MADNESS_ENABLE_HDF5)
   target_include_directories(seed_es_from_hdf5 PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(seed_es_from_hdf5 PRIVATE ${HDF5_LIBRARIES})
   target_compile_definitions(seed_es_from_hdf5 PRIVATE MADNESS_HAS_HDF5)
-  # dalton-cis-seed (b): overlap-based pinning — identify which converged ES root
-  # matches the operator-selected seed by |<seed|root>| (character, not energy).
-  # Its reader of the older bundle layout is gone; node folders arrive in step 4c part 5d.
-  add_mad_executable(es_overlap "tools/es_overlap.cpp;GroundState.cpp" "MADchem")
-  target_include_directories(es_overlap PRIVATE ${HDF5_INCLUDE_DIRS})
-  target_link_libraries(es_overlap PRIVATE ${HDF5_LIBRARIES})
-  target_compile_definitions(es_overlap PRIVATE MADNESS_HAS_HDF5)
 endif()
+
+# dalton-cis-seed (b): overlap-based pinning — identify which converged ES root
+# matches the operator-selected seed by |<seed|root>| (character, not energy).
+# Reads excited-state set and seed node folders (native archives), so it needs
+# no HDF5 and builds in every configuration.
+add_mad_executable(es_overlap "tools/es_overlap.cpp;GroundState.cpp" "MADchem")
 
 # dalton-cis-seed (c): native DALTON reader — reads RSPVEC + molden.inp directly,
 # projects x_i onto MRA, and emits the ES seed without a Python/HDF5

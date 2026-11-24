@@ -65,7 +65,7 @@ per-cell, cannot hold sub-box grids).
   `vtkAMRBox` lo = `l·m`, hi = `l·m + m − 1`. Values attached as cell data `"psi"`.
 - Output `<stem>.vthb` via `vtkXMLUniformGridAMRWriter`. Wired for the ground MOs
   **and** (with `--fd`) the FD response orbitals + ρ⁽¹⁾ — same call-chain threading
-  as `--cube` (`dump_fd_states → dump_fd_point → dump_block`), parity with
+  as `--cube` (`dump_response_states → dump_driven → dump_one`), parity with
   `--cube`/`--htg`.
 
 ## Known prototype simplifications (intentional — fix during iteration)
@@ -82,8 +82,8 @@ per-cell, cannot hold sub-box grids).
    resolution from the box geometry; we do not pre-blank. Verify it renders correctly;
    if not, call `vtkOverlappingAMR::GenerateParentChildInformation()` / set blanking.
 4. ~~**Ground-state only** — FD response/ρ⁽¹⁾ not yet wired (trivial follow-up).~~
-   **DONE:** `--amr` now threads through `dump_fd_states → dump_fd_point →
-   dump_block` (alongside `--cube`), so `--fd --amr` emits `fd_*_x*.vthb`,
+   **DONE:** `--amr` now threads through `dump_response_states → dump_driven →
+   dump_one` (alongside `--cube`), so `--fd --amr` emits `fd_*_x*.vthb`,
    `fd_*_y*.vthb` (Full), and `fd_*_rho1.vthb`. Pending alloc rebuild + ParaView
    eyeball of the FD `.vthb` outputs.
 

@@ -1,4 +1,4 @@
-// seed_from_dalton — build a molresponse TDA excited-state SEED bundle by
+// seed_from_dalton — build a molresponse TDA excited-state SEED by
 // reading a DALTON RSPVEC binary and Molden file directly (no Python/HDF5
 // intermediate). Projects the per-occupied-orbital response function
 //   x_i(r) = sum_mu D[mu,i] chi_mu(r),  D = C_vir @ X.T
@@ -85,11 +85,11 @@ int main(int argc, char** argv) {
         if (world.rank() == 0) {
             print("Usage: seed_from_dalton --rspvec=RSPVEC --molden=molden.inp "
                   "--n-occ=N --root=IDX --omega=<au> --run-dir=<madqc run folder>");
-            print("  multi-root: --roots=0,1,2 --omegas=w0,w1,w2 (one N-root bundle)");
+            print("  multi-root: --roots=0,1,2 --omegas=w0,w1,w2 (one N-root seed)");
             print("  [--archive=<moldft restartdata>] (load the MADNESS ground "
                   "state, take box/k from its header, and ROTATE the seed into "
                   "its occupied gauge — required for a localized ground state)");
-            print("  [--full] (write Full X,Y bundle for --es-full/RPA solve; "
+            print("  [--full] (write a full (X,Y) seed for the RPA set; "
                   "default TDA X-only) [--yflip] (flip Y sign) "
                   "[--thresh=1e-4] [--scale=<sqrt2>]");
         }
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     const std::string run_dir    = parser.value_raw("run-dir");
     const int         n_occ      = std::stoi(parser.value("n-occ"));
     // Multi-root: --roots=0,1,2 --omegas=w0,w1,w2 build ONE N-root seed
-    // bundle (what a production --es-roots=N solve warm-starts from).
+    // (what a set of N roots starts from).
     // --root/--omega remain as the single-root spelling.
     std::vector<int>    root_list;
     std::vector<double> omega_list;
@@ -269,8 +269,8 @@ int main(int argc, char** argv) {
 
         const std::string key    = protocol_key(thresh, k);
 
-        // --full: write a Full (X,Y) bundle the RPA/--es-full solve resumes
-        // from (default: TDA, X-only). DALTON stores the RPA de-excitation
+        // --full: write a full (X,Y) seed the RPA set starts from
+        // (default: TDA, X-only). DALTON stores the RPA de-excitation
         // block as Y_ai; our y_alpha follows the eigenvector dictionary
         // y_i = -sum_a Y_ai phi_a, so the projected Y block is NEGATED by
         // default. --yflip toggles that sign for the convention check (the RPA

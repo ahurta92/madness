@@ -26,12 +26,25 @@
 // norm2) are COLLECTIVE -- they run on every rank; only printing is gated on
 // rank 0.
 //
+// With --fd and --es it also dumps the saved response states of a madqc run
+// folder (--run-dir, default the archive's directory): it lists the node
+// folders under <run>/states/response/, reads each description, and loads the
+// driven states (--fd) and excited-state sets (--es) through the node module.
+// It never writes into the run folder.
+//
 // Usage:
 //   dump_mra_trees --archive=<prefix>.restartdata [--out=DIR]
 //                  [--maxlevel=N] [--k=N] [--thresh=X] [--max-orbitals=N]
+//                  [--fd] [--es] [--run-dir=<madqc run folder>]
 
 #include "../GroundState.hpp"
 #include "../ResponseProtocol.hpp"
+#include "../kernels/tags.hpp"     // Static / Full / TDA, ClosedShell
+#include "../kernels/static.hpp"   // Kernels<Static,ClosedShell>::compute_density
+#include "../kernels/full.hpp"     // Kernels<Full,ClosedShell>::compute_density
+#include "../kernels/tda.hpp"      // Kernels<TDA,ClosedShell>::compute_density
+#include "../solvers/response_metadata.hpp"  // ResponseMetadata::freq_key (output names)
+#include "saved_states.hpp"        // node folders under <run>/states/response/
 
 #include <madness/chem/atomutil.h>
 #include <nlohmann/json.hpp>
@@ -581,10 +594,163 @@ void dump_function_trees(World& world, Function<double, 3> f,
   if (htg) write_htg_from_function(world, f, stem + "_error.htg");
 }
 
-// Read-only inspection of saved states. The checkpoint store it read is gone;
-// it returns as a reader of node folders.
-void dump_shared_checkpoint(World&,const commandlineparser&) {
-  throw std::runtime_error("inspection of saved states is not available in this version");
+// What every dumped function gets: the trees, and the optional cube, AMR and
+// native-coefficient files. Collective.
+struct DumpOptions {
+  std::string out_dir;
+  int max_orbitals = -1;
+  bool cube = false;
+  int cube_npoints = 80;
+  double cube_pad = 6.0;
+  bool htg = false;
+  bool amr = false;
+  int amr_m = 8;
+  bool coeffs = false;
+};
+
+void dump_one(World& world, const real_function_3d& f, const std::string& stem,
+              const std::string& what, const Molecule& mol, const DumpOptions& o) {
+  dump_function_trees(world, f, stem, o.htg);
+  if (o.cube) write_cube_file(world, f, mol, stem + ".cube", o.cube_npoints, o.cube_pad);
+  if (o.amr) write_amr_from_function(world, f, stem + ".vthb", o.amr_m);
+  if (o.coeffs) write_coeffs_hdf5(world, f, stem + ".mad.h5");
+  const double nrm = f.norm2();  // collective
+  if (world.rank() == 0) print("  dumped", what, " norm2=", nrm);
+}
+
+std::size_t orbital_count(std::size_t n, int max_orbitals) {
+  return max_orbitals >= 0 ? std::min<std::size_t>(n, static_cast<std::size_t>(max_orbitals)) : n;
+}
+
+// The ground orbitals at the active k, for the response and transition
+// densities: a LOCAL copy reprojected when the ground state was loaded at
+// another k (the dumped ground trees stay native).
+ResponseGroundState ground_at_active_k(World& world, const vecfuncT& gs_amo) {
+  const int k = FunctionDefaults<3>::get_k();
+  const double thresh = FunctionDefaults<3>::get_thresh();
+  ResponseGroundState rgs;
+  rgs.amo.reserve(gs_amo.size());
+  for (const auto& o : gs_amo)
+    rgs.amo.push_back(o.k() == k ? o : project(o, k, thresh, false));
+  world.gop.fence();
+  return rgs;
+}
+
+// One driven state at its saved level: each response orbital (x, and y for a
+// full layout) and the response density rho^(1). Kernels::compute_density is
+// the single source of the closed-shell convention (static folds Y=X -> factor
+// 4; full uses x+y -> factor 2). Output stems keep the earlier names,
+// fd_<perturbation>__<protocol>__<frequency>_{x<i>,y<i>,rho1}. Collective.
+template <typename Type>
+void dump_driven(World& world, const saved_states::SavedNode& node, const vecfuncT& gs_amo,
+                 const Molecule& mol, const DumpOptions& o) {
+  using Storage = std::conditional_t<std::is_same_v<Type, Full>, ResponseStateXY<ClosedShell>,
+                                     ResponseStateX<ClosedShell>>;
+  const auto& d = node.description;
+  const auto store = saved_states::load_driven<Storage>(world, node);
+  const std::string label = "fd_" + d.settings.at("perturbation").get<std::string>() + "__" +
+                            protocol_key(d.protocol.thresh, d.protocol.k) + "__" +
+                            ResponseMetadata::freq_key(d.settings.at("frequency").get<double>());
+  auto dump_block = [&](const vecfuncT& blk, const char* tag) {
+    for (std::size_t i = 0; i < orbital_count(blk.size(), o.max_orbitals); ++i)
+      dump_one(world, blk[i], o.out_dir + "/" + label + "_" + tag + std::to_string(i),
+               label + " " + tag + std::to_string(i), mol, o);
+  };
+  dump_block(store.x_alpha, "x");
+  if constexpr (std::is_same_v<Type, Full>) dump_block(store.y_alpha, "y");
+  const auto rgs = ground_at_active_k(world, gs_amo);
+  const real_function_3d rho1 = Kernels<Type, ClosedShell>::compute_density(world, rgs, store);
+  dump_one(world, rho1, o.out_dir + "/" + label + "_rho1", label + " rho1", mol, o);
+}
+
+// One excited-state set at its saved level: x_i (and y_i for full) per root
+// and the transition density (TDA: 2 sum phi_i x_i; full: 2 sum phi_i
+// (x_i + y_i)). Output stems keep the earlier names, es_<slot>__<protocol>_*
+// (pymra.web's field contract); with more than one set in the run the model is
+// added to the protocol part, es_<slot>__<protocol>-<model>_*, so the sets do
+// not overwrite each other. Returns the number of roots. Collective.
+template <typename Type>
+int dump_excited(World& world, const saved_states::SavedNode& node, bool name_model,
+                 const vecfuncT& gs_amo, const Molecule& mol, const DumpOptions& o) {
+  const auto& d = node.description;
+  const auto state = saved_states::load_excited<Type>(world, node);
+  std::string key = protocol_key(d.protocol.thresh, d.protocol.k);
+  if (name_model) key += "-" + d.settings.at("excited_model").get<std::string>();
+  const auto rgs = ground_at_active_k(world, gs_amo);
+  const int nr = static_cast<int>(state.roots.size());
+  for (int f = 0; f < nr; ++f) {
+    const auto& root = state.roots[f];
+    const std::string label = "es_" + std::to_string(f) + "__" + key;
+    const std::size_t no = orbital_count(root.x_alpha.size(), o.max_orbitals);
+    for (std::size_t i = 0; i < no; ++i)
+      dump_one(world, root.x_alpha[i], o.out_dir + "/" + label + "_x" + std::to_string(i),
+               label + " x" + std::to_string(i), mol, o);
+    if constexpr (std::is_same_v<Type, Full>)
+      for (std::size_t i = 0; i < no && i < root.y_alpha.size(); ++i)
+        dump_one(world, root.y_alpha[i], o.out_dir + "/" + label + "_y" + std::to_string(i),
+                 label + " y" + std::to_string(i), mol, o);
+    const real_function_3d tdens = Kernels<Type, ClosedShell>::compute_density(world, rgs, root);
+    dump_one(world, tdens, o.out_dir + "/" + label + "_tdens", label + " tdens", mol, o);
+  }
+  return nr;
+}
+
+// The saved driven states (fd) and excited-state sets (es) of the run folder
+// `run`, found by listing its node folders and reading their descriptions.
+// Stops when the run folder has nothing of an asked kind. Collective.
+struct ResponseNodes {
+  std::vector<saved_states::SavedNode> driven, excited;
+};
+ResponseNodes find_response_states(World& world, const std::filesystem::path& run, bool fd, bool es) {
+  ResponseNodes found;
+  for (auto& node : saved_states::response_nodes(world, run)) {
+    if (fd && saved_states::is_driven(node)) found.driven.push_back(node);
+    if (es && saved_states::is_excited(node)) found.excited.push_back(node);
+  }
+  if (fd && found.driven.empty())
+    throw std::runtime_error("--fd: no saved driven state under " + (run / "states/response").string());
+  if (es && found.excited.empty())
+    throw std::runtime_error("--es: no saved excited-state set under " + (run / "states/response").string());
+  return found;
+}
+
+// Dump the found states, each at its saved level. Open-shell driven states are
+// listed and skipped, as before. Collective.
+void dump_response_states(World& world, double L, const std::filesystem::path& run, const ResponseNodes& found,
+                          const vecfuncT& gs_amo, const Molecule& mol, const DumpOptions& o) {
+  const auto& driven = found.driven;
+  const auto& excited = found.excited;
+
+  auto at_saved_level = [&](const saved_states::SavedNode& node) {
+    set_response_protocol(world, L, node.description.protocol.thresh, node.description.protocol.k, false);
+    saved_states::print_loaded(world, node);
+  };
+  int npoints = 0;
+  for (const auto& node : driven) {
+    at_saved_level(node);
+    if (!saved_states::closed_shell(node)) {
+      if (world.rank() == 0) print("  [FD] skip, not closed shell:", saved_states::layout(node));
+      continue;
+    }
+    if (saved_states::full_layout(node)) dump_driven<Full>(world, node, gs_amo, mol, o);
+    else dump_driven<Static>(world, node, gs_amo, mol, o);
+    ++npoints;
+  }
+  if (!driven.empty() && world.rank() == 0) print("DUMP_MRA_FD  run=", run.string(), "  states_dumped=", npoints);
+
+  int nroots = 0;
+  for (const auto& node : excited) {
+    at_saved_level(node);
+    const int n = static_cast<int>(node.description.details.at("n_roots").get<std::size_t>());
+    if (world.rank() == 0) print("  [ES] set", node.folder.filename().string(), " layout=",
+                                 saved_states::layout(node), " roots=", n);
+    if (saved_states::full_layout(node))
+      nroots += dump_excited<Full>(world, node, excited.size() > 1, gs_amo, mol, o);
+    else
+      nroots += dump_excited<TDA>(world, node, excited.size() > 1, gs_amo, mol, o);
+  }
+  if (!excited.empty() && world.rank() == 0)
+    print("DUMP_MRA_ES  run=", run.string(), "  sets=", int(excited.size()), "  roots_dumped=", nroots);
 }
 
 }  // namespace
@@ -596,16 +762,12 @@ int main(int argc, char** argv) {
     startup(world, argc, argv, true);
 
     commandlineparser parser(argc, argv);
-    if(parser.key_exists("checkpoint-root")) {
-      dump_shared_checkpoint(world,parser);finalize();return 0;
-    }
     if (!parser.key_exists("archive")) {
       if (world.rank() == 0) {
         print("Usage: dump_mra_trees --archive=<prefix>.restartdata "
               "[--out=DIR] [--maxlevel=N] [--k=N] [--thresh=X] "
               "[--max-orbitals=N] [--cube] [--cube-npoints=N] [--cube-pad=X] "
-              "[--htg] [--amr] [--amr-m=N] [--coeffs]");
-        print("  Native shared inspection: --checkpoint-root=RUN --task=ID [--subject=ROOT] [--generation=ID]");
+              "[--htg] [--amr] [--amr-m=N] [--coeffs] [--fd] [--es] [--run-dir=DIR]");
         print("  Loads ground-state orbitals at their native (k, thresh) and");
         print("  dumps per-orbital MRA octree JSON (reconstructed + compressed),");
         print("  geometry.vtk, and (with --cube) per-orbital .cube isosurfaces.");
@@ -619,8 +781,14 @@ int main(int argc, char** argv) {
         print("  function's NATIVE MRA coefficients as <stem>.mad.h5 (/meta+/keys+");
         print("  /coeffs: per-leaf n,l,s[k^3] + cell,k,thresh) -- the exact basis");
         print("  for offline reconstruction, not a point sample like .cube/.vthb.");
-        print("  --fd and --es (response states) are not available in this");
-        print("  version: reading response node folders arrives in the next part.");
+        print("  With --fd, also dumps the saved closed-shell driven states of the");
+        print("  madqc run folder --run-dir (default: the archive's directory; the");
+        print("  older name --fd-calc-dir is still accepted) from its node folders");
+        print("  under states/response/: x_i (+ y_i for a dynamic state) and rho^(1),");
+        print("  stems fd_<perturbation>__<protocol>__<frequency>_*.");
+        print("  With --es, also dumps every excited-state set there (TDA or full):");
+        print("  x_i (+ y_i for full) per root and the transition density, stems");
+        print("  es_<root>__<protocol>_*. Each state is dumped at its saved level.");
       }
       finalize();
       return 1;
@@ -642,12 +810,21 @@ int main(int argc, char** argv) {
                                    ? std::stoi(parser.value("cube-npoints")) : 80;
       const double cube_pad = parser.key_exists("cube-pad")
                                   ? std::stod(parser.value("cube-pad")) : 6.0;
-      // Response states (--fd, --es): the older layout these options read is
-      // gone; reading node folders (states/response/*) arrives in step 4c part 5d.
-      if (parser.key_exists("fd") || parser.key_exists("es"))
-        throw std::runtime_error(
-            "--fd and --es are not available in this version: reading response "
-            "node folders (states/response/) arrives in the next part");
+      // Response states of a madqc run folder: driven states (--fd) and
+      // excited-state sets (--es) from its node folders, into the same out dir,
+      // so one mra_tree.py run yields a combined ground + response analysis.
+      // --fd-calc-dir is the older name of --run-dir.
+      const bool dump_fd = parser.key_exists("fd");
+      const bool dump_es = parser.key_exists("es");
+      const std::string run_dir =
+          parser.key_exists("run-dir")       ? parser.value_raw("run-dir")
+          : parser.key_exists("fd-calc-dir") ? parser.value_raw("fd-calc-dir")
+                                             : std::filesystem::path(archive_path).parent_path().string();
+      // Find the states before any output, so a run folder without them stops
+      // with nothing written.
+      ResponseNodes response_states;
+      if (dump_fd || dump_es)
+        response_states = find_response_states(world, run_dir, dump_fd, dump_es);
       // Native HyperTreeGrid (.htg) export of every tree, in addition to the
       // JSON/.vtk. Needs a -DMADNESS_ENABLE_VTK=ON build; otherwise a no-op.
       const bool htg = parser.key_exists("htg");
@@ -727,6 +904,15 @@ int main(int argc, char** argv) {
       }
       world.gop.fence();
 
+      // Response states, after the ground dump: each is loaded at its own saved
+      // level (this changes FunctionDefaults). header.L is the box length.
+      if (dump_fd || dump_es) {
+        const DumpOptions o{out_dir, max_orbitals, cube, cube_npoints, cube_pad,
+                            htg, amr, amr_m, coeffs};
+        dump_response_states(world, header.L, run_dir, response_states, mos,
+                             gs.molecule(), o);
+        world.gop.fence();
+      }
     }
 
     finalize();

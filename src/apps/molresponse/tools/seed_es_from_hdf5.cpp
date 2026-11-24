@@ -1,4 +1,4 @@
-// seed_es_from_hdf5 — build a molresponse TDA excited-state SEED bundle from
+// seed_es_from_hdf5 — build a molresponse TDA excited-state SEED from
 // per-occupied-orbital response functions x_i(r) stored as pymra structured
 // .mad.h5 files (schema=1, the /meta+/keys+/coeffs layout written by
 // pymra.io.write_function == solvers/function_hdf5_io.hpp save_function_hdf5).

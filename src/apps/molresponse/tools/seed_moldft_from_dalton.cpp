@@ -1,7 +1,7 @@
 // seed_moldft_from_dalton — build a moldft ground-state SEED by projecting the
 // occupied DALTON/molden MOs onto the MRA basis and writing a `.restartdata`
 // archive that moldft `--restart` resumes from. Ground-state analogue of
-// tools/seed_from_dalton (which seeds the ES/response bundle).
+// tools/seed_from_dalton (which seeds the excited-state set).
 //
 // The header is written through RestartMetadata (madness/chem/Restart.h), the
 // same struct SCF::save_mos and SCF::load_mos use, so the layout cannot drift

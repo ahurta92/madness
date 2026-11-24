@@ -177,6 +177,38 @@ inline std::optional<it::NodeDescription> read_other_node(madness::World& world,
   return it::read_description(json::parse(text));
 }
 
+// The functions of a saved driven state (archive/response in `directory`) at
+// level `target`: read at the saved level, then projected and truncated to the
+// target. FunctionDefaults must already be at the target. Collective.
+template<class Storage>
+Storage load_driven_functions(madness::World& world,const std::filesystem::path& directory,
+                              const it::NodeDescription& d,it::Protocol target) {
+  cp::records::require(d.details.at("writers").get<int>()<=world.size(),"unsupported native response payload");
+  cp::records::require(it::Protocol{madness::FunctionDefaults<3>::get_thresh(),madness::FunctionDefaults<3>::get_k()}==
+                       target,"prepare response representation before native loading");
+  const auto stored=d.protocol;
+  Storage functions;
+  {
+    struct Restore {
+      it::Protocol target;
+      ~Restore() {madness::FunctionDefaults<3>::set_k(target.k);madness::FunctionDefaults<3>::set_thresh(target.thresh);}
+    } restore{target};
+    madness::FunctionDefaults<3>::set_k(stored.k);
+    madness::FunctionDefaults<3>::set_thresh(stored.thresh);
+    functions=Storage::load(world,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
+  }
+  for (auto* block : functions.blocks()) {
+    for (auto& function : *block) {
+      cp::records::require(function.k()==stored.k,"response payload disagrees with saved polynomial order");
+      if (stored.k!=target.k) function=madness::project(function,target.k,target.thresh,false);
+    }
+    madness::set_thresh(world,*block,target.thresh);
+    if (stored!=target) madness::truncate(world,*block,target.thresh);
+  }
+  world.gop.fence();
+  return functions;
+}
+
 // A driven state, the response to one perturbation at one frequency, is one
 // node: <run>/states/response/<perturbation>-f<frequency>/, with
 // description.json, history.jsonl and archive/response (one native archive).
@@ -336,31 +368,7 @@ public:
   // Driven storage's native conversion to the current protocol level.
   template<class Storage> Storage load(bool require_complete=false) {
     return load([&](const std::filesystem::path& directory,const it::NodeDescription& d) {
-      cp::records::require(d.details.at("writers").get<int>()<=world_.size(),"unsupported native response payload");
-      cp::records::require(it::Protocol{madness::FunctionDefaults<3>::get_thresh(),madness::FunctionDefaults<3>::get_k()}==
-                           settings.protocol,"prepare response representation before native loading");
-      const auto stored=d.protocol;
-      const auto target=settings.protocol;
-      Storage functions;
-      {
-        struct Restore {
-          it::Protocol target;
-          ~Restore() {madness::FunctionDefaults<3>::set_k(target.k);madness::FunctionDefaults<3>::set_thresh(target.thresh);}
-        } restore{target};
-        madness::FunctionDefaults<3>::set_k(stored.k);
-        madness::FunctionDefaults<3>::set_thresh(stored.thresh);
-        functions=Storage::load(world_,madness::native_archive_name((directory/"response").string()),IoBackend::Native);
-      }
-      for (auto* block : functions.blocks()) {
-        for (auto& function : *block) {
-          cp::records::require(function.k()==stored.k,"response payload disagrees with saved polynomial order");
-          if (stored.k!=target.k) function=madness::project(function,target.k,target.thresh,false);
-        }
-        madness::set_thresh(world_,*block,target.thresh);
-        if (stored!=target) madness::truncate(world_,*block,target.thresh);
-      }
-      world_.gop.fence();
-      return functions;
+      return load_driven_functions<Storage>(world_,directory,d,settings.protocol);
     },require_complete);
   }
   // One row per decision in the node's history, before any save.

@@ -26,7 +26,11 @@
 // test pass without testing anything.
 //
 //   test_tpa_pq_vs_vbc --archive=<moldft restartdata> [--thresh=X] [--k=N]
-//   (--calc-dir, which read stored FD responses, returns with node folders in part 5d)
+//       [--calc-dir=<madqc run folder> --freq=<omega_f/2> [--baxis=N --caxis=N]]
+// With --calc-dir, b and c are the saved driven states dipole_<baxis> and
+// dipole_<caxis> (default z) at --freq, found among the run folder's node
+// folders (states/response/) and loaded at this test's level. A static state
+// (X only) is used as (X, Y = X). A missing state stops the test.
 // ===========================================================================
 
 #include "../GroundState.hpp"
@@ -40,6 +44,7 @@
 #include "../kernels/vbc.hpp"
 #include "../solvers/build_response_ground_state.hpp"
 #include "../solvers/response_state.hpp"
+#include "../tools/saved_states.hpp"
 
 #include <madness/misc/info.h>
 #include <madness/mra/mra.h>
@@ -66,7 +71,8 @@ int main(int argc, char **argv) {
       commandlineparser parser(argc, argv);
       if (!parser.key_exists("archive")) {
         if (world.rank() == 0)
-          print("Usage: test_tpa_pq_vs_vbc --archive=<path> [--thresh=X] [--k=N]");
+          print("Usage: test_tpa_pq_vs_vbc --archive=<path> [--thresh=X] [--k=N] "
+                "[--calc-dir=<run folder> --freq=<omega_f/2> [--baxis=N --caxis=N]]");
         finalize();
         return 1;
       }
@@ -129,13 +135,35 @@ int main(int argc, char **argv) {
       const vecfuncT xf = comb(1.0, d1, -0.37, d2, -0.19);
       const vecfuncT yf = comb(1.0, d2,  0.71, d0,  0.43);
 
-      // ---- stored FD responses (--calc-dir) --------------------------------
-      // The older response layout this option read is gone; reading node
-      // folders arrives in step 4c part 5d. Until then only the stand-ins run.
-      const std::string src = "stand-in (dipole combinations + phi admixture)";
-      if (parser.key_exists("calc-dir"))
-        throw std::runtime_error("--calc-dir read the older response layout, which is gone; "
-                                 "reading response node folders arrives in step 4c part 5d");
+      // ---- optionally replace b,c with SAVED driven states ----------------
+      // --calc-dir=<run folder> --freq=<omega_f/2> [--baxis=N --caxis=N]
+      // The stand-ins above exercise the algebra; real responses give physical
+      // magnitudes for the (p,q)-vs-V^{bc} comparison.
+      std::string src = "stand-in (dipole combinations + phi admixture)";
+      if (parser.key_exists("calc-dir")) {
+        MADNESS_CHECK_THROW(parser.key_exists("freq"), "--calc-dir needs --freq");
+        const std::string cdir = parser.value_raw("calc-dir");
+        const double freq = std::stod(parser.value("freq"));
+        const int ba = parser.key_exists("baxis") ? std::stoi(parser.value("baxis")) : 2;
+        const int ca = parser.key_exists("caxis") ? std::stoi(parser.value("caxis")) : 2;
+        auto load = [&](int axis) {
+          const std::string pert = std::string("dipole_") + "xyz"[axis];
+          const auto node = saved_states::find_driven(world, cdir, pert, freq);
+          if (!node)
+            throw std::runtime_error("no saved driven state " + pert + " at frequency " +
+                                     parser.value("freq") + " in " + cdir + "/states/response");
+          saved_states::print_loaded(world, *node);
+          return saved_states::load_driven_xy(world, *node);
+        };
+        const auto rb = load(ba);
+        const auto rcc = load(ca);
+        xb = madness::copy(world, rb.x_alpha);
+        yb = madness::copy(world, rb.y_alpha);
+        xc = madness::copy(world, rcc.x_alpha);
+        yc = madness::copy(world, rcc.y_alpha);
+        src = "SAVED driven states  dipole_" + std::string(1, "xyz"[ba]) +
+              " / dipole_" + std::string(1, "xyz"[ca]) + "  @ omega=" + parser.value("freq");
+      }
 
       ResponseStateXY<ClosedShell> B, C, F;
       B.x_alpha = madness::copy(world, xb); B.y_alpha = madness::copy(world, yb);

@@ -96,12 +96,6 @@ if(BUILD_TESTING)
         LABELS "madqc;applications;verylong" TIMEOUT 1800
         ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
     endif()
-    add_test(NAME madness/test/madqc/test_native_response_inspection/run
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_native_inspection.py
-        --binary $<TARGET_FILE:dump_mra_trees> --solver $<TARGET_FILE:madqc>)
-    set_tests_properties(madness/test/madqc/test_native_response_inspection/run PROPERTIES
-      LABELS "madqc;applications;verylong" TIMEOUT 900
-      ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
     foreach(case response_he_alpha response_he_lda_alpha response_he_pbe0_alpha
         response_h2o_lda_alpha response_h2_es_tda response_h2_es_rpa
         response_h2_es_rpa_nokain response_lih_beta response_lih_raman_full
