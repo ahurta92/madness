@@ -83,6 +83,17 @@ inline it::ModelMetrics model(it::Protocol = {1e-4, 6}) {
           {it::Metric::kinetic_change, {it::Support::supported, false, {}, it::LimitRule::plain, {}}}};
 }
 
+// What a saved driven state must share with this one to be its starting
+// state: every setting but the frequency and the static or full part of the
+// layout. The ground state's identity, when the settings hold it, is part of it.
+inline json start_model(json settings) {
+  settings.erase("frequency");
+  if(settings.contains("layout")) {
+    const auto layout=settings.at("layout").get<std::string>();
+    settings["layout"]=layout.substr(0,layout.rfind('_')+1); // "closed_shell_" or "open_shell_"
+  }
+  return settings;
+}
 // Applications supply their metric definitions and restart compatibility check.
 // The binding owns records, never numerical state or comparison history.
 struct TaskDefinition {
@@ -93,6 +104,9 @@ struct TaskDefinition {
   std::function<void(const json&,const json&)> validate_settings;
   std::string application="driven response"; // names the solver in input errors
   it::MetricLabels labels=metric_labels();
+  // The check on another node's saved settings before this state starts from
+  // it; validate_settings when unset.
+  std::function<void(const json&,const json&)> validate_start;
 };
 inline TaskDefinition driven_task() {
   return {{{"subject","response"},{"fd_checkpoint_version",1}}, metric_set(), definitions(),
@@ -103,6 +117,11 @@ inline TaskDefinition driven_task() {
             "response frequency conflicts with saved task identity; use a new output prefix");
         cp::records::require(previous.at("layout")==current.at("layout"),
             "unsupported driven checkpoint block layout");
+      },
+      "driven response",metric_labels(),
+      [](const json& other,const json& current) {
+        cp::records::require(start_model(other)==start_model(current),
+            "a saved driven state of another perturbation or model cannot start this one");
       }};
 }
 
@@ -114,6 +133,7 @@ inline TaskDefinition derived_task() {
         previous.at("derived_from")==current.at("derived_from"),
         "derived response origin or layout differs from its saved functions");
   };
+  result.validate_start=result.validate_settings;
   return result;
 }
 
@@ -218,14 +238,16 @@ public:
       cp::records::require(madness::scf_model_settings(d.settings.at("ground_settings"))==
                            madness::scf_model_settings(settings_.at("ground_settings")),
           "response ground-state model differs from its saved checkpoint");
-      definition_.validate_settings(d.settings,settings_);
+      if(own_) definition_.validate_settings(d.settings,settings_);
+      else (definition_.validate_start ? definition_.validate_start : definition_.validate_settings)(d.settings,settings_);
       saved=it::SavedTask{};
       saved->metrics=stored(d);
       const auto subjects=cp::records::subjects(definition_.record);
       for(const auto& state:saved->metrics.states)
         cp::records::require(subjects.contains(state.id),"unsupported response task definition");
       saved->protocol_complete=d.level_finished;
-      saved->updates_at_protocol=d.updates_at_protocol;
+      // Another node's update count is not this state's.
+      saved->updates_at_protocol=own_ ? d.updates_at_protocol : 0;
       saved->conversion_supported=true;
       if(!own_ || d.settings!=settings_) saved->use=it::SavedEvidenceUse::guess_only;
       // A compatible restart keeps naming what the saved state started from.
@@ -271,6 +293,16 @@ public:
   [[nodiscard]] bool has_saved() const {return saved_.has_value();}
   // This node has its own saved state.
   [[nodiscard]] bool has_node() const {return own_;}
+  // The node this state starts from, while it has no saved state of its own.
+  [[nodiscard]] std::optional<std::string> started_from() const {
+    if(own_ || !saved_) return std::nullopt;
+    return source_.filename().string();
+  }
+  // The settings of the saved state it starts from: this node's or another's.
+  [[nodiscard]] const json& source_settings() const {
+    cp::records::require(saved_.has_value(),"no saved driven state");
+    return saved_->settings;
+  }
   [[nodiscard]] bool reusable() const {return reusable_;}
   [[nodiscard]] bool complete() const {return complete_;}
   [[nodiscard]] const TaskDefinition& definition() const {return definition_;}
@@ -291,7 +323,7 @@ public:
     return response_shared::measured_values(stored(description()),std::move(subject));
   }
   [[nodiscard]] std::size_t previous_updates() const {
-    return saved_ && saved_->protocol==settings.protocol ? saved_->updates_at_protocol : 0;
+    return own_ && saved_->protocol==settings.protocol ? saved_->updates_at_protocol : 0;
   }
   void note_guess(const json& source) {lineage_["guess"]=source;}
   // reader(archive folder, description), on every process: this node's saved

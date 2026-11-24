@@ -45,6 +45,7 @@ inline constexpr Verbosity iteration_timing = Verbosity::progress;      // write
 inline constexpr Verbosity checkpoint_saved = Verbosity::progress;      // write_checkpoint_saved
 inline constexpr Verbosity restart_summary = Verbosity::progress;       // write_restart_summary
 inline constexpr Verbosity checkpoint_timing = Verbosity::progress;     // write_checkpoint_timing
+inline constexpr Verbosity start_source = Verbosity::progress;          // write_start_source
 // breakdown
 inline constexpr Verbosity energy_breakdown = Verbosity::breakdown;     // write_value_table, energy terms
 // detail
@@ -289,6 +290,16 @@ inline void write_checkpoint_saved(std::ostream& os, const Decision& decision) {
     os << "Checkpoint saved.";
     if (decision.action != Action::update) os << " No further update at this protocol.";
     os << '\n';
+}
+
+// A state that starts from another saved state of the same subject at
+// another frequency (a nearby frequency): one line naming both frequencies.
+inline void write_start_source(std::ostream& os, const std::string& subject, double frequency,
+                               double source_frequency) {
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(5) << "Start: " << subject << " at frequency " << frequency
+         << ", from the saved state at frequency " << source_frequency << '\n';
+    os << line.str();
 }
 
 // The caller has already loaded/validated the payload. Assessment is scalar-only

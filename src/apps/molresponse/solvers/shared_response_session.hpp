@@ -31,6 +31,63 @@ inline std::string driven_node_name(const json& settings) {
   return settings.at("perturbation").get<std::string>()+"-"+
          ResponseMetadata::freq_key(settings.at("frequency").get<double>());
 }
+// One saved driven node as the choice of a starting state sees it.
+struct StartCandidate {
+  std::string name;
+  double frequency=0.0;
+  json ground;        // the ground state's identity in its settings
+  json model;         // start_model of its settings, without the ground identity
+  bool settled=true;  // completely saved, and written by no process group again in this run
+};
+// The node a state at `frequency` starts from: of the settled candidates with
+// this ground identity and model, the one at the nearest frequency; of two
+// equally near, the lower frequency. Nothing when none can serve.
+inline std::optional<std::string> nearest_start(double frequency,const json& ground,const json& model,
+                                                const std::vector<StartCandidate>& candidates) {
+  const StartCandidate* best=nullptr;
+  for(const auto& candidate:candidates) {
+    if(!candidate.settled || candidate.ground!=ground || candidate.model!=model) continue;
+    if(best==nullptr) {best=&candidate;continue;}
+    const double distance=std::abs(candidate.frequency-frequency),best_distance=std::abs(best->frequency-frequency);
+    const double tie=1e-12*std::max({1.0,std::abs(candidate.frequency),std::abs(best->frequency)});
+    const bool nearer=distance<best_distance-tie;
+    const bool equally_near=!nearer && distance<=best_distance+tie;
+    if(nearer || (equally_near && (candidate.frequency<best->frequency ||
+                                   (candidate.frequency==best->frequency && candidate.name<best->name))))
+      best=&candidate;
+  }
+  if(best==nullptr) return std::nullopt;
+  return best->name;
+}
+// The ground state's identity in a driven state's settings.
+inline json ground_identity(const json& settings) {
+  return {{"ground_settings",settings.value("ground_settings",json())},{"ground_saved",settings.value("ground_saved",json())}};
+}
+// A driven node folder whose save is complete: its description and archive
+// are present and no save is under way or was left unfinished.
+inline bool completely_saved(const std::filesystem::path& folder) {
+  if(!std::filesystem::is_directory(it::Node(folder).archive())) return false;
+  for(const auto* name:{"archive.new","archive.old","archive.staging","description.json.new","description.json.tmp"})
+    if(std::filesystem::exists(folder/name)) return false;
+  return std::filesystem::is_regular_file(folder/"description.json");
+}
+// Every completely saved driven node under <root>/states/response, by name.
+// Run on the root process only; unreadable nodes are skipped.
+inline std::vector<std::pair<std::string,it::NodeDescription>> saved_driven_nodes(const std::filesystem::path& root) {
+  std::vector<std::pair<std::string,it::NodeDescription>> result;
+  const auto directory=root/"states"/"response";
+  if(!std::filesystem::is_directory(directory)) return result;
+  for(const auto& entry:std::filesystem::directory_iterator(directory)) {
+    if(!completely_saved(entry.path())) continue;
+    try {
+      std::ifstream file(entry.path()/"description.json");
+      auto d=it::read_description(json::parse(file));
+      if(d.kind=="driven") result.emplace_back(entry.path().filename().string(),std::move(d));
+    } catch(const std::exception&) {}
+  }
+  std::sort(result.begin(),result.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+  return result;
+}
 // A session of one process group (for_world) has a group number; the main
 // session has none.
 struct SessionScope {
@@ -102,15 +159,60 @@ public:
   }
   // A process group bound by for_world only solves or reads; the launch that
   // made the group already wrote each node's launch row.
-  std::unique_ptr<DrivenState> bind(const TaskSpec& task) const {
+  std::unique_ptr<DrivenState> bind(const TaskSpec& task,bool launch_header=true) const {
     return std::make_unique<DrivenState>(world_,root_,ground_,task.checkpoint_id.empty()?task.id:task.checkpoint_id,
         driven_node_name(task.settings),task.settings,request_,protocols_,task.definition,task.start_from,
-        scope_.group<0,verbosity_);
+        launch_header && scope_.group<0,verbosity_);
+  }
+  // Whether a saved driven state meets the current request at the final
+  // level, so that its owner reuses it and no process group writes it again.
+  [[nodiscard]] bool meets_request(const it::NodeDescription& d) const {
+    if(d.protocol!=final_) return false;
+    const auto definition=driven_task();
+    const auto settings=it::resolve(request_,definition.model(final_),final_,true,definition.application);
+    const auto context=json{{"settings",d.settings},{"inputs",json::array()}}.dump();
+    const std::string task="nearby";
+    const auto subjects=cp::records::subjects(definition.record);
+    const it::ExpectedTask expected{task,context,{subjects.begin(),subjects.end()}};
+    try {
+      return it::saved_completion(settings,expected,it::stored_metrics(d,{task,d.protocol,0,context}),true).has_value();
+    } catch(const std::exception&) {return false;}
+  }
+  // An ordinary driven state with no saved state of its own starts from the
+  // saved state of the same perturbation, ground state and model at the
+  // nearest frequency, chosen when it starts; that node is only read. The
+  // main session solves one state at a time, so any completely saved node
+  // can serve. A process group may start only from a state of its own or one
+  // that already meets the request: no other group writes those again, so
+  // none is replaced while it is read. Collective.
+  DrivenState& start_nearby(const std::string& id) {
+    auto& state=*states.at(id);
+    const auto& task=specifications_.at(id);
+    if(state.has_saved() || task.settings.contains("derived_from")) return state;
+    const auto& settings=state.scientific_settings();
+    const auto ground=ground_identity(settings);
+    auto model=start_model(settings);model.erase("ground_settings");model.erase("ground_saved");
+    std::set<std::string> own;
+    for(const auto& [other,spec]:specifications_) own.insert(driven_node_name(spec.settings));
+    const auto chosen=cp::detail::on_root(world_,[&] {
+      std::vector<StartCandidate> candidates;
+      for(const auto& [name,d]:saved_driven_nodes(root_)) {
+        if(name==state.name()) continue;
+        auto other=start_model(d.settings);other.erase("ground_settings");other.erase("ground_saved");
+        candidates.push_back({name,d.settings.value("frequency",0.0),ground_identity(d.settings),std::move(other),
+                              scope_.group<0 || own.contains(name) || meets_request(d)});
+      }
+      return nearest_start(settings.at("frequency").get<double>(),ground,model,candidates).value_or(std::string{});
+    });
+    if(chosen.empty()) return state;
+    auto from=task;from.start_from=chosen;
+    states[id]=bind(from,false);
+    return *states.at(id);
   }
   // A state derived from an excited root keeps its root while the root's
   // energy, so its frequency and node name, moves. With no node of its own it
-  // starts from the node of the same origin and perturbation at the nearby
-  // frequency, the one saved last; that node is only read.
+  // starts from the node of the same origin and perturbation at the nearest
+  // frequency (of two equally near, the lower); that node is only read.
   DrivenState& bind_derived(const std::string& id,json settings) {
     const auto present=states.find(id);
     if(present!=states.end()) {
@@ -120,22 +222,17 @@ public:
       return *present->second;
     }
     const auto name=driven_node_name(settings);
+    // The ground identity is not compared: a moved root follows a ground
+    // state saved again.
+    const json origin{{"derived_from",settings.at("derived_from")},{"perturbation",settings.at("perturbation")}};
     const auto nearby=cp::detail::on_root(world_,[&] {
-      std::string best,best_saved;
-      const auto directory=root_/"states"/"response";
-      if(std::filesystem::is_directory(directory))
-        for(const auto& entry:std::filesystem::directory_iterator(directory)) {
-          const auto other=entry.path().filename().string();
-          if(other==name || !std::filesystem::is_directory(it::Node(entry.path()).archive())) continue;
-          try {
-            std::ifstream file(entry.path()/"description.json");
-            const auto d=it::read_description(json::parse(file));
-            if(d.kind!="driven" || d.settings.value("derived_from",json())!=settings.at("derived_from") ||
-               d.settings.at("perturbation")!=settings.at("perturbation")) continue;
-            if(best.empty() || d.saved_at>best_saved || (d.saved_at==best_saved && other<best)) {best=other;best_saved=d.saved_at;}
-          } catch(const std::exception&) {}
-        }
-      return best;
+      std::vector<StartCandidate> candidates;
+      for(const auto& [other,d]:saved_driven_nodes(root_)) {
+        if(other==name) continue;
+        candidates.push_back({other,d.settings.value("frequency",0.0),json(),
+            {{"derived_from",d.settings.value("derived_from",json())},{"perturbation",d.settings.value("perturbation",json())}}});
+      }
+      return nearest_start(settings.at("frequency").get<double>(),json(),origin,candidates).value_or(std::string{});
     });
     TaskSpec task{id,settings,derived_task(),{},nearby.empty()?std::nullopt:std::optional<std::string>(nearby)};
     auto binding=bind(task);

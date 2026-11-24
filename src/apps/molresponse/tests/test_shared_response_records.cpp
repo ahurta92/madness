@@ -34,6 +34,28 @@ int main(int argc, char** argv) {
                 if (!result) throw std::runtime_error("cannot make scratch directory");
                 return std::string(result);
             });
+            // The nearest saved frequency of the same ground state and model.
+            {
+                const cp::json g1{{"saved_at","T1"}},g2{{"saved_at","T2"}},m{{"perturbation","dipole_z"}};
+                const auto c=[&](std::string name,double frequency,cp::json ground=cp::json()) {
+                    return rs::StartCandidate{std::move(name),frequency,ground.is_null()?g1:ground,m};
+                };
+                // One candidate.
+                require(rs::nearest_start(0.05,g1,m,{c("a",0.0)})==std::optional<std::string>("a"));
+                require(!rs::nearest_start(0.05,g1,m,{}));
+                // Several: the nearest, above or below.
+                require(rs::nearest_start(0.05,g1,m,{c("a",0.0),c("b",0.04),c("c",0.2)})==std::optional<std::string>("b"));
+                require(rs::nearest_start(0.03,g1,m,{c("a",0.0),c("c",0.04)})==std::optional<std::string>("c"));
+                // A tie goes to the lower frequency, whatever the order.
+                require(rs::nearest_start(0.04,g1,m,{c("hi",0.06),c("lo",0.02)})==std::optional<std::string>("lo"));
+                require(rs::nearest_start(0.04,g1,m,{c("lo",0.02),c("hi",0.06)})==std::optional<std::string>("lo"));
+                // Another ground-state identity, model or an unsettled save cannot serve.
+                require(rs::nearest_start(0.05,g1,m,{c("a",0.0),c("b",0.04,g2)})==std::optional<std::string>("a"));
+                require(!rs::nearest_start(0.05,g1,m,{c("b",0.04,g2)}));
+                auto other_model=c("x",0.05);other_model.model={{"perturbation","dipole_x"}};
+                auto unsettled=c("u",0.05);unsettled.settled=false;
+                require(rs::nearest_start(0.05,g1,m,{c("a",0.0),other_model,unsettled})==std::optional<std::string>("a"));
+            }
             const cp::json model{{"version",1},{"dft",{{"xc","HF"}}},
                 {"molecule",{{"parameters",cp::json::object()},{"core_potentials",cp::json::array()}}},
                 {"xc",{{"specification","HF"}}}};
@@ -212,7 +234,7 @@ int main(int argc, char** argv) {
             require(refined.has_node() && refined.description().lineage.at("started_from")=="dipole_z-f0.10000");
             require(rs::read_other_node(world,std::filesystem::path(root)/old_leg.folder())==old_description);
             // A later launch binds the derived state by its settings: its own
-            // node is reused, and a further move starts from the newest node.
+            // node is reused, and a further move starts from the nearest node.
             cp::detail::on_root(world,[&] {std::filesystem::create_directory(root+"/recovery");return std::string{};});
             it::TimingCollector<> recovery_timing;
             recovery_timing.begin("run"); recovery_timing.begin("response"); recovery_timing.begin("setup");
@@ -221,7 +243,8 @@ int main(int argc, char** argv) {
             require(recovered_leg.reusable() && recovered_leg.description()==refined.description());
             auto moved_settings=refined_settings;moved_settings["frequency"]=0.12;
             auto& moved=recovered.bind_derived("moved-leg",moved_settings);
-            require(moved.has_saved() && !moved.has_node() && moved.saved_metrics().states.size()==1);
+            require(moved.has_saved() && !moved.has_node() && moved.saved_metrics().states.size()==1 &&
+                    moved.started_from()==std::optional<std::string>("dipole_z-f0.11000") && moved.previous_updates()==0);
             recovered.report();
             // results.json is written directly: response's entry names its nodes
             // and no launch; another application's entry is left alone.

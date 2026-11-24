@@ -440,6 +440,33 @@ load_fd_as_xy(madness::World &world, const std::string &calc_dir,
   return r->state.responses[0];
 }
 
+/// The saved state another node holds, as the starting guess of a shared
+/// driven state with no node of its own. A static state (X only) becomes
+/// (X, Y = X) for a dynamic target; a dynamic state gives a static target
+/// its X. The other node's archive is only read.
+template <typename Shell, typename Storage, typename Binding>
+Storage load_start(madness::World &world, Binding &binding) {
+  const auto layout = binding.source_settings().at("layout").template get<std::string>();
+  const bool source_static = layout.ends_with("_static");
+  constexpr bool target_static = std::is_same_v<Storage, ResponseStateX<Shell>>;
+  if (source_static == target_static) return binding.template load<Storage>();
+  Storage result;
+  if constexpr (target_static) {
+    auto xy = binding.template load<ResponseStateXY<Shell>>();
+    result.x_alpha = std::move(xy.x_alpha);
+    if constexpr (std::is_same_v<Shell, OpenShell>) result.x_beta = std::move(xy.x_beta);
+  } else {
+    auto x = binding.template load<ResponseStateX<Shell>>();
+    result.x_alpha = madness::copy(world, x.x_alpha);
+    result.y_alpha = std::move(x.x_alpha);
+    if constexpr (std::is_same_v<Shell, OpenShell>) {
+      result.x_beta = madness::copy(world, x.x_beta);
+      result.y_beta = std::move(x.x_beta);
+    }
+  }
+  return result;
+}
+
 /// Alpha-spin perturbation source vector for one (pert) at the active
 /// protocol. Throws for sources 15a does not build.
 inline vector_real_function_3d
@@ -577,7 +604,9 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
   }
   if (ctx.shared_response) {
     namespace it=madness::iteration;
-    auto& binding=ctx.shared_response->at(fd_node_id(pert,freq));
+    // With no saved state of its own, the state starts from the nearest
+    // frequency saved now (section 2 of step 4d).
+    auto& binding=ctx.shared_response->start_nearby(fd_node_id(pert,freq));
     ctx.shared_response->timing().end();
     binding.activate({t0,FunctionDefaults<3>::get_k()});
     // Suppress the legacy stopping table; report the shared controller's checks.
@@ -585,10 +614,17 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     solver.set_print_level(ctx.print_level);
     if (binding.has_saved()) {
       it::ElapsedTimer<> load_timer;
-      s0.responses.front()=binding.template load<typename Solver::Storage>();
+      const auto started_from=binding.started_from();
+      if (started_from) s0.responses.front()=detail_exec::load_start<Shell,typename Solver::Storage>(world,binding);
+      else s0.responses.front()=binding.template load<typename Solver::Storage>();
       const double load_seconds=load_timer.seconds();
       ctx.shared_response->timing().append({{"name","load"},{"seconds",load_seconds}});
-      if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
+      if (started_from) {
+        // Only a starting guess: no measured value or update count is carried.
+        if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::start_source))
+          it::write_start_source(std::cout,pert.description(),freq,
+                                 binding.source_settings().at("frequency").template get<double>());
+      } else if (world.rank()==0 && it::prints(ctx.verbosity,it::needed::restart_summary)) {
         const auto saved=binding.saved_metrics();
         it::write_restart_summary(std::cout,"response",saved,binding.controls().protocol,
             it::assess(binding.controls(),binding.expected(),saved),binding.reusable(),response_shared::metric_labels());

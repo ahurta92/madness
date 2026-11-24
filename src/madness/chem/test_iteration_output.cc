@@ -116,7 +116,8 @@ int main() {
             const std::string at = " at print_level " + std::to_string(p);
             // Ground state: print_level > 0, > 1, > 2. Response: PrintLevel >= Normal, i.e. print_level >= 1.
             for (const auto level : {needed::iteration_metrics, needed::iteration_timing, needed::checkpoint_saved,
-                                     needed::restart_summary, needed::checkpoint_timing})
+                                     needed::restart_summary, needed::checkpoint_timing,
+                                     needed::start_source})
                 check(prints(v, level) == (p > 0), "progress output" + at);
             check(prints(v, needed::energy_breakdown) == (p > 1), "energy breakdown" + at);
             check(prints(v, needed::final_orbital_timing) == (p > 2), "final orbital timing" + at);
@@ -124,6 +125,12 @@ int main() {
             check(prints(v, needed::targets_below_floor), "below-floor warning" + at);
             check(prints(v, needed::unconverged_diagnostics), "NOT CONVERGED block" + at);
         }
+    }
+    {
+        std::ostringstream os;
+        write_start_source(os, "dipole_z", 0.05, 0.0);
+        check(os.str() == "Start: dipole_z at frequency 0.05000, from the saved state at frequency 0.00000\n",
+              "start-source line");
     }
 
     const auto metrics = sample();
