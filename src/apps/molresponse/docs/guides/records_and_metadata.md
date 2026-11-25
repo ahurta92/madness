@@ -12,6 +12,7 @@ contract.
 | `<prefix>.calc_info.json` | the whole workflow — one entry per task | the driver's record: what ran, in what order, and whether it succeeded |
 | `response_metadata.json` (in the calc dir) | the response calculation | the property and state record: every tensor, every converged state, keyed and provenanced |
 | `<prefix>.out` | the whole workflow | humans |
+| `<run>/results.json` | the whole run folder, one entry per application | every value a person wants, each naming the saved states it came from — see [results_file.md](results_file.md) |
 
 The rest of this page is about `response_metadata.json`, because that is the one
 with a schema you build on.

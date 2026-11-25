@@ -25,6 +25,10 @@ struct GroundReference {
 };
 GroundReference scf_ground_reference(World& world, const SCF& scf);
 /// Collective: whether the run holds a saved ground-state node.
+/// Collective. Add the dipole and the gradient, each when it was computed (not
+/// empty), to the ground-state entry of results.json that run_scf wrote.
+void report_scf_properties(World& world, const SCF& scf, const Tensor<double>& dipole,
+                           const Tensor<double>& gradient);
 bool has_saved_ground_state(World& world, const std::filesystem::path& root);
 void require_scf_restart(World& world, const std::filesystem::path& root);
 }

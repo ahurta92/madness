@@ -51,8 +51,9 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
     scf.pad_virtuals_from_guess(world);
 }
 
+// One node's measured values, keyed in results.json by its folder name.
 json state_metrics(const it::NodeDescription& saved) {
-    json metrics = json::object();
+    json subjects = json::object();
     for (const auto& state : it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"}).states) {
         json values = json::object(), unavailable = json::object();
         for (const auto& [metric, value] : state.metrics) {
@@ -60,26 +61,43 @@ json state_metrics(const it::NodeDescription& saved) {
             else unavailable[it::metric_name(metric)] = {{"status", value.status == it::Availability::not_applicable ?
                 "not_applicable" : "unavailable"}, {"reason", value.reason}};
         }
-        metrics[state.id] = {{"values", values}, {"availability", unavailable}};
+        subjects[state.id] = {{"values", values}, {"availability", unavailable}};
     }
-    return metrics;
+    return {{"protocol", cp::records::protocol_record(saved.protocol)}, {"subjects", subjects}};
+}
+
+// A tensor's elements in row-major order.
+json tensor_values(const Tensor<double>& t) {
+    const Tensor<double> flat = copy(t);
+    json values = json::array();
+    for (long i = 0; i < flat.size(); ++i) values.push_back(flat.ptr()[i]);
+    return values;
 }
 
 void report(World& world, const std::filesystem::path& root, const std::filesystem::path& folder, const SCF& scf,
             const std::optional<it::NodeDescription>& occupied) {
     const auto saved = read_node(world, folder);
     cp::records::require(saved.has_value(), "SCF ended without a saved state");
-    json metrics = occupied ? state_metrics(*occupied) : json::object();
-    metrics.update(state_metrics(*saved));
+    const auto name = folder.filename().string();
+    json metrics = json::object();
+    if (occupied) metrics[ground_state_node(root).filename().string()] = state_metrics(*occupied);
+    metrics[name] = state_metrics(*saved);
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
-    json energy{{"units", "hartree"}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
-    if (complete) energy["value"] = scf.current_energy;
-    else energy["reason"] = "criteria_unmet";
+    const auto property = [&](const char* units, const json& value) {
+        json p{{"units", units}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"},
+               {"states", json::array({name})}};
+        if (complete) p["value"] = value;
+        else p["reason"] = "criteria_unmet";
+        return p;
+    };
+    json orbitals{{"alpha", tensor_values(scf.aeps)}};
+    if (!scf.param.spin_restricted() && scf.param.have_beta()) orbitals["beta"] = tensor_values(scf.beps);
     it::write_results_entry(world, root, {{"calculation_id", "ground_state"}, {"application", "moldft"},
-        {"model", scf.param.xc()}, {"node", std::filesystem::relative(folder, root).string()},
+        {"model", scf.param.xc()},
         {"protocol", cp::records::protocol_record(saved->protocol)},
-        {"properties", {{"total_energy", energy}}},
-        {"state_metrics", json::array({{{"states", metrics}}})}});
+        {"properties", {{"total_energy", property("hartree", scf.current_energy)},
+                        {"orbital_energies", property("hartree", orbitals)}}},
+        {"state_metrics", metrics}});
 }
 } // namespace
 
@@ -119,6 +137,21 @@ std::filesystem::path scf_checkpoint_archive(World& world, const SCF& scf) {
 GroundReference scf_ground_reference(World& world, const SCF& scf) {
     const auto saved = qualified(world, scf);
     return {it::Node(*scf.last_node).archive() / "scf.restartdata", saved.protocol, node_identity(saved)};
+}
+
+void report_scf_properties(World& world, const SCF& scf, const Tensor<double>& dipole,
+                           const Tensor<double>& gradient) {
+    // A run that saved no node (the legacy solve) writes no results.json.
+    if ((dipole.size() == 0 && gradient.size() == 0) || !scf.last_node) return;
+    const json states = json::array({std::filesystem::path(*scf.last_node).filename().string()});
+    json properties = json::object();
+    if (dipole.size() > 0)
+        properties["dipole"] = {{"units", "atomic_units"}, {"value_type", "real"}, {"status", "complete"},
+                                {"states", states}, {"value", tensor_values(dipole)}};
+    if (gradient.size() > 0)
+        properties["gradient"] = {{"units", "hartree/bohr"}, {"value_type", "real"}, {"status", "complete"},
+                                  {"states", states}, {"value", tensor_values(gradient)}};
+    it::add_results_properties(world, scf_checkpoint_directory(scf), "ground_state", properties);
 }
 
 bool has_saved_ground_state(World& world, const std::filesystem::path& root) {

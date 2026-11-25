@@ -185,6 +185,8 @@ inline void run_workflow(madness::World &world,
         "io",
         {{"backend", molresponse_v3::hdf5_io_enabled() ? "hdf5" : "native"},
          {"hdf5_compiled", true}});
+    madness::iteration::archive_io_backend() =
+        molresponse_v3::hdf5_io_enabled() ? "hdf5" : "native";
 #else
     wf.set_provenance("io", {{"backend", "native"}, {"hdf5_compiled", false}});
 #endif

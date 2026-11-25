@@ -757,6 +757,9 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
         {"availability",{{"x","excited bundle incomplete"},{"y","excited bundle incomplete"},{"z","excited bundle incomplete"}}}});
     }
   }
+  // Every excited-state property comes from the one set.
+  const json states=json::array({session.node_name(es_node_id(std::is_same_v<Type,TDA>,n_roots))});
+  for(auto* property:{&energies,&strengths,&dipoles,&quadrupoles}) (*property)["states"]=states;
   session.set_properties({{"excitation_energy",energies},{"oscillator_strength",strengths},{"transition_dipole",dipoles},{"transition_quadrupole",quadrupoles}});
 }
 
@@ -1555,6 +1558,11 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
               {"components",json::object()},{"availability",json::object()}};
       if(nuclear) tensor["coordinate"]=request.pert_c.description();
     }
+    session.name_state(tensor,fd_node_id(request.pert_b,request.freq_b));
+    session.name_state(tensor,fd_node_id(request.pert_c,request.freq_c));
+    session.name_state(tensor,id);
+    for(int axis=0;axis<3;++axis)
+      session.name_state(tensor,fd_node_id(Perturbation::dipole(axis),request.freq_b+request.freq_c));
     std::optional<ResponseStateXY<ClosedShell>> source,B,C;
     const auto selected=session.second_order.find(id);
     if(supported && selected!=session.second_order.end() && selected->second->reusable()) {
@@ -1678,13 +1686,22 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
         {"values",shared_values}}}});
     ctx.shared_response->timing().end();
   };
-  auto unavailable=[&](const std::string& id,const std::string& reason) {
-    shared_values.push_back({{"state",id},{"status","unavailable"},
-        {"components",nlohmann::json::object()},{"availability",{{"two_photon_absorption",reason}}}});
+  const auto& request=plan.es.front();
+  const auto set_id=es_node_id(request.tda,request.n_roots);
+  // A root's value comes from the set and the three dipole states at half its
+  // excitation energy (none known until the set has converged).
+  auto named=[&](nlohmann::json value,std::optional<double> half) {
+    value["states"]=nlohmann::json::array();
+    ctx.shared_response->name_state(value,set_id);
+    if(half) for(int a=0;a<3;++a) ctx.shared_response->name_state(value,fd_node_id(Perturbation::dipole(a),*half));
+    return value;
+  };
+  auto unavailable=[&](const std::string& id,const std::string& reason,std::optional<double> half=std::nullopt) {
+    shared_values.push_back(named({{"state",id},{"status","unavailable"},
+        {"components",nlohmann::json::object()},{"availability",{{"two_photon_absorption",reason}}}},half));
   };
   ctx.shared_response->timing().begin("two_photon_properties");
-  const auto& request=plan.es.front();
-  auto& shared_bundle=ctx.shared_response->excited_at(es_node_id(request.tda,request.n_roots));
+  auto& shared_bundle=ctx.shared_response->excited_at(set_id);
   if(!shared_bundle.complete()) {
     for(const auto& id:shared_bundle.expected().states) unavailable(id,"excited bundle has not met the final request");
     finish_shared();return;
@@ -1758,7 +1775,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       if (world.rank() == 0)
         print("[TPA] root", f, " omega_f=", wf,
               " — missing dipole FD @", wf_half, " — skip");
-      unavailable(root_ids[f],"required driven response has not met the final request");
+      unavailable(root_ids[f],"required driven response has not met the final request",wf_half);
       continue;
     }
 
@@ -1854,10 +1871,10 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       ctx.shared_response->timing().end();
       nlohmann::json components=nlohmann::json::object();
       for(int a=0;a<3;++a) for(int b=0;b<3;++b) components[std::string(1,"xyz"[a])+"xyz"[b]]=S(a,b);
-      shared_values.push_back({{"state",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
+      shared_values.push_back(named({{"state",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
           {"components",components},{"availability",nlohmann::json::object()},
           {"observables",{{"Df",obs.Df},{"Dg",obs.Dg},{"D_linear",obs.D_linear},{"D_circular",obs.D_circular},
-              {"R",obs.R},{"sigma_linear_gm",obs.sigma_linear_gm},{"sigma_circular_gm",obs.sigma_circular_gm}}}});
+              {"R",obs.R},{"sigma_linear_gm",obs.sigma_linear_gm},{"sigma_circular_gm",obs.sigma_circular_gm}}}},wf_half));
     }
 
 
@@ -1981,8 +1998,10 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         for (int row:axes) for (int column:axes)
           availability[std::string{char('x'+row),char('x'+column)}]=
               "open-shell polarizability contraction is not implemented";
-        tensors.push_back({{"frequency",frequency},{"status","unavailable"},
-            {"components",nlohmann::json::object()},{"availability",availability}});
+        nlohmann::json tensor={{"frequency",frequency},{"status","unavailable"},
+            {"components",nlohmann::json::object()},{"availability",availability},{"states",nlohmann::json::array()}};
+        for (int axis:axes) ctx.shared_response->name_state(tensor,fd_node_id(Perturbation::dipole(axis),frequency));
+        tensors.push_back(std::move(tensor));
       }
       ctx.shared_response->set_properties({{"polarizability",{{"units","bohr^3"},{"value_type","real"},{"values",tensors}}}});
     }
@@ -2055,8 +2074,10 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         }
         matrix.push_back(row);
       }
-      tensors.push_back({{"frequency",frequency},{"status",availability.empty() ? "complete" : components.empty() ? "unavailable" : "partial"},
-                         {"components",components},{"availability",availability}});
+      nlohmann::json tensor={{"frequency",frequency},{"status",availability.empty() ? "complete" : components.empty() ? "unavailable" : "partial"},
+                             {"components",components},{"availability",availability},{"states",nlohmann::json::array()}};
+      for (int axis:ax) ctx.shared_response->name_state(tensor,fd_node_id(Perturbation::dipole(axis),frequency));
+      tensors.push_back(std::move(tensor));
       // Keep the legacy analysis mirror for qualified tensors only.
       if (availability.empty()) {
         std::string directions;for (int axis:ax) directions+=char('x'+axis);

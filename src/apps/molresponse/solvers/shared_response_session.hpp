@@ -123,6 +123,7 @@ class Session {
   std::optional<std::size_t> timing_part_; // this run's part of the launch's timing entry
   it::Verbosity verbosity_;
   json properties_=json::object();
+  json run_=json::object();
 public:
   std::map<std::string,std::unique_ptr<DrivenState>> states;
   std::map<std::string,std::unique_ptr<SecondOrderNode>> second_order;
@@ -395,6 +396,29 @@ public:
     }
   }
   void set_properties(const json& properties) {properties_.update(properties);}
+  // The scheduler's end of this run, for the response entry of results.json.
+  void set_run(const json& run) {run_=run;}
+  // A task's node name: its folder name under states/response/. results.json
+  // refers to every saved state by it.
+  [[nodiscard]] std::string node_name(const std::string& id) const {
+    if(const auto state=states.find(id);state!=states.end()) return state->second->name();
+    if(const auto set=excited.find(id);set!=excited.end())
+      return std::filesystem::path(set->second->folder()).filename().string();
+    if(const auto node=second_order.find(id);node!=second_order.end()) return node->second->name();
+    throw std::runtime_error("no response node for task "+id);
+  }
+  [[nodiscard]] bool knows(const std::string& id) const {
+    return states.contains(id) || excited.contains(id) || second_order.contains(id);
+  }
+  // Add a task's node name to a property's states list, once, if this
+  // request binds the task.
+  void name_state(json& property,const std::string& id) const {
+    if(!knows(id)) return;
+    auto& names=property["states"];
+    if(!names.is_array()) names=json::array();
+    const auto name=node_name(id);
+    if(std::find(names.begin(),names.end(),name)==names.end()) names.push_back(name);
+  }
   const json& properties() const {return properties_;}
   template<class Work> decltype(auto) with_failure_timing(Work&& work) {
     try {return work();}
@@ -451,45 +475,26 @@ public:
   }
   void report() {
     cp::records::require(scope_.group<0,"only the main session writes the results file");
-    std::map<std::string,json> groups;
-    // Driven states and excited-state sets are nodes: their measured values
-    // are reported from the node description.
-    json driven_nodes=json::array();
-    for (const auto& [id,state] : states) {
-      if (!state->has_node()) continue;
-      driven_nodes.push_back({{"id",id},{"node",state->folder()}});
-      const auto frame=state->saved_metrics();
-      const auto protocol=frame.info.protocol;
-      auto& group=groups[protocol_key(protocol.thresh,protocol.k)];
-      group["protocol"]=cp::records::protocol_record(protocol);
-      for (const auto& subject:frame.states) {
-        const auto public_id=frame.states.size()==1 ? id : id+":"+subject.id;
-        group["states"][public_id]=measured_values(frame,subject.id);
-      }
-    }
-    for (const auto& [id,set] : excited) {
-      if (!set->has_saved()) continue;
-      const auto frame=set->saved_metrics();
-      auto& group=groups[protocol_key(frame.info.protocol.thresh,frame.info.protocol.k)];
-      group["protocol"]=cp::records::protocol_record(frame.info.protocol);
-      for (const auto& subject:frame.states) group["states"][id+":"+subject.id]=measured_values(frame,subject.id);
-    }
-    json metrics=json::array();
-    for (const auto& [key,group]:groups) metrics.push_back(group);
-    json second_order_nodes=json::array();
-    for(const auto& [id,binding]:second_order) if(binding->reusable())
-      second_order_nodes.push_back({{"id",id},{"node",binding->folder()}});
-    json excited_nodes=json::array();
-    for(const auto& [id,set]:excited) if(set->has_saved())
-      excited_nodes.push_back({{"id",id},{"node",set->folder()}});
+    // Each saved node's measured values, keyed by its folder name, the name
+    // the properties' states lists use.
+    json metrics=json::object();
+    const auto add=[&](const std::string& name,const it::IterationMetrics& frame) {
+      json subjects=json::object();
+      for (const auto& subject:frame.states) subjects[subject.id]=measured_values(frame,subject.id);
+      metrics[name]={{"protocol",cp::records::protocol_record(frame.info.protocol)},{"subjects",subjects}};
+    };
+    for (const auto& [id,state] : states) if (state->has_node()) add(state->name(),state->saved_metrics());
+    for (const auto& [id,set] : excited) if (set->has_saved()) add(node_name(id),set->saved_metrics());
+    // A second-order source is built, not iterated: it has no measured values.
+    for (const auto& [id,node] : second_order) if (node->reusable())
+      metrics[node->name()]={{"protocol",cp::records::protocol_record(node->description().protocol)},
+                             {"subjects",json::object()}};
     // Only the main session reports; it replaces only response's entry.
     it::write_results_entry(world_,root_,{{"calculation_id","response"},{"application","molresponse"},
        {"protocol",cp::records::protocol_record(final_)},
        {"properties",properties_},
-       {"state_metrics",metrics},
-       {"driven",driven_nodes},
-       {"second_order",second_order_nodes},
-       {"excited",excited_nodes}});
+       {"run",run_},
+       {"state_metrics",metrics}});
   }
 };
 } // namespace molresponse_v3::response_shared

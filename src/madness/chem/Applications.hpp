@@ -1209,6 +1209,7 @@ struct moldft_lib {
     tensorT dip;
     if (complete && scf->param.dipole())
       dip = scf->dipole(world, rho);
+    report_scf_properties(world, *scf, dip, grad);
 
     // atomic charges by the schemes of the population key (none: empty)
     const nlohmann::json pop = complete ? scf->population_analysis(world) : nlohmann::json{};

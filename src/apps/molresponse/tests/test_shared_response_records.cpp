@@ -263,21 +263,46 @@ int main(int argc, char** argv) {
             auto& moved=recovered.bind_derived("moved-leg",moved_settings);
             require(moved.has_saved() && !moved.has_node() && moved.saved_metrics().states.size()==1 &&
                     moved.started_from()==std::optional<std::string>("dipole_z-f0.11000") && moved.previous_updates()==0);
-            recovered.report();
-            // results.json is written directly: response's entry names its nodes
-            // and no launch; another application's entry is left alone.
+            // A version 2 results file is replaced, not merged.
             const auto results_path=std::filesystem::path(root)/"results.json";
+            cp::detail::on_root(world,[&] {
+                cp::detail::replace_json(results_path,{{"version",2},{"calculations",cp::json::array({{{"calculation_id","old"}}})}});
+                return std::string{};
+            });
+            recovered.report();
+            // results.json is written directly: response's entry keys its
+            // measured values by node folder name and names no launch; another
+            // application's entry is left alone.
             {
                 auto results=read_root_json(world,results_path);
-                require(results.at("version")==2 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
+                require(results.at("version")==3 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
+                const auto& provenance=results.at("provenance");
+                require(provenance.at("code_version").is_string() && provenance.at("launched_at").is_string() &&
+                        provenance.at("mpi_processes")==world.size() && provenance.at("archive_io")=="native");
                 const auto& entry=results.at("calculations").at(0);
-                require(entry.at("calculation_id")=="response" && !entry.contains("attempt_id") && entry.at("driven").is_array());
-                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"node","states/ground_state"}});
+                require(entry.at("calculation_id")=="response" && !entry.contains("attempt_id") && entry.at("run").is_object());
+                require(!entry.contains("driven") && !entry.contains("excited") && !entry.contains("second_order"));
+                const auto& metrics=entry.at("state_metrics");
+                require(metrics.contains(recovered_leg.name()) && !metrics.contains(moved.name()) &&
+                        metrics.at(recovered_leg.name()).at("subjects").size()==1);
+                require(recovered.node_name("new-leg")==recovered_leg.name());
+                cp::detail::on_root(world,[&] {
+                    for(const auto& [name,value]:metrics.items())
+                        require(std::filesystem::is_directory(std::filesystem::path(root)/"states"/"response"/name));
+                    return std::string{};
+                });
+                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"properties",cp::json::object()}});
                 recovered.report();
                 results=read_root_json(world,results_path);
                 require(results.at("calculations").size()==2 &&
                         results.at("calculations").at(0).at("calculation_id")=="ground_state" &&
                         results.at("calculations").at(1).at("calculation_id")=="response");
+                // Properties computed after an entry is written are added to it.
+                it::add_results_properties(world,root,"ground_state",{{"dipole",{{"value",cp::json::array({0.0,0.0,1.0})}}}});
+                results=read_root_json(world,results_path);
+                require(results.at("calculations").at(0).at("properties").at("dipole").at("value").size()==3 &&
+                        results.at("calculations").at(1).at("calculation_id")=="response");
+                rejects([&]{it::add_results_properties(world,root,"missing",cp::json::object());});
             }
             // The same collective metadata writer used by Raman must preserve
             // the old file and publish failure timing on every rank.

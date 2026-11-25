@@ -5,6 +5,8 @@
 // own application) and timings.json (one entry per launch). No lock: within a
 // launch one process writes them; separate launches must not share a folder.
 #include <madness/chem/RootCoordination.h>
+#include <madness/misc/info.h>
+#include <madness/world/thread.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -40,22 +42,62 @@ inline void require_current_run_folder(World& world, const std::filesystem::path
     });
 }
 
+/// The archive I/O backend this launch writes saved states with, for the
+/// provenance in results.json. madqc sets it when a deck turns HDF5 on.
+inline std::string& archive_io_backend() {
+    static std::string backend = "native";
+    return backend;
+}
+
+/// Who wrote results.json and how it ran: replaced on each write, so it
+/// describes the launch that wrote the file last.
+inline nlohmann::json results_provenance(World& world) {
+    return {{"code_version", madness::info::git_commit()}, {"launched_at", launch_started_at()},
+            {"mpi_processes", world.size()}, {"threads_per_process", ThreadPool::size() + 1},
+            {"archive_io", archive_io_backend()}};
+}
+
 /// Collective. Replace this application's entry in results.json, keyed by its
-/// calculation_id, and leave the other entries alone.
+/// calculation_id, and leave the other entries alone. A file of another
+/// version is replaced, not merged.
 inline void write_results_entry(World& world, const std::filesystem::path& root, const nlohmann::json& entry) {
     namespace cp = madness::checkpoint;
+    const auto provenance = results_provenance(world);
     cp::detail::on_root(world, [&] {
         const auto path = root / "results.json";
-        auto results = std::filesystem::exists(std::filesystem::symlink_status(path))
-            ? cp::detail::read_json(path) : nlohmann::json{{"version", 2}, {"calculations", nlohmann::json::array()}};
-        cp::records::require(results.at("version") == 2 && results.at("calculations").is_array(),
-                             "unsupported results file");
+        nlohmann::json results{{"version", 3}, {"calculations", nlohmann::json::array()}};
+        if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
+            auto saved = cp::detail::read_json(path);
+            if (saved.value("version", 0) == 3) {
+                cp::records::require(saved.at("calculations").is_array(), "unsupported results file");
+                results = std::move(saved);
+            }
+        }
         const auto id = cp::records::id(entry.at("calculation_id"));
         nlohmann::json calculations = nlohmann::json::array();
         for (auto& other : results.at("calculations"))
             if (other.at("calculation_id") != id) calculations.push_back(std::move(other));
         calculations.push_back(entry);
         results["calculations"] = std::move(calculations);
+        results["provenance"] = provenance;
+        cp::detail::replace_json(path, results);
+        return std::string{};
+    });
+}
+
+/// Collective. Add properties to this application's entry in results.json,
+/// which must have been written already.
+inline void add_results_properties(World& world, const std::filesystem::path& root, const std::string& id,
+                                   const nlohmann::json& properties) {
+    namespace cp = madness::checkpoint;
+    cp::detail::on_root(world, [&] {
+        const auto path = root / "results.json";
+        auto results = cp::detail::read_json(path);
+        cp::records::require(results.value("version", 0) == 3, "unsupported results file");
+        bool found = false;
+        for (auto& entry : results.at("calculations"))
+            if (entry.at("calculation_id") == id) { entry.at("properties").update(properties); found = true; }
+        cp::records::require(found, "results.json has no entry " + id);
         cp::detail::replace_json(path, results);
         return std::string{};
     });

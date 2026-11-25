@@ -202,13 +202,27 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   const std::string key = protocol_key();
   if (world.rank() == 0)
     print("\n=== Raman vibrational analysis  protocol_key=", key, " ===");
+  // The Hessian comes from the static nuclear states; the spectrum adds the
+  // states of the polarizability derivatives it is built from.
+  nlohmann::json hessian_states={{"states",nlohmann::json::array()}};
+  for (long a = 0; a < static_cast<long>(gs.molecule().natom()); ++a)
+    for (int ax = 0; ax < 3; ++ax)
+      ctx.shared_response->name_state(hessian_states,fd_node_id(Perturbation::nuclear(static_cast<int>(a),ax),0.0));
+  nlohmann::json spectrum_states=hessian_states;
+  if (const auto& p=ctx.shared_response->properties();p.contains("polarizability_gradient"))
+    for (const auto& value:p.at("polarizability_gradient").at("values"))
+      for (const auto& name:value.value("states",nlohmann::json::array()))
+        if (std::find(spectrum_states["states"].begin(),spectrum_states["states"].end(),name)==spectrum_states["states"].end())
+          spectrum_states["states"].push_back(name);
 
   auto vib = compute_vibrational_analysis(ctx);
   world.gop.fence();
   if(!vib) {
     ctx.shared_response->set_properties({
-        {"vibrational_analysis",{{"values",nlohmann::json::object()},{"availability",{{"hessian","nuclear response inputs have not met the final request"}}}}},
-        {"raman_spectrum",{{"values",nlohmann::json::object()},{"availability",{{"spectrum","qualified Hessian and derivatives are required"}}}}}});
+        {"vibrational_analysis",{{"values",nlohmann::json::object()},{"availability",{{"hessian","nuclear response inputs have not met the final request"}}},
+          {"states",hessian_states.at("states")}}},
+        {"raman_spectrum",{{"values",nlohmann::json::object()},{"availability",{{"spectrum","qualified Hessian and derivatives are required"}}},
+          {"states",spectrum_states.at("states")}}}});
     return;
   }
   response_shared::update_response_metadata(world,ctx.calc_dir+"/response_metadata.json",[&](ResponseMetadata& meta) {
@@ -370,8 +384,9 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
         {"vibrational_analysis",{{"units",va.at("units")},
           {"values",{{"hessian",numeric_values(vib->hessian)},{"frequencies",numeric_values(vib->frequencies)},
             {"normal_modes",numeric_values(vib->normalmodes)},{"reduced_mass",numeric_values(vib->reducedmass)}}},
-          {"availability",nlohmann::json::object()}}},
-        {"raman_spectrum",{{"units",rs.at("units")},{"values",spectra},{"availability",availability}}}});
+          {"availability",nlohmann::json::object()},{"states",hessian_states.at("states")}}},
+        {"raman_spectrum",{{"units",rs.at("units")},{"values",spectra},{"availability",availability},
+          {"states",spectrum_states.at("states")}}}});
   }
   meta.set_section("vibrational_analysis", va);
   meta.set_section("raman_spectra", rs);
