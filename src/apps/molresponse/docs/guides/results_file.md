@@ -42,7 +42,7 @@ uncommitted changes.
     "excited_states": {"bsh_residual": 0.0005, "density_change": 0.0005, "energy_change": 0.0005}
   },
   "properties": { "<name>": <property>, ... },
-  "run": {"stop_reason": "complete", "dropped_work": [], "stalled": []},
+  "run": {"stop_reason": "complete", "dropped_work": [], "stalled": [], "unconverged": []},
   "state_metrics": {
     "dipole_z-f0.00000": {
       "protocol": {"threshold": 0.0001, "k": 6},
@@ -65,8 +65,14 @@ uncommitted changes.
   value of the entry comes from the same state: the `ground_state` entry has
   one `convergence`, the worst measured values of its saved state, and its
   properties have none.
-- `run` appears only on the response entry. `dropped_work` and `stalled` are
-  always lists, empty when nothing was dropped.
+- `run` appears only on the response entry. `dropped_work`, `stalled` and
+  `unconverged` are always lists, empty when there is nothing to list.
+  `unconverged` names, by folder, each state that ended without meeting the
+  request and is not already listed as stalled. `stop_reason` is `complete`
+  only when all three lists are empty; it is `unconverged` when only
+  `unconverged` is not empty. Stalled and dropped work keep their own stop
+  reasons (`complete_with_stalled`, `complete_with_dropped_beta`, …), which take
+  precedence.
 - `state_metrics` is keyed by node name: the per-state table behind every
   `convergence`. Each node gives the level it was saved at and the measured
   values of each of its subjects. A driven state has one subject (`response`),
@@ -195,9 +201,9 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
 - Tables carry values and convergence only, no status column. A missing value
   prints as `-`; an item that has no value still shows each requested component.
 - Convergence values and targets are in scientific notation to three
-  significant figures. A value above its target is marked `*`; one line at the
-  end of the section says `NOT COMPLETE` at the top is the verdict (driven
-  states use the scaled rule).
+  significant figures. A value above its target is marked `*`; one note at the
+  end of the section reads `* above target (driven states can pass under the
+  scaled rule)`.
 - Values in hartree are printed to 8 decimals, response property values to 6
   decimals, other values to 6 significant figures, response frequencies to 5
   decimals as in the state folder names. A value below 1e-10 in magnitude
@@ -207,6 +213,13 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
 - If any property or item is not `complete`, or the run stopped for another
   reason, dropped work or has stalled states, the file opens with a
   `NOT COMPLETE` block: one line per item with its reason from `availability`.
+- The response section ends with the run line: the stop reason, with the
+  number of unconverged states when there are any, then the dropped and
+  stalled counts, e.g. `run: unconverged (2 states). Nothing dropped. Nothing
+  stalled.`
+- `madqc` prints each task's wall time and the citations of external modules
+  after the summary in the log (and appends them to `<prefix>.out`); they are
+  not in `results.json`, so not in `summary.txt`.
 - The Hessian, normal modes, transition quadrupoles, polarizability-gradient
   components and anything else too large for a table are named on one
   `not printed (see results.json)` line.

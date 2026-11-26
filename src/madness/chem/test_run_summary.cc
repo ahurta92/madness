@@ -175,7 +175,7 @@ Response (molresponse), level 1.0e-04 k 6
 
   run: complete_with_dropped_beta. 1 dropped. Nothing stalled.
 
-  * above target; NOT COMPLETE at the top is the verdict (driven states use the scaled rule)
+  * above target (driven states can pass under the scaled rule)
 )text";
 
 // Quadratic response, two-photon absorption and Raman, with one driven value
@@ -268,7 +268,7 @@ Response (molresponse), level 1.0e-06 k 8
 
   run: complete. Nothing dropped. Nothing stalled.
 
-  * above target; NOT COMPLETE at the top is the verdict (driven states use the scaled rule)
+  * above target (driven states can pass under the scaled rule)
 )text";
 
 int check(const char* name, const char* input, const char* expected) {

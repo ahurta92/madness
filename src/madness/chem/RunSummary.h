@@ -21,7 +21,7 @@ using json = nlohmann::json;
 inline constexpr std::size_t max_width = 100;
 inline constexpr double noise = 1e-10;
 inline constexpr const char* above_target_note =
-    "  * above target; NOT COMPLETE at the top is the verdict (driven states use the scaled rule)";
+    "  * above target (driven states can pass under the scaled rule)";
 
 inline std::string printf_text(const char* format, double x) {
     char text[64];
@@ -691,12 +691,23 @@ inline void write_entry(std::string& out, const json& entry) {
         const auto& run = entry.at("run");
         const auto dropped = run.value("dropped_work", json::array()).size();
         const auto stalled = run.value("stalled", json::array()).size();
-        out += "\n  run: " + run.value("stop_reason", std::string("unknown")) + ". " +
+        const auto unconverged = run.value("unconverged", json::array()).size();
+        const auto states = [](std::size_t n) { return std::to_string(n) + (n == 1 ? " state" : " states"); };
+        const auto stop = run.value("stop_reason", std::string("unknown"));
+        // The stop reason, with the count of states that ended without
+        // meeting the request when there are any.
+        const auto reason = unconverged == 0 ? stop
+                            : stop == "unconverged" ? stop + " (" + states(unconverged) + ")"
+                                                    : stop + ", unconverged (" + states(unconverged) + ")";
+        out += "\n  run: " + reason + ". " +
                (dropped == 0 ? std::string("Nothing dropped.") : std::to_string(dropped) + " dropped.") + " " +
                (stalled == 0 ? std::string("Nothing stalled.") : std::to_string(stalled) + " stalled.") + "\n";
     }
     // One note for every * in the section.
-    if (marked) out += "\n" + std::string(above_target_note) + "\n";
+    if (marked) {
+        out += "\n";
+        for (const auto& line : wrap(above_target_note, "    ")) out += line + "\n";
+    }
 }
 
 /// The code version as people quote it: a full commit hash is shortened to

@@ -10,6 +10,7 @@
 #include <madness/chem/RunFiles.h>
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/VizManifest.hpp>
+#include <sstream>
 #include <optional>
 
 namespace madqc {
@@ -54,6 +55,9 @@ make_scf_reference(madness::World &world, const Params &params) {
 struct RunSummaryTarget {
   std::filesystem::path directory;
   madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::silent;
+  /// Wall time and citations, printed after the summary; empty until the
+  /// workflow has finished.
+  std::string wall_time_and_citations;
 };
 
 /// Rank zero. Print the summary of the run folder's results.json, the same
@@ -70,7 +74,7 @@ inline void print_run_summary(madness::World &world,
   try {
     std::cout << "\n"
               << it::results_summary(madness::checkpoint::detail::read_json(path))
-              << std::flush;
+              << target->wall_time_and_citations << std::flush;
   } catch (const std::exception &e) {
     madness::print("summary not printed:", e.what());
   }
@@ -248,14 +252,24 @@ inline void run_workflow(madness::World &world,
 
     // Human-readable chemistry report: to stdout and <prefix>.out. The
     // machine-readable <prefix>.calc_info.json remains the source of truth.
+    // A workflow that writes results.json prints its values in summary.txt
+    // at the end of the log; only the wall time and citations are added here,
+    // printed after that summary.
     if (world.rank() == 0) {
-      qcapp::write_results_summary(std::cout, wf.results());
+      std::ostringstream text;
+      if (shared_output && summary) {
+        qcapp::write_wall_time_and_citations(text, wf.results());
+        (*summary)->wall_time_and_citations = text.str();
+      } else {
+        qcapp::write_results_summary(text, wf.results());
+        std::cout << text.str();
+      }
       // APPEND, never truncate: with the usual `#SBATCH --output=<prefix>.out`
       // this file IS the job's stdout, and opening it for writing wiped the
       // whole run log at the end of every successful run (closeout attempt
       // 12, 2026-09-10: a 97-minute LiH log reduced to the summary).
       std::ofstream report(prefix + ".out", std::ios::app);
-      qcapp::write_results_summary(report, wf.results());
+      report << text.str();
       print("Wrote results summary :", prefix + ".out");
 
       // Index any visualization artifacts (cube/dx/line plots) the run

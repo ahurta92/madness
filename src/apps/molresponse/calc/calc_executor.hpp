@@ -733,7 +733,9 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
         y_norms.push_back(std::move(norms));
       }
     }
-    if(ctx.print_level>=PrintLevel::Normal) print_es_analysis(ctx.world,analysis,std::is_same_v<Type,TDA>,y_norms);
+    if(ctx.print_level>=PrintLevel::Normal)
+      print_es_analysis(ctx.world,analysis,std::is_same_v<Type,TDA>,y_norms,
+                        madness::iteration::prints(ctx.verbosity,madness::iteration::needed::assembled_values));
     checkpoint::detail::on_root(ctx.world,[&] {
       std::ofstream output(ctx.calc_dir+"/es_analysis__"+protocol_key()+".json");
       output.exceptions(std::ios::failbit|std::ios::badbit);
@@ -1626,7 +1628,8 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       const double value=beta::beta_abc<ClosedShell>(world,*ground,*A,*source,*B,*C,VA);
       session.timing().end();
       slot("components")[component]=value;
-      if(world.rank()==0) print(nuclear ? "[RAMAN]" : "[BETA]",component,
+      if(world.rank()==0 && madness::iteration::prints(ctx.verbosity,madness::iteration::needed::assembled_values))
+        print(nuclear ? "[RAMAN]" : "[BETA]",component,
           "fB=",request.freq_b,"fC=",request.freq_c,"value=",value);
       // Preserve the analysis mirror consumed by the existing Raman analysis.
       double residual=0.0;
@@ -1839,7 +1842,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     // vector norms, transition dipoles/oscillators, and alpha(omega_f/2) from
     // the SAME loaded states the contraction uses — line-for-line comparable
     // with the patched-DALTON QRSMONORM + QRLRVE output (TPA_SCOPING §5n/§5o).
-    if (static_cast<int>(ctx.print_level) >= 1) {
+    if (madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values)) {
       const double xx = inner(Xf.x_alpha, Xf.x_alpha);
       const double yy = inner(Xf.y_alpha, Xf.y_alpha);
       if (world.rank() == 0)
@@ -1919,7 +1922,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     S = madness::copy(S_1e);
     S += S_e3c;
     S.scale(std::sqrt(2.0));
-    if (world.rank() == 0)
+    if (world.rank() == 0 && madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values))
       printf("  [TPA] root %ld assembled: S = sqrt2*(1e + E3corr)   "
              "b<->c max asym = %.2e\n", f, max_asym);
     const auto obs = tpa::observables(S, wf);
@@ -1976,7 +1979,8 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   // Dalton-style output (matches rspvec.F QRSMO): tensor S table + the
   // Monson-McClain Df/Dg/D(lin,circ)/sigma/R summary. No point-group symmetry
   // in MRA, so one manifold (no Sym column). Diffable against Dalton .out.
-  if (world.rank() == 0 && !tbl_f.empty()) {
+  if (world.rank() == 0 && !tbl_f.empty() &&
+      madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values)) {
     const double H2EV = 27.211386245988;
     printf("\n                  +--------------------------------+\n");
     printf("                  | Two-photon transition tensor S |\n");

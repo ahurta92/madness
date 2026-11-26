@@ -52,6 +52,9 @@ inline constexpr Verbosity run_summary = Verbosity::progress;           // madqc
 inline constexpr Verbosity energy_breakdown = Verbosity::breakdown;     // write_value_table, energy terms
 // detail
 inline constexpr Verbosity final_orbital_timing = Verbosity::detail;    // write_value_table, final orbital steps
+inline constexpr Verbosity assembled_values = Verbosity::detail;        // molresponse's per-value lines while it
+                                                                        // assembles properties ([ANALYZE], [BETA],
+                                                                        // [RAMAN], [TPA]); results.json holds them
 } // namespace needed
 
 template<class Clock = std::chrono::steady_clock>

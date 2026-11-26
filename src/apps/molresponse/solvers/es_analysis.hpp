@@ -178,10 +178,13 @@ analyze_es_bundle(madness::World &world,
 /// Print the transition-property block for a bundle (rank 0 only). `tda`
 /// controls only the dominant-contribution layout (X-only vs X/Y columns);
 /// when `tda` is false, `y_orbital_norms[i]` supplies the per-root Y weights.
+/// With `values` false only the dominant contributions are printed: the
+/// energies, transition moments and oscillator strengths are in results.json.
 inline void
 print_es_analysis(madness::World &world,
                   const std::vector<ESRootAnalysis> &an, bool tda,
-                  const std::vector<std::vector<double>> &y_orbital_norms = {}) {
+                  const std::vector<std::vector<double>> &y_orbital_norms = {},
+                  bool values = true) {
   using namespace madness;
   if (world.rank() != 0) return;
 
@@ -189,6 +192,9 @@ print_es_analysis(madness::World &world,
     const ESRootAnalysis &a = an[i];
     const size_t n = a.orbital_norms.size();
 
+    if (!values) {
+      printf("\n   Response Function %d", static_cast<int>(i));
+    } else {
     printf("   Response Function %d\t\t%7.8f a.u.", static_cast<int>(i), a.omega);
     print("\n   --------------------------------------------");
     printf("   Response Function %d\t\t%7.8f eV", static_cast<int>(i),
@@ -216,6 +222,7 @@ print_es_analysis(madness::World &world,
            a.quadrupole[2][2]);
 
     } else print("   Transition quadrupole: unavailable (analysis diagnostic)");
+    }
 
     // Dominant contributions: top 5 occupied orbitals by |x_j| (legacy order).
     std::vector<size_t> order(n);

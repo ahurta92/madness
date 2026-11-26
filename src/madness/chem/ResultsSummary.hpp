@@ -452,6 +452,51 @@ inline void write_timing_section(std::ostream& os, const nlohmann::json& task) {
   os << line.str();
 }
 
+// A failed task is recorded in two shapes: the Workflow driver emits
+// {"type":"task_failed","error":...} while other paths set
+// {"status":"failed","error":...}. Recognize both (raman brief defect 4).
+inline bool task_failed(const nlohmann::json &t) {
+  return (t.value("status", std::string()) == "failed") ||
+         (t.value("type", std::string()) == "task_failed");
+}
+
+inline std::string task_title(const nlohmann::json &t) {
+  const std::string type = t.value("type", std::string());
+  const std::string model = t.value("model", std::string());
+  if (task_failed(t))
+    return "TASK  (FAILED)";
+  if (type == "response")
+    return "RESPONSE";
+  if (model == "scf" || t.contains("scf_eigenvalues_a"))
+    return "SCF  (model = " + (model.empty() ? "scf" : model) + ")";
+  if (t.contains("excitations") && !t.contains("correlation_energy"))
+    return "EXCITED STATES  (model = " + model + ")";
+  if (t.contains("correlation_energy"))
+    return "CORRELATION  (model = " + model + ")";
+  if (model == "optimize")
+    return "GEOMETRY OPTIMIZATION";
+  return "TASK";
+}
+
+/// The part of the results summary that summary.txt does not hold: each
+/// task's wall time and the citations of external modules. Printed after
+/// summary.txt by the workflows that write results.json (scf, response).
+inline void write_wall_time_and_citations(std::ostream &os,
+                                          const nlohmann::json &calc_info) {
+  using namespace summary_detail;
+  if (!calc_info.contains("tasks") || !calc_info["tasks"].is_array())
+    return;
+  os << "\nmadqc wall time\n";
+  int i = 0;
+  CitationFlags citation_flags;
+  for (const auto &t : calc_info["tasks"]) {
+    collect_citation_flags_from_task(t, citation_flags);
+    os << "  Task " << i++ << " : " << task_title(t) << "\n";
+    write_timing_section(os, t);
+  }
+  write_citations_section(os, citation_flags);
+}
+
 inline void write_results_summary(std::ostream &os,
                                   const nlohmann::json &calc_info) {
   using namespace summary_detail;
@@ -470,28 +515,8 @@ inline void write_results_summary(std::ostream &os,
     collect_citation_flags_from_task(t, citation_flags);
     const std::string type = t.value("type", std::string());
     const std::string model = t.value("model", std::string());
-
-    // A failed task is recorded in two shapes: the Workflow driver emits
-    // {"type":"task_failed","error":...} while other paths set
-    // {"status":"failed","error":...}. Recognize both (raman brief defect 4).
-    const bool failed =
-        (t.value("status", std::string()) == "failed") || (type == "task_failed");
-
-    std::string title;
-    if (failed)
-      title = "TASK  (FAILED)";
-    else if (type == "response")
-      title = "RESPONSE";
-    else if (model == "scf" || t.contains("scf_eigenvalues_a"))
-      title = "SCF  (model = " + (model.empty() ? "scf" : model) + ")";
-    else if (t.contains("excitations") && !t.contains("correlation_energy"))
-      title = "EXCITED STATES  (model = " + model + ")";
-    else if (t.contains("correlation_energy"))
-      title = "CORRELATION  (model = " + model + ")";
-    else if (model == "optimize")
-      title = "GEOMETRY OPTIMIZATION";
-    else
-      title = "TASK";
+    const bool failed = task_failed(t);
+    const std::string title = task_title(t);
 
     os << "\n  Task " << i++ << " : " << title << "\n";
     os << "  " << rule('-') << "\n";

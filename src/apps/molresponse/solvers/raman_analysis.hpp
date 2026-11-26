@@ -168,7 +168,7 @@ compute_vibrational_analysis(ExecutorContext &ctx) {
   out.normalmodes_atomic = inner(mol.massweights(), modes);   // M^{-1/2} * eigenvectors
   out.hessian = H;
 
-  if (world.rank() == 0) {
+  if (world.rank() == 0 && madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values)) {
     print("[RAMAN] Hessian from", dim, "nuclear response states; max asymmetry",
           out.max_asymmetry);
     printf("[RAMAN] projected frequencies (cm^-1):");
@@ -331,7 +331,10 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
     const Tensor<double> Dq = raman::project_on_modes(D, L);
     derivs_modes[wkey] = tensor_to_json(Dq);
     nlohmann::json rows = nlohmann::json::array();
-    print("[RAMAN] omega=", w, " mode   freq(cm^-1)   activity(A^4/amu)   depol   alpha'^2   beta'^2 (a.u.)");
+    const bool print_rows = world.rank() == 0 &&
+        madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values);
+    if (print_rows)
+      print("[RAMAN] omega=", w, " mode   freq(cm^-1)   activity(A^4/amu)   depol   alpha'^2   beta'^2 (a.u.)");
     for (size_t q = 0; q < modes.size(); ++q) {
       const auto a = raman::mode_tensor(Dq, static_cast<long>(q));
       const auto inv = raman::invariants(a);
@@ -346,7 +349,8 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
                       {"dep_ratio", inv.depolarization},
                       {"depol_int", inv.depolarization * inv.activity * raman::AU_TO_A4_AMU},
                       {"converged", all_conv}});
-      printf("[RAMAN]   %3d  %12.3f  %16.4f  %7.4f  %10.5f %10.5f\n",
+      if (print_rows)
+        printf("[RAMAN]   %3d  %12.3f  %16.4f  %7.4f  %10.5f %10.5f\n",
              static_cast<int>(q) + 1, fcm, inv.activity * raman::AU_TO_A4_AMU,
              inv.depolarization, inv.alpha2, inv.beta2);
     }
