@@ -223,6 +223,13 @@ scf_data::scf_data() : iter(0) {
 }
 
 
+std::map<std::string, double> scf_data::final_values() const {
+    std::map<std::string, double> values;
+    for (const auto& [key, rows] : e_data)
+        if (!rows.empty()) values[key] = rows.back();
+    return values;
+}
+
 void scf_data::to_json(json &j) const {
     madness::print("SCF DATA TO JSON");
 

@@ -410,14 +410,30 @@ public:
   [[nodiscard]] bool knows(const std::string& id) const {
     return states.contains(id) || excited.contains(id) || second_order.contains(id);
   }
-  // Add a task's node name to a property's states list, once, if this
-  // request binds the task.
-  void name_state(json& property,const std::string& id) const {
+  // Add a task's node, or one subject of it (an excited root), to the states
+  // a value was computed from, once, if this request binds the task. The
+  // results file turns them into the value's convergence.
+  void name_state(json& value,const std::string& id,const std::string& subject={}) const {
     if(!knows(id)) return;
-    auto& names=property["states"];
-    if(!names.is_array()) names=json::array();
-    const auto name=node_name(id);
-    if(std::find(names.begin(),names.end(),name)==names.end()) names.push_back(name);
+    it::add_results_source(value,node_name(id),subject);
+  }
+  // The final-level target of each metric, per kind of state this request
+  // solves. One kind, or kinds that agree, give one object; otherwise each
+  // kind is named.
+  [[nodiscard]] json targets() const {
+    json kinds=json::object();
+    if(!states.empty()) {
+      const auto definition=driven_task();
+      kinds["driven_states"]=it::results_targets(it::resolve(request_,definition.model(final_),final_,true,definition.application));
+    }
+    if(!excited.empty()) {
+      const auto& definition=excited.begin()->second->definition();
+      kinds["excited_states"]=it::results_targets(it::resolve(request_,definition.model(final_),final_,true,definition.application));
+    }
+    if(kinds.empty()) return json::object();
+    const auto& first=kinds.begin().value();
+    for(const auto& [kind,targets]:kinds.items()) if(targets!=first) return kinds;
+    return first;
   }
   const json& properties() const {return properties_;}
   template<class Work> decltype(auto) with_failure_timing(Work&& work) {
@@ -475,8 +491,8 @@ public:
   }
   void report() {
     cp::records::require(scope_.group<0,"only the main session writes the results file");
-    // Each saved node's measured values, keyed by its folder name, the name
-    // the properties' states lists use.
+    // Each saved node's measured values, keyed by its folder name: the table
+    // each property's convergence is taken from.
     json metrics=json::object();
     const auto add=[&](const std::string& name,const it::IterationMetrics& frame) {
       json subjects=json::object();
@@ -492,6 +508,7 @@ public:
     // Only the main session reports; it replaces only response's entry.
     it::write_results_entry(world_,root_,{{"calculation_id","response"},{"application","molresponse"},
        {"protocol",cp::records::protocol_record(final_)},
+       {"targets",targets()},
        {"properties",properties_},
        {"run",run_},
        {"state_metrics",metrics}});

@@ -693,10 +693,23 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
   using json=nlohmann::json;
   auto& session=*ctx.shared_response;
   auto& binding=session.excited_at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
-  json energies={{"units","hartree"},{"components",json::object()},{"availability",json::object()}};
-  json strengths={{"units","dimensionless"},{"components",json::object()},{"availability",json::object()}};
-  json dipoles={{"units","atomic_units"},{"values",json::array()}};
-  json quadrupoles={{"units","atomic_units"},{"definition","nontraceless second moment"},{"values",json::array()}};
+  json energies={{"units","hartree"},{"value_type","real"},{"values",json::array()}};
+  json strengths={{"units","dimensionless"},{"value_type","real"},{"values",json::array()}};
+  json dipoles={{"units","atomic_units"},{"value_type","real"},{"values",json::array()}};
+  json quadrupoles={{"units","atomic_units"},{"value_type","real"},{"definition","nontraceless second moment"},{"values",json::array()}};
+  // Every excited-state value comes from one root of the one set; its own
+  // metrics are its convergence. Its status is decided here, from what was
+  // computed.
+  const auto set_id=es_node_id(std::is_same_v<Type,TDA>,n_roots);
+  const auto set_name=session.node_name(set_id);
+  const auto item=[&](const std::string& root,json fields) {
+    fields["root"]=root;
+    const bool computed=fields.contains("value") || !fields.value("components",json::object()).empty();
+    const bool whole=fields.value("availability",json::object()).empty();
+    fields["status"]=!computed ? "unavailable" : whole ? "complete" : "partial";
+    session.name_state(fields,set_id,root);
+    return fields;
+  };
   if(binding.complete()) {
     session.timing().begin("excited_properties",{{"task_id",binding.info().task_id}});
     set_response_protocol(ctx.world,ctx.L,thresh);
@@ -733,33 +746,31 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
         if(analysis[i].quadrupole_available) components[key]=analysis[i].quadrupole[a][b];
         else missing[key]="not computed by analysis diagnostic";
       }
-      quadrupoles["values"].push_back({{"state",id},{"components",components},{"availability",missing}});
-      energies["components"][id]=analysis[i].omega;
-      if(analysis[i].dipole_available) strengths["components"][id]=analysis[i].oscillator;
-      else strengths["availability"][id]="not computed by analysis diagnostic";
+      quadrupoles["values"].push_back(item(id,{{"components",components},{"availability",missing}}));
+      energies["values"].push_back(item(id,{{"value",analysis[i].omega}}));
+      if(analysis[i].dipole_available) strengths["values"].push_back(item(id,{{"value",analysis[i].oscillator}}));
+      else strengths["values"].push_back(item(id,{{"availability",{{"value","not computed by analysis diagnostic"}}}}));
       components=json::object();missing=json::object();
       for(std::size_t a=0;a<3;++a) {
         const auto key=std::string(1,"xyz"[a]);
         if(analysis[i].dipole_available) components[key]=analysis[i].dipole[a];
         else missing[key]="not computed by analysis diagnostic";
       }
-      dipoles["values"].push_back({{"state",id},{"components",components},{"availability",missing}});
+      dipoles["values"].push_back(item(id,{{"components",components},{"availability",missing}}));
     }
     session.timing().end();session.timing().end();
   } else {
+    const auto reason=set_name+" has not met the requested criteria";
     for(const auto& id:binding.expected().states) {
       json missing=json::object();
-      for(char a:std::string("xyz")) for(char b:std::string("xyz")) missing[std::string(1,a)+b]="excited bundle incomplete";
-      quadrupoles["values"].push_back({{"state",id},{"components",json::object()},{"availability",missing}});
-      energies["availability"][id]="excited bundle has not met the requested criteria";
-      strengths["availability"][id]="excited bundle has not met the requested criteria";
-      dipoles["values"].push_back({{"state",id},{"components",json::object()},
-        {"availability",{{"x","excited bundle incomplete"},{"y","excited bundle incomplete"},{"z","excited bundle incomplete"}}}});
+      for(char a:std::string("xyz")) for(char b:std::string("xyz")) missing[std::string(1,a)+b]=reason;
+      quadrupoles["values"].push_back(item(id,{{"components",json::object()},{"availability",missing}}));
+      energies["values"].push_back(item(id,{{"availability",{{"value",reason}}}}));
+      strengths["values"].push_back(item(id,{{"availability",{{"value",reason}}}}));
+      dipoles["values"].push_back(item(id,{{"components",json::object()},
+        {"availability",{{"x",reason},{"y",reason},{"z",reason}}}}));
     }
   }
-  // Every excited-state property comes from the one set.
-  const json states=json::array({session.node_name(es_node_id(std::is_same_v<Type,TDA>,n_roots))});
-  for(auto* property:{&energies,&strengths,&dipoles,&quadrupoles}) (*property)["states"]=states;
   session.set_properties({{"excitation_energy",energies},{"oscillator_strength",strengths},{"transition_dipole",dipoles},{"transition_quadrupole",quadrupoles}});
 }
 
@@ -1527,6 +1538,21 @@ private:
 
 inline char beta_axis_name(int a) { return a == 0 ? 'x' : a == 1 ? 'y' : 'z'; }
 
+// Why a β component is missing: the folders of the states it needs that have
+// not met the final request (a VBC source not built counts).
+inline std::string missing_beta_inputs(const response_shared::Session& session,const std::string& source_id,
+                                       const std::vector<std::string>& driven_ids) {
+  std::vector<std::string> names;
+  for(const auto& id:driven_ids)
+    if(session.knows(id) && !session.complete(id)) names.push_back(session.node_name(id));
+  const auto source=session.second_order.find(source_id);
+  if(source==session.second_order.end() || !source->second->reusable())
+    names.push_back(session.knows(source_id) ? session.node_name(source_id) : source_id);
+  std::string text;
+  for(const auto& name:names) text+=(text.empty() ? "" : ", ")+name;
+  return (text.empty() ? std::string("a required state") : text)+" has not met the final request";
+}
+
 // Contract each VBC source node with the qualified driven states of this
 // request.
 inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,double thresh) {
@@ -1546,18 +1572,31 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
     session.timing().end();
   }
   std::map<std::string,json> beta_tensors,raman_tensors;
+  const auto missing_inputs=[&](const std::string& source_id,const auto& request,const std::string& A_id) {
+    return missing_beta_inputs(session,source_id,{A_id,fd_node_id(request.pert_b,request.freq_b),
+                                                  fd_node_id(request.pert_c,request.freq_c)});
+  };
   json beta_rows=json::array(),raman_rows=json::array();
   for(const auto& request:expand_vbc_requests(plan.vbc,static_cast<int>(gs.molecule().natom()))) {
     const auto id=vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c);
     const bool nuclear=request.pert_c.kind==Perturbation::Kind::NuclearDisplacement;
-    const auto tensor_key=json::array({request.freq_b,request.freq_c,
-        nuclear ? request.pert_c.description() : ""}).dump();
+    // One item per frequency pair holds the whole tensor. A polarizability
+    // gradient's pair is (laser frequency, 0); its components are keyed by
+    // nuclear coordinate, then by dipole pair.
+    const auto tensor_key=json::array({request.freq_b,request.freq_c}).dump();
     auto& tensor=(nuclear ? raman_tensors : beta_tensors)[tensor_key];
     if(tensor.is_null()) {
-      tensor={{"frequency_b",request.freq_b},{"frequency_c",request.freq_c},
-              {"components",json::object()},{"availability",json::object()}};
-      if(nuclear) tensor["coordinate"]=request.pert_c.description();
+      tensor={{"components",json::object()},{"availability",json::object()}};
+      if(!nuclear) {tensor["frequency_b"]=request.freq_b;tensor["frequency_c"]=request.freq_c;}
+      else {
+        tensor["frequency"]=request.freq_b;
+        if(request.freq_c!=0.0) tensor["frequency_c"]=request.freq_c;
+      }
     }
+    // A component of a polarizability gradient is written under its coordinate.
+    const auto slot=[&](const char* key) -> json& {
+      return nuclear ? tensor[key][request.pert_c.description()] : tensor[key];
+    };
     session.name_state(tensor,fd_node_id(request.pert_b,request.freq_b));
     session.name_state(tensor,fd_node_id(request.pert_c,request.freq_c));
     session.name_state(tensor,id);
@@ -1578,7 +1617,7 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       std::string component=std::string(1,"xyz"[axis])+"xyz"[request.pert_b.axis];
       if(!nuclear) component+="xyz"[request.pert_c.axis];
       if(!source || !B || !C || !session.at(A_id).complete()) {
-        tensor["availability"][component]=supported ? "required response state or VBC has not met the final request"
+        slot("availability")[component]=supported ? missing_inputs(id,request,A_id)
             : "open-shell quadratic source and contraction are not implemented";
         continue;
       }
@@ -1587,7 +1626,7 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       auto VA=dipole_operator(world,axis);
       const double value=beta::beta_abc<ClosedShell>(world,*ground,*A,*source,*B,*C,VA);
       session.timing().end();
-      tensor["components"][component]=value;
+      slot("components")[component]=value;
       if(world.rank()==0) print(nuclear ? "[RAMAN]" : "[BETA]",component,
           "fB=",request.freq_b,"fC=",request.freq_c,"value=",value);
       // Preserve the analysis mirror consumed by the existing Raman analysis.
@@ -1607,6 +1646,13 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       tensor["status"]=tensor.at("availability").empty() ? "complete" : tensor.at("components").empty() ? "unavailable" : "partial";
       values.push_back(std::move(tensor));
     }
+    // Ordered by frequency, as the keys' text does not order numbers.
+    std::stable_sort(values.begin(),values.end(),[](const json& a,const json& b) {
+      const auto key=[](const json& v) {
+        return std::make_pair(v.value("frequency_b",v.value("frequency",0.0)),v.value("frequency_c",0.0));
+      };
+      return key(a)<key(b);
+    });
     session.set_properties({{name,{{"units",units},{"value_type","real"},{"values",values}}}});
   };
   publish("hyperpolarizability","atomic_units",beta_tensors);
@@ -1690,20 +1736,31 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   const auto set_id=es_node_id(request.tda,request.n_roots);
   // A root's value comes from the set and the three dipole states at half its
   // excitation energy (none known until the set has converged).
+  // The set counts through the root's own metrics.
   auto named=[&](nlohmann::json value,std::optional<double> half) {
-    value["states"]=nlohmann::json::array();
-    ctx.shared_response->name_state(value,set_id);
+    ctx.shared_response->name_state(value,set_id,value.at("root").get<std::string>());
     if(half) for(int a=0;a<3;++a) ctx.shared_response->name_state(value,fd_node_id(Perturbation::dipole(a),*half));
     return value;
   };
   auto unavailable=[&](const std::string& id,const std::string& reason,std::optional<double> half=std::nullopt) {
-    shared_values.push_back(named({{"state",id},{"status","unavailable"},
+    shared_values.push_back(named({{"root",id},{"status","unavailable"},
         {"components",nlohmann::json::object()},{"availability",{{"two_photon_absorption",reason}}}},half));
+  };
+  // The folders of the dipole states at `half` that have not met the request.
+  auto unmet_half=[&](double half) {
+    std::string text;
+    for(int a=0;a<3;++a) {
+      const auto id=fd_node_id(Perturbation::dipole(a),half);
+      const auto& session=*ctx.shared_response;
+      if(!session.complete(id))
+        text+=(text.empty() ? "" : ", ")+(session.knows(id) ? session.node_name(id) : id);
+    }
+    return (text.empty() ? std::string("a dipole state at half the root energy") : text)+" has not met the final request";
   };
   ctx.shared_response->timing().begin("two_photon_properties");
   auto& shared_bundle=ctx.shared_response->excited_at(set_id);
   if(!shared_bundle.complete()) {
-    for(const auto& id:shared_bundle.expected().states) unavailable(id,"excited bundle has not met the final request");
+    for(const auto& id:shared_bundle.expected().states) unavailable(id,ctx.shared_response->node_name(set_id)+" has not met the final request");
     finish_shared();return;
   }
   set_response_protocol(world, ctx.L, thresh);
@@ -1775,7 +1832,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       if (world.rank() == 0)
         print("[TPA] root", f, " omega_f=", wf,
               " — missing dipole FD @", wf_half, " — skip");
-      unavailable(root_ids[f],"required driven response has not met the final request",wf_half);
+      unavailable(root_ids[f],unmet_half(wf_half),wf_half);
       continue;
     }
 
@@ -1871,7 +1928,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       ctx.shared_response->timing().end();
       nlohmann::json components=nlohmann::json::object();
       for(int a=0;a<3;++a) for(int b=0;b<3;++b) components[std::string(1,"xyz"[a])+"xyz"[b]]=S(a,b);
-      shared_values.push_back(named({{"state",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
+      shared_values.push_back(named({{"root",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
           {"components",components},{"availability",nlohmann::json::object()},
           {"observables",{{"Df",obs.Df},{"Dg",obs.Dg},{"D_linear",obs.D_linear},{"D_circular",obs.D_circular},
               {"R",obs.R},{"sigma_linear_gm",obs.sigma_linear_gm},{"sigma_circular_gm",obs.sigma_circular_gm}}}},wf_half));
@@ -1999,7 +2056,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
           availability[std::string{char('x'+row),char('x'+column)}]=
               "open-shell polarizability contraction is not implemented";
         nlohmann::json tensor={{"frequency",frequency},{"status","unavailable"},
-            {"components",nlohmann::json::object()},{"availability",availability},{"states",nlohmann::json::array()}};
+            {"components",nlohmann::json::object()},{"availability",availability}};
         for (int axis:axes) ctx.shared_response->name_state(tensor,fd_node_id(Perturbation::dipole(axis),frequency));
         tensors.push_back(std::move(tensor));
       }
@@ -2047,7 +2104,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         auto& binding=ctx.shared_response->at(fd_node_id(Perturbation::dipole(axis),frequency));
         nlohmann::json row=nlohmann::json::array();
         if (!binding.complete()) {
-          for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]="response state has not met the final request";
+          for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]=binding.name()+" has not met the final request";
           continue;
         }
         iteration::ElapsedTimer<> load_timer;
@@ -2075,7 +2132,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         matrix.push_back(row);
       }
       nlohmann::json tensor={{"frequency",frequency},{"status",availability.empty() ? "complete" : components.empty() ? "unavailable" : "partial"},
-                             {"components",components},{"availability",availability},{"states",nlohmann::json::array()}};
+                             {"components",components},{"availability",availability}};
       for (int axis:ax) ctx.shared_response->name_state(tensor,fd_node_id(Perturbation::dipole(axis),frequency));
       tensors.push_back(std::move(tensor));
       // Keep the legacy analysis mirror for qualified tensors only.

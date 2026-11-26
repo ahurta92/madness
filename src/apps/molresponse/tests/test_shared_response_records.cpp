@@ -1,4 +1,5 @@
 #include "../solvers/shared_response_session.hpp"
+#include "../solvers/raman_results.hpp"
 #include <madness/world/MADworld.h>
 #include <iostream>
 namespace rs = molresponse_v3::response_shared;
@@ -263,19 +264,30 @@ int main(int argc, char** argv) {
             auto& moved=recovered.bind_derived("moved-leg",moved_settings);
             require(moved.has_saved() && !moved.has_node() && moved.saved_metrics().states.size()==1 &&
                     moved.started_from()==std::optional<std::string>("dipole_z-f0.11000") && moved.previous_updates()==0);
-            // A version 2 results file is replaced, not merged.
+            // A version 3 results file is replaced, not merged.
             const auto results_path=std::filesystem::path(root)/"results.json";
             cp::detail::on_root(world,[&] {
-                cp::detail::replace_json(results_path,{{"version",2},{"calculations",cp::json::array({{{"calculation_id","old"}}})}});
+                cp::detail::replace_json(results_path,{{"version",3},{"calculations",cp::json::array({{{"calculation_id","old"}}})}});
                 return std::string{};
             });
+            // A property names the states its value used; the file carries
+            // their worst measured values as its convergence instead.
+            {
+                cp::json single{{"units","bohr^3"},{"value_type","real"},{"value",1.0},{"status","complete"}};
+                recovered.name_state(single,"new-leg");
+                recovered.name_state(single,"not-bound"); // a task this request does not bind
+                cp::json item{{"frequency",0.11},{"components",{{"zz",1.0}}},{"status","complete"},
+                              {"availability",cp::json::object()}};
+                recovered.name_state(item,"new-leg");
+                recovered.set_properties({{"single",single},{"listed",{{"units","bohr^3"},{"values",cp::json::array({item})}}}});
+            }
             recovered.report();
             // results.json is written directly: response's entry keys its
             // measured values by node folder name and names no launch; another
             // application's entry is left alone.
             {
                 auto results=read_root_json(world,results_path);
-                require(results.at("version")==3 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
+                require(results.at("version")==4 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
                 const auto& provenance=results.at("provenance");
                 require(provenance.at("code_version").is_string() && provenance.at("launched_at").is_string() &&
                         provenance.at("mpi_processes")==world.size() && provenance.at("archive_io")=="native");
@@ -286,23 +298,108 @@ int main(int argc, char** argv) {
                 require(metrics.contains(recovered_leg.name()) && !metrics.contains(moved.name()) &&
                         metrics.at(recovered_leg.name()).at("subjects").size()==1);
                 require(recovered.node_name("new-leg")==recovered_leg.name());
+                // Each value's convergence is its states' worst measured
+                // values; no states list and no empty availability remain.
+                const auto& measured=metrics.at(recovered_leg.name()).at("subjects").begin().value().at("values");
+                const auto& properties=entry.at("properties");
+                const auto& single=properties.at("single");
+                const auto& listed=properties.at("listed").at("values").at(0);
+                for(const auto* value:{&single,&listed}) {
+                  require(!value->contains("sources") && !value->contains("states") && !value->contains("availability"));
+                  require(value->at("convergence").size()==2);
+                  for(const auto& metric:{"bsh_residual","density_change"})
+                    require(value->at("convergence").at(metric)==measured.at(metric));
+                }
+                require(single.at("value")==1.0 && listed.at("components").at("zz")==1.0);
+                // Only driven states: one set of final-level targets.
+                require(entry.at("targets").at("bsh_residual").is_number() &&
+                        entry.at("targets").at("density_change").is_number() && !entry.at("targets").contains("energy_change"));
                 cp::detail::on_root(world,[&] {
                     for(const auto& [name,value]:metrics.items())
                         require(std::filesystem::is_directory(std::filesystem::path(root)/"states"/"response"/name));
                     return std::string{};
                 });
-                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"properties",cp::json::object()}});
+                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"properties",cp::json::object()},
+                    {"state_metrics",{{"ground_state",{{"subjects",{{"ground",{{"values",{{"bsh_residual",2e-5},{"density_change",3e-5}}}}}}}}}}}});
                 recovered.report();
                 results=read_root_json(world,results_path);
                 require(results.at("calculations").size()==2 &&
                         results.at("calculations").at(0).at("calculation_id")=="ground_state" &&
                         results.at("calculations").at(1).at("calculation_id")=="response");
-                // Properties computed after an entry is written are added to it.
-                it::add_results_properties(world,root,"ground_state",{{"dipole",{{"value",cp::json::array({0.0,0.0,1.0})}}}});
+                // Properties computed after an entry is written are added to
+                // it, with their convergence from that entry's state_metrics.
+                cp::json dipole{{"value",cp::json::array({0.0,0.0,1.0})},{"status","complete"}};
+                it::add_results_source(dipole,"ground_state");
+                it::add_results_properties(world,root,"ground_state",{{"dipole",dipole}});
                 results=read_root_json(world,results_path);
-                require(results.at("calculations").at(0).at("properties").at("dipole").at("value").size()==3 &&
+                const auto& added=results.at("calculations").at(0).at("properties").at("dipole");
+                require(added.at("value").size()==3 && !added.contains("sources") &&
+                        added.at("convergence")==cp::json({{"bsh_residual",2e-5},{"density_change",3e-5}}) &&
                         results.at("calculations").at(1).at("calculation_id")=="response");
                 rejects([&]{it::add_results_properties(world,root,"missing",cp::json::object());});
+            }
+            // Convergence is the worst value of each metric over the states a
+            // value used; an excited root counts through its own metrics, and
+            // a node with no measured values adds nothing.
+            {
+                const cp::json table{
+                    {"A",{{"subjects",{{"response",{{"values",{{"bsh_residual",1e-6},{"density_change",4e-5},{"kinetic_change",1.0}}}}}}}}},
+                    {"set",{{"subjects",{{"root0",{{"values",{{"bsh_residual",5e-5},{"density_change",1e-6}}}}},
+                                         {"root1",{{"values",{{"bsh_residual",9e-1},{"density_change",9e-1}}}}}}}}},
+                    {"vbc",{{"subjects",cp::json::object()}}}};
+                cp::json value=cp::json::object();
+                it::add_results_source(value,"A");
+                it::add_results_source(value,"set","root0");
+                it::add_results_source(value,"vbc");
+                it::add_results_source(value,"A"); // once
+                require(value.at("sources").size()==3);
+                require(it::worst_convergence(table,value.at("sources"))==cp::json({{"bsh_residual",5e-5},{"density_change",4e-5}}));
+                require(it::worst_convergence(table,cp::json::array({{{"node","vbc"}},{{"node","absent"}}}))==cp::json::object());
+            }
+            // Raman, which no check runs: one spectrum item per laser
+            // frequency, a number, with the Hessian's states and that
+            // frequency's polarizability-gradient states; the analysis is one
+            // value.
+            {
+                const cp::json table{
+                    {"nuc_0_x-f0.00000",{{"subjects",{{"response",{{"values",{{"bsh_residual",1e-6},{"density_change",2e-6}}}}}}}}},
+                    {"dipole_x-f0.05000",{{"subjects",{{"response",{{"values",{{"bsh_residual",3e-6},{"density_change",1e-7}}}}}}}}},
+                    {"dipole_x-f0.10000",{{"subjects",{{"response",{{"values",{{"bsh_residual",9e-1},{"density_change",9e-1}}}}}}}}}};
+                cp::json hessian=cp::json::object();
+                it::add_results_source(hessian,"nuc_0_x-f0.00000");
+                cp::json at05{{"frequency",0.05},{"components",{{"nuc_0_x",{{"xx",1.0}}}}}},at10{{"frequency",0.10}};
+                it::add_results_source(at05,"dipole_x-f0.05000");
+                it::add_results_source(at10,"dipole_x-f0.10000");
+                const cp::json gradient{{"values",cp::json::array({at05,at10})}};
+                const cp::json whole{{"rows_found",9},{"rows_expected",9},{"all_rows_converged",true}};
+                const cp::json short_rows{{"rows_found",3},{"rows_expected",9},{"all_rows_converged",true}};
+                const cp::json rows=cp::json::array({{{"mode",1},{"freq_cm1",1000.0}}});
+                const cp::json units{{"hessian","Eh/bohr^2"}};
+                const cp::json analysis{{"hessian",cp::json::array({1.0})},{"frequencies",cp::json::array({0.01})}};
+                const cp::json properties{
+                    {"vibrational_analysis",molresponse_v3::vibrational_analysis_property(hessian,units,analysis)},
+                    {"raman_spectrum",{{"values",cp::json::array({
+                        molresponse_v3::raman_spectrum_item(0.05,hessian,gradient,whole,rows),
+                        molresponse_v3::raman_spectrum_item(0.10,hessian,gradient,short_rows,cp::json()),
+                        molresponse_v3::raman_spectrum_item(0.20,hessian,cp::json(),whole,cp::json())})}}}};
+                const auto written=it::finish_results_properties(properties,table);
+                const auto& va=written.at("vibrational_analysis");
+                require(va.at("value")==analysis && va.at("status")=="complete" && va.at("units")==units &&
+                        va.at("convergence")==cp::json({{"bsh_residual",1e-6},{"density_change",2e-6}}) &&
+                        !va.contains("sources") && !va.contains("availability"));
+                const auto& spectrum=written.at("raman_spectrum").at("values");
+                require(spectrum.size()==3 && spectrum.at(0).at("frequency")==0.05 && spectrum.at(0).at("value")==rows &&
+                        spectrum.at(0).at("status")=="complete" && !spectrum.at(0).contains("availability") &&
+                        spectrum.at(0).at("convergence")==cp::json({{"bsh_residual",3e-6},{"density_change",2e-6}}));
+                require(spectrum.at(1).at("status")=="unavailable" && !spectrum.at(1).contains("value") &&
+                        spectrum.at(1).at("availability").contains("spectrum") &&
+                        spectrum.at(1).at("convergence").at("bsh_residual")==9e-1);
+                // No vibrational mode: a complete, empty spectrum.
+                require(spectrum.at(2).at("status")=="complete" && spectrum.at(2).at("value")==cp::json::array() &&
+                        spectrum.at(2).at("convergence").at("bsh_residual")==1e-6);
+                const auto missing=molresponse_v3::vibrational_analysis_property(hessian,units,cp::json());
+                require(missing.at("status")=="unavailable" && !missing.contains("value") &&
+                        molresponse_v3::raman_spectrum_item(0.05,hessian,gradient,cp::json(),cp::json()).at("status")=="unavailable");
             }
             // The same collective metadata writer used by Raman must preserve
             // the old file and publish failure timing on every rank.

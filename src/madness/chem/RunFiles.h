@@ -4,6 +4,7 @@
 // the main World: results.json (one entry per application, each written by its
 // own application) and timings.json (one entry per launch). No lock: within a
 // launch one process writes them; separate launches must not share a folder.
+#include <madness/chem/ConvergenceDecision.h>
 #include <madness/chem/RootCoordination.h>
 #include <madness/misc/info.h>
 #include <madness/world/thread.h>
@@ -57,18 +58,98 @@ inline nlohmann::json results_provenance(World& world) {
             {"archive_io", archive_io_backend()}};
 }
 
+inline constexpr int results_version = 4;
+
+/// The final-level target of each metric, as the convergence decision module
+/// resolved it: {metric name: target}.
+inline nlohmann::json results_targets(const ResolvedSettings& settings) {
+    nlohmann::json targets = nlohmann::json::object();
+    for (const auto& criterion : settings.criteria) targets[metric_name(criterion.metric)] = criterion.effective;
+    return targets;
+}
+
+/// The key under which a writer lists the states a value was computed from,
+/// while the entry is assembled. It never reaches the file: each item is
+/// `{"node": folder name}` (every subject of that node) or
+/// `{"node": folder name, "subject": id}` (one subject, e.g. an excited root).
+inline constexpr const char* results_sources_key = "sources";
+
+/// Add a source to a value's list, once.
+inline void add_results_source(nlohmann::json& value, const std::string& node, const std::string& subject = {}) {
+    auto& sources = value[results_sources_key];
+    if (!sources.is_array()) sources = nlohmann::json::array();
+    nlohmann::json source{{"node", node}};
+    if (!subject.empty()) source["subject"] = subject;
+    if (std::find(sources.begin(), sources.end(), source) == sources.end()) sources.push_back(std::move(source));
+}
+
+/// The metrics a value's `convergence` reports.
+inline const std::vector<std::string>& convergence_metrics() {
+    static const std::vector<std::string> names{"bsh_residual", "density_change"};
+    return names;
+}
+
+/// The worst measured value of each convergence metric over `sources`, from
+/// the entry's state_metrics. A metric no source measured is left out.
+inline nlohmann::json worst_convergence(const nlohmann::json& state_metrics, const nlohmann::json& sources) {
+    nlohmann::json worst = nlohmann::json::object();
+    for (const auto& source : sources) {
+        const auto node = state_metrics.find(source.at("node").get<std::string>());
+        if (node == state_metrics.end()) continue;
+        const auto& subjects = node->at("subjects");
+        for (const auto& [subject, measured] : subjects.items()) {
+            if (source.contains("subject") && source.at("subject") != subject) continue;
+            const auto& values = measured.at("values");
+            for (const auto& metric : convergence_metrics()) {
+                const auto value = values.find(metric);
+                if (value == values.end()) continue;
+                if (!worst.contains(metric) || value->get<double>() > worst.at(metric).get<double>())
+                    worst[metric] = *value;
+            }
+        }
+    }
+    return worst;
+}
+
+/// Turn one value (a single-answer property or an item of `values`) into its
+/// written form: its sources become `convergence`, and an empty availability
+/// is dropped.
+inline void finish_results_value(nlohmann::json& value, const nlohmann::json& state_metrics) {
+    value["convergence"] = worst_convergence(state_metrics, value.value(results_sources_key, nlohmann::json::array()));
+    value.erase(results_sources_key);
+    if (value.contains("availability") && value.at("availability").empty()) value.erase("availability");
+}
+
+/// The written form of an entry's properties.
+inline nlohmann::json finish_results_properties(nlohmann::json properties, const nlohmann::json& state_metrics) {
+    for (auto& [name, property] : properties.items()) {
+        if (property.contains("values")) {
+            for (auto& item : property.at("values")) finish_results_value(item, state_metrics);
+            property.erase(results_sources_key);
+            if (property.contains("availability") && property.at("availability").empty()) property.erase("availability");
+        } else {
+            finish_results_value(property, state_metrics);
+        }
+    }
+    return properties;
+}
+
 /// Collective. Replace this application's entry in results.json, keyed by its
 /// calculation_id, and leave the other entries alone. A file of another
-/// version is replaced, not merged.
-inline void write_results_entry(World& world, const std::filesystem::path& root, const nlohmann::json& entry) {
+/// version is replaced, not merged. Each property's sources become its
+/// convergence (finish_results_properties).
+inline void write_results_entry(World& world, const std::filesystem::path& root, nlohmann::json entry) {
     namespace cp = madness::checkpoint;
     const auto provenance = results_provenance(world);
+    if (entry.contains("properties"))
+        entry["properties"] = finish_results_properties(entry.at("properties"),
+                                                        entry.value("state_metrics", nlohmann::json::object()));
     cp::detail::on_root(world, [&] {
         const auto path = root / "results.json";
-        nlohmann::json results{{"version", 3}, {"calculations", nlohmann::json::array()}};
+        nlohmann::json results{{"version", results_version}, {"calculations", nlohmann::json::array()}};
         if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
             auto saved = cp::detail::read_json(path);
-            if (saved.value("version", 0) == 3) {
+            if (saved.value("version", 0) == results_version) {
                 cp::records::require(saved.at("calculations").is_array(), "unsupported results file");
                 results = std::move(saved);
             }
@@ -86,17 +167,22 @@ inline void write_results_entry(World& world, const std::filesystem::path& root,
 }
 
 /// Collective. Add properties to this application's entry in results.json,
-/// which must have been written already.
+/// which must have been written already. Their sources become convergence
+/// from that entry's state_metrics.
 inline void add_results_properties(World& world, const std::filesystem::path& root, const std::string& id,
                                    const nlohmann::json& properties) {
     namespace cp = madness::checkpoint;
     cp::detail::on_root(world, [&] {
         const auto path = root / "results.json";
         auto results = cp::detail::read_json(path);
-        cp::records::require(results.value("version", 0) == 3, "unsupported results file");
+        cp::records::require(results.value("version", 0) == results_version, "unsupported results file");
         bool found = false;
         for (auto& entry : results.at("calculations"))
-            if (entry.at("calculation_id") == id) { entry.at("properties").update(properties); found = true; }
+            if (entry.at("calculation_id") == id) {
+                entry.at("properties").update(
+                    finish_results_properties(properties, entry.value("state_metrics", nlohmann::json::object())));
+                found = true;
+            }
         cp::records::require(found, "results.json has no entry " + id);
         cp::detail::replace_json(path, results);
         return std::string{};

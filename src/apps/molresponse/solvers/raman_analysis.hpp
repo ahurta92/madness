@@ -28,6 +28,7 @@
 // ===========================================================================
 
 #include "../calc/calc_executor.hpp"      // ExecutorContext, detail_exec::qualified_fd_as_xy
+#include "raman_results.hpp"
 #include "../kernels/raman_spectrum.hpp"
 #include "../ResponsePropertyPlanner.hpp"
 #include "response_metadata.hpp"
@@ -202,27 +203,30 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   const std::string key = protocol_key();
   if (world.rank() == 0)
     print("\n=== Raman vibrational analysis  protocol_key=", key, " ===");
-  // The Hessian comes from the static nuclear states; the spectrum adds the
-  // states of the polarizability derivatives it is built from.
-  nlohmann::json hessian_states={{"states",nlohmann::json::array()}};
+  // The Hessian comes from the static nuclear states; each laser frequency's
+  // spectrum adds the states of the polarizability gradient at it.
+  nlohmann::json hessian=nlohmann::json::object();
   for (long a = 0; a < static_cast<long>(gs.molecule().natom()); ++a)
     for (int ax = 0; ax < 3; ++ax)
-      ctx.shared_response->name_state(hessian_states,fd_node_id(Perturbation::nuclear(static_cast<int>(a),ax),0.0));
-  nlohmann::json spectrum_states=hessian_states;
-  if (const auto& p=ctx.shared_response->properties();p.contains("polarizability_gradient"))
-    for (const auto& value:p.at("polarizability_gradient").at("values"))
-      for (const auto& name:value.value("states",nlohmann::json::array()))
-        if (std::find(spectrum_states["states"].begin(),spectrum_states["states"].end(),name)==spectrum_states["states"].end())
-          spectrum_states["states"].push_back(name);
+      ctx.shared_response->name_state(hessian,fd_node_id(Perturbation::nuclear(static_cast<int>(a),ax),0.0));
+  std::vector<double> laser_frequencies;
+  for (const auto &r : plan.vbc)
+    if (r.pert_c.is_all_atoms() &&
+        std::find_if(laser_frequencies.begin(), laser_frequencies.end(),
+                     [&](double f) { return std::abs(f - r.freq_b) < 1e-9; }) == laser_frequencies.end())
+      laser_frequencies.push_back(r.freq_b);
+  std::sort(laser_frequencies.begin(), laser_frequencies.end());
+  const auto& gradient=ctx.shared_response->properties().value("polarizability_gradient",nlohmann::json());
 
   auto vib = compute_vibrational_analysis(ctx);
   world.gop.fence();
   if(!vib) {
+    nlohmann::json spectra=nlohmann::json::array();
+    for (double w:laser_frequencies)
+      spectra.push_back(raman_spectrum_item(w,hessian,gradient,nlohmann::json(),nlohmann::json()));
     ctx.shared_response->set_properties({
-        {"vibrational_analysis",{{"values",nlohmann::json::object()},{"availability",{{"hessian","nuclear response inputs have not met the final request"}}},
-          {"states",hessian_states.at("states")}}},
-        {"raman_spectrum",{{"values",nlohmann::json::object()},{"availability",{{"spectrum","qualified Hessian and derivatives are required"}}},
-          {"states",spectrum_states.at("states")}}}});
+        {"vibrational_analysis",vibrational_analysis_property(hessian,nlohmann::json(),nlohmann::json())},
+        {"raman_spectrum",{{"value_type","real"},{"values",spectra}}}});
     return;
   }
   response_shared::update_response_metadata(world,ctx.calc_dir+"/response_metadata.json",[&](ResponseMetadata& meta) {
@@ -281,13 +285,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
                  {"freq_cm1", "cm^-1"}};
   rs["au_to_A4_amu"] = raman::AU_TO_A4_AMU;
 
-  std::vector<double> pol_freqs;
-  for (const auto &r : plan.vbc)
-    if (r.pert_c.is_all_atoms() &&
-        std::find_if(pol_freqs.begin(), pol_freqs.end(),
-                     [&](double f) { return std::abs(f - r.freq_b) < 1e-9; }) == pol_freqs.end())
-      pol_freqs.push_back(r.freq_b);
-  std::sort(pol_freqs.begin(), pol_freqs.end());
+  const auto &pol_freqs = laser_frequencies;
   rs["polarization_frequencies"] = pol_freqs;
 
   const bool have_rows = j.contains("properties") && j["properties"].contains("raman") &&
@@ -376,17 +374,17 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
       }
       return values;
     };
-    nlohmann::json availability=nlohmann::json::object();
-    for(const auto& [frequency,verdict]:complete.items())
-      if(verdict.at("rows_found")!=verdict.at("rows_expected") || !verdict.at("all_rows_converged").get<bool>())
-        availability[frequency]="polarizability derivatives are incomplete";
+    // One spectrum item per laser frequency.
+    nlohmann::json items=nlohmann::json::array();
+    for (double w:pol_freqs) {
+      const auto wkey=ResponseMetadata::freq_key(w);
+      items.push_back(raman_spectrum_item(w,hessian,gradient,complete.at(wkey),spectra.value(wkey,nlohmann::json())));
+    }
     ctx.shared_response->set_properties({
-        {"vibrational_analysis",{{"units",va.at("units")},
-          {"values",{{"hessian",numeric_values(vib->hessian)},{"frequencies",numeric_values(vib->frequencies)},
-            {"normal_modes",numeric_values(vib->normalmodes)},{"reduced_mass",numeric_values(vib->reducedmass)}}},
-          {"availability",nlohmann::json::object()},{"states",hessian_states.at("states")}}},
-        {"raman_spectrum",{{"units",rs.at("units")},{"values",spectra},{"availability",availability},
-          {"states",spectrum_states.at("states")}}}});
+        {"vibrational_analysis",vibrational_analysis_property(hessian,va.at("units"),
+            {{"hessian",numeric_values(vib->hessian)},{"frequencies",numeric_values(vib->frequencies)},
+             {"normal_modes",numeric_values(vib->normalmodes)},{"reduced_mass",numeric_values(vib->reducedmass)}})},
+        {"raman_spectrum",{{"units",rs.at("units")},{"value_type","real"},{"values",items}}}});
   }
   meta.set_section("vibrational_analysis", va);
   meta.set_section("raman_spectra", rs);

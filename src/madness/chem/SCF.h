@@ -201,6 +201,10 @@ public:
 
         void add_data(std::map<std::string, double> values);
 
+        /// The last row of energy terms (e_kinetic, e_nuclear, ...); empty when
+        /// this run evaluated no energy.
+        [[nodiscard]] std::map<std::string, double> final_values() const;
+
         void add_gradient(const Tensor<double> &grad);
     };
 

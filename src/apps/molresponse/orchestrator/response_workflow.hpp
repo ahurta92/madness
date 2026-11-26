@@ -94,7 +94,14 @@ inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohma
   }
   for(const auto& [shared,legacy]:std::vector<std::pair<std::string,std::string>>{
       {"vibrational_analysis","vibrational_analysis"},{"raman_spectrum","raman_spectra"}}) {
-    if(!current.contains(shared) || current.at(shared).at("values").empty() || !metadata.contains(legacy)) continue;
+    if(!current.contains(shared) || !metadata.contains(legacy)) continue;
+    // Copied when anything was computed: the analysis's value, or a
+    // spectrum item's non-empty value.
+    const auto& property=current.at(shared);
+    bool computed=property.contains("value");
+    for(const auto& item:property.value("values",nlohmann::json::array()))
+      computed=computed || !item.value("value",nlohmann::json::array()).empty();
+    if(!computed) continue;
     if(shared=="vibrational_analysis") output.vibrational_analysis=metadata.at(legacy);
     else output.raman_spectra=metadata.at(legacy);
   }

@@ -84,19 +84,34 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
     metrics[name] = state_metrics(*saved);
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     const auto property = [&](const char* units, const json& value) {
-        json p{{"units", units}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"},
-               {"states", json::array({name})}};
+        json p{{"units", units}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
+        it::add_results_source(p, name);
         if (complete) p["value"] = value;
-        else p["reason"] = "criteria_unmet";
+        else p["availability"] = {{"value", name + " has not met the requested criteria"}};
         return p;
     };
     json orbitals{{"alpha", tensor_values(scf.aeps)}};
     if (!scf.param.spin_restricted() && scf.param.have_beta()) orbitals["beta"] = tensor_values(scf.beps);
+    json properties{{"total_energy", property("hartree", scf.current_energy)},
+                    {"orbital_energies", property("hartree", orbitals)}};
+    // The final energy terms, when this run evaluated the energy.
+    const auto terms = scf.e_data.final_values();
+    if (!terms.empty()) {
+        json components{{"kinetic", terms.at("e_kinetic")}, {"nuclear_attraction", terms.at("e_nuclear")},
+                        {"coulomb", terms.at("e_coulomb")}, {"exchange_correlation", terms.at("e_xc")},
+                        {"nuclear_repulsion", terms.at("e_nrep")}};
+        if (scf.param.pcm_data() != "none") components["pcm"] = terms.at("e_pcm");
+        properties["energy_components"] = property("hartree", components);
+    }
+    if (scf.dispersion.active())
+        properties["dispersion_energy"] = property("hartree", scf.dispersion.energy(world, scf.molecule));
+    const auto request = scf_iteration_request(scf.param);
+    const auto final = protocols(scf).back();
     it::write_results_entry(world, root, {{"calculation_id", "ground_state"}, {"application", "moldft"},
         {"model", scf.param.xc()},
         {"protocol", cp::records::protocol_record(saved->protocol)},
-        {"properties", {{"total_energy", property("hartree", scf.current_energy)},
-                        {"orbital_energies", property("hartree", orbitals)}}},
+        {"targets", it::results_targets(it::resolve(request, scf.iteration_model(), final, true, "ground state"))},
+        {"properties", properties},
         {"state_metrics", metrics}});
 }
 } // namespace
@@ -140,17 +155,19 @@ GroundReference scf_ground_reference(World& world, const SCF& scf) {
 }
 
 void report_scf_properties(World& world, const SCF& scf, const Tensor<double>& dipole,
-                           const Tensor<double>& gradient) {
+                           const Tensor<double>& gradient, const json& populations) {
     // A run that saved no node (the legacy solve) writes no results.json.
-    if ((dipole.size() == 0 && gradient.size() == 0) || !scf.last_node) return;
-    const json states = json::array({std::filesystem::path(*scf.last_node).filename().string()});
+    if ((dipole.size() == 0 && gradient.size() == 0 && populations.empty()) || !scf.last_node) return;
+    const auto name = std::filesystem::path(*scf.last_node).filename().string();
+    const auto property = [&](const char* units, const json& value) {
+        json p{{"units", units}, {"value_type", "real"}, {"status", "complete"}, {"value", value}};
+        it::add_results_source(p, name);
+        return p;
+    };
     json properties = json::object();
-    if (dipole.size() > 0)
-        properties["dipole"] = {{"units", "atomic_units"}, {"value_type", "real"}, {"status", "complete"},
-                                {"states", states}, {"value", tensor_values(dipole)}};
-    if (gradient.size() > 0)
-        properties["gradient"] = {{"units", "hartree/bohr"}, {"value_type", "real"}, {"status", "complete"},
-                                  {"states", states}, {"value", tensor_values(gradient)}};
+    if (dipole.size() > 0) properties["dipole"] = property("atomic_units", tensor_values(dipole));
+    if (gradient.size() > 0) properties["gradient"] = property("hartree/bohr", tensor_values(gradient));
+    if (!populations.empty()) properties["populations"] = property("e", populations);
     it::add_results_properties(world, scf_checkpoint_directory(scf), "ground_state", properties);
 }
 
