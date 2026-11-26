@@ -7,6 +7,7 @@
 
 
 #include <madness/madness_config.h>
+#include "madness_git_revision.h" // generated at build time
 #include <sstream>
 #include <string>
 #include <iostream>
