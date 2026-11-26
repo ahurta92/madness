@@ -1549,7 +1549,7 @@ inline std::string missing_beta_inputs(const response_shared::Session& session,c
     names.push_back(session.knows(source_id) ? session.node_name(source_id) : source_id);
   std::string text;
   for(const auto& name:names) text+=(text.empty() ? "" : ", ")+name;
-  return (text.empty() ? std::string("a required state") : text)+" has not met the final request";
+  return (text.empty() ? std::string("a required state") : text)+" has not met the requested criteria";
 }
 
 // Contract each VBC source node with the qualified driven states of this
@@ -1754,12 +1754,12 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       if(!session.complete(id))
         text+=(text.empty() ? "" : ", ")+(session.knows(id) ? session.node_name(id) : id);
     }
-    return (text.empty() ? std::string("a dipole state at half the root energy") : text)+" has not met the final request";
+    return (text.empty() ? std::string("a dipole state at half the root energy") : text)+" has not met the requested criteria";
   };
   ctx.shared_response->timing().begin("two_photon_properties");
   auto& shared_bundle=ctx.shared_response->excited_at(set_id);
   if(!shared_bundle.complete()) {
-    for(const auto& id:shared_bundle.expected().states) unavailable(id,ctx.shared_response->node_name(set_id)+" has not met the final request");
+    for(const auto& id:shared_bundle.expected().states) unavailable(id,ctx.shared_response->node_name(set_id)+" has not met the requested criteria");
     finish_shared();return;
   }
   set_response_protocol(world, ctx.L, thresh);
@@ -2103,7 +2103,7 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
         auto& binding=ctx.shared_response->at(fd_node_id(Perturbation::dipole(axis),frequency));
         nlohmann::json row=nlohmann::json::array();
         if (!binding.complete()) {
-          for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]=binding.name()+" has not met the final request";
+          for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]=binding.name()+" has not met the requested criteria";
           continue;
         }
         iteration::ElapsedTimer<> load_timer;

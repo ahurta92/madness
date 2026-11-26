@@ -6,6 +6,7 @@
 // launch one process writes them; separate launches must not share a folder.
 #include <madness/chem/ConvergenceDecision.h>
 #include <madness/chem/RootCoordination.h>
+#include <madness/chem/RunSummary.h>
 #include <madness/misc/info.h>
 #include <madness/world/thread.h>
 #include <algorithm>
@@ -62,6 +63,20 @@ inline nlohmann::json results_provenance(World& world) {
 }
 
 inline constexpr int results_version = 4;
+
+/// Rank zero. Write `results` to results.json and its text summary to
+/// summary.txt beside it, so the two never disagree.
+inline void replace_results_files(const std::filesystem::path& root, const nlohmann::json& results) {
+    namespace cp = madness::checkpoint;
+    cp::detail::replace_json(root / "results.json", results);
+    const auto path = root / "summary.txt";
+    const auto temp = root / ".summary.txt.tmp";
+    if (std::filesystem::is_regular_file(std::filesystem::symlink_status(temp))) std::filesystem::remove(temp);
+    cp::detail::write_exclusive(temp, results_summary(results));
+    cp::records::require(!std::filesystem::is_symlink(std::filesystem::symlink_status(path)),
+                         "symlink record destination");
+    std::filesystem::rename(temp, path);
+}
 
 /// The final-level target of each metric, as the convergence decision module
 /// resolved it: {metric name: target}.
@@ -235,7 +250,7 @@ inline void write_results_entry(World& world, const std::filesystem::path& root,
         calculations.push_back(entry);
         results["calculations"] = std::move(calculations);
         results["provenance"] = provenance;
-        cp::detail::replace_json(path, results);
+        replace_results_files(root, results);
         return std::string{};
     });
 }
@@ -260,7 +275,7 @@ inline void add_results_properties(World& world, const std::filesystem::path& ro
                 found = true;
             }
         cp::records::require(found, "results.json has no entry " + id);
-        cp::detail::replace_json(path, results);
+        replace_results_files(root, results);
         return std::string{};
     });
 }

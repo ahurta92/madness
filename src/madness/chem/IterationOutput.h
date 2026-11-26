@@ -47,6 +47,7 @@ inline constexpr Verbosity restart_summary = Verbosity::progress;       // write
 inline constexpr Verbosity checkpoint_timing = Verbosity::progress;     // write_checkpoint_timing
 inline constexpr Verbosity start_source = Verbosity::progress;          // write_start_source, write_seed_start
 inline constexpr Verbosity seed_refused = Verbosity::progress;          // write_seed_refused
+inline constexpr Verbosity run_summary = Verbosity::progress;           // madqc's summary.txt at the end of the log
 // breakdown
 inline constexpr Verbosity energy_breakdown = Verbosity::breakdown;     // write_value_table, energy terms
 // detail

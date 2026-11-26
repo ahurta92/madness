@@ -5,10 +5,12 @@
 #include <ParameterManager.hpp>
 #include <WorkflowBuilders.hpp>
 #include <apps/molresponse/madqc_adapter.hpp>
+#include <madness/chem/IterationOutput.h>
 #include <madness/chem/ResultsSummary.hpp>
 #include <madness/chem/RunFiles.h>
 #include <madness/chem/SCFRun.h>
 #include <madness/chem/VizManifest.hpp>
+#include <optional>
 
 namespace madqc {
 
@@ -46,8 +48,39 @@ make_scf_reference(madness::World &world, const Params &params) {
 
 // One application-level driver. Workflow code owns dependencies; each engine
 // retains its numerical state and solver implementation.
+/// The run folder whose summary madqc prints at the end of the log, and the
+/// verbosity that decides whether it prints. summary.txt itself is written
+/// with results.json at every verbosity.
+struct RunSummaryTarget {
+  std::filesystem::path directory;
+  madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::silent;
+};
+
+/// Rank zero. Print the summary of the run folder's results.json, the same
+/// text as its summary.txt, when the verbosity asks for it.
+inline void print_run_summary(madness::World &world,
+                              const std::optional<RunSummaryTarget> &target) {
+  namespace it = madness::iteration;
+  if (world.rank() != 0 || !target ||
+      !it::prints(target->verbosity, it::needed::run_summary))
+    return;
+  const auto path = target->directory / "results.json";
+  if (!std::filesystem::exists(path))
+    return;
+  try {
+    std::cout << "\n"
+              << it::results_summary(madness::checkpoint::detail::read_json(path))
+              << std::flush;
+  } catch (const std::exception &e) {
+    madness::print("summary not printed:", e.what());
+  }
+}
+
+/// `summary`, when given, is set to the run folder of a workflow that writes
+/// results.json, before any work starts, so a failed run still prints it.
 inline void run_workflow(madness::World &world,
-                         const madness::commandlineparser &parser) {
+                         const madness::commandlineparser &parser,
+                         std::optional<RunSummaryTarget> *summary = nullptr) {
   using namespace madness;
   validate_workflow_input(world, parser);
   // Create workflow
@@ -76,6 +109,13 @@ inline void run_workflow(madness::World &world,
   const auto scf_directory = shared_output ? run_directory
       : run_directory / "task_0" / "moldft";
   if (shared_output) require_shared_run_layout(world, run_directory);
+  if (shared_output && summary)
+    *summary = RunSummaryTarget{
+        run_directory,
+        madness::iteration::verbosity(
+            user_workflow == "response"
+                ? pm.get<ResponseParameters>().print_level()
+                : scf_parameters.print_level())};
   if (shared_scf && pm.get<IOParameters>().hdf5())
     throw std::runtime_error("shared SCF checkpoints require native archives");
   if (parser.key_exists("continue")) {

@@ -182,6 +182,7 @@ int main(int argc, char **argv) {
   World &world = initialize(argc, argv);
   int rc = 0;
   bool solver_started = false;
+  std::optional<madqc::RunSummaryTarget> summary;
   if (world.rank() == 0)
     print_header1("MADQC -- Multiresolution Quantum Chemistry Code");
   try {
@@ -203,7 +204,7 @@ int main(int argc, char **argv) {
         print(info::print_revision_information());
         print("    git source commit ...     ", info::git_commit());
       }
-      madqc::run_workflow(world, parser);
+      madqc::run_workflow(world, parser, &summary);
     }
   } catch (const MadnessException &e) {
     rc = 1;
@@ -217,6 +218,8 @@ int main(int argc, char **argv) {
   world.gop.fence();
   if (solver_started)
     print_stats(world);
+  // Last in the log: the text of summary.txt, from results.json.
+  madqc::print_run_summary(world, summary);
   finalize();
   return rc;
 }

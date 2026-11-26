@@ -65,6 +65,7 @@ set(MADCHEM_HEADERS
     MetricRecords.h
     RootCoordination.h
     RunFiles.h
+    RunSummary.h
     IterationMetrics.h
     IterationHistory.h
     IterationOutput.h
@@ -219,7 +220,7 @@ if(BUILD_TESTING)
   set(CHEM_TEST_SOURCES_SHORT test_pointgroupsymmetry.cc test_masks_and_boxes.cc
       test_exchange_asymmetric.cc
   test_qc.cc test_MolecularOrbitals.cc test_BSHApply.cc test_projector.cc
-  test_results_summary.cc
+  test_results_summary.cc test_run_summary.cc
   test_exchange_owner_assign.cc test_exchange_batch_cache.cc test_restart.cc
   test_population.cc)
   set(CHEM_TEST_SOURCES_LONG test_localizer.cc test_ccpairfunction.cc test_low_rank_function.cc test_scf_evaluation.cc test_scf_iteration.cc test_scf_defaults.cc test_scf_frozen_iteration.cc test_scf_checkpoint.cc)
