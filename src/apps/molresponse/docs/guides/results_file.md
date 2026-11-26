@@ -11,7 +11,7 @@ replaced, not merged.
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "provenance": {
     "code_version": "<git commit the program was built from>",
     "launched_at": "2026-11-25T09:12:03.512Z",
@@ -171,11 +171,75 @@ Which states a value used follows from what it is:
 | `vibrational_analysis` | (one value) | | the static nuclear-displacement states; `value` holds `hessian`, `frequencies`, `normal_modes`, `reduced_mass` |
 | `raman_spectrum` | laser frequency | `frequency` | the Hessian's states and that frequency's polarizability-gradient states; `value` is the list of mode rows |
 
+The ground entry's `orbital_energies` also says which energies are occupied,
+`"occupied": {"alpha": n}` (and `beta` when there are beta energies), and
+whether the orbitals are `"canonical"` or `"localized"` (`orbitals`). With
+localized orbitals the energies are diagonal Fock elements, not eigenvalues.
+
 The ground entry's `energy_components` holds the final `kinetic`,
 `nuclear_attraction`, `coulomb`, `exchange_correlation` and
 `nuclear_repulsion` terms, and `pcm` when PCM is on. `dispersion_energy` is
 present when a dispersion correction is on, `populations` when a population
 analysis was requested, `dipole` and `gradient` when computed.
+
+## Derived quantities
+
+The numbers people quote are written beside the tensor or value they come
+from. An item (or a single-answer property) gains a `derived` object; its
+property gains `definitions`, the formula of each derived quantity in plain
+text, and `derived_units`, the unit of each:
+
+```json
+"polarizability": {
+  "units": "bohr^3",
+  "definitions": {"isotropic": "(xx + yy + zz) / 3", "anisotropy": "sqrt( 1/2 [ ... ] )"},
+  "derived_units": {"isotropic": "bohr^3", "anisotropy": "bohr^3"},
+  "values": [
+    {"frequency": 0.0,
+     "components": {"xx": 5.1, "xy": 0.0, ...},
+     "derived": {"isotropic": 5.55, "anisotropy": 1.34},
+     "status": "complete",
+     "convergence": {...}}
+  ]
+}
+```
+
+- A derived quantity is written only when the item is `complete` and every
+  component it needs is present. Otherwise it is absent; nothing is summed
+  over part of a tensor. `definitions` and `derived_units` name only the
+  quantities that appear.
+- Derived quantities follow the tensor's convention: no convention factor is
+  applied.
+- The formulas are in `src/madness/chem/DerivedQuantities.h` and unit-tested
+  there; `src/madness/chem/DerivedResults.h` writes them into the file. They
+  are computed afresh every time `results.json` is written, from the values
+  in it, so they cannot disagree with it.
+
+| Property | `derived` | Needs |
+|---|---|---|
+| `orbital_energies` | `homo_energy`: the highest occupied orbital energy; `{"alpha": …, "beta": …}` when there are beta energies | the energies and `occupied`; absent for localized orbitals unless each spin has at most one occupied orbital |
+| `dipole` | `dipole_magnitude` (atomic units), `dipole_magnitude_debye` | the dipole |
+| `polarizability` | `isotropic` = (xx + yy + zz)/3; `anisotropy` = sqrt(½[(xx−yy)² + (yy−zz)² + (zz−xx)²] + 3[xy² + xz² + yz²]) | the diagonal; for `anisotropy` also each off-diagonal pair, which enters as the mean of ij and ji when both are present |
+| `hyperpolarizability` | `vector` {x, y, z}, β_i = ⅓ Σ_j (β_ijj + β_jij + β_jji); `vector_magnitude`; `parallel` = ⅗ Σ_i β_i μ_i / \|μ\|; `hrs` = sqrt(⟨β_ZZZ²⟩ + ⟨β_ZXX²⟩); `hrs_depolarization` = ⟨β_ZZZ²⟩/⟨β_ZXX²⟩ | all 27 components; `parallel` also the ground entry's dipole, and is absent when it was not computed or \|μ\| < 1e-8; `hrs_depolarization` is absent when `hrs` < 1e-8 (a noise-level tensor) |
+| `excited_states` | `energy_ev` (× 27.211386245981, CODATA), `wavelength_nm` = 10⁷ / (E × 219474.63136314) | the excitation energy |
+| `two_photon_absorption` | `Df`, `Dg`, `D_linear`, `D_circular`, `R`, `sigma_linear_gm`, `sigma_circular_gm` | computed by the two-photon assembly from the root's S and energy |
+
+β_ijk is the component named `ijk`. The hyper-Rayleigh averages are those of
+Bersohn, Pao and Frisch (1966) with no Kleinman symmetry assumed: the squares
+of the laboratory components β_ZZZ and β_ZXX averaged over all orientations,
+evaluated exactly.
+
+The two-photon cross section is σ = N π² α a0⁵ ω² D g / c in GM (1 GM =
+1e-50 cm⁴ s per photon) with N = 8 (prefactor 8π²), ω = E/2 the photon energy,
+and lineshape g = 1/Γ at resonance, a constant rather than a normalized
+Lorentzian, with linewidth Γ = 0.1 eV taken as a full width at half maximum.
+This is DALTON's AU_TO_GM. The two-photon `definitions` state it, so a reader
+can convert to another convention; `units` holds only the tensor's and the
+energy's units.
+
+`raman_spectrum` keeps its per-mode quantities in each mode row of `value`
+(`activity_au`, `dep_ratio`, `pol_int`, …), beside the mode they belong to;
+its `definitions` name the formula of each.
 
 ## A state name is its folder name
 
@@ -223,13 +287,20 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
 - The Hessian, normal modes, transition quadrupoles, polarizability-gradient
   components and anything else too large for a table are named on one
   `not printed (see results.json)` line.
+- Derived quantities print under their table, one line each: in the table as
+  extra rows of the item (polarizability, hyperpolarizability, two-photon), or
+  as lines under it (excited states, orbital energies, dipole). A unit is
+  printed after the value when it is not the table's own unit. A
+  hyperpolarizability whose 27 components are too many for the page prints
+  its derived quantities only. For two-photon absorption only `D_linear` and
+  `sigma_linear_gm` are printed; the circular values stay in `results.json`.
 
 The summary of the H2 deck `src/examples/qc/response_h2_es_rpa`:
 
 ```text
 madqc summary
-  code      900a79af8-dirty
-  launched  2026-11-26 10:50 UTC
+  code      ad5db99a6-dirty
+  launched  2026-11-26 12:30 UTC
   run       1 process x 16 threads
 
 Ground state (moldft, hf), level 1.0e-04 k 6
@@ -250,6 +321,7 @@ Ground state (moldft, hf), level 1.0e-04 k 6
   orbital_energies (hartree)
   spin   orbital  value
   alpha  0        -0.59489421
+  homo_energy  -0.59489421
 
 Response (molresponse), level 1.0e-04 k 6
   targets   driven:  bsh_residual 5.00e-04   density_change 5.00e-04
@@ -258,6 +330,8 @@ Response (molresponse), level 1.0e-04 k 6
   excited states (energy in hartree)
   root          energy      osc. strength  bsh_residual  density_change  energy_change
   es_root_0000  0.46583341  0.285480       3.85e-05      1.09e-04        1.00e-07
+  es_root_0000  energy_ev      12.675973 eV
+  es_root_0000  wavelength_nm  97.810400 nm
 
   transition dipole (atomic_units)
   root          x  y  z

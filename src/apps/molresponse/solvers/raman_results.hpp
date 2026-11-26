@@ -44,6 +44,21 @@ inline nlohmann::json raman_spectrum_item(double frequency, const nlohmann::json
     return item;
 }
 
+/// The definitions of the quantities each raman_spectrum mode row holds
+/// (raman::invariants; a is the mode's polarizability derivative, au_to_A4_amu
+/// the conversion in response_metadata's raman_spectra section).
+inline nlohmann::json raman_spectrum_definitions() {
+    return {{"alpha2_au", "alpha'^2 = ( (a_xx + a_yy + a_zz) / 3 )^2"},
+            {"beta2_au", "beta'^2 = 1/2 sum_ij ( 3 a_ij^2 - a_ii a_jj )"},
+            {"activity_au", "45 alpha'^2 + 4 beta'^2"},
+            {"dep_ratio", "3 beta'^2 / ( 45 alpha'^2 + 4 beta'^2 ), linear polarization"},
+            {"alpha2", "alpha2_au x au_to_A4_amu"},
+            {"beta2", "beta2_au x au_to_A4_amu"},
+            {"pol_int", "activity_au x au_to_A4_amu"},
+            {"depol_int", "dep_ratio x pol_int"},
+            {"freq_cm1", "harmonic frequency of the mode"}};
+}
+
 /// The vibrational_analysis property: `value` holds the Hessian, frequencies,
 /// normal modes and reduced masses; null `value` when no Hessian was computed.
 inline nlohmann::json vibrational_analysis_property(const nlohmann::json& hessian, const nlohmann::json& units,

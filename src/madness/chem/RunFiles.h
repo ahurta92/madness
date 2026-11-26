@@ -5,6 +5,7 @@
 // own application) and timings.json (one entry per launch). No lock: within a
 // launch one process writes them; separate launches must not share a folder.
 #include <madness/chem/ConvergenceDecision.h>
+#include <madness/chem/DerivedResults.h>
 #include <madness/chem/RootCoordination.h>
 #include <madness/chem/RunSummary.h>
 #include <madness/misc/info.h>
@@ -62,12 +63,14 @@ inline nlohmann::json results_provenance(World& world) {
             {"archive_io", archive_io_backend()}};
 }
 
-inline constexpr int results_version = 4;
+inline constexpr int results_version = 5;
 
-/// Rank zero. Write `results` to results.json and its text summary to
+/// Rank zero. Write `results`, with its derived quantities computed afresh
+/// (add_derived_quantities), to results.json and its text summary to
 /// summary.txt beside it, so the two never disagree.
-inline void replace_results_files(const std::filesystem::path& root, const nlohmann::json& results) {
+inline void replace_results_files(const std::filesystem::path& root, nlohmann::json results) {
     namespace cp = madness::checkpoint;
+    add_derived_quantities(results);
     cp::detail::replace_json(root / "results.json", results);
     const auto path = root / "summary.txt";
     const auto temp = root / ".summary.txt.tmp";

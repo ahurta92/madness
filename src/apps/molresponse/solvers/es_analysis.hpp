@@ -29,6 +29,7 @@
 
 #include "../GroundState.hpp"
 #include "../kernels/tags.hpp"   // PrintLevel
+#include <madness/chem/DerivedQuantities.h>
 #include "es_solver.hpp"
 
 #include <madness/chem/SCF.h>            // MomentFunctor, DipoleFunctor, SCF::project_ao_basis_only
@@ -198,7 +199,7 @@ print_es_analysis(madness::World &world,
     printf("   Response Function %d\t\t%7.8f a.u.", static_cast<int>(i), a.omega);
     print("\n   --------------------------------------------");
     printf("   Response Function %d\t\t%7.8f eV", static_cast<int>(i),
-           a.omega * 27.2114);
+           madness::derived::excitation_energy_ev(a.omega));
     print("\n   --------------------------------------------");
 
     if (a.dipole_available) {
@@ -272,7 +273,7 @@ es_analysis_to_json(const std::vector<ESRootAnalysis> &an, bool tda,
       r["root_id"]      = make_root_id(stable_index[i]);
     }
     r["omega"]                 = a.omega;
-    r["omega_ev"]              = a.omega * 27.2114;
+    r["omega_ev"]              = madness::derived::excitation_energy_ev(a.omega);
     if (a.dipole_available) {
     r["transition_dipole"]     = {a.dipole[0], a.dipole[1], a.dipole[2]};
     r["oscillator_strength"]   = a.oscillator;

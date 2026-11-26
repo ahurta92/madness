@@ -388,7 +388,8 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
         {"vibrational_analysis",vibrational_analysis_property(hessian,va.at("units"),
             {{"hessian",numeric_values(vib->hessian)},{"frequencies",numeric_values(vib->frequencies)},
              {"normal_modes",numeric_values(vib->normalmodes)},{"reduced_mass",numeric_values(vib->reducedmass)}})},
-        {"raman_spectrum",{{"units",rs.at("units")},{"value_type","real"},{"values",items}}}});
+        {"raman_spectrum",{{"units",rs.at("units")},{"definitions",raman_spectrum_definitions()},
+                           {"value_type","real"},{"values",items}}}});
   }
   meta.set_section("vibrational_analysis", va);
   meta.set_section("raman_spectra", rs);

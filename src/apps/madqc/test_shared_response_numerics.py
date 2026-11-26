@@ -49,7 +49,7 @@ def shared_value(key, reference, ground, properties):
         if kind == 'tpa':
             row = properties['two_photon_absorption']['values'][key[6]]
             assert row['status'] == 'complete'
-            return row['observables'][key[7]]
+            return row['derived'][key[7]]
     if key[2:4] == ['properties', 'vibrational_analysis']:
         values = properties['vibrational_analysis']['values']
         if key[4] == 'frequencies_cm1':

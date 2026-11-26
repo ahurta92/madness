@@ -1713,6 +1713,25 @@ inline bool load_tpa_es_xy(madness::World &world,
   return true;
 }
 
+/// The definitions of the two-photon quantities results.json holds per root
+/// (tpa::observables, madness/chem/DerivedQuantities.h). The cross-section
+/// convention is DALTON's, written so a reader can convert to another one.
+inline nlohmann::json tpa_definitions() {
+  return {
+      {"Df","(1/30) sum_ij S_ii S_jj"},
+      {"Dg","(1/30) sum_ij S_ij S_ij; equals (1/30) sum_ij S_ij S_ji since S is symmetric"},
+      {"D_linear","2 Df + 4 Dg: the strength for two photons of the same linear polarization "
+                  "(Monson and McClain 1970; F = G = H = 2)"},
+      {"D_circular","-2 Df + 6 Dg: the strength for two photons of the same circular polarization "
+                    "(F = -2, G = H = 3)"},
+      {"R","(-Df + 3 Dg) / (Df + 2 Dg), the circular-to-linear ratio; 0 when the denominator is 0"},
+      {"sigma_linear_gm","sigma = N pi^2 alpha a0^5 omega^2 D_linear g / c in GM (1 GM = 1e-50 cm^4 s per photon), "
+                         "with N = 8 (prefactor 8 pi^2), omega = E/2 the photon energy (E the excitation energy), "
+                         "and lineshape g = 1/Gamma at resonance, a constant, not a normalized Lorentzian; "
+                         "linewidth Gamma = 0.1 eV, a full width at half maximum. This is DALTON's AU_TO_GM"},
+      {"sigma_circular_gm","as sigma_linear_gm with D_circular"}};
+}
+
 inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
                          double thresh) {
   using namespace madness;
@@ -1727,11 +1746,17 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
 
   nlohmann::json shared_values=nlohmann::json::array();
   auto finish_shared=[&] {
-    ctx.shared_response->set_properties({{"two_photon_absorption",{
+    nlohmann::json property{
         {"value_type","real"},{"scientific_status","preliminary"},
-        {"units",{{"transition_tensor","atomic_units"},{"energy","hartree"},
-            {"sigma_linear_gm","GM"},{"sigma_circular_gm","GM"}}},
-        {"values",shared_values}}}});
+        {"units",{{"transition_tensor","atomic_units"},{"energy","hartree"}}},
+        {"values",shared_values}};
+    // The definitions travel with the numbers, once any root has them.
+    if(std::any_of(shared_values.begin(),shared_values.end(),[](const auto& v){return v.contains("derived");})) {
+      property["definitions"]=tpa_definitions();
+      property["derived_units"]={{"Df","atomic_units"},{"Dg","atomic_units"},{"D_linear","atomic_units"},
+          {"D_circular","atomic_units"},{"R","dimensionless"},{"sigma_linear_gm","GM"},{"sigma_circular_gm","GM"}};
+    }
+    ctx.shared_response->set_properties({{"two_photon_absorption",property}});
     ctx.shared_response->timing().end();
   };
   const auto& request=plan.es.front();
@@ -1849,7 +1874,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
         printf("  [TPA diag] root %ld  omega=%.8f (%.3f eV)\n"
                "    Xf norms: |x|=%.10f  |y|=%.10f  x2-y2=%.10f "
                "(DALTON C(EXCI): Z2-Y2=0.5 => ours/DALTON = sqrt2)\n",
-               f, wf, wf * 27.211386245988, std::sqrt(xx), std::sqrt(yy),
+               f, wf, madness::derived::excitation_energy_ev(wf), std::sqrt(xx), std::sqrt(yy),
                xx - yy);
       std::array<vecfuncT, 3> mu_amo;
       for (int a = 0; a < 3; ++a) mu_amo[a] = mul(world, mu_op[a], g0.amo, true);
@@ -1932,7 +1957,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       for(int a=0;a<3;++a) for(int b=0;b<3;++b) components[std::string(1,"xyz"[a])+"xyz"[b]]=S(a,b);
       shared_values.push_back(named({{"root",root_ids[f]},{"energy",wf},{"frequency",wf_half},{"status","complete"},
           {"components",components},{"availability",nlohmann::json::object()},
-          {"observables",{{"Df",obs.Df},{"Dg",obs.Dg},{"D_linear",obs.D_linear},{"D_circular",obs.D_circular},
+          {"derived",{{"Df",obs.Df},{"Dg",obs.Dg},{"D_linear",obs.D_linear},{"D_circular",obs.D_circular},
               {"R",obs.R},{"sigma_linear_gm",obs.sigma_linear_gm},{"sigma_circular_gm",obs.sigma_circular_gm}}}},wf_half));
     }
 
@@ -1946,7 +1971,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
       }
       rows.push_back({{"es_root_id", static_cast<int>(f)},
                       {"omega", wf},
-                      {"omega_ev", wf * 27.211386245988},
+                      {"omega_ev", madness::derived::excitation_energy_ev(wf)},
                       {"source_files", nlohmann::json::array()}, // sources are not saved
                       {"writer_nproc", static_cast<int>(world.size())},
                       {"S", Sj},
@@ -1981,7 +2006,7 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   // in MRA, so one manifold (no Sym column). Diffable against Dalton .out.
   if (world.rank() == 0 && !tbl_f.empty() &&
       madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values)) {
-    const double H2EV = 27.211386245988;
+    const double H2EV = madness::derived::excitation_hartree_to_ev;
     printf("\n                  +--------------------------------+\n");
     printf("                  | Two-photon transition tensor S |\n");
     printf("                  +--------------------------------+\n");

@@ -375,6 +375,62 @@ inline bool small_components(const json& components) {
     return std::all_of(components.begin(), components.end(), [](const json& v) { return v.is_number(); });
 }
 
+/// The derived quantities of a value in the order they print: the known
+/// ones first, as people read them, then any other in key order. `only`, when
+/// not empty, limits them to those names.
+inline std::vector<std::string> derived_names(const json& derived, const std::vector<std::string>& only = {}) {
+    static const std::vector<std::string> order{
+        "isotropic", "anisotropy", "vector", "vector_magnitude", "parallel", "hrs", "hrs_depolarization",
+        "energy_ev", "wavelength_nm", "homo_energy", "dipole_magnitude", "dipole_magnitude_debye",
+        "D_linear", "sigma_linear_gm"};
+    std::vector<std::string> names;
+    if (!derived.is_object()) return names;
+    for (const auto& name : order)
+        if (derived.contains(name)) names.push_back(name);
+    for (const auto& [name, value] : derived.items())
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    if (!only.empty())
+        names.erase(std::remove_if(names.begin(), names.end(),
+                                   [&](const std::string& n) { return std::find(only.begin(), only.end(), n) == only.end(); }),
+                    names.end());
+    return names;
+}
+
+/// One derived value as it prints: a number, or a vector {x, y, z} as
+/// "(x, y, z)", followed by its unit from the property's `derived_units` when
+/// that is not the table's own unit and not dimensionless.
+inline std::string derived_text(const json& property, const std::string& name, const json& value,
+                                const std::string& table_unit, bool decimals) {
+    const auto unit = unit_of(property.value("derived_units", json::object()), name);
+    const bool energy = is_energy_unit(unit);
+    std::string text;
+    if (value.is_object()) {
+        for (const auto* axis : {"x", "y", "z"})
+            text += std::string(text.empty() ? "(" : ", ") + number_text(value.value(axis, json()), energy, decimals);
+        text += ")";
+    } else {
+        text = number_text(value, energy, decimals);
+    }
+    const auto label = unit_label(unit);
+    if (!label.empty() && label != table_unit && label != "dimensionless") text += " " + label;
+    return text;
+}
+
+/// The derived quantities of a single-answer property, one line each, under
+/// its table.
+inline void write_derived_lines(std::string& out, const json& property, const std::string& table_unit,
+                                bool decimals) {
+    const auto derived = property.value("derived", json::object());
+    const auto names = derived_names(derived);
+    if (names.empty()) return;
+    Table table({"", ""});
+    for (const auto& name : names)
+        table.add({name, derived_text(property, name, derived.at(name), table_unit, decimals)});
+    std::string text;
+    table.write(text);
+    out += text.substr(text.find('\n') + 1); // without the empty header line
+}
+
 inline void write_title(std::string& out, const std::string& name, const std::string& unit,
                         const std::string& note = {}) {
     out += "\n";
@@ -392,25 +448,36 @@ inline void write_values_property(std::string& out, const json& entry, const std
     const auto unit = property.value("units", json());
     const bool energy = is_energy_unit(unit);
     const bool decimals = decimal_values(entry);
-    bool components = false, large = false;
+    bool components = false, large = false, any_derived = false;
     for (const auto& item : items) {
         if (item.contains("components")) components = true;
         if (item.contains("components") && !small_components(item.at("components")) &&
             !item.at("components").empty())
             large = true;
         if (item.contains("value") && !item.at("value").is_number()) large = true;
+        if (!derived_names(item.value("derived", json::object())).empty()) any_derived = true;
     }
     ConvergenceTable table;
     table.header = keys;
     table.key_columns = keys.size();
-    if (!large) {
-        if (components) table.header.emplace_back("component");
+    // Components too many for the page are left to results.json; the derived
+    // quantities still print, one row each.
+    if (!large || any_derived) {
+        if (components || large) table.header.emplace_back(large ? "quantity" : "component");
         table.header.emplace_back("value");
     }
     table.metrics = convergence_metrics(std::vector<json>(items.begin(), items.end()));
+    const auto derived_rows = [&](const json& item, std::vector<std::vector<std::string>>& r) {
+        const auto derived = item.value("derived", json::object());
+        for (const auto& name : derived_names(derived))
+            r.push_back({name, derived_text(property, name, derived.at(name), unit_label(unit), decimals)});
+    };
     const auto rows = [&](const json& item) {
         std::vector<std::vector<std::string>> r;
-        if (large) return r;
+        if (large) {
+            if (any_derived) derived_rows(item, r);
+            return r;
+        }
         if (item.contains("components")) {
             // Every requested component: those with a value, and those whose
             // availability says why they have none (printed as -).
@@ -424,6 +491,7 @@ inline void write_values_property(std::string& out, const json& entry, const std
         } else if (item.contains("value"))
             r.push_back(components ? std::vector<std::string>{"", number_text(item.at("value"), energy, decimals)}
                                    : std::vector<std::string>{number_text(item.at("value"), energy, decimals)});
+        if (components) derived_rows(item, r);
         return r;
     };
     for (const auto& item : items)
@@ -454,6 +522,22 @@ inline void write_excited_states(std::string& out, const json& entry, const json
     const auto energy_unit = unit_label(unit_of(units, "excitation_energy"));
     write_title(out, "excited states", energy_unit.empty() ? "" : "energy in " + energy_unit);
     table.write(out);
+    // The derived quantities of each root, one line each.
+    Table derived_table({"", "", ""});
+    bool any_derived = false;
+    for (const auto& item : items) {
+        const auto derived = item.value("derived", json::object());
+        for (const auto& name : derived_names(derived)) {
+            any_derived = true;
+            derived_table.add({number_text(item.value("root", json()), false), name,
+                               derived_text(property, name, derived.at(name), energy_unit, decimals)});
+        }
+    }
+    if (any_derived) {
+        std::string text;
+        derived_table.write(text);
+        out += text.substr(text.find('\n') + 1);
+    }
 
     Table dipoles({"root", "x", "y", "z"});
     bool any = false;
@@ -474,8 +558,9 @@ inline void write_excited_states(std::string& out, const json& entry, const json
     if (quadrupole) not_printed.emplace_back("transition_quadrupole");
 }
 
-/// two_photon_absorption: per root, the transition tensor components and the
-/// observables.
+/// two_photon_absorption: per root, the transition tensor components, then
+/// the linear-polarization strength and cross section. The circular values
+/// and the rest of `derived` stay in results.json.
 inline void write_two_photon(std::string& out, const json& entry, const json& property, bool& marked) {
     const auto& items = property.at("values");
     const auto units = property.value("units", json::object());
@@ -489,10 +574,11 @@ inline void write_two_photon(std::string& out, const json& entry, const json& pr
         if (item.contains("energy"))
             r.push_back({"energy", number_text(item.at("energy"), is_energy_unit(unit_of(units, "energy")), decimals)});
         const auto components = item.value("components", json::object());
-        const auto observables = item.value("observables", json::object());
+        const auto derived = item.value("derived", json::object());
         for (const auto& [component, value] : components.items())
             r.push_back({component, number_text(value, false, decimals)});
-        for (const auto& [name, value] : observables.items()) r.push_back({name, number_text(value, false, decimals)});
+        for (const auto& name : derived_names(derived, {"D_linear", "sigma_linear_gm"}))
+            r.push_back({name, derived_text(property, name, derived.at(name), "", decimals)});
         return r;
     };
     for (const auto& item : items) item_rows(table, item, {"root", "frequency"}, rows, targets_for(entry, true), marked);
@@ -606,6 +692,7 @@ inline void write_structured_value(std::string& out, const json& entry, const st
             for (std::size_t i = 0; i < list.size(); ++i)
                 table.add({key, std::to_string(i), number_text(list.at(i), energy, decimals)});
         table.write(out);
+        write_derived_lines(out, property, unit_label(unit), decimals);
         return;
     }
     if (value.is_array() && !value.empty() && value.size() % 3 == 0 &&
@@ -620,6 +707,7 @@ inline void write_structured_value(std::string& out, const json& entry, const st
             table.add(row);
         }
         table.write(out);
+        write_derived_lines(out, property, unit_label(unit), decimals);
         return;
     }
     not_printed.push_back(name);

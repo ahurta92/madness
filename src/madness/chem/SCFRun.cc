@@ -91,8 +91,14 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
     };
     json orbitals{{"alpha", tensor_values(scf.aeps)}};
     if (!scf.param.spin_restricted() && scf.param.have_beta()) orbitals["beta"] = tensor_values(scf.beps);
+    // Which energies are occupied, and whether they are eigenvalues: with
+    // localized orbitals they are diagonal Fock elements.
+    auto orbital_energies = property("hartree", orbitals);
+    orbital_energies["occupied"] = {{"alpha", scf.param.nalpha()}};
+    if (orbitals.contains("beta")) orbital_energies["occupied"]["beta"] = scf.param.nbeta();
+    orbital_energies["orbitals"] = scf.param.do_localize() ? "localized" : "canonical";
     json properties{{"total_energy", property("hartree", scf.current_energy)},
-                    {"orbital_energies", property("hartree", orbitals)}};
+                    {"orbital_energies", orbital_energies}};
     // The final energy terms, when this run evaluated the energy.
     const auto terms = scf.e_data.final_values();
     if (!terms.empty()) {
