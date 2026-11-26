@@ -85,7 +85,6 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     const auto property = [&](const char* units, const json& value) {
         json p{{"units", units}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
-        it::add_results_source(p, name);
         if (complete) p["value"] = value;
         else p["availability"] = {{"value", name + " has not met the requested criteria"}};
         return p;
@@ -107,12 +106,16 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
         properties["dispersion_energy"] = property("hartree", scf.dispersion.energy(world, scf.molecule));
     const auto request = scf_iteration_request(scf.param);
     const auto final = protocols(scf).back();
-    it::write_results_entry(world, root, {{"calculation_id", "ground_state"}, {"application", "moldft"},
+    // Every ground-state value comes from the one saved state: the entry
+    // carries its convergence once, and the properties carry none.
+    json entry{{"calculation_id", "ground_state"}, {"application", "moldft"},
         {"model", scf.param.xc()},
         {"protocol", cp::records::protocol_record(saved->protocol)},
         {"targets", it::results_targets(it::resolve(request, scf.iteration_model(), final, true, "ground state"))},
         {"properties", properties},
-        {"state_metrics", metrics}});
+        {"state_metrics", metrics}};
+    it::add_results_source(entry, name);
+    it::write_results_entry(world, root, std::move(entry));
 }
 } // namespace
 
@@ -158,11 +161,9 @@ void report_scf_properties(World& world, const SCF& scf, const Tensor<double>& d
                            const Tensor<double>& gradient, const json& populations) {
     // A run that saved no node (the legacy solve) writes no results.json.
     if ((dipole.size() == 0 && gradient.size() == 0 && populations.empty()) || !scf.last_node) return;
-    const auto name = std::filesystem::path(*scf.last_node).filename().string();
-    const auto property = [&](const char* units, const json& value) {
-        json p{{"units", units}, {"value_type", "real"}, {"status", "complete"}, {"value", value}};
-        it::add_results_source(p, name);
-        return p;
+    // Their convergence is the entry's: they come from its one saved state.
+    const auto property = [](const char* units, const json& value) {
+        return json{{"units", units}, {"value_type", "real"}, {"status", "complete"}, {"value", value}};
     };
     json properties = json::object();
     if (dipole.size() > 0) properties["dipole"] = property("atomic_units", tensor_values(dipole));

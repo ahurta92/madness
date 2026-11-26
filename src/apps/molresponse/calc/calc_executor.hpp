@@ -693,20 +693,22 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
   using json=nlohmann::json;
   auto& session=*ctx.shared_response;
   auto& binding=session.excited_at(es_node_id(std::is_same_v<Type,TDA>,n_roots));
-  json energies={{"units","hartree"},{"value_type","real"},{"values",json::array()}};
-  json strengths={{"units","dimensionless"},{"value_type","real"},{"values",json::array()}};
-  json dipoles={{"units","atomic_units"},{"value_type","real"},{"values",json::array()}};
-  json quadrupoles={{"units","atomic_units"},{"value_type","real"},{"definition","nontraceless second moment"},{"values",json::array()}};
-  // Every excited-state value comes from one root of the one set; its own
-  // metrics are its convergence. Its status is decided here, from what was
-  // computed.
+  // One item per root holds every excited-state value of that root. They all
+  // come from the root's own state, so the item has one convergence: the
+  // root's metrics. A value that was not computed is absent and named in
+  // availability; status is decided here, from what was computed.
+  json excited={{"value_type","real"},
+                {"units",{{"excitation_energy","hartree"},{"oscillator_strength","dimensionless"},
+                          {"transition_dipole","atomic_units"},{"transition_quadrupole","atomic_units"}}},
+                {"definitions",{{"transition_quadrupole","nontraceless second moment"}}},
+                {"values",json::array()}};
   const auto set_id=es_node_id(std::is_same_v<Type,TDA>,n_roots);
   const auto set_name=session.node_name(set_id);
-  const auto item=[&](const std::string& root,json fields) {
+  const auto item=[&](const std::string& root,const json& values,const json& missing) {
+    json fields=values;
     fields["root"]=root;
-    const bool computed=fields.contains("value") || !fields.value("components",json::object()).empty();
-    const bool whole=fields.value("availability",json::object()).empty();
-    fields["status"]=!computed ? "unavailable" : whole ? "complete" : "partial";
+    fields["availability"]=missing;
+    fields["status"]=values.empty() ? "unavailable" : missing.empty() ? "complete" : "partial";
     session.name_state(fields,set_id,root);
     return fields;
   };
@@ -738,40 +740,37 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
       output<<es_analysis_to_json(analysis,std::is_same_v<Type,TDA>,y_norms,state.stable_index).dump(2)<<'\n';
       output.close();return std::string{};
     });
+    const std::string not_computed="not computed by analysis diagnostic";
     for(std::size_t i=0;i<state.roots.size();++i) {
-      const auto id=make_root_id(state.stable_index[i]);
-      json components=json::object(), missing=json::object();
-      for(std::size_t a=0;a<3;++a) for(std::size_t b=0;b<3;++b) {
-        const auto key=std::string(1,"xyz"[a])+"xyz"[b];
-        if(analysis[i].quadrupole_available) components[key]=analysis[i].quadrupole[a][b];
-        else missing[key]="not computed by analysis diagnostic";
+      json values{{"excitation_energy",analysis[i].omega}}, missing=json::object();
+      if(analysis[i].dipole_available) {
+        values["oscillator_strength"]=analysis[i].oscillator;
+        json dipole=json::object();
+        for(std::size_t a=0;a<3;++a) dipole[std::string(1,"xyz"[a])]=analysis[i].dipole[a];
+        values["transition_dipole"]=dipole;
+      } else {
+        missing["oscillator_strength"]=not_computed;
+        missing["transition_dipole"]=not_computed;
       }
-      quadrupoles["values"].push_back(item(id,{{"components",components},{"availability",missing}}));
-      energies["values"].push_back(item(id,{{"value",analysis[i].omega}}));
-      if(analysis[i].dipole_available) strengths["values"].push_back(item(id,{{"value",analysis[i].oscillator}}));
-      else strengths["values"].push_back(item(id,{{"availability",{{"value","not computed by analysis diagnostic"}}}}));
-      components=json::object();missing=json::object();
-      for(std::size_t a=0;a<3;++a) {
-        const auto key=std::string(1,"xyz"[a]);
-        if(analysis[i].dipole_available) components[key]=analysis[i].dipole[a];
-        else missing[key]="not computed by analysis diagnostic";
+      if(analysis[i].quadrupole_available) {
+        json quadrupole=json::object();
+        for(std::size_t a=0;a<3;++a) for(std::size_t b=0;b<3;++b)
+          quadrupole[std::string(1,"xyz"[a])+"xyz"[b]]=analysis[i].quadrupole[a][b];
+        values["transition_quadrupole"]=quadrupole;
+      } else {
+        missing["transition_quadrupole"]=not_computed;
       }
-      dipoles["values"].push_back(item(id,{{"components",components},{"availability",missing}}));
+      excited["values"].push_back(item(make_root_id(state.stable_index[i]),values,missing));
     }
     session.timing().end();session.timing().end();
   } else {
     const auto reason=set_name+" has not met the requested criteria";
-    for(const auto& id:binding.expected().states) {
-      json missing=json::object();
-      for(char a:std::string("xyz")) for(char b:std::string("xyz")) missing[std::string(1,a)+b]=reason;
-      quadrupoles["values"].push_back(item(id,{{"components",json::object()},{"availability",missing}}));
-      energies["values"].push_back(item(id,{{"availability",{{"value",reason}}}}));
-      strengths["values"].push_back(item(id,{{"availability",{{"value",reason}}}}));
-      dipoles["values"].push_back(item(id,{{"components",json::object()},
-        {"availability",{{"x",reason},{"y",reason},{"z",reason}}}}));
-    }
+    json missing=json::object();
+    for(const char* field:{"excitation_energy","oscillator_strength","transition_dipole","transition_quadrupole"})
+      missing[field]=reason;
+    for(const auto& id:binding.expected().states) excited["values"].push_back(item(id,json::object(),missing));
   }
-  session.set_properties({{"excitation_energy",energies},{"oscillator_strength",strengths},{"transition_dipole",dipoles},{"transition_quadrupole",quadrupoles}});
+  session.set_properties({{"excited_states",excited}});
 }
 
 // ---------------------------------------------------------------------------

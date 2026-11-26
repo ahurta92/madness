@@ -10,11 +10,14 @@
 #include <madness/world/thread.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace madness::iteration {
 
@@ -83,15 +86,36 @@ inline void add_results_source(nlohmann::json& value, const std::string& node, c
     if (std::find(sources.begin(), sources.end(), source) == sources.end()) sources.push_back(std::move(source));
 }
 
-/// The metrics a value's `convergence` reports.
+/// The metrics a value's `convergence` reports when its entry names no
+/// targets.
 inline const std::vector<std::string>& convergence_metrics() {
     static const std::vector<std::string> names{"bsh_residual", "density_change"};
     return names;
 }
 
-/// The worst measured value of each convergence metric over `sources`, from
-/// the entry's state_metrics. A metric no source measured is left out.
-inline nlohmann::json worst_convergence(const nlohmann::json& state_metrics, const nlohmann::json& sources) {
+/// The metrics a `convergence` reports: every metric with a target in the
+/// entry's `targets`, flat or named by kind (driven_states, excited_states).
+/// A metric a value's states did not measure is still left out of its
+/// convergence (a driven state has no energy_change).
+inline std::vector<std::string> results_convergence_metrics(const nlohmann::json& targets) {
+    std::vector<std::string> names;
+    const auto add = [&](const std::string& name) {
+        if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    };
+    if (targets.is_object())
+        for (const auto& [key, target] : targets.items()) {
+            if (target.is_number()) add(key);
+            else if (target.is_object())
+                for (const auto& [metric, value] : target.items())
+                    if (value.is_number()) add(metric);
+        }
+    return names.empty() ? convergence_metrics() : names;
+}
+
+/// The worst measured value of each of `metrics` over `sources`, from the
+/// entry's state_metrics. A metric no source measured is left out.
+inline nlohmann::json worst_convergence(const nlohmann::json& state_metrics, const nlohmann::json& sources,
+                                        const std::vector<std::string>& metrics = convergence_metrics()) {
     nlohmann::json worst = nlohmann::json::object();
     for (const auto& source : sources) {
         const auto node = state_metrics.find(source.at("node").get<std::string>());
@@ -100,7 +124,7 @@ inline nlohmann::json worst_convergence(const nlohmann::json& state_metrics, con
         for (const auto& [subject, measured] : subjects.items()) {
             if (source.contains("subject") && source.at("subject") != subject) continue;
             const auto& values = measured.at("values");
-            for (const auto& metric : convergence_metrics()) {
+            for (const auto& metric : metrics) {
                 const auto value = values.find(metric);
                 if (value == values.end()) continue;
                 if (!worst.contains(metric) || value->get<double>() > worst.at(metric).get<double>())
@@ -111,24 +135,62 @@ inline nlohmann::json worst_convergence(const nlohmann::json& state_metrics, con
     return worst;
 }
 
+/// `x` rounded to `digits` significant figures. Convergence and targets are
+/// written this way; state_metrics and property values keep full precision.
+inline double round_significant(double x, int digits = 3) {
+    if (x == 0.0 || !std::isfinite(x)) return x;
+    char text[32];
+    std::snprintf(text, sizeof text, "%.*e", digits - 1, x);
+    return std::strtod(text, nullptr);
+}
+
+/// Every floating-point number in `j`, at any depth, rounded to three
+/// significant figures.
+inline nlohmann::json round_results_numbers(nlohmann::json j) {
+    std::vector<nlohmann::json*> pending{&j};
+    while (!pending.empty()) {
+        auto* node = pending.back();
+        pending.pop_back();
+        if (node->is_number_float()) *node = round_significant(node->get<double>());
+        else if (node->is_structured())
+            for (auto& element : *node) pending.push_back(&element);
+    }
+    return j;
+}
+
+/// The written convergence of a value or entry: the worst measured values
+/// over its sources, to three significant figures.
+inline nlohmann::json results_convergence(const nlohmann::json& state_metrics, const nlohmann::json& value,
+                                          const std::vector<std::string>& metrics) {
+    return round_results_numbers(
+        worst_convergence(state_metrics, value.value(results_sources_key, nlohmann::json::array()), metrics));
+}
+
 /// Turn one value (a single-answer property or an item of `values`) into its
-/// written form: its sources become `convergence`, and an empty availability
-/// is dropped.
-inline void finish_results_value(nlohmann::json& value, const nlohmann::json& state_metrics) {
-    value["convergence"] = worst_convergence(state_metrics, value.value(results_sources_key, nlohmann::json::array()));
+/// written form: its sources become `convergence` (unless the entry carries
+/// the convergence for all its values), and an empty availability is dropped.
+inline void finish_results_value(nlohmann::json& value, const nlohmann::json& state_metrics,
+                                 bool with_convergence = true,
+                                 const std::vector<std::string>& metrics = convergence_metrics()) {
+    if (with_convergence) value["convergence"] = results_convergence(state_metrics, value, metrics);
     value.erase(results_sources_key);
     if (value.contains("availability") && value.at("availability").empty()) value.erase("availability");
 }
 
-/// The written form of an entry's properties.
-inline nlohmann::json finish_results_properties(nlohmann::json properties, const nlohmann::json& state_metrics) {
+/// The written form of an entry's properties. With `with_convergence` false
+/// the entry carries one convergence for every value, and the properties none.
+/// `metrics` are those the convergence reports (results_convergence_metrics).
+inline nlohmann::json finish_results_properties(nlohmann::json properties, const nlohmann::json& state_metrics,
+                                                bool with_convergence = true,
+                                                const std::vector<std::string>& metrics = convergence_metrics()) {
     for (auto& [name, property] : properties.items()) {
         if (property.contains("values")) {
-            for (auto& item : property.at("values")) finish_results_value(item, state_metrics);
+            for (auto& item : property.at("values"))
+                finish_results_value(item, state_metrics, with_convergence, metrics);
             property.erase(results_sources_key);
             if (property.contains("availability") && property.at("availability").empty()) property.erase("availability");
         } else {
-            finish_results_value(property, state_metrics);
+            finish_results_value(property, state_metrics, with_convergence, metrics);
         }
     }
     return properties;
@@ -137,13 +199,25 @@ inline nlohmann::json finish_results_properties(nlohmann::json properties, const
 /// Collective. Replace this application's entry in results.json, keyed by its
 /// calculation_id, and leave the other entries alone. A file of another
 /// version is replaced, not merged. Each property's sources become its
-/// convergence (finish_results_properties).
+/// convergence (finish_results_properties). An entry that lists sources itself
+/// (every value from the same states, as the ground state) carries one
+/// convergence instead, and its properties none. A convergence reports every
+/// metric that has a target. Convergence and targets are written to three
+/// significant figures.
 inline void write_results_entry(World& world, const std::filesystem::path& root, nlohmann::json entry) {
     namespace cp = madness::checkpoint;
     const auto provenance = results_provenance(world);
+    const auto state_metrics = entry.value("state_metrics", nlohmann::json::object());
+    const auto metrics = results_convergence_metrics(entry.value("targets", nlohmann::json::object()));
+    const bool entry_convergence = entry.contains(results_sources_key);
+    if (entry_convergence) {
+        entry["convergence"] = results_convergence(state_metrics, entry, metrics);
+        entry.erase(results_sources_key);
+    }
     if (entry.contains("properties"))
-        entry["properties"] = finish_results_properties(entry.at("properties"),
-                                                        entry.value("state_metrics", nlohmann::json::object()));
+        entry["properties"] =
+            finish_results_properties(entry.at("properties"), state_metrics, !entry_convergence, metrics);
+    if (entry.contains("targets")) entry["targets"] = round_results_numbers(entry.at("targets"));
     cp::detail::on_root(world, [&] {
         const auto path = root / "results.json";
         nlohmann::json results{{"version", results_version}, {"calculations", nlohmann::json::array()}};
@@ -168,7 +242,8 @@ inline void write_results_entry(World& world, const std::filesystem::path& root,
 
 /// Collective. Add properties to this application's entry in results.json,
 /// which must have been written already. Their sources become convergence
-/// from that entry's state_metrics.
+/// from that entry's state_metrics, unless the entry carries one convergence
+/// for all its values.
 inline void add_results_properties(World& world, const std::filesystem::path& root, const std::string& id,
                                    const nlohmann::json& properties) {
     namespace cp = madness::checkpoint;
@@ -179,8 +254,9 @@ inline void add_results_properties(World& world, const std::filesystem::path& ro
         bool found = false;
         for (auto& entry : results.at("calculations"))
             if (entry.at("calculation_id") == id) {
-                entry.at("properties").update(
-                    finish_results_properties(properties, entry.value("state_metrics", nlohmann::json::object())));
+                entry.at("properties").update(finish_results_properties(
+                    properties, entry.value("state_metrics", nlohmann::json::object()), !entry.contains("convergence"),
+                    results_convergence_metrics(entry.value("targets", nlohmann::json::object()))));
                 found = true;
             }
         cp::records::require(found, "results.json has no entry " + id);

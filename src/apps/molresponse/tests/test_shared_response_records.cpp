@@ -299,7 +299,8 @@ int main(int argc, char** argv) {
                         metrics.at(recovered_leg.name()).at("subjects").size()==1);
                 require(recovered.node_name("new-leg")==recovered_leg.name());
                 // Each value's convergence is its states' worst measured
-                // values; no states list and no empty availability remain.
+                // values, to three significant figures; no states list and no
+                // empty availability remain.
                 const auto& measured=metrics.at(recovered_leg.name()).at("subjects").begin().value().at("values");
                 const auto& properties=entry.at("properties");
                 const auto& single=properties.at("single");
@@ -308,7 +309,7 @@ int main(int argc, char** argv) {
                   require(!value->contains("sources") && !value->contains("states") && !value->contains("availability"));
                   require(value->at("convergence").size()==2);
                   for(const auto& metric:{"bsh_residual","density_change"})
-                    require(value->at("convergence").at(metric)==measured.at(metric));
+                    require(value->at("convergence").at(metric)==it::round_significant(measured.at(metric).get<double>()));
                 }
                 require(single.at("value")==1.0 && listed.at("components").at("zz")==1.0);
                 // Only driven states: one set of final-level targets.
@@ -319,22 +320,39 @@ int main(int argc, char** argv) {
                         require(std::filesystem::is_directory(std::filesystem::path(root)/"states"/"response"/name));
                     return std::string{};
                 });
-                it::write_results_entry(world,root,{{"calculation_id","ground_state"},{"properties",cp::json::object()},
-                    {"state_metrics",{{"ground_state",{{"subjects",{{"ground",{{"values",{{"bsh_residual",2e-5},{"density_change",3e-5}}}}}}}}}}}});
+                // The ground entry takes its values from one state: one
+                // convergence on the entry, none on its properties. It reports
+                // every metric with a target (energy_change too, kinetic_change
+                // not); targets are written to three significant figures.
+                cp::json ground_entry{{"calculation_id","ground_state"},
+                    {"properties",{{"total_energy",{{"value",-1.0},{"status","complete"}}}}},
+                    {"targets",{{"bsh_residual",1.23456e-4},{"density_change",1e-4},{"energy_change",1e-5}}},
+                    {"state_metrics",{{"ground_state",{{"subjects",{{"ground",{{"values",
+                        {{"bsh_residual",2.04449e-5},{"density_change",3e-5},{"energy_change",2.73029e-8},{"kinetic_change",1.0}}}}}}}}}}}};
+                it::add_results_source(ground_entry,"ground_state");
+                it::write_results_entry(world,root,ground_entry);
                 recovered.report();
                 results=read_root_json(world,results_path);
                 require(results.at("calculations").size()==2 &&
                         results.at("calculations").at(0).at("calculation_id")=="ground_state" &&
                         results.at("calculations").at(1).at("calculation_id")=="response");
+                {
+                    const auto& ground=results.at("calculations").at(0);
+                    require(ground.at("convergence")==cp::json({{"bsh_residual",2.04e-5},{"density_change",3e-5},{"energy_change",2.73e-8}}) &&
+                            !ground.contains("sources") && ground.at("targets").at("bsh_residual")==1.23e-4 &&
+                            !ground.at("properties").at("total_energy").contains("convergence") &&
+                            ground.at("properties").at("total_energy").at("value")==-1.0 &&
+                            ground.at("state_metrics").at("ground_state").at("subjects").at("ground")
+                                .at("values").at("bsh_residual")==2.04449e-5);
+                }
                 // Properties computed after an entry is written are added to
-                // it, with their convergence from that entry's state_metrics.
+                // it; an entry with its own convergence gives them none.
                 cp::json dipole{{"value",cp::json::array({0.0,0.0,1.0})},{"status","complete"}};
                 it::add_results_source(dipole,"ground_state");
                 it::add_results_properties(world,root,"ground_state",{{"dipole",dipole}});
                 results=read_root_json(world,results_path);
                 const auto& added=results.at("calculations").at(0).at("properties").at("dipole");
-                require(added.at("value").size()==3 && !added.contains("sources") &&
-                        added.at("convergence")==cp::json({{"bsh_residual",2e-5},{"density_change",3e-5}}) &&
+                require(added.at("value").size()==3 && !added.contains("sources") && !added.contains("convergence") &&
                         results.at("calculations").at(1).at("calculation_id")=="response");
                 rejects([&]{it::add_results_properties(world,root,"missing",cp::json::object());});
             }
@@ -355,6 +373,21 @@ int main(int argc, char** argv) {
                 require(value.at("sources").size()==3);
                 require(it::worst_convergence(table,value.at("sources"))==cp::json({{"bsh_residual",5e-5},{"density_change",4e-5}}));
                 require(it::worst_convergence(table,cp::json::array({{{"node","vbc"}},{{"node","absent"}}}))==cp::json::object());
+                // A convergence reports every metric with a target, flat or
+                // named by kind; with no targets, the residual and density.
+                require(it::results_convergence_metrics({{"driven_states",{{"bsh_residual",1e-3},{"density_change",1e-3}}},
+                            {"excited_states",{{"bsh_residual",1e-3},{"energy_change",1e-3}}}})==
+                        std::vector<std::string>({"bsh_residual","density_change","energy_change"}));
+                require(it::results_convergence_metrics(cp::json::object())==it::convergence_metrics());
+                require(it::worst_convergence(table,value.at("sources"),{"bsh_residual","kinetic_change"})==
+                        cp::json({{"bsh_residual",5e-5},{"kinetic_change",1.0}}));
+                // Three significant figures, at any depth; integers, strings
+                // and zero are left alone.
+                require(it::round_significant(2.1578670402586745e-05)==2.16e-05 && it::round_significant(0.0005)==0.0005 &&
+                        it::round_significant(0.13038009471965675)==0.13 && it::round_significant(-1.23456)==-1.23 &&
+                        it::round_significant(0.0)==0.0);
+                require(it::round_results_numbers({{"a",{{"b",1.23456e-4}}},{"n",3},{"s","x"}})==
+                        cp::json({{"a",{{"b",1.23e-4}}},{"n",3},{"s","x"}}));
             }
             // Raman, which no check runs: one spectrum item per laser
             // frequency, a number, with the Hessian's states and that

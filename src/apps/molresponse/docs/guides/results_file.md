@@ -60,7 +60,11 @@ uncommitted changes.
   (`driven_states`, `excited_states`); otherwise `targets` is one object of
   metric to target. A driven state's residual and density targets use the
   scaled rule: the state met them when its value was at most target × (1 +
-  scale).
+  scale). Targets are written to three significant figures.
+- `convergence` appears on the entry instead of on its properties when every
+  value of the entry comes from the same state: the `ground_state` entry has
+  one `convergence`, the worst measured values of its saved state, and its
+  properties have none.
 - `run` appears only on the response entry. `dropped_work` and `stalled` are
   always lists, empty when nothing was dropped.
 - `state_metrics` is keyed by node name: the per-state table behind every
@@ -72,15 +76,15 @@ uncommitted changes.
 
 ## One property
 
-A property with one answer has `value`:
+A property with one answer has `value` (on the `ground_state` entry the
+`convergence` is the entry's, so the property has none):
 
 ```json
 "total_energy": {
   "units": "hartree",
   "value_type": "real",
   "value": -1.1335935503913517,
-  "status": "complete",
-  "convergence": {"bsh_residual": 2.2e-05, "density_change": 2.8e-05}
+  "status": "complete"
 }
 ```
 
@@ -96,10 +100,35 @@ a `values` list. Each item has the keys that say what it belongs to, then
     {"frequency": 0.0,
      "components": {"zz": 6.4364},
      "status": "complete",
-     "convergence": {"bsh_residual": 2.3e-06, "density_change": 3.4e-05}}
+     "convergence": {"bsh_residual": 2.25e-06, "density_change": 3.42e-05}}
   ]
 }
 ```
+
+The excited states are one property, `excited_states`, with one item per
+root. Each value of a root is its own key, so `units` maps each to its unit:
+
+```json
+"excited_states": {
+  "value_type": "real",
+  "units": {"excitation_energy": "hartree", "oscillator_strength": "dimensionless",
+            "transition_dipole": "atomic_units", "transition_quadrupole": "atomic_units"},
+  "definitions": {"transition_quadrupole": "nontraceless second moment"},
+  "values": [
+    {"root": "es_root_0000",
+     "excitation_energy": 0.46583,
+     "oscillator_strength": 0.28548,
+     "transition_dipole": {"x": 0.0, "y": 0.0, "z": -0.95878},
+     "transition_quadrupole": {"xx": 0.0, "xy": 0.0, ...},
+     "status": "complete",
+     "convergence": {"bsh_residual": 3.85e-05, "density_change": 0.000109, "energy_change": 1e-07}}
+  ]
+}
+```
+
+A root value that was not computed is absent from its item and named in
+`availability`; the item is then `partial`, or `unavailable` when nothing was
+computed.
 
 - A property holds the value at the final protocol level only. Earlier levels
   are in the node histories and the log.
@@ -111,24 +140,27 @@ a `values` list. Each item has the keys that say what it belongs to, then
 - `availability` appears only when something is missing: it lists each missing
   component (or `value`) with the reason, which names the state that fell short
   by its folder name.
-- `convergence` is the worst measured value of `bsh_residual` and
-  `density_change` over every state the value was computed from, at the final
-  level, taken from `state_metrics`. For a value of an excited root, that
-  root's own metrics count. **It is a measurement of the states, not an error
-  bar on the property.** A metric no state measured is left out, so a value
-  whose states were never saved has an empty `convergence`.
+- `convergence` is the worst measured value of every metric that has a
+  target in the entry's `targets` (`bsh_residual`, `density_change`, and
+  `energy_change` where the ground state or an excited root has an energy
+  target), over every state the value was computed from, at the final level,
+  taken from `state_metrics`, written to three significant figures
+  (`state_metrics` and every property value keep full precision). For a value
+  of an excited root, that root's own metrics count. **It is a measurement of
+  the states, not an error bar on the property.** A metric no state measured is
+  left out (a driven state has no `energy_change`), so a value whose states
+  were never saved has an empty `convergence`.
 - A property that was not requested is absent, not `unavailable`.
 
 Which states a value used follows from what it is:
 
 | Property | Item per | Identifying keys | States its convergence covers |
 |---|---|---|---|
-| `total_energy`, `orbital_energies`, `energy_components`, `dispersion_energy`, `dipole`, `gradient`, `populations` | (one value) | | the ground state |
+| `total_energy`, `orbital_energies`, `energy_components`, `dispersion_energy`, `dipole`, `gradient`, `populations` | (one value) | | the ground state (written once, on the entry) |
 | `polarizability` | frequency | `frequency` | the dipole states at that frequency |
 | `hyperpolarizability` | frequency pair | `frequency_b`, `frequency_c` | for each component ABC: the A state at ω_B + ω_C, the B and C states, and the second-order source |
 | `polarizability_gradient` | laser frequency | `frequency` | as β; components are keyed by nuclear coordinate, then dipole pair |
-| `excitation_energy`, `oscillator_strength` | root | `root` | the root |
-| `transition_dipole`, `transition_quadrupole` | root | `root` | the root |
+| `excited_states` | root | `root` | the root; the item holds `excitation_energy`, `oscillator_strength`, `transition_dipole`, `transition_quadrupole` |
 | `two_photon_absorption` | root | `root`, `energy`, `frequency` | the root and the three dipole states at `frequency` (half the root's energy) |
 | `vibrational_analysis` | (one value) | | the static nuclear-displacement states; `value` holds `hessian`, `frequencies`, `normal_modes`, `reduced_mass` |
 | `raman_spectrum` | laser frequency | `frequency` | the Hessian's states and that frequency's polarizability-gradient states; `value` is the list of mode rows |
