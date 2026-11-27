@@ -180,8 +180,10 @@ compute_vibrational_analysis(ExecutorContext &ctx) {
 }
 
 /// Full Raman assembly at protocol `thresh`: Hessian + modes (collective), then
-/// the per-mode spectrum from the raman rows recorded at this protocol (rank 0),
-/// written as the "vibrational_analysis" and "raman_spectra" sections.
+/// the per-mode spectrum from the polarizability gradient this run assembled
+/// (in memory, rank 0). Published as the vibrational_analysis and
+/// raman_spectrum properties; the metadata file keeps a copy in its
+/// "vibrational_analysis" and "raman_spectra" sections, which nothing reads.
 inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &plan,
                                     double thresh) {
   using namespace madness;
@@ -239,7 +241,6 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   constexpr double tr_cutoff_cm1 = 1.0;
   const auto modes = raman::vibrational_modes(vib->frequencies, tr_cutoff_cm1);
 
-  const auto &j = meta.json();
 
   // --- vibrational_analysis section --------------------------------------
   nlohmann::json va;
@@ -288,32 +289,39 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   const auto &pol_freqs = laser_frequencies;
   rs["polarization_frequencies"] = pol_freqs;
 
-  const bool have_rows = j.contains("properties") && j["properties"].contains("raman") &&
-                         j["properties"]["raman"].contains(key);
   nlohmann::json derivs = nlohmann::json::object(), derivs_modes = nlohmann::json::object(),
                  spectra = nlohmann::json::object(), complete = nlohmann::json::object();
   static const char *axn = "xyz";
   for (double w : pol_freqs) {
     const std::string wkey = ResponseMetadata::freq_key(w);
     Tensor<double> D(9L, dim);
-    long found = 0; bool all_conv = true;
-    if (have_rows) {
-      for (const auto &row : j["properties"]["raman"][key]) {
-        if (std::abs(row.value("freq_b", -1.0) - w) > 1e-9) continue;
-        if (std::abs(row.value("freq_c", -1.0)) > 1e-9) continue;
-        const std::string A = row.value("A", ""), B = row.value("B", ""), C = row.value("C", "");
-        if (A.size() != 1 || B.rfind("dipole_", 0) != 0 || C.rfind("nuc_", 0) != 0) continue;
-        const int ia = static_cast<int>(std::string(axn).find(A[0]));
-        const int ib = static_cast<int>(std::string(axn).find(B.back()));
-        // C = nuc_<atom>_<axis>
-        const auto us = C.find('_', 4);
-        if (ia < 0 || ib < 0 || us == std::string::npos) continue;
-        const int atom = std::stoi(C.substr(4, us - 4));
-        const int ic = static_cast<int>(std::string(axn).find(C.back()));
-        if (atom < 0 || atom >= natom || ic < 0) continue;
-        D(3 * ia + ib, 3 * atom + ic) = row.value("beta", 0.0);
-        ++found;
-        all_conv = all_conv && row.value("converged", false);
+    // The derivative tensor at w from the polarizability gradient assembled
+    // in this run: its static-pair item (frequency w, no frequency_c), whose
+    // components are keyed by nuclear coordinate nuc_<atom>_<axis>, then by
+    // dipole pair AB. A component is present only when computed from
+    // converged states; a missing one is named in the item's availability.
+    long found = 0; const bool all_conv = true;
+    if (gradient.is_object() && gradient.contains("values")) {
+      for (const auto &item : gradient.at("values")) {
+        if (std::abs(item.value("frequency", -1.0) - w) > 1e-9) continue;
+        if (std::abs(item.value("frequency_c", 0.0)) > 1e-9) continue;
+        if (!item.contains("components") || !item.at("components").is_object()) continue;
+        for (const auto &[C, pairs] : item.at("components").items()) {
+          // C = nuc_<atom>_<axis>
+          const auto us = C.find('_', 4);
+          if (C.rfind("nuc_", 0) != 0 || us == std::string::npos) continue;
+          const int atom = std::stoi(C.substr(4, us - 4));
+          const int ic = static_cast<int>(std::string(axn).find(C.back()));
+          if (atom < 0 || atom >= natom || ic < 0) continue;
+          for (const auto &[AB, value] : pairs.items()) {
+            if (AB.size() != 2 || !value.is_number()) continue;
+            const int ia = static_cast<int>(std::string(axn).find(AB[0]));
+            const int ib = static_cast<int>(std::string(axn).find(AB[1]));
+            if (ia < 0 || ib < 0) continue;
+            D(3 * ia + ib, 3 * atom + ic) = value.get<double>();
+            ++found;
+          }
+        }
       }
     }
     complete[wkey] = {{"rows_found", found}, {"rows_expected", 9 * dim},

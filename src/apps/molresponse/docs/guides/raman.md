@@ -55,7 +55,9 @@ legs, builds the dipole × nuclear source for every coordinate, writes the
   Hessian added), projected frequencies (hartree and cm⁻¹), mass-weighted
   normal modes, Cartesian displacements per unit normal coordinate, reduced
   masses.
-- `raman_spectra`: per optical frequency the 9 × 3N derivative table, its
+- `raman_spectra`: per optical frequency the 9 × 3N derivative table (taken
+  from the polarizability gradient the same run assembled, in memory; the
+  metadata rows are a copy nothing reads back), its
   projection on the vibrational modes, and per mode α′², β′², the activity
   45α′² + 4β′² (a.u. and Å⁴/amu), and the depolarization ratio 3β′²/(45α′²+4β′²).
   Every row states whether all derivative rows that fed it converged.
