@@ -492,15 +492,19 @@ public:
   void report() {
     cp::records::require(scope_.group<0,"only the main session writes the results file");
     // Each saved node's measured values, keyed by its folder name: the table
-    // each property's convergence is taken from.
+    // each property's convergence is taken from, with the number of updates
+    // the node took at its saved level (one number for an excited set).
     json metrics=json::object();
-    const auto add=[&](const std::string& name,const it::IterationMetrics& frame) {
+    const auto add=[&](const std::string& name,const it::IterationMetrics& frame,std::size_t updates) {
       json subjects=json::object();
       for (const auto& subject:frame.states) subjects[subject.id]=measured_values(frame,subject.id);
-      metrics[name]={{"protocol",cp::records::protocol_record(frame.info.protocol)},{"subjects",subjects}};
+      metrics[name]={{"protocol",cp::records::protocol_record(frame.info.protocol)},{"updates",updates},
+                     {"subjects",subjects}};
     };
-    for (const auto& [id,state] : states) if (state->has_node()) add(state->name(),state->saved_metrics());
-    for (const auto& [id,set] : excited) if (set->has_saved()) add(node_name(id),set->saved_metrics());
+    for (const auto& [id,state] : states)
+      if (state->has_node()) add(state->name(),state->saved_metrics(),state->description().updates_at_protocol);
+    for (const auto& [id,set] : excited)
+      if (set->has_saved()) add(node_name(id),set->saved_metrics(),set->description().updates_at_protocol);
     // A second-order source is built, not iterated: it has no measured values.
     for (const auto& [id,node] : second_order) if (node->reusable())
       metrics[node->name()]={{"protocol",cp::records::protocol_record(node->description().protocol)},

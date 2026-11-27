@@ -287,7 +287,8 @@ int main(int argc, char** argv) {
             // application's entry is left alone.
             {
                 auto results=read_root_json(world,results_path);
-                require(results.at("version")==4 && results.at("calculations").size()==1 && !results.contains("attempt_id"));
+                require(results.at("version")==madness::iteration::results_version &&
+                        results.at("calculations").size()==1 && !results.contains("attempt_id"));
                 const auto& provenance=results.at("provenance");
                 require(provenance.at("code_version").is_string() && provenance.at("launched_at").is_string() &&
                         provenance.at("mpi_processes")==world.size() && provenance.at("archive_io")=="native");
@@ -297,6 +298,8 @@ int main(int argc, char** argv) {
                 const auto& metrics=entry.at("state_metrics");
                 require(metrics.contains(recovered_leg.name()) && !metrics.contains(moved.name()) &&
                         metrics.at(recovered_leg.name()).at("subjects").size()==1);
+                // The updates the node took at its saved level, from its description.
+                require(metrics.at(recovered_leg.name()).at("updates")==recovered_leg.description().updates_at_protocol);
                 require(recovered.node_name("new-leg")==recovered_leg.name());
                 // Each value's convergence is its states' worst measured
                 // values, to three significant figures; no states list and no

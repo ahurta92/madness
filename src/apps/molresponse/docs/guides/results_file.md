@@ -11,7 +11,7 @@ replaced, not merged.
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "provenance": {
     "code_version": "<git commit the program was built from>",
     "launched_at": "2026-11-25T09:12:03.512Z",
@@ -46,6 +46,7 @@ uncommitted changes.
   "state_metrics": {
     "dipole_z-f0.00000": {
       "protocol": {"threshold": 0.0001, "k": 6},
+      "updates": 7,
       "subjects": {"response": {"values": {"bsh_residual": 2.3e-06, "density_change": 3.4e-05}, "availability": {}}}
     }
   }
@@ -74,11 +75,15 @@ uncommitted changes.
   reasons (`complete_with_stalled`, `complete_with_dropped_beta`, …), which take
   precedence.
 - `state_metrics` is keyed by node name: the per-state table behind every
-  `convergence`. Each node gives the level it was saved at and the measured
-  values of each of its subjects. A driven state has one subject (`response`),
-  an excited-state set one per root (`es_root_0000`, …), the ground state one
-  (`ground`). A second-order source is built rather than iterated, so its
-  `subjects` is empty.
+  `convergence`. Each node gives the level it was saved at, the number of
+  updates it took at that level (`updates`, the node description's
+  `updates_at_protocol`; one number for an excited-state set, whose roots are
+  updated together), and the measured values of each of its subjects. A driven
+  state has one subject (`response`), an excited-state set one per root
+  (`es_root_0000`, …), the ground state one (`ground`). A second-order source
+  is built rather than iterated, so it has no `updates` and its `subjects` is
+  empty. A state reused from an earlier launch keeps the count it was saved
+  with.
 
 ## One property
 

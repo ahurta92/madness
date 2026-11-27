@@ -63,7 +63,7 @@ inline nlohmann::json results_provenance(World& world) {
             {"archive_io", archive_io_backend()}};
 }
 
-inline constexpr int results_version = 5;
+inline constexpr int results_version = 6;
 
 /// Rank zero. Write `results`, with its derived quantities computed afresh
 /// (add_derived_quantities), to results.json and its text summary to

@@ -11,7 +11,7 @@ using json = nlohmann::json;
 
 // Everything complete: a ground state and a response with alpha and one root.
 const char* all_complete = R"json({
-  "version": 5,
+  "version": 6,
   "provenance": {"code_version": "900a79af8c1e2b3d4f5a6b7c8d9e0f1a2b3c4d5e-dirty",
                  "launched_at": "2026-11-26T01:51:07.123Z", "mpi_processes": 1,
                  "threads_per_process": 16, "archive_io": "native"},
@@ -107,7 +107,7 @@ Response (molresponse), level 1.0e-04 k 6
 
 // An excited root that never converged, and beta work that was dropped.
 const char* unavailable_and_dropped = R"json({
-  "version": 5,
+  "version": 6,
   "provenance": {"code_version": "unknown", "launched_at": "2026-11-26T02:00:00.000Z",
                  "mpi_processes": 2, "threads_per_process": 8, "archive_io": "native"},
   "calculations": [
@@ -181,7 +181,7 @@ Response (molresponse), level 1.0e-04 k 6
 // Quadratic response, two-photon absorption and Raman, with one driven value
 // above its target that the scaled rule still passed.
 const char* quadratic_two_photon_raman = R"json({
-  "version": 5,
+  "version": 6,
   "provenance": {"code_version": "0123456789abcdef0123456789abcdef01234567", "launched_at": "2026-11-26T03:04:05.000Z",
                  "mpi_processes": 1, "threads_per_process": 4, "archive_io": "hdf5"},
   "calculations": [
@@ -276,7 +276,7 @@ Response (molresponse), level 1.0e-06 k 8
 // hyperpolarizability (its 27 components are not printed, its derived
 // quantities are), an excited root, the HOMO and the dipole magnitude.
 const char* derived_present = R"json({
-  "version": 5,
+  "version": 6,
   "provenance": {"code_version": "unknown", "launched_at": "2026-11-26T04:00:00.000Z",
                  "mpi_processes": 1, "threads_per_process": 2, "archive_io": "native"},
   "calculations": [
@@ -389,7 +389,7 @@ Response (molresponse), level 1.0e-04 k 6
 
 // A run whose states did not converge: the run line counts them.
 const char* unconverged = R"json({
-  "version": 5,
+  "version": 6,
   "provenance": {"code_version": "unknown", "launched_at": "2026-11-26T05:00:00.000Z",
                  "mpi_processes": 1, "threads_per_process": 2, "archive_io": "native"},
   "calculations": [

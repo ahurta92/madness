@@ -51,7 +51,8 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
     scf.pad_virtuals_from_guess(world);
 }
 
-// One node's measured values, keyed in results.json by its folder name.
+// One node's measured values, keyed in results.json by its folder name, with
+// the number of updates it took at its saved level.
 json state_metrics(const it::NodeDescription& saved) {
     json subjects = json::object();
     for (const auto& state : it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"}).states) {
@@ -63,7 +64,8 @@ json state_metrics(const it::NodeDescription& saved) {
         }
         subjects[state.id] = {{"values", values}, {"availability", unavailable}};
     }
-    return {{"protocol", cp::records::protocol_record(saved.protocol)}, {"subjects", subjects}};
+    return {{"protocol", cp::records::protocol_record(saved.protocol)}, {"updates", saved.updates_at_protocol},
+            {"subjects", subjects}};
 }
 
 // A tensor's elements in row-major order.
