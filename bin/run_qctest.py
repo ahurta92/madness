@@ -6,12 +6,16 @@ A qctest case is a self-contained directory (see src/examples/qc/README.md):
     <case>/<case>.in                        the input deck
     <case>/run.sh                           one-liner invocation
     <case>/check.json                       result keys + tolerances
-        (each check: "key" plus "tol" | "rtol" | "max"; see compare()),
+        (each check: "key" plus "tol" | "rtol" | "max" | "min"; see compare();
+        optional "file": "results" | "calc_info" names the file the key is
+        read from, see FILES; a key may select a list item by field value,
+        see lookup(); "count": true compares the length of a list),
         or "expect_error": "<text>" for a case that must be REFUSED
         (see check_expected_error(); no checks and no reference needed);
         optional "expect_files": [glob, ...] relative to the work dir, each of
         which must match a produced file (see check_expected_files())
-    <case>/reference/<case>.calc_info.json  compared numerically
+    <case>/reference/<case>.calc_info.json  compared numerically (checks on calc_info)
+    <case>/reference/<case>.results.json    compared numerically (checks on results)
     <case>/reference/<case>.out             for humans; never compared
 
 The case is copied into the current working directory and run there, so the
@@ -33,10 +37,33 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parent))
-from test_utilities import madjsoncompare
-
 SKIP = 77
+
+# The files a check can read. A check names one with "file"; without it, it
+# reads calc_info.json. Each maps to (the run's file, the reference's name).
+FILES = ("calc_info", "results")
+DEFAULT_FILE = "calc_info"
+
+# Everything a check entry may carry.
+ENTRY_FIELDS = {"key", "file", "count", "tol", "rtol", "max", "min", "allow_zero"}
+
+
+def output_files(case, workdir, check):
+    """file kind -> (path of the run's file, path of its reference)."""
+    # madqc names its output after the deck: <case>.in -> <case>.calc_info.json
+    # and the run folder <case>/, which holds results.json.
+    # (A deck literally named `input` would fall back to the default prefix `mad`,
+    # which is why cases name the deck after themselves.)
+    calc_info = workdir / check.get("output", f"{case.name}.calc_info.json")
+    return {"calc_info": (calc_info, case / "reference" / calc_info.name),
+            "results": (workdir / case.name / "results.json",
+                        case / "reference" / f"{case.name}.results.json")}
+
+
+def file_kinds(checks):
+    """The file kinds the checks read, in FILES order."""
+    named = {entry.get("file", DEFAULT_FILE) for entry in checks}
+    return [kind for kind in FILES if kind in named]
 
 
 def load_check(case, updating):
@@ -168,37 +195,93 @@ def run(runscript, logfile):
     return p.returncode
 
 
+class SelectorError(LookupError):
+    """A key-path selector that matched no list item, or more than one."""
+
+
+SELECTOR_TOL = 1e-9
+
+
+def _matches(item, selector):
+    """Whether a list item has every field of the selector, numbers within SELECTOR_TOL."""
+    if not isinstance(item, dict):
+        return False
+    for field, want in selector.items():
+        if field not in item:
+            return False
+        have = item[field]
+        if _number(want) and _number(have):
+            if abs(have - want) > SELECTOR_TOL:
+                return False
+        elif have != want or type(have) is not type(want):
+            return False
+    return True
+
+
 def lookup(data, keys):
+    """Walk a key path: a string indexes an object, an int a list, and an object
+    such as {"frequency": 0.05} selects the one list item whose fields equal it
+    (numbers within SELECTOR_TOL). A selector that matches no item or more than
+    one raises SelectorError."""
     for k in keys:
-        data = data[k]
+        if isinstance(k, dict):
+            if not isinstance(data, list):
+                raise TypeError(f"selector {json.dumps(k)} applied to a {type(data).__name__}, not a list")
+            hits = [item for item in data if _matches(item, k)]
+            if len(hits) != 1:
+                raise SelectorError(f"selector {json.dumps(k)} matched {len(hits)} of "
+                                    f"{len(data)} items; it must match exactly one")
+            data = hits[0]
+        else:
+            data = data[k]
     return data
+
+
+def label(entry):
+    """How a check names itself in the log: its key path, and "(count)" for a count."""
+    return f"{entry['key']}" + (" (count)" if entry.get("count") else "")
+
+
+def value_at(data, entry):
+    """The checked value: the one at the key path, or with "count" the length of
+    the list there."""
+    value = lookup(data, entry["key"])
+    if entry.get("count"):
+        if not isinstance(value, list):
+            raise TypeError(f"'count' needs a list, found {type(value).__name__}")
+        return len(value)
+    return value
 
 
 def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def check_max(data, keys, bound):
-    """Upper bound on the produced value alone.
+def check_bound(data, entry, mode):
+    """A bound on the produced value alone: "max" an upper bound, "min" a lower one.
 
     For iteration counts and residuals the reference is a budget, not a number to
     reproduce: a solve that takes 9 iterations where the reference took 7 is not a
-    regression, one that takes 40 is. The reference file is not consulted.
+    regression, one that takes 40 is. Likewise an overlap of 0.998 where the
+    reference had 0.9995 is not a regression, one of 0.6 is. The reference file
+    is not consulted.
     """
+    keys, bound = label(entry), entry[mode]
     try:
-        value = lookup(data, keys)
-    except (KeyError, IndexError, TypeError) as e:
+        value = value_at(data, entry)
+    except (LookupError, TypeError) as e:
         print(f"key {keys} not found in the output: {type(e).__name__}: {e}")
         return False
     if not _number(value):
-        print(f"key {keys} is {value!r}, not a number; 'max' needs a numeric value")
+        print(f"key {keys} is {value!r}, not a number; '{mode}' needs a numeric value")
         return False
-    ok = value <= bound
-    print(f"key {keys} {'within' if ok else 'exceeds'} max {bound}: {value}")
+    ok = value <= bound if mode == "max" else value >= bound
+    word = ("within" if ok else "exceeds") if mode == "max" else ("meets" if ok else "below")
+    print(f"key {keys} {word} {mode} {bound}: {value}")
     return ok
 
 
-def check_rtol(out, ref, keys, rtol, allow_zero=False):
+def check_rtol(out, ref, entry, rtol, allow_zero=False):
     """|out - ref| <= rtol * |ref|.
 
     A reference of exactly zero makes the bound zero, so the check is either
@@ -206,9 +289,10 @@ def check_rtol(out, ref, keys, rtol, allow_zero=False):
     allow_zero, in which case it degenerates to an exact match (the physics is a
     symmetry zero and the run must reproduce it).
     """
+    keys = label(entry)
     try:
-        v1, v2 = lookup(out, keys), lookup(ref, keys)
-    except (KeyError, IndexError, TypeError) as e:
+        v1, v2 = value_at(out, entry), value_at(ref, entry)
+    except (LookupError, TypeError) as e:
         print(f"key {keys} not found in both files: {type(e).__name__}: {e}")
         return False
     if not (_number(v1) and _number(v2)):
@@ -226,51 +310,118 @@ def check_rtol(out, ref, keys, rtol, allow_zero=False):
     return ok
 
 
+def check_tol(out, ref, entry, tol):
+    """Absolute tolerance for floats (<=, so 0 means exact); ints, strings,
+    booleans and anything else compare exactly. The semantics of
+    test_utilities.madjsoncompare.compare, on values found by value_at."""
+    keys = label(entry)
+    try:
+        v1, v2 = value_at(out, entry), value_at(ref, entry)
+    except (LookupError, TypeError) as e:
+        print(f"key {keys} not found in both files: {type(e).__name__}: {e}")
+        return False
+    diff = "is different"
+    if type(v1) is float:
+        if not _number(v2):
+            print(f"key {keys} is not numeric in both files ({v1!r}, {v2!r})")
+            return False
+        diff = abs(v1 - v2)
+        ok = diff <= tol
+    else:
+        ok = v1 == v2
+        if ok:
+            diff = ""
+    print(f"key {keys} {'agrees to' if ok else 'differs gt'} {tol}: {v1} {v2} {diff}")
+    if not ok:
+        return False
+
+    # A reference value no larger than its own tolerance makes the check
+    # vacuous: every conceivable result passes, so it survives any
+    # regression. Exactly 0.0 is the common case -- a field the workflow
+    # never populated, which is what several of the older hand-written
+    # scripted tests compare for `scf_total_energy` -- but a dark state's
+    # 1e-26 oscillator strength checked to 1e-3 is just as empty. Require an
+    # explicit opt-in where the near-zero is the physics (a
+    # symmetry-vanishing dipole, a gradient at a stationary point).
+    if isinstance(v2, float) and abs(v2) <= tol and not entry.get("allow_zero"):
+        print(f"key {keys} has reference value {v2!r}, within its own tolerance "
+              f"{tol} -- this check cannot fail. Compare a key that carries a "
+              "value, or set \"allow_zero\": true if the near-zero is physical.")
+        return False
+    return True
+
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
 def compare(output, reference, checks):
     """Compare the declared keys. A missing key is a failure.
+
+    `output` and `reference` are each a path, used for every check, or a dict
+    from file kind (FILES) to path; a check reads the kind its "file" names
+    (default calc_info). A file is read only if some check names it.
 
     Each entry names a key path and one or more of:
       tol   absolute tolerance against the reference (0 = exact; ints/strings/bools exact)
       rtol  relative tolerance against the reference
       max   upper bound on the produced value alone (reference not consulted)
-    `max` may be combined with `tol` or `rtol`; an entry with only `max` never reads
-    the reference value.
+      min   lower bound on the produced value alone (reference not consulted)
+    `max` and `min` may be combined with each other and with `tol` or `rtol`; an
+    entry with only bounds never reads the reference value. Any other field
+    fails the check. With "count": true the checked value is the length of
+    the list at the key path.
     """
-    cmp = madjsoncompare(str(output), str(reference))
+    cache = {}
+
+    def data(paths, kind):
+        path = paths if not isinstance(paths, dict) else paths.get(kind)
+        if path is None:
+            raise LookupError(f"no {kind} file was given")
+        if path not in cache:
+            if not Path(path).is_file():
+                raise LookupError(f"{path} does not exist")
+            cache[path] = load_json(path)
+        return cache[path]
+
+    success = True
     for entry in checks:
         keys = entry["key"]
-        if "max" in entry:
-            cmp.success = check_max(cmp.data1, keys, entry["max"]) and cmp.success
-            if "tol" not in entry and "rtol" not in entry:
-                continue
-        if "rtol" in entry:
-            cmp.success = check_rtol(cmp.data1, cmp.data2, keys, entry["rtol"],
-                                     entry.get("allow_zero", False)) and cmp.success
+        unknown = sorted(set(entry) - ENTRY_FIELDS)
+        if unknown:
+            # A misspelt or unsupported mode would otherwise fall through to an
+            # exact comparison (how "min" was silently ignored before it existed).
+            print(f"key {keys}: unknown field(s) {unknown}; a check may carry "
+                  f"{sorted(ENTRY_FIELDS)}")
+            success = False
             continue
-
-        tol = entry.get("tol", 0.0)
+        kind = entry.get("file", DEFAULT_FILE)
+        if kind not in FILES:
+            print(f"key {keys}: unknown file {kind!r}; expected one of {FILES}")
+            success = False
+            continue
         try:
-            cmp.compare(keys, tol)
-        except (KeyError, IndexError, TypeError) as e:
-            print(f"key {keys} not found in both files: {type(e).__name__}: {e}")
-            cmp.success = False
+            out = data(output, kind)
+            # An entry with only bounds (`max`, `min`) never reads the reference.
+            bounded = "max" in entry or "min" in entry
+            needs_reference = "tol" in entry or "rtol" in entry or not bounded
+            ref = data(reference, kind) if needs_reference else None
+        except (LookupError, OSError, ValueError) as e:
+            print(f"key {keys} ({kind}): {e}")
+            success = False
             continue
-
-        # A reference value no larger than its own tolerance makes the check
-        # vacuous: every conceivable result passes, so it survives any
-        # regression. Exactly 0.0 is the common case -- a field the workflow
-        # never populated, which is what several of the older hand-written
-        # scripted tests compare for `scf_total_energy` -- but a dark state's
-        # 1e-26 oscillator strength checked to 1e-3 is just as empty. Require an
-        # explicit opt-in where the near-zero is the physics (a
-        # symmetry-vanishing dipole, a gradient at a stationary point).
-        ref = lookup(cmp.data2, keys)
-        if isinstance(ref, float) and abs(ref) <= tol and not entry.get("allow_zero"):
-            print(f"key {keys} has reference value {ref!r}, within its own tolerance "
-                  f"{tol} -- this check cannot fail. Compare a key that carries a "
-                  "value, or set \"allow_zero\": true if the near-zero is physical.")
-            cmp.success = False
-    return cmp.success
+        for mode in ("max", "min"):
+            if mode in entry:
+                success = check_bound(out, entry, mode) and success
+        if bounded and "tol" not in entry and "rtol" not in entry:
+            continue
+        if "rtol" in entry:
+            success = check_rtol(out, ref, entry, entry["rtol"],
+                                 entry.get("allow_zero", False)) and success
+            continue
+        success = check_tol(out, ref, entry, entry.get("tol", 0.0)) and success
+    return success
 
 
 def check_expected_error(output, exitcode, expected):
@@ -321,7 +472,7 @@ def external_reference_source(case):
     A reference that holds another code's numbers (e.g. DALTON's) says so in a
     top-level `reference_source`; --update would replace them with this run's
     own result and turn the check into MADNESS against itself."""
-    for ref in sorted((case / "reference").glob("*.calc_info.json")):
+    for ref in sorted((case / "reference").glob("*.json")):
         try:
             src = json.loads(ref.read_text()).get("reference_source")
         except (OSError, ValueError, AttributeError):
@@ -331,11 +482,13 @@ def external_reference_source(case):
     return None
 
 
-def update_reference(case, output, report):
+def update_reference(case, outputs, report, names):
+    """Copy each produced file to reference/ under its reference name."""
     refdir = case / "reference"
     refdir.mkdir(exist_ok=True)
-    shutil.copy2(output, refdir / output.name)
-    print("updated reference:", refdir / output.name)
+    for output, name in zip(outputs, names):
+        shutil.copy2(output, refdir / name)
+        print("updated reference:", refdir / name)
     if report.is_file():
         shutil.copy2(report, refdir / report.name)
         print("updated reference:", refdir / report.name)
@@ -383,10 +536,8 @@ def main():
         print("SKIPPED: run.sh returned 77")
         return SKIP
 
-    # madqc names its output after the deck: <case>.in -> <case>.calc_info.json.
-    # (A deck literally named `input` would fall back to the default prefix `mad`,
-    # which is why cases name the deck after themselves.)
-    output = workdir / check.get("output", f"{case.name}.calc_info.json")
+    files = output_files(case, workdir, check)
+    output = files["calc_info"][0]
     report = workdir / output.name.replace(".calc_info.json", ".out")
 
     if check.get("expect_error"):
@@ -397,24 +548,28 @@ def main():
         print("final success:", ok)
         return 0 if ok else 1
 
-    if not output.is_file():
-        print(f"FAILED: expected result file {output.name} was not produced")
-        return 1
+    # The files the checks read; before a case has checks, calc_info.json.
+    kinds = file_kinds(check.get("checks", [])) or [DEFAULT_FILE]
+    for kind in kinds:
+        if not files[kind][0].is_file():
+            print(f"FAILED: expected result file {files[kind][0].relative_to(workdir)} was not produced")
+            return 1
 
     if args.update:
-        update_reference(case, output, report)
+        update_reference(case, [files[kind][0] for kind in kinds], report,
+                         [files[kind][1].name for kind in kinds])
         return 0
 
-    reference = case / "reference" / output.name
-    if not reference.is_file():
-        print(f"FAILED: no reference at {reference}; generate it with --update")
-        return 1
+    for kind in kinds:
+        if not files[kind][1].is_file():
+            print(f"FAILED: no reference at {files[kind][1]}; generate it with --update")
+            return 1
 
-    ok = compare(output, reference, check["checks"])
+    ok = compare({kind: files[kind][0] for kind in kinds},
+                 {kind: files[kind][1] for kind in kinds}, check["checks"])
     ok = check_expected_files(workdir, check.get("expect_files", [])) and ok
     print("final success:", ok and exitcode == 0)
     return 0 if (ok and exitcode == 0) else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -5,8 +5,9 @@
 #
 #   <case>/input                      the deck, verbatim (what a user copies)
 #   <case>/run.sh                     one-liner; honours ${MADQC}, ${MPIEXEC}, ${NP}
-#   <case>/check.json                 which calc_info.json keys matter, and to what tolerance
-#   <case>/reference/*.calc_info.json compared numerically by bin/run_qctest.py
+#   <case>/check.json                 which results.json / calc_info.json keys matter, and to what tolerance
+#   <case>/reference/*.results.json   compared numerically by bin/run_qctest.py
+#   <case>/reference/*.calc_info.json (likewise, for checks still on calc_info.json)
 #   <case>/reference/*.out            checked in for humans/agents; NOT compared
 #
 # Usage
