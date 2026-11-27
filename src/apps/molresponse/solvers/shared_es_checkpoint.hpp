@@ -196,9 +196,12 @@ public:
   }
   // writer(folder) saves root_<slot> for every slot collectively into an empty
   // staging folder; rank 0's one Node::save then replaces the whole set.
+  // `facts` are further details about these roots (the seed guard), written in
+  // the same save; a later save without them drops them with the roots.
   template<class Writer>
   void publish(const it::IterationMetrics& metrics,const it::Decision& decision,
-               const it::Progress& progress,const std::vector<int>& stable_index,const Writer& writer) {
+               const it::Progress& progress,const std::vector<int>& stable_index,const Writer& writer,
+               const json& facts=json::object()) {
     cp::records::require(metrics.info==it::IterationInfo{task_,settings.protocol,metrics.info.iteration,context_},
                          "response metrics belong to a different binding or protocol");
     complete_=decision.action==it::Action::complete;
@@ -236,6 +239,10 @@ public:
       d.code_version=madness::info::git_commit();
       d.level_finished=decision.action==it::Action::finish_protocol || decision.action==it::Action::complete;
       d.details={{"excited_node_version",1},{"n_roots",roots.size()},{"roots",roots},{"writers",writers}};
+      for(const auto& [key,value]:facts.items()) {
+        cp::records::require(!d.details.contains(key),"excited-set detail would replace "+key);
+        d.details[key]=value;
+      }
       it::Node(folder_).save(d,[&](const std::filesystem::path& archive) {
         for(const auto& file:std::filesystem::directory_iterator(staging))
           std::filesystem::rename(file.path(),archive/file.path().filename());

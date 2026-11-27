@@ -26,23 +26,24 @@
 //                   via --omegas.
 //   omega_shift   — ω_converged − ω_seed,
 //
-// prints a rank-0 summary table, records the block into
-// response_metadata.json (excited_states/<key>/seed_guard — via the
-// ResponseMetadata layer, never hand-written), and warns loudly when
+// prints a rank-0 summary table, and warns loudly when
 //   * a converged root has LOW overlap (< kSeedGuardOverlapWarn) with
 //     EVERY seed root — the solve left the seeded basin, or
 //   * every root kept high overlap (> kSeedGuardTrackingOverlap) and the
 //     whole solve took <= n_roots iterations — pure seed tracking; the
-//     N-lowest guarantee does NOT hold (informational note), or
+//     N-lowest guarantee does NOT hold (informational note).
+//
+// The report (to_json) is saved in the excited-set node's details as
+// `seed_guard`, in the same save as the roots it describes. The metadata copy
+// (excited_states/<key>/seed_guard) and results.json's per-root `seed_match`
+// are read from there.
 //
 // Collectivity: evaluate_es_seed_guard computes MRA inner products and is
 // collective on `world` (call from every rank). The report it returns is
-// rank-uniform (built from replicated tensors); printing and the metadata
-// write are rank-0-only inside the print/record helpers.
+// rank-uniform (built from replicated tensors); printing is rank-0-only.
 // =========================================================================
 
 #include "es_root_identity.hpp"           // make_root_id
-#include "response_metadata.hpp"          // ResponseMetadata (aggregate writer)
 #include "response_state.hpp"             // ResponseStateX/XY storage
 #include "../kernels/response_space_ops.hpp"  // rs::metric (RPA-metric overlap)
 
@@ -79,7 +80,7 @@ struct EsSeedGuardRoot {
   double      best_overlap  = 0.0;  // max_j overlap (basin-escape discriminator)
 };
 
-/// Full guard report — rank-uniform; to_json() feeds the metadata layer.
+/// Full guard report — rank-uniform; to_json() is what the node saves.
 struct EsSeedGuardReport {
   std::vector<EsSeedGuardRoot> roots;
   bool   seeded    = false;
@@ -280,26 +281,6 @@ inline void print_es_seed_guard(madness::World &world,
   }
 
   std::fflush(stdout);
-}
-
-/// Record the guard block into the calc-level aggregate at
-/// excited_states/<protocol_key>/seed_guard — through the ResponseMetadata
-/// layer. Rank-0 write + fence.
-inline void record_es_seed_guard(madness::World &world,
-                                 const std::string &calc_dir,
-                                 const std::string &protocol_key,
-                                 const EsSeedGuardReport &rep,
-                                 double wall_s = -1.0) { // D-118: the guard's time
-  if (world.rank() == 0) {
-    auto meta =
-        ResponseMetadata::load_or_create(calc_dir + "/response_metadata.json");
-    auto entry = rep.to_json();
-    if (wall_s >= 0.0)
-      entry["wall_s"] = wall_s;
-    meta.set_es_seed_guard(protocol_key, entry);
-    meta.save();
-  }
-  world.gop.fence();
 }
 
 } // namespace molresponse_v3

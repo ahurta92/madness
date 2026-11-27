@@ -141,6 +141,24 @@ A root value that was not computed is absent from its item and named in
 `availability`; the item is then `partial`, or `unavailable` when nothing was
 computed.
 
+When the set started from a seed (`seeds/`, e.g. imported from DALTON), each
+item also has `seed_match`: the seed guard, saved with the roots in the set's
+node (`details.seed_guard`). It is absent when the set did not start from a
+seed, and it describes the roots as saved: a later save of the set (a
+continued solve) drops it.
+
+```json
+"seed_match": {"seed_slot": 0, "omega_seed": 0.32186, "omega_shift": -4.8e-05,
+               "seed_overlap": 0.99877, "best_seed_slot": 0, "best_overlap": 0.99877}
+```
+
+`seed_overlap` is the root's overlap with the seed root of the same identity
+(`seed_slot`), `best_overlap` its largest overlap with any seed root
+(`best_seed_slot`), both normalized in the response metric (⟨X|X'⟩, minus
+⟨Y|Y'⟩ for the full model). `omega_shift` is `excitation_energy` −
+`omega_seed`. A `best_overlap` below 0.5 means the root left the state the seed
+described. The property's `units` and `definitions` carry a `seed_match` entry.
+
 - A property holds the value at the final protocol level only. Earlier levels
   are in the node histories and the log.
 - `status` (`complete`, `partial` or `unavailable`) is on every property or
@@ -171,7 +189,7 @@ Which states a value used follows from what it is:
 | `polarizability` | frequency | `frequency` | the dipole states at that frequency |
 | `hyperpolarizability` | frequency pair | `frequency_b`, `frequency_c` | for each component ABC: the A state at ω_B + ω_C, the B and C states, and the second-order source |
 | `polarizability_gradient` | laser frequency | `frequency` | as β; components are keyed by nuclear coordinate, then dipole pair |
-| `excited_states` | root | `root` | the root; the item holds `excitation_energy`, `oscillator_strength`, `transition_dipole`, `transition_quadrupole` |
+| `excited_states` | root | `root` | the root; the item holds `excitation_energy`, `oscillator_strength`, `transition_dipole`, `transition_quadrupole`, and `seed_match` for a seeded set |
 | `two_photon_absorption` | root | `root`, `energy`, `frequency` | the root and the three dipole states at `frequency` (half the root's energy) |
 | `vibrational_analysis` | (one value) | | the static nuclear-displacement states; `value` holds `hessian`, `frequencies`, `normal_modes`, `reduced_mass` |
 | `raman_spectrum` | laser frequency | `frequency` | the Hessian's states and that frequency's polarizability-gradient states; `value` is the list of mode rows |
@@ -292,6 +310,8 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
 - The Hessian, normal modes, transition quadrupoles, polarizability-gradient
   components and anything else too large for a table are named on one
   `not printed (see results.json)` line.
+- An excited-state set that started from a seed has one more column,
+  `seed overlap` (`seed_match.seed_overlap`).
 - Derived quantities print under their table, one line each: in the table as
   extra rows of the item (polarizability, hyperpolarizability, two-photon), or
   as lines under it (excited states, orbital energies, dipole). A unit is

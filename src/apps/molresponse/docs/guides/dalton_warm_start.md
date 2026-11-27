@@ -99,12 +99,15 @@ state — fast, `converged=true`, and silently in place of the true N-th lowest
 true 4th-lowest is 0.4096 au). This is a feature when you target a *specific*
 state (2PA residues) and a trap when you mean "give me the N lowest". Every
 seeded solve therefore prints a `[SEED-GUARD]` block — per-root seed overlap,
-seed ω, and ω shift, recorded under `excited_states/<key>/seed_guard` in
-`response_metadata.json` — with a loud warning on basin escape (overlap < 0.5
-with every seed root) and a note when the solve was pure tracking. When a
-reference ladder from a better basis is available (validation campaigns),
-compare the reported energies against it by hand — the guard records them in
-the metadata for exactly that purpose.
+seed ω, and ω shift — with a loud warning on basin escape (overlap < 0.5
+with every seed root) and a note when the solve was pure tracking. The guard is
+saved with the roots in the excited-set node (`details.seed_guard` of
+`states/response/excited-<model>/description.json`), reported per root as
+`seed_match` in `results.json` and as a `seed overlap` column in the summary,
+and copied to `excited_states/<key>/seed_guard` in `response_metadata.json`.
+When a reference ladder from a better basis is available (validation
+campaigns), compare the reported energies against it by hand — the guard
+records them for exactly that purpose.
 
 ## Choosing where to start the protocol ladder
 

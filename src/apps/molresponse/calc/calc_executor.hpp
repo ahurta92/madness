@@ -642,6 +642,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
     state=std::move(guess);timing.end();
   }
   std::size_t evaluations=0;
+  std::optional<double> guard_seconds;
   if(!binding.reusable()) {
     const auto observer=[&](const auto& current,const it::IterationMetrics& metrics,const it::Decision& decision,const it::Progress& progress) {
       ++evaluations;
@@ -656,9 +657,23 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
             diagnostics.push_back({"excitation_energy",root.id,"",*found->second.evidence.current});
       // One row in the node's history per decision, before any save can fail.
       binding.record_evaluation(metrics,decision,diagnostics);
+      // A set that started from a seed: at the level's last decision, how
+      // closely each root still matches its seed root. It is saved with the
+      // roots it describes.
+      nlohmann::json facts=nlohmann::json::object();
+      if(imported_seed && decision.checkpoint && decision.action!=it::Action::update) {
+        it::ElapsedTimer<> guard_timer;
+        const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,current,decision.action==it::Action::complete,
+            [&] {return response_seed::load_excited_seed<Type,ClosedShell>(world,*imported_seed);},
+            imported_seed->shown(),protocol_key(imported_seed->description.protocol.thresh,imported_seed->description.protocol.k));
+        guard_seconds=guard_timer.seconds();
+        print_es_seed_guard(world,guard);
+        facts["seed_guard"]=guard.to_json();
+        timing.append({{"name","seed_comparison"},{"seconds",*guard_seconds}});
+      }
       binding.publish(metrics,decision,progress,current.stable_index,[&](const auto& directory) {
         response_shared::save_excited_functions(world,current,directory);
-      });
+      },facts);
       if(decision.checkpoint && world.rank()==0 && it::prints(ctx.verbosity,it::needed::checkpoint_saved))
         it::write_checkpoint_saved(std::cout,decision);
       if(world.rank()==0 && decision.action==it::Action::stop && decision.reason=="iteration_limit" &&
@@ -672,17 +687,7 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       });
     MADNESS_CHECK_THROW(decision.checkpoint,"excited bundle stopped without a valid current checkpoint");
   }
-  if(imported_seed) {
-    it::ElapsedTimer<> guard_timer;
-    const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,state,binding.complete(),
-        [&] {return response_seed::load_excited_seed<Type,ClosedShell>(world,*imported_seed);},
-        imported_seed->shown(),protocol_key(imported_seed->description.protocol.thresh,imported_seed->description.protocol.k));
-    const auto seconds=guard_timer.seconds();
-    print_es_seed_guard(world,guard);
-    record_es_seed_guard(world,ctx.calc_dir,protocol_key(),guard,seconds);
-    timing.append({{"name","seed_comparison"},{"seconds",seconds}});
-  }
-  session.record_summary(binding,evaluations);
+  session.record_summary(binding,evaluations,guard_seconds);
   timing.end();timing.end();session.publish_timings();
   return {binding.complete(),protocol_key(),{}};
 }
@@ -704,11 +709,28 @@ void assemble_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) {
                 {"values",json::array()}};
   const auto set_id=es_node_id(std::is_same_v<Type,TDA>,n_roots);
   const auto set_name=session.node_name(set_id);
+  // A set that started from a seed: the guard saved with its roots, per root.
+  std::map<std::string,json> seed_match;
+  if(binding.has_saved() && binding.description().details.contains("seed_guard")) {
+    excited["units"]["seed_match"]={{"omega_seed","hartree"},{"omega_shift","hartree"},
+                                    {"seed_overlap","dimensionless"},{"best_overlap","dimensionless"}};
+    excited["definitions"]["seed_match"]=
+        "the root against the seed it started from: seed_overlap with the seed root of the same identity "
+        "(seed_slot), best_overlap with any seed root (best_seed_slot), both normalized in the response metric; "
+        "omega_shift = excitation_energy - omega_seed";
+    for(const auto& root:binding.description().details.at("seed_guard").at("roots")) {
+      json match=json::object();
+      for(const char* field:{"seed_slot","omega_seed","omega_shift","seed_overlap","best_seed_slot","best_overlap"})
+        if(root.contains(field)) match[field]=root.at(field);
+      seed_match[root.at("root_id").template get<std::string>()]=std::move(match);
+    }
+  }
   const auto item=[&](const std::string& root,const json& values,const json& missing) {
     json fields=values;
     fields["root"]=root;
     fields["availability"]=missing;
     fields["status"]=values.empty() ? "unavailable" : missing.empty() ? "complete" : "partial";
+    if(const auto match=seed_match.find(root);match!=seed_match.end()) fields["seed_match"]=match->second;
     session.name_state(fields,set_id,root);
     return fields;
   };

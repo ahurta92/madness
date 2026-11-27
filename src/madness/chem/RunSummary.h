@@ -502,21 +502,29 @@ inline void write_values_property(std::string& out, const json& entry, const std
 }
 
 /// excited_states: one row per root with its energy, oscillator strength and
-/// convergence, then the transition dipoles. The quadrupoles are left out.
+/// convergence, then the transition dipoles. The quadrupoles are left out. A
+/// set that started from a seed adds each root's overlap with its seed root.
 inline void write_excited_states(std::string& out, const json& entry, const json& property,
                                  std::vector<std::string>& not_printed, bool& marked) {
     const auto& items = property.at("values");
     const auto units = property.value("units", json::object());
     const bool decimals = decimal_values(entry);
+    const bool seeded = std::any_of(items.begin(), items.end(),
+                                    [](const json& item) { return item.contains("seed_match"); });
     ConvergenceTable table;
     table.header = {"root", "energy", "osc. strength"};
+    if (seeded) table.header.emplace_back("seed overlap");
     table.key_columns = 1;
     table.metrics = convergence_metrics(std::vector<json>(items.begin(), items.end()));
     const auto rows = [&](const json& item) {
-        return std::vector<std::vector<std::string>>{
-            {number_text(item.value("excitation_energy", json()), is_energy_unit(unit_of(units, "excitation_energy")),
-                         decimals),
-             number_text(item.value("oscillator_strength", json()), false, decimals)}};
+        std::vector<std::string> row{
+            number_text(item.value("excitation_energy", json()), is_energy_unit(unit_of(units, "excitation_energy")),
+                        decimals),
+            number_text(item.value("oscillator_strength", json()), false, decimals)};
+        if (seeded)
+            row.push_back(number_text(item.value("seed_match", json::object()).value("seed_overlap", json()), false,
+                                      decimals));
+        return std::vector<std::vector<std::string>>{row};
     };
     for (const auto& item : items) item_rows(table, item, {"root"}, rows, targets_for(entry, true), marked);
     const auto energy_unit = unit_label(unit_of(units, "excitation_energy"));

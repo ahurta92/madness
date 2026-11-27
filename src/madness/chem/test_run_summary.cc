@@ -429,6 +429,55 @@ Response (molresponse), level 1.0e-04 k 6
   * above target (driven states can pass under the scaled rule)
 )text";
 
+// An excited set that started from a seed: each root's overlap with its seed
+// root is one more column.
+const char* seeded = R"json({
+  "version": 6,
+  "provenance": {"code_version": "900a79af8c1e2b3d4f5a6b7c8d9e0f1a2b3c4d5e",
+                 "launched_at": "2026-11-26T01:51:07.123Z", "mpi_processes": 1,
+                 "threads_per_process": 16, "archive_io": "native"},
+  "calculations": [
+    {"calculation_id": "response", "application": "molresponse",
+     "protocol": {"threshold": 0.0001, "k": 6},
+     "targets": {"excited_states": {"bsh_residual": 1000.0, "density_change": 1000.0, "energy_change": 1000.0}},
+     "properties": {
+       "excited_states": {"value_type": "real",
+         "units": {"excitation_energy": "hartree", "oscillator_strength": "dimensionless",
+                   "seed_match": {"omega_seed": "hartree", "omega_shift": "hartree",
+                                  "seed_overlap": "dimensionless", "best_overlap": "dimensionless"}},
+         "values": [
+           {"root": "es_root_0000", "excitation_energy": 0.3218123, "oscillator_strength": 0.0123456,
+            "seed_match": {"seed_slot": 0, "omega_seed": 0.32186, "omega_shift": -0.0000477,
+                           "seed_overlap": 0.9987654, "best_seed_slot": 0, "best_overlap": 0.9987654},
+            "status": "complete",
+            "convergence": {"bsh_residual": 0.0213, "density_change": 0.0114, "energy_change": 0.0021}},
+           {"root": "es_root_0001", "excitation_energy": 0.3834, "oscillator_strength": 0.0,
+            "seed_match": {"seed_slot": 1, "omega_seed": 0.38334, "omega_shift": 0.00006,
+                           "seed_overlap": 0.41, "best_seed_slot": 1, "best_overlap": 0.41},
+            "status": "complete",
+            "convergence": {"bsh_residual": 0.0311, "density_change": 0.0157, "energy_change": 0.0042}}]}
+     },
+     "run": {"stop_reason": "complete", "dropped_work": [], "stalled": [], "unconverged": []},
+     "state_metrics": {"excited-full": {"protocol": {"threshold": 0.0001, "k": 6}, "updates": 0, "subjects": {}}}}
+  ]
+})json";
+
+const char* seeded_text = R"text(madqc summary
+  code      900a79af8
+  launched  2026-11-26 01:51 UTC
+  run       1 process x 16 threads
+
+Response (molresponse), level 1.0e-04 k 6
+  targets   excited: bsh_residual 1.00e+03   density_change 1.00e+03   energy_change 1.00e+03
+
+  excited states (energy in hartree)
+  root          energy      osc. strength  seed overlap  bsh_residual  density_change  energy_change
+  es_root_0000  0.32181230  0.012346       0.998765      2.13e-02      1.14e-02        2.10e-03
+  es_root_0001  0.38340000  0              0.410000      3.11e-02      1.57e-02        4.20e-03
+
+  run: complete. Nothing dropped. Nothing stalled.
+)text";
+
 int check(const char* name, const char* input, const char* expected) {
     const auto text = madness::iteration::results_summary(json::parse(input));
     if (text == expected) {
@@ -449,9 +498,10 @@ int main() {
                       quadratic_two_photon_raman_text);
     failures += check("derived quantities present", derived_present, derived_present_text);
     failures += check("unconverged states", unconverged, unconverged_text);
+    failures += check("seeded excited states", seeded, seeded_text);
     // Every line fits the page.
     for (const auto* input : {all_complete, unavailable_and_dropped, quadratic_two_photon_raman, derived_present,
-                              unconverged}) {
+                              unconverged, seeded}) {
         const auto text = madness::iteration::results_summary(json::parse(input));
         std::size_t start = 0;
         while (start < text.size()) {

@@ -458,7 +458,10 @@ public:
     return std::all_of(states.begin(),states.end(),[](const auto& entry){return entry.second->complete();}) &&
            std::all_of(excited.begin(),excited.end(),[](const auto& entry){return entry.second->complete();});
   }
-  void record_summary(const ExcitedSet& set,std::size_t evaluations) const {
+  // The metadata copy of an excited set, with its seed guard when the saved
+  // roots carry one (`guard_seconds` when this launch measured it).
+  void record_summary(const ExcitedSet& set,std::size_t evaluations,
+                      std::optional<double> guard_seconds={}) const {
     const auto& d=set.description();
     const auto& physical=set.scientific_settings();
     cp::detail::on_root(world_,[&] {
@@ -470,6 +473,11 @@ public:
         {"type",physical.at("excited_model")},{"shell","closed_shell"},{"n_roots",roots.size()},
         {"roots",roots},{"iter",d.updates_at_protocol},{"node",set.folder()},
         {"shared_evaluations",evaluations},{"shared_reused",set.reusable()}});
+      if(d.details.contains("seed_guard")) {
+        auto guard=d.details.at("seed_guard");
+        if(guard_seconds) guard["wall_s"]=*guard_seconds;
+        meta.set_es_seed_guard(key,guard);
+      }
       meta.save();return std::string{};
     });
   }
