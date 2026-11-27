@@ -241,72 +241,9 @@
           "calculation_id": "response"
         },
         "state_metrics",
-        "dipole_x-f0.16119",
-        "updates"
-      ],
-      "file": "results",
-      "max": 30
-    },
-    {
-      "key": [
-        "calculations",
         {
-          "calculation_id": "response"
+          "match": "dipole_*"
         },
-        "state_metrics",
-        "dipole_x-f0.19165",
-        "updates"
-      ],
-      "file": "results",
-      "max": 30
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_y-f0.16119",
-        "updates"
-      ],
-      "file": "results",
-      "max": 30
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_y-f0.19165",
-        "updates"
-      ],
-      "file": "results",
-      "max": 30
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_z-f0.16119",
-        "updates"
-      ],
-      "file": "results",
-      "max": 30
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_z-f0.19165",
         "updates"
       ],
       "file": "results",

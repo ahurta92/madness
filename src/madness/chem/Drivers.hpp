@@ -8,6 +8,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <utility>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <stdexcept>
@@ -15,6 +19,7 @@
 #include <vector>
 
 #include <madness/chem/Applications.hpp>  // Interface for SCFApplication / ResponseApplication
+#include <madness/chem/RunFiles.h>        // write_results_entry
 #include <madness/chem/SCFTargetAdapter.hpp>  // SCFTarget
 
 namespace qcapp {
@@ -47,6 +52,12 @@ class Driver {
    * @brief Return a JSON summary of results produced by this driver.
    */
   [[nodiscard]] virtual nlohmann::json summary() const = 0;
+
+  /// The results.json entry this driver's calculation writes in a shared run
+  /// ({calculation_id, application}), if any.
+  [[nodiscard]] virtual std::optional<std::pair<std::string, std::string>> results_entry() const {
+    return std::nullopt;
+  }
 };
 
 /**
@@ -82,6 +93,10 @@ class SinglePointDriver : public Driver {
 
   nlohmann::json summary() const override {
     return result_;
+  }
+
+  [[nodiscard]] std::optional<std::pair<std::string, std::string>> results_entry() const override {
+    return app_->results_entry();
   }
 
  private:
@@ -160,6 +175,7 @@ public:
         }
         all_["tasks"].push_back(failed);
         write_calc_info(prefix);
+        record_failure(ctx, *drivers_[i], failed);
         throw;
       }
       append_summary(drivers_[i]->summary());
@@ -171,6 +187,25 @@ public:
   const nlohmann::json &results() const { return all_; }
 
 private:
+  /// A failed calculation's entry in the shared run's results.json: status
+  /// "failed" and what calc_info.json records for it. It replaces any entry an
+  /// earlier launch left under the same id. A failure to write it must not
+  /// hide the error being reported, so it is only printed.
+  static void record_failure(const madness::StepContext &ctx, const Driver &driver,
+                             const nlohmann::json &failed) {
+    const auto id = driver.results_entry();
+    if (ctx.shared_run_root.empty() || !id) return;
+    try {
+      madness::iteration::write_results_entry(
+          madness::World::get_default(), ctx.shared_run_root,
+          {{"calculation_id", id->first}, {"application", id->second}, {"status", "failed"},
+           {"error", {{"task_index", failed.at("task_index")}, {"message", failed.at("error")}}}});
+    } catch (const std::exception &e) {
+      if (madness::World::get_default().rank() == 0)
+        std::cerr << "could not record the failure in results.json: " << e.what() << std::endl;
+    }
+  }
+
   void append_summary(const nlohmann::json &output) {
     if (output.is_array()) {
       for (const auto &item : output) all_["tasks"].push_back(item);

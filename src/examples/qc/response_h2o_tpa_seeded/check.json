@@ -94,7 +94,7 @@
         "updates"
       ],
       "file": "results",
-      "max": 9
+      "max": 12
     },
     {
       "key": [
@@ -313,72 +313,9 @@
           "calculation_id": "response"
         },
         "state_metrics",
-        "dipole_x-f0.16125",
-        "updates"
-      ],
-      "file": "results",
-      "max": 21
-    },
-    {
-      "key": [
-        "calculations",
         {
-          "calculation_id": "response"
+          "match": "dipole_*"
         },
-        "state_metrics",
-        "dipole_x-f0.19169",
-        "updates"
-      ],
-      "file": "results",
-      "max": 21
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_y-f0.16125",
-        "updates"
-      ],
-      "file": "results",
-      "max": 21
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_y-f0.19169",
-        "updates"
-      ],
-      "file": "results",
-      "max": 21
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_z-f0.16125",
-        "updates"
-      ],
-      "file": "results",
-      "max": 21
-    },
-    {
-      "key": [
-        "calculations",
-        {
-          "calculation_id": "response"
-        },
-        "state_metrics",
-        "dipole_z-f0.19169",
         "updates"
       ],
       "file": "results",

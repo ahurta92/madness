@@ -47,6 +47,7 @@ uncommitted changes.
     "dipole_z-f0.00000": {
       "protocol": {"threshold": 0.0001, "k": 6},
       "updates": 7,
+      "status": "complete",
       "subjects": {"response": {"values": {"bsh_residual": 2.3e-06, "density_change": 3.4e-05}, "availability": {}}}
     }
   }
@@ -83,7 +84,19 @@ uncommitted changes.
   (`es_root_0000`, …), the ground state one (`ground`). A second-order source
   is built rather than iterated, so it has no `updates` and its `subjects` is
   empty. A state reused from an earlier launch keeps the count it was saved
-  with.
+  with. `status` is `complete` when the state's stored metrics meet the
+  current request at its final level (the test a restart makes to reuse the
+  state), otherwise `unconverged`. It is decided when the file is written and
+  stored nowhere else; a second-order source listed here is always `complete`.
+- `citations` appears on the `ground_state` entry: which external libraries
+  the ground state used (`dftd3`, `libxc`, `pcm`, each true or false). `madqc`
+  prints the matching citations at the end of the log from it.
+- **A failed calculation.** When a calculation ends in an error or a refusal,
+  its entry is written with `"status": "failed"` and `"error": {"task_index":
+  <i>, "message": "<text>"}` (the error `calc_info.json` records as its
+  `task_failed` task), replacing any entry an earlier launch left under the
+  same id. Such an entry has no properties; `summary.txt` opens with it in its
+  `NOT COMPLETE` block.
 
 ## One property
 
@@ -305,8 +318,9 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
   stalled counts, e.g. `run: unconverged (2 states). Nothing dropped. Nothing
   stalled.`
 - `madqc` prints each task's wall time and the citations of external modules
-  after the summary in the log (and appends them to `<prefix>.out`); they are
-  not in `results.json`, so not in `summary.txt`.
+  after the summary in the log (and appends them to `<prefix>.out`). The wall
+  time is not in `results.json`; the citations come from the ground state's
+  `citations`. Neither is in `summary.txt`.
 - The Hessian, normal modes, transition quadrupoles, polarizability-gradient
   components and anything else too large for a table are named on one
   `not printed (see results.json)` line.

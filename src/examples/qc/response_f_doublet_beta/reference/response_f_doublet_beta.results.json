@@ -48,13 +48,16 @@
       },
       "state_metrics": {
         "dipole_z-f0.00000": {
-          "updates": 11
+          "updates": 11,
+          "status": "complete"
         },
         "dipole_z-f0.05000": {
-          "updates": 12
+          "updates": 12,
+          "status": "complete"
         },
         "dipole_z-f0.10000": {
-          "updates": 12
+          "updates": 12,
+          "status": "complete"
         }
       }
     }

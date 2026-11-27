@@ -15,9 +15,9 @@
     {"key": ["calculations", {"calculation_id": "response"}, "run", "dropped_work", {"id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000"}, "id"], "file": "results", "tol": 0},
     {"key": ["calculations", {"calculation_id": "response"}, "run", "dropped_work", {"id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000"}, "reason"], "file": "results", "tol": 0},
     {"key": ["calculations", {"calculation_id": "response"}, "run", "dropped_work", {"id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000"}, "id"], "file": "results", "tol": 0},
-    {"key": ["tasks", 1, "metadata", "fd_states", "dipole_z", "1e-04_k6", "f0.00000", "converged"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "fd_states", "dipole_z", "1e-04_k6", "f0.05000", "converged"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "fd_states", "dipole_z", "1e-04_k6", "f0.10000", "converged"], "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.00000", "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.05000", "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.10000", "status"], "file": "results", "tol": 0},
     {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.00000", "updates"], "file": "results", "max": 36},
     {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.05000", "updates"], "file": "results", "max": 36},
     {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.10000", "updates"], "file": "results", "max": 36}

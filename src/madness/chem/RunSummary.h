@@ -248,6 +248,10 @@ inline std::vector<std::string> not_complete(const json& results) {
     };
     for (const auto& entry : results.value("calculations", json::array())) {
         const auto id = entry.value("calculation_id", std::string("?"));
+        if (entry.value("status", std::string()) == "failed") {
+            const auto error = entry.value("error", json::object());
+            lines.push_back("  " + id + ": failed: " + error.value("message", std::string("no error recorded")));
+        }
         if (entry.contains("run")) {
             const auto& run = entry.at("run");
             const auto stop = run.value("stop_reason", std::string("unknown"));

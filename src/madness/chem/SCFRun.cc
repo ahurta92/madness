@@ -52,8 +52,8 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
 }
 
 // One node's measured values, keyed in results.json by its folder name, with
-// the number of updates it took at its saved level.
-json state_metrics(const it::NodeDescription& saved) {
+// the number of updates it took at its saved level and its status.
+json state_metrics(const it::NodeDescription& saved, const char* status) {
     json subjects = json::object();
     for (const auto& state : it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"}).states) {
         json values = json::object(), unavailable = json::object();
@@ -65,7 +65,7 @@ json state_metrics(const it::NodeDescription& saved) {
         subjects[state.id] = {{"values", values}, {"availability", unavailable}};
     }
     return {{"protocol", cp::records::protocol_record(saved.protocol)}, {"updates", saved.updates_at_protocol},
-            {"subjects", subjects}};
+            {"status", status}, {"subjects", subjects}};
 }
 
 // A tensor's elements in row-major order.
@@ -76,14 +76,42 @@ json tensor_values(const Tensor<double>& t) {
     return values;
 }
 
+// "complete" when a saved state's stored metrics meet the current request at
+// its final level: the test a restart makes to reuse it (saved_completion,
+// through plan_restart). Decided now, from the saved description alone.
+const char* state_status(const SCF& scf, const it::NodeDescription& saved) {
+    const auto final = protocols(scf).back();
+    if (saved.protocol != final) return "unconverged";
+    const auto metrics = it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"});
+    std::vector<std::string> subjects;
+    subjects.reserve(metrics.states.size());
+    for (const auto& state : metrics.states) subjects.push_back(state.id);
+    const auto settings = it::resolve(scf_iteration_request(scf.param), scf.iteration_model(), final, true,
+                                      "ground state");
+    return it::saved_completion(settings, {"scf", "saved", subjects}, metrics, true) ? "complete" : "unconverged";
+}
+
+// The external libraries the ground state used, for the citations printed at
+// the end of the log: the flags SCFApplication records (Applications.hpp).
+json citations(const SCF& scf) {
+    bool pcm = false, libxc = false;
+#ifdef MADNESS_HAS_PCM
+    pcm = scf.pcm_param.solvent() != "none";
+#endif
+#ifdef MADNESS_HAS_LIBXC
+    libxc = scf.xc.uses_libxc_backend();
+#endif
+    return {{"dftd3", scf.dispersion.active()}, {"libxc", libxc}, {"pcm", pcm}};
+}
+
 void report(World& world, const std::filesystem::path& root, const std::filesystem::path& folder, const SCF& scf,
             const std::optional<it::NodeDescription>& occupied) {
     const auto saved = read_node(world, folder);
     cp::records::require(saved.has_value(), "SCF ended without a saved state");
     const auto name = folder.filename().string();
     json metrics = json::object();
-    if (occupied) metrics[ground_state_node(root).filename().string()] = state_metrics(*occupied);
-    metrics[name] = state_metrics(*saved);
+    if (occupied) metrics[ground_state_node(root).filename().string()] = state_metrics(*occupied, state_status(scf, *occupied));
+    metrics[name] = state_metrics(*saved, state_status(scf, *saved));
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     const auto property = [&](const char* units, const json& value) {
         json p{{"units", units}, {"value_type", "real"}, {"status", complete ? "complete" : "unavailable"}};
@@ -121,6 +149,7 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
         {"protocol", cp::records::protocol_record(saved->protocol)},
         {"targets", it::results_targets(it::resolve(request, scf.iteration_model(), final, true, "ground state"))},
         {"properties", properties},
+        {"citations", citations(scf)},
         {"state_metrics", metrics}};
     it::add_results_source(entry, name);
     it::write_results_entry(world, root, std::move(entry));

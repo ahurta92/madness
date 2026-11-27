@@ -249,7 +249,13 @@ the one list item whose fields equal it (numbers within 1e-9). `results.json`
 identifies its list items by such fields, not by position, so checks select
 rather than index. A selector that matches no item, or more than one, fails the
 check. `"count": true` checks the number of items in the list at `key` instead
-of a value (the number of excited-state roots, for example). Each
+of a value (the number of excited-state roots, for example). A **wildcard**
+`{"match": "dipole_*"}` selects every key of an object that matches the
+shell-style pattern; it is valid only with `max` or `min`, which then bound
+every selected value, and the check fails naming the first key that breaks the
+bound. A pattern that selects nothing fails the check. The two-photon cases use
+it to bound the iterations of their dipole states, whose names carry half a
+root's energy and so move with the roots. Each
 check then carries one or more of:
 
 - `tol` — an absolute tolerance against the reference; `0` means "must match
@@ -373,8 +379,10 @@ replace those assertions with β values and regenerate.
 Three `response_he_*` cases are decks that must be **refused**. Their `check.json` carries `"expect_error": "<text>"` in place of `checks`, and they have no `reference/` directory. A case passes only if all of these hold:
 
 - `madqc` exits non-zero;
-- `calc_info.json` records a `task_failed` entry;
-- that entry's error contains the text.
+- the failure is recorded: with `"file": "results"` (the scf and response
+  cases) as an entry of `<prefix>/results.json` with `"status": "failed"` and
+  `error.message`, otherwise as a `task_failed` entry of `calc_info.json`;
+- that error contains the text.
 
 A run that succeeds, a crash that leaves no record, and a failure for some other reason all fail the case.
 

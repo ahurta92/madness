@@ -1,4 +1,5 @@
 {
   "description": "raman.nuc_atom beyond the molecule's atom count must be refused before any solve (review C13)",
-  "expect_error": "raman.nuc_atom"
+  "expect_error": "raman.nuc_atom",
+  "file": "results"
 }

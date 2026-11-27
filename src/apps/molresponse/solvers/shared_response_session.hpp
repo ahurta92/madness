@@ -503,22 +503,28 @@ public:
     cp::records::require(scope_.group<0,"only the main session writes the results file");
     // Each saved node's measured values, keyed by its folder name: the table
     // each property's convergence is taken from, with the number of updates
-    // the node took at its saved level (one number for an excited set).
+    // the node took at its saved level (one number for an excited set) and
+    // its status: "complete" when its stored metrics meet the current request
+    // at the final level (meets_request, the test a restart makes to reuse
+    // it), decided now and stored nowhere else.
     json metrics=json::object();
-    const auto add=[&](const std::string& name,const it::IterationMetrics& frame,std::size_t updates) {
+    const auto add=[&](const std::string& name,const it::IterationMetrics& frame,std::size_t updates,bool met) {
       json subjects=json::object();
       for (const auto& subject:frame.states) subjects[subject.id]=measured_values(frame,subject.id);
       metrics[name]={{"protocol",cp::records::protocol_record(frame.info.protocol)},{"updates",updates},
-                     {"subjects",subjects}};
+                     {"status",met ? "complete" : "unconverged"},{"subjects",subjects}};
     };
     for (const auto& [id,state] : states)
-      if (state->has_node()) add(state->name(),state->saved_metrics(),state->description().updates_at_protocol);
+      if (state->has_node()) add(state->name(),state->saved_metrics(),state->description().updates_at_protocol,
+                                 state->meets_request(state->description()));
     for (const auto& [id,set] : excited)
-      if (set->has_saved()) add(node_name(id),set->saved_metrics(),set->description().updates_at_protocol);
+      if (set->has_saved()) add(node_name(id),set->saved_metrics(),set->description().updates_at_protocol,
+                                set->meets_request(set->description()));
     // A second-order source is built, not iterated: it has no measured values.
+    // It is only listed when it is reusable, which is its completeness.
     for (const auto& [id,node] : second_order) if (node->reusable())
       metrics[node->name()]={{"protocol",cp::records::protocol_record(node->description().protocol)},
-                             {"subjects",json::object()}};
+                             {"status","complete"},{"subjects",json::object()}};
     // Only the main session reports; it replaces only response's entry.
     it::write_results_entry(world_,root_,{{"calculation_id","response"},{"application","molresponse"},
        {"protocol",cp::records::protocol_record(final_)},

@@ -1,4 +1,5 @@
 {
   "description": "beta.or (optical rectification) has no quadratic source yet; the deck must be refused, not silently return no beta (review C10)",
-  "expect_error": "beta.or"
+  "expect_error": "beta.or",
+  "file": "results"
 }

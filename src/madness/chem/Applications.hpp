@@ -17,6 +17,7 @@
 #include <string>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 
 namespace madness {
 enum class NextAction { Ok, ReloadOnly, Restart, Redo };
@@ -201,6 +202,13 @@ public:
     return std::nullopt;
   }
 
+  /// The entry this application writes in a shared run's results.json, as
+  /// {calculation_id, application}; none for an application that writes none.
+  /// A run that fails in it records the failure under that entry.
+  [[nodiscard]] virtual std::optional<std::pair<std::string, std::string>> results_entry() const {
+    return std::nullopt;
+  }
+
   virtual void print_parameters(World &world) const = 0;
 
   /// check if this calculation has a json with results
@@ -260,6 +268,11 @@ template <typename Library> class SCFApplication : public Application {
 private:
 public:
   using Calc = typename Library::Calc;
+
+  [[nodiscard]] std::optional<std::pair<std::string, std::string>> results_entry() const override {
+    if constexpr (std::is_same_v<Calc, SCF>) return std::pair<std::string, std::string>{"ground_state", "moldft"};
+    else return std::nullopt;
+  }
 
   explicit SCFApplication(World &w, const Params &p)
       : Application(p), world_(w) {}
@@ -669,6 +682,10 @@ public:
       : Application(std::move(params)),
         world_(world),
         reference_(std::move(reference)) {}
+
+  [[nodiscard]] std::optional<std::pair<std::string, std::string>> results_entry() const override {
+    return std::pair<std::string, std::string>{"response", "molresponse"};
+  }
 
   // print parameters
   void print_parameters(World &world) const override {

@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <optional>
+#include <utility>
 
 namespace fs = std::filesystem;
 using namespace madness;
@@ -18,8 +21,13 @@ void check(bool condition, const char* message) {
 // context handoff, report writer and MPI failure propagation run unchanged.
 class TestApplication : public Application {
 public:
-    explicit TestApplication(CalculationOutcome outcome, bool fail = false, bool invalid_text = false)
-        : Application(Params{}), outcome_(std::move(outcome)), fail_(fail), invalid_text_(invalid_text) {}
+    explicit TestApplication(CalculationOutcome outcome, bool fail = false, bool invalid_text = false,
+                             std::optional<std::pair<std::string, std::string>> entry = std::nullopt)
+        : Application(Params{}), outcome_(std::move(outcome)), fail_(fail), invalid_text_(invalid_text),
+          entry_(std::move(entry)) {}
+    [[nodiscard]] std::optional<std::pair<std::string, std::string>> results_entry() const override {
+        return entry_;
+    }
     void run(const fs::path&) override {
         ++runs;
         if (fail_) throw std::runtime_error("numerical failure");
@@ -39,6 +47,7 @@ private:
     CalculationOutcome outcome_;
     bool fail_;
     bool invalid_text_;
+    std::optional<std::pair<std::string, std::string>> entry_;
 };
 
 nlohmann::json read(const fs::path& path) {
@@ -69,6 +78,43 @@ void workflow_case(World& world, const fs::path& root, bool complete, bool failu
         check(records[0].at("outcome").at("complete") == complete, "completion recorded");
         check(records[0].at("properties").at("available") == 2.0, "available results survive stop");
     }
+}
+
+// A calculation that fails in a shared run leaves its entry in results.json
+// with status "failed" and the error calc_info.json records; one with no
+// results.json entry (another application) leaves nothing there.
+void failure_record_case(World& world, const fs::path& root, bool has_entry) {
+    auto first = std::make_shared<TestApplication>(
+        CalculationOutcome{true, "final_criteria_met"}, true, false,
+        has_entry ? std::optional<std::pair<std::string, std::string>>({"response", "molresponse"})
+                  : std::nullopt);
+    qcapp::Workflow workflow;
+    workflow.addDriver(std::make_unique<qcapp::SinglePointDriver>(first));
+    bool failed = false;
+    try { workflow.run(root.string(), true); }
+    catch (const std::runtime_error&) { failed = true; }
+    check(failed, "a failure in a shared run is still an error");
+    world.gop.fence();
+    const auto results_path = root / "results.json";
+    if (!has_entry) {
+        check(!fs::exists(results_path), "no results.json entry for an application that writes none");
+        return;
+    }
+    check(fs::exists(results_path), "a failed calculation leaves results.json");
+    if (!fs::exists(results_path)) return;
+    const auto results = read(results_path);
+    const auto& entry = results.at("calculations").at(0);
+    check(entry.at("calculation_id") == "response" && entry.at("application") == "molresponse",
+          "failed entry named by the application");
+    check(entry.at("status") == "failed", "failed entry has status failed");
+    check(entry.at("error").at("message") == "numerical failure", "failed entry holds the error");
+    check(entry.at("error").at("task_index") == 0, "failed entry holds the task index");
+    const auto task = read(root.string() + ".calc_info.json").at("tasks").at(0);
+    check(task.at("error") == entry.at("error").at("message"), "the same error as calc_info.json");
+    std::ifstream summary(root / "summary.txt");
+    const std::string text((std::istreambuf_iterator<char>(summary)), std::istreambuf_iterator<char>());
+    check(text.find("NOT COMPLETE") == 0 && text.find("response: failed: numerical failure") != std::string::npos,
+          "summary.txt reports the failure");
 }
 
 void decision_cases() {
@@ -178,6 +224,8 @@ int main(int argc, char** argv) {
             workflow_case(world, fs::path(path) / "failed", true, true);
             report_failure_case(world, fs::path(path) / "write-failed");
             report_failure_case(world, fs::path(path) / "serialization-failed", true);
+            failure_record_case(world, fs::path(path) / "failed-shared", true);
+            failure_record_case(world, fs::path(path) / "failed-shared-none", false);
         }
         world.gop.fence();
         if (world.rank() == 0) fs::remove_all(path);

@@ -258,7 +258,15 @@ inline void run_workflow(madness::World &world,
     if (world.rank() == 0) {
       std::ostringstream text;
       if (shared_output && summary) {
-        qcapp::write_wall_time_and_citations(text, wf.results());
+        // The citations come from results.json (the ground state's entry).
+        nlohmann::json results = nlohmann::json::object();
+        const auto results_path = std::filesystem::path(prefix) / "results.json";
+        if (std::filesystem::is_regular_file(results_path)) {
+          std::ifstream in(results_path);
+          results = nlohmann::json::parse(in, nullptr, false);
+          if (results.is_discarded()) results = nlohmann::json::object();
+        }
+        qcapp::write_wall_time_and_citations(text, wf.results(), results);
         (*summary)->wall_time_and_citations = text.str();
       } else {
         qcapp::write_results_summary(text, wf.results());

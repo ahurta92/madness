@@ -481,8 +481,12 @@ inline std::string task_title(const nlohmann::json &t) {
 /// The part of the results summary that summary.txt does not hold: each
 /// task's wall time and the citations of external modules. Printed after
 /// summary.txt by the workflows that write results.json (scf, response).
+/// The wall time of each task, then the citations. With the run's
+/// results.json (`results`, not null) the citation flags come from its entries,
+/// where the ground state records them; otherwise from calc_info's tasks.
 inline void write_wall_time_and_citations(std::ostream &os,
-                                          const nlohmann::json &calc_info) {
+                                          const nlohmann::json &calc_info,
+                                          const nlohmann::json &results = nullptr) {
   using namespace summary_detail;
   if (!calc_info.contains("tasks") || !calc_info["tasks"].is_array())
     return;
@@ -490,10 +494,13 @@ inline void write_wall_time_and_citations(std::ostream &os,
   int i = 0;
   CitationFlags citation_flags;
   for (const auto &t : calc_info["tasks"]) {
-    collect_citation_flags_from_task(t, citation_flags);
+    if (results.is_null()) collect_citation_flags_from_task(t, citation_flags);
     os << "  Task " << i++ << " : " << task_title(t) << "\n";
     write_timing_section(os, t);
   }
+  if (!results.is_null())
+    for (const auto &entry : results.value("calculations", nlohmann::json::array()))
+      if (entry.contains("citations")) merge_citation_object(entry["citations"], citation_flags);
   write_citations_section(os, citation_flags);
 }
 

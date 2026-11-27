@@ -6,6 +6,8 @@ per-check "file".
 Run by hand:   python3 bin/test_run_qctest.py
 Via ctest:     madness/test/qc/run_qctest_selftest/run   (labels qctest;short)
 """
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -233,6 +235,82 @@ class SelectorTests(unittest.TestCase):
         self.assertFalse(self.compare([{"key": key + [0], "count": True, "tol": 0}]))
 
 
+class WildcardTests(unittest.TestCase):
+    """{"match": pattern} selects every matching key of an object; only for bounds."""
+
+    METRICS = {"state_metrics": {
+        "dipole_x-f0.16123": {"updates": 12}, "dipole_y-f0.16123": {"updates": 14},
+        "dipole_z-f0.19166": {"updates": 20}, "excited-full": {"updates": 10}}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.out, self.ref = d / "out.json", d / "ref.json"
+        self.write(self.METRICS)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, out):
+        self.out.write_text(json.dumps(out))
+        self.ref.write_text(json.dumps({}))  # bounds never read the reference
+
+    def compare(self, checks):
+        return run_qctest.compare(self.out, self.ref, checks)
+
+    KEY = ["state_metrics", {"match": "dipole_*"}, "updates"]
+
+    def test_expand_selects_every_matching_key_in_order(self):
+        found = run_qctest.expand(self.METRICS, self.KEY)
+        self.assertEqual([p[1] for p, _ in found],
+                         ["dipole_x-f0.16123", "dipole_y-f0.16123", "dipole_z-f0.19166"])
+        self.assertEqual([v for _, v in found], [12, 14, 20])
+
+    def test_max_bounds_every_selected_value(self):
+        self.assertTrue(self.compare([{"key": self.KEY, "max": 20}]))
+        self.assertFalse(self.compare([{"key": self.KEY, "max": 19}]))  # only dipole_z breaks it
+
+    def test_min_bounds_every_selected_value(self):
+        self.assertTrue(self.compare([{"key": self.KEY, "min": 12}]))
+        self.assertFalse(self.compare([{"key": self.KEY, "min": 13}]))
+
+    def test_the_failure_names_the_first_key_that_breaks(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(self.compare([{"key": self.KEY, "max": 13}]))
+        text = out.getvalue()
+        self.assertIn("'dipole_y-f0.16123', 'updates'] exceeds max 13: 14", text)
+        self.assertNotIn("dipole_z-f0.19166', 'updates'] exceeds", text)
+
+    def test_a_pattern_that_selects_nothing_fails(self):
+        self.assertFalse(self.compare([{"key": ["state_metrics", {"match": "nuc_*"}, "updates"],
+                                        "max": 100}]))
+
+    def test_a_wildcard_is_only_valid_with_bounds(self):
+        self.assertFalse(self.compare([{"key": self.KEY, "tol": 100}]))
+        self.assertFalse(self.compare([{"key": self.KEY, "rtol": 1}]))
+        self.assertFalse(self.compare([{"key": self.KEY, "max": 100, "tol": 100}]))
+        self.assertFalse(self.compare([{"key": self.KEY, "count": True, "tol": 0}]))
+        with self.assertRaises(run_qctest.SelectorError):
+            run_qctest.lookup(self.METRICS, self.KEY)
+
+    def test_a_wildcard_on_a_list_or_a_missing_value_fails(self):
+        self.write({"state_metrics": [{"updates": 1}]})
+        self.assertFalse(self.compare([{"key": self.KEY, "max": 100}]))
+        self.write({"state_metrics": {"dipole_x": {"other": 1}}})
+        self.assertFalse(self.compare([{"key": self.KEY, "max": 100}]))
+
+    def test_a_wildcard_with_a_non_number_fails(self):
+        self.write({"state_metrics": {"dipole_x": {"updates": "many"}}})
+        self.assertFalse(self.compare([{"key": self.KEY, "max": 100}]))
+
+    def test_exact_names_and_case_matter(self):
+        self.assertFalse(self.compare([{"key": ["state_metrics", {"match": "Dipole_*"}, "updates"],
+                                        "max": 100}]))
+        self.assertTrue(self.compare([{"key": ["state_metrics", {"match": "excited-*"}, "updates"],
+                                       "max": 10}]))
+
+
 class FileSelectionTests(unittest.TestCase):
     """Each check reads the file its "file" names; calc_info.json by default."""
 
@@ -347,6 +425,32 @@ class ExpectErrorTests(unittest.TestCase):
 
     def test_a_nonzero_exit_without_a_record_fails_the_case(self):
         self.assertFalse(self.check(1, "beta.or is not implemented"))
+
+    def write_failed_results(self, message):
+        path = self.dir / "results.json"
+        path.write_text(json.dumps({"version": 6, "calculations": [
+            {"calculation_id": "ground_state", "properties": {}},
+            {"calculation_id": "response", "application": "molresponse", "status": "failed",
+             "error": {"task_index": 1, "message": message}}]}))
+        return path
+
+    def test_refusal_recorded_in_results_passes(self):
+        path = self.write_failed_results("response: beta.or is not implemented (no signed-frequency source)")
+        self.assertTrue(run_qctest.check_expected_error(path, 1, "beta.or is not implemented", "results"))
+
+    def test_results_failure_for_another_reason_fails(self):
+        path = self.write_failed_results("eval: coordinate upper-bound error")
+        self.assertFalse(run_qctest.check_expected_error(path, 1, "beta.or is not implemented", "results"))
+
+    def test_results_without_a_failed_entry_fails(self):
+        path = self.dir / "results.json"
+        path.write_text(json.dumps({"calculations": [{"calculation_id": "ground_state"}]}))
+        self.assertFalse(run_qctest.check_expected_error(path, 1, "beta.or", "results"))
+        self.assertFalse(run_qctest.check_expected_error(self.dir / "missing.json", 1, "beta.or", "results"))
+
+    def test_calc_info_record_is_not_read_as_results(self):
+        self.write_failed("response: beta.or is not implemented")
+        self.assertFalse(run_qctest.check_expected_error(self.out, 1, "beta.or", "results"))
 
     def test_load_check_accepts_expect_error_without_checks(self):
         (self.dir / "check.json").write_text(json.dumps({"expect_error": "x"}))

@@ -11,7 +11,8 @@ A qctest case is a self-contained directory (see src/examples/qc/README.md):
         read from, see FILES; a key may select a list item by field value,
         see lookup(); "count": true compares the length of a list),
         or "expect_error": "<text>" for a case that must be REFUSED
-        (see check_expected_error(); no checks and no reference needed);
+        (see check_expected_error(); no checks and no reference needed;
+        a top-level "file": "results" reads the failure from results.json);
         optional "expect_files": [glob, ...] relative to the work dir, each of
         which must match a produced file (see check_expected_files())
     <case>/reference/<case>.calc_info.json  compared numerically (checks on calc_info)
@@ -30,6 +31,7 @@ Exit codes: 0 pass, 1 fail, 77 skipped (ctest's SKIP_RETURN_CODE).
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -218,12 +220,26 @@ def _matches(item, selector):
     return True
 
 
+def is_wildcard(k):
+    """A key path element {"match": "<pattern>"}: every key of an object that
+    matches the shell-style pattern (fnmatch, case-sensitive)."""
+    return isinstance(k, dict) and list(k) == ["match"] and isinstance(k["match"], str)
+
+
+def has_wildcard(entry):
+    return any(is_wildcard(k) for k in entry["key"])
+
+
 def lookup(data, keys):
     """Walk a key path: a string indexes an object, an int a list, and an object
     such as {"frequency": 0.05} selects the one list item whose fields equal it
     (numbers within SELECTOR_TOL). A selector that matches no item or more than
-    one raises SelectorError."""
+    one raises SelectorError. A wildcard ({"match": ...}) selects several values
+    and is walked by expand(), not here."""
     for k in keys:
+        if is_wildcard(k):
+            raise SelectorError(f"wildcard {json.dumps(k)} selects several values; "
+                                "it is only valid in a check with 'max' or 'min'")
         if isinstance(k, dict):
             if not isinstance(data, list):
                 raise TypeError(f"selector {json.dumps(k)} applied to a {type(data).__name__}, not a list")
@@ -235,6 +251,24 @@ def lookup(data, keys):
         else:
             data = data[k]
     return data
+
+
+def expand(data, keys):
+    """Every (concrete key path, value) a key path with wildcards selects, in
+    key order. A wildcard that selects nothing raises SelectorError."""
+    for i, k in enumerate(keys):
+        if is_wildcard(k):
+            node = lookup(data, keys[:i])
+            if not isinstance(node, dict):
+                raise TypeError(f"wildcard {json.dumps(k)} applied to a {type(node).__name__}, not an object")
+            names = sorted(name for name in node if fnmatch.fnmatchcase(name, k["match"]))
+            if not names:
+                raise SelectorError(f"wildcard {json.dumps(k)} matched none of the {len(node)} keys")
+            found = []
+            for name in names:
+                found += expand(data, [*keys[:i], name, *keys[i + 1:]])
+            return found
+    return [(list(keys), lookup(data, keys))]
 
 
 def label(entry):
@@ -268,17 +302,34 @@ def check_bound(data, entry, mode):
     """
     keys, bound = label(entry), entry[mode]
     try:
-        value = value_at(data, entry)
+        found = expand(data, entry["key"])
     except (LookupError, TypeError) as e:
         print(f"key {keys} not found in the output: {type(e).__name__}: {e}")
         return False
-    if not _number(value):
-        print(f"key {keys} is {value!r}, not a number; '{mode}' needs a numeric value")
-        return False
-    ok = value <= bound if mode == "max" else value >= bound
-    word = ("within" if ok else "exceeds") if mode == "max" else ("meets" if ok else "below")
-    print(f"key {keys} {word} {mode} {bound}: {value}")
-    return ok
+    # With a wildcard the bound applies to every selected value; the first
+    # one that breaks it fails the check, named by its own key path.
+    for path, value in found:
+        name = label({**entry, "key": path})
+        if entry.get("count"):
+            if not isinstance(value, list):
+                print(f"key {name}: 'count' needs a list, found {type(value).__name__}")
+                return False
+            value = len(value)
+        if not _number(value):
+            print(f"key {name} is {value!r}, not a number; '{mode}' needs a numeric value")
+            return False
+        ok = value <= bound if mode == "max" else value >= bound
+        word = ("within" if ok else "exceeds") if mode == "max" else ("meets" if ok else "below")
+        if not ok or not has_wildcard(entry):
+            print(f"key {name} {word} {mode} {bound}: {value}")
+        if not ok:
+            return False
+    if has_wildcard(entry):
+        where = [i for i, k in enumerate(entry["key"]) if is_wildcard(k)]
+        print(f"key {keys}: all {len(found)} selected values "
+              f"{'within' if mode == 'max' else 'meet'} {mode} {bound}: "
+              + ", ".join("/".join(str(path[i]) for i in where) + f"={v}" for path, v in found))
+    return True
 
 
 def check_rtol(out, ref, entry, rtol, allow_zero=False):
@@ -370,7 +421,9 @@ def compare(output, reference, checks):
       min   lower bound on the produced value alone (reference not consulted)
     `max` and `min` may be combined with each other and with `tol` or `rtol`; an
     entry with only bounds never reads the reference value. Any other field
-    fails the check. With "count": true the checked value is the length of
+    fails the check. A key with a wildcard ({"match": "dipole_*"}) selects
+    every matching key of an object; it is valid only with `max`/`min`, which
+    then bound every selected value. With "count": true the checked value is the length of
     the list at the key path.
     """
     cache = {}
@@ -394,6 +447,12 @@ def compare(output, reference, checks):
             # exact comparison (how "min" was silently ignored before it existed).
             print(f"key {keys}: unknown field(s) {unknown}; a check may carry "
                   f"{sorted(ENTRY_FIELDS)}")
+            success = False
+            continue
+        if has_wildcard(entry) and ("tol" in entry or "rtol" in entry
+                                    or not ("max" in entry or "min" in entry)):
+            print(f"key {keys}: a wildcard ({{\"match\": ...}}) is only valid with 'max' or "
+                  "'min', and not with 'tol' or 'rtol'")
             success = False
             continue
         kind = entry.get("file", DEFAULT_FILE)
@@ -424,14 +483,27 @@ def compare(output, reference, checks):
     return success
 
 
-def check_expected_error(output, exitcode, expected):
+def recorded_errors(output, kind):
+    """The failure messages a run recorded: in results.json, each entry with
+    status "failed" (its error.message); in calc_info.json, each task_failed
+    entry's error."""
+    with open(output) as f:
+        data = json.load(f)
+    if kind == "results":
+        return [c.get("error", {}).get("message", "") for c in data.get("calculations", [])
+                if c.get("status") == "failed"]
+    return [t.get("error", "") for t in data.get("tasks", []) if t.get("type") == "task_failed"]
+
+
+def check_expected_error(output, exitcode, expected, kind=DEFAULT_FILE):
     """A refusal case passes only if the run was refused, loudly, for the stated reason.
 
-    madqc must exit non-zero AND record the failure in its calc_info.json as a
-    `task_failed` entry whose `error` contains `expected` (Workflow::run writes it
-    before rethrowing). A run that succeeds, a crash that leaves no record, and a
-    failure for some other reason all fail the case -- a refusal test that any
-    error satisfies would pass on a segfault.
+    madqc must exit non-zero AND record the failure whose message contains
+    `expected` (Workflow::run writes it before rethrowing): with kind "results"
+    as an entry of results.json with "status": "failed", otherwise as a
+    `task_failed` entry of calc_info.json. A run that succeeds, a crash that
+    leaves no record, and a failure for some other reason all fail the case --
+    a refusal test that any error satisfies would pass on a segfault.
     """
     if exitcode == 0:
         print(f"FAILED: expected the run to be refused ({expected!r}), but it exited 0")
@@ -439,9 +511,7 @@ def check_expected_error(output, exitcode, expected):
     if not output.is_file():
         print(f"FAILED: exit code {exitcode} but no {output.name} records why")
         return False
-    with open(output) as f:
-        tasks = json.load(f).get("tasks", [])
-    errors = [t.get("error", "") for t in tasks if t.get("type") == "task_failed"]
+    errors = recorded_errors(output, kind)
     if any(expected in e for e in errors):
         print(f"refused as expected: {expected!r}")
         return True
@@ -544,7 +614,11 @@ def main():
         if args.update:
             print("note: refusal case -- no reference to update")
             return 0
-        ok = check_expected_error(output, exitcode, check["expect_error"])
+        # The case's "file" names where the failure is recorded (default calc_info).
+        kind = check.get("file", DEFAULT_FILE)
+        if kind not in FILES:
+            sys.exit(f"qctest: unknown file {kind!r}; expected one of {FILES}")
+        ok = check_expected_error(files[kind][0], exitcode, check["expect_error"], kind)
         print("final success:", ok)
         return 0 if ok else 1
 
