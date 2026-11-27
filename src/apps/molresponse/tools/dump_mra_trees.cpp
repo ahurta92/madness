@@ -27,8 +27,8 @@
 //
 // The run folder is --run-dir (default: the current directory). The ground
 // state comes from its node, <run>/states/ground_state/, at the level its
-// description records, with the molecule from the run's analysis files
-// (solvers/saved_states.hpp:read_ground). With --fd and --es it also dumps the saved
+// description records, with the molecule and occupation from the same
+// description (solvers/saved_states.hpp:read_ground). With --fd and --es it also dumps the saved
 // response states: it lists the node folders under <run>/states/response/,
 // reads each description, and loads the driven states (--fd) and excited-state
 // sets (--es) through the node module. It never writes into the run folder.

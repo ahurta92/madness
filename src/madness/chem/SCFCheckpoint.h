@@ -16,6 +16,26 @@ std::optional<iteration::NodeDescription> read_node(World& world, const std::fil
 /// its settings, its level and its save time.
 nlohmann::json node_identity(const iteration::NodeDescription& description);
 
+/// The electrons of a saved SCF state: its total charge and its occupied
+/// orbital counts per spin.
+struct SavedOccupation {
+    double charge = 0.0;
+    int nalpha = 0, nbeta = 0;
+};
+
+/// The molecule a saved SCF state (ground state or virtuals) was solved for,
+/// rebuilt from its description's settings (`settings.molecule`, as
+/// Molecule::electronic_settings wrote it). The json form takes those settings
+/// directly, as a node identity carries them. Throws, asking for the ground
+/// state to be rerun, when the settings do not hold the molecule.
+Molecule saved_molecule(const nlohmann::json& settings);
+Molecule saved_molecule(const iteration::NodeDescription& description);
+
+/// The charge and occupied counts a saved SCF state was solved with, from its
+/// settings (`settings.dft`: charge, nalpha, nbeta). Throws as saved_molecule.
+SavedOccupation saved_occupation(const nlohmann::json& settings);
+SavedOccupation saved_occupation(const iteration::NodeDescription& description);
+
 /// Append one launch row (time, code version, host, processes, threads) to a
 /// node's history.jsonl. Collective; rank 0 writes.
 void write_launch_header(World& world, const std::filesystem::path& folder);

@@ -78,6 +78,43 @@ json node_identity(const it::NodeDescription& d) {
             {"saved_at", d.saved_at}};
 }
 
+namespace {
+// The SCF settings of a saved state, with `field` under `part`, or a stop that
+// tells the user what to do.
+const json& saved_part(const json& settings, const char* part, const char* field) {
+    cp::records::require(settings.is_object() && settings.value("version", 0) == 1 && settings.contains(part) &&
+                             settings.at(part).is_object() && settings.at(part).contains(field),
+                         std::string("the saved ground state has no ") + part + "." + field +
+                             " in its settings; it was saved by an older version. Rerun the ground state "
+                             "(a new output prefix, or remove states/ground_state).");
+    return settings.at(part);
+}
+const json& scf_settings(const it::NodeDescription& description) {
+    cp::records::require(description.kind == "ground_state" || description.kind == "virtuals",
+                         "not a saved SCF state: " + description.kind);
+    return description.settings;
+}
+} // namespace
+
+Molecule saved_molecule(const json& settings) {
+    saved_part(settings, "molecule", "atoms");
+    return Molecule::from_electronic_settings(settings.at("molecule"));
+}
+Molecule saved_molecule(const it::NodeDescription& description) { return saved_molecule(scf_settings(description)); }
+
+SavedOccupation saved_occupation(const json& settings) {
+    SavedOccupation occupation;
+    occupation.charge = saved_part(settings, "dft", "charge").at("charge").get<double>();
+    occupation.nalpha = saved_part(settings, "dft", "nalpha").at("nalpha").get<int>();
+    occupation.nbeta = saved_part(settings, "dft", "nbeta").at("nbeta").get<int>();
+    cp::records::require(occupation.nalpha >= occupation.nbeta && occupation.nbeta >= 0,
+                         "the saved ground state has invalid occupied counts");
+    return occupation;
+}
+SavedOccupation saved_occupation(const it::NodeDescription& description) {
+    return saved_occupation(scf_settings(description));
+}
+
 SCFCheckpoint::SCFCheckpoint(World& world, SCF& scf, std::filesystem::path folder, Identity identity, json lineage)
     : world_(world), scf_(scf), folder_(std::move(folder)), identity_(std::move(identity)),
       settings_(capture_settings()), lineage_(std::move(lineage)), layout_(layout()) {

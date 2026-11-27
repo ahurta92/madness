@@ -631,6 +631,12 @@ class Molecule {
   /// Effective electronic model, including field, smoothing and loaded core data.
   /// Omits input provenance, isotope masses and geometry-preparation controls.
   [[nodiscard]] json electronic_settings() const;
+  /// The molecule that electronic_settings() wrote `settings` for: atoms with
+  /// their charges and coordinates (atomic units, used as stored: no
+  /// reorientation), field, smoothing radii, point group, and the core data
+  /// named by its core_type. Throws unless the result writes the same settings
+  /// back.
+  [[nodiscard]] static Molecule from_electronic_settings(const json &settings);
   void insert_symbols_and_geometry(json &mol_json) const;
   void from_json(const json &mol_json);
 };

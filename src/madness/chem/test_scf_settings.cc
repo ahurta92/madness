@@ -1,4 +1,5 @@
 #include <madness/chem/SCFScientificSettings.h>
+#include <madness/chem/SCFCheckpoint.h>
 #include <madness/chem/SCF.h>
 #include <cstdlib>
 #include <iostream>
@@ -163,10 +164,59 @@ void exercise(World& world) {
     check(core.electronic_settings() != core_settings, "loaded core-potential smoothing participates");
     check(!core_settings.at("core_potentials").empty(), "snapshot contains loaded core coefficients, not their filename");
 
+    // A saved state's molecule and occupation are read back from its settings.
+    const auto rebuilt = saved_molecule(base);
+    check(rebuilt.electronic_settings() == base.at("molecule"), "the saved molecule is rebuilt exactly");
+    check(rebuilt.natom() == 1 && rebuilt.get_atom(0).x == 0.1 && rebuilt.get_atom(0).q == 2.0,
+          "the rebuilt molecule keeps its coordinates and charges");
+    const auto occupation = saved_occupation(base);
+    check(occupation.nalpha == scf.param.nalpha() && occupation.nbeta == scf.param.nbeta() &&
+              occupation.charge == scf.param.charge(),
+          "the saved occupation is the SCF's");
+    {
+        auto open = p;
+        open.set_user_defined_value("nopen", 2);
+        open.set_user_defined_value("spin_restricted", false);
+        Molecule carbon;
+        carbon.add_atom(0, 0, 0.5, 6, 6);
+        SCF open_scf(world, open, carbon);
+        const auto open_occupation = saved_occupation(scf_scientific_settings(open_scf));
+        check(open_occupation.nalpha == 4 && open_occupation.nbeta == 2 && open_occupation.charge == 0.0,
+              "an open-shell occupation keeps its spin split");
+    }
+    for (const auto* part : {"molecule", "dft"}) {
+        auto older = base;
+        older.erase(part);
+        bool refused = false;
+        try { (void)saved_molecule(older); (void)saved_occupation(older); }
+        catch (const std::exception& error) {
+            refused = std::string(error.what()).find("Rerun the ground state") != std::string::npos;
+        }
+        check(refused, "settings without the molecule or occupation ask for the ground state to be rerun");
+    }
+    // Loaded core data is read again from its core_type; a pseudo atom keeps its flag.
+    {
+        Molecule named;
+        named.parameters.set_user_defined_value("core_type", std::string("mcp"));
+        named.add_atom(0, 0, 0, 4, 4);
+        setenv("MRA_DATA_DIR", MRA_CHEMDATA_DIR, 1);
+        named.read_core_file("mcp");
+        const auto settings = named.electronic_settings();
+        check(Molecule::from_electronic_settings(settings).electronic_settings() == settings,
+              "a molecule with core potentials is rebuilt exactly");
+        if (directory) setenv("MRA_DATA_DIR", directory->c_str(), 1); else unsetenv("MRA_DATA_DIR");
+        bool refused = false;
+        try { (void)Molecule::from_electronic_settings(core_settings); }
+        catch (const std::exception&) { refused = true; }
+        check(refused, "core data the settings do not name cannot be rebuilt, and says so");
+    }
+
     Molecule pseudo;
     pseudo.add_atom(0, 0, 0, 2, 2, true);
     scf.molecule = pseudo;
     check(!scf_settings_allow_reuse(scf_scientific_settings(scf)), "unloaded GTH coefficients cannot qualify reuse");
+    check(Molecule::from_electronic_settings(pseudo.electronic_settings()).get_atom(0).pseudo_atom,
+          "a rebuilt pseudo atom stays a pseudo atom");
     scf.gthpseudopotential = std::make_shared<GTHPseudopotential<double>>(world, pseudo);
     scf.gthpseudopotential->load_pseudo_from_file(world, std::string(MAD_ROOT_DIR) + "/src/apps/moldft/gth.xml");
     const auto gth = scf_scientific_settings(scf);

@@ -3,6 +3,7 @@
 
 #include <madness/chem/IterationMetrics.h>
 #include <madness/chem/SCF.h>
+#include <madness/chem/SCFCheckpoint.h>
 #include <madness/chem/projector.h>
 #include <madness/world/world.h>
 #include <memory>
@@ -27,11 +28,15 @@ public:
     /// Factory: load from a moldft restart archive.
     /// Reads the archive header to extract L, xc, etc., constructs an SCF
     /// with matching parameters, then delegates to SCF::load_mos().
+    /// Without verified parameters, an open-shell archive needs `occupation`
+    /// (the ground-state node's, madness::saved_occupation): the archive
+    /// header alone does not say how many electrons each spin holds.
     static GroundState from_archive(World& world,
                                      const std::string& archive_path,
                                      const Molecule& molecule,
                                      const CalculationParameters* verified_parameters = nullptr,
-                                     const PCMParameters* verified_pcm = nullptr);
+                                     const PCMParameters* verified_pcm = nullptr,
+                                     const std::optional<SavedOccupation>& occupation = std::nullopt);
 
     // -----------------------------------------------------------------
     // Delegated accessors — no local copies, all point to scf_->

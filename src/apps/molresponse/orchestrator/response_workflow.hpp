@@ -222,12 +222,11 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
                    "(subworlds reload the ground state from the archive)");
   if (fan_requested && !in.archive_file.empty()) {
     const std::string  archive = in.archive_file;
-    const madness::Molecule mol = gs.molecule();
     const std::string  fock = fock_json;
     const auto         fock_level = gs.fock_level();
     const double       L_   = L;
     const ExecutorSettings base = in.settings;
-    fan_out = [archive, mol, fock, fock_level, L_, base](
+    fan_out = [archive, fock, fock_level, L_, base](
                   madness::World &sub, const std::vector<WorkItem> &items,
                   double thresh, int gid, const std::string &log_prefix) {
       std::set<std::string> states;
@@ -241,7 +240,10 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
       try {
         shared->timing().begin("reference_load");
         set_response_protocol(sub,L_,thresh,-1,false);
-        auto gs_s=GroundState::from_archive(sub,archive,mol);
+        // The molecule and occupation come from the ground-state node.
+        const auto& ground_settings=base.shared_response->ground().identity.at("settings");
+        auto gs_s=GroundState::from_archive(sub,archive,madness::saved_molecule(ground_settings),nullptr,nullptr,
+                                            madness::saved_occupation(ground_settings));
         if(fock_level) gs_s.set_fock_level(*fock_level);
         shared->timing().end();
         ExecutorSettings settings=base;

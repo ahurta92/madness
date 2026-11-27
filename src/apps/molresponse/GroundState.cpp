@@ -37,7 +37,8 @@ GroundState GroundState::from_archive(World& world,
                                        const std::string& archive_path,
                                        const Molecule& molecule,
                                        const CalculationParameters* verified_parameters,
-                                       const PCMParameters* verified_pcm) {
+                                       const PCMParameters* verified_pcm,
+                                       const std::optional<SavedOccupation>& occupation) {
     // Step 1: Read archive header to get L, xc, nmo_alpha, spin_restricted
     auto header = read_archive_header(world, archive_path);
 
@@ -75,7 +76,7 @@ GroundState GroundState::from_archive(World& world,
     // param.nmo_alpha() orbitals — with the neutral default a charged species
     // silently DROPS its HOMO (anion) or mis-derives nopen. The archive side
     // knows the truth: closed shell nelec = 2*nmo_alpha exactly; open shell
-    // takes nalpha/nbeta from the moldft calc_info.json sibling.
+    // takes nalpha/nbeta from the ground-state node (`occupation`).
     const double Z = molecule.total_nuclear_charge();
     if (verified_parameters) {
         MADNESS_CHECK_THROW(header.spin_restricted == params.spin_restricted() &&
@@ -100,44 +101,18 @@ GroundState GroundState::from_archive(World& world,
             print("ARCHIVE_HEADER: inferred total charge =", charge,
                   " (nelec =", 2 * header.nmo_alpha, ")");
     } else {
-        // rank 0 reads the sibling calc_info.json; broadcast (na, nb, found).
-        long na = -1, nb = -1;
-        if (world.rank() == 0) {
-            const auto ci = std::filesystem::path(prefix + ".calc_info.json");
-            std::ifstream in(ci);
-            if (in) {
-                try {
-                    nlohmann::json j;
-                    in >> j;
-                    na = j.value("calcinfo_nalpha", -1);
-                    nb = j.value("calcinfo_nbeta", -1);
-                } catch (const std::exception &) { na = nb = -1; }
-            }
-        }
-        std::vector<long> nab{na, nb};
-        world.gop.broadcast_serializable(nab, 0);
-        na = nab[0]; nb = nab[1];
-        if (na > 0 && nb >= 0) {
-            const double charge = Z - static_cast<double>(na + nb);
-            params.set_user_defined_value("charge", charge);
-            params.set_user_defined_value("nopen", static_cast<int>(na - nb));
-            if (world.rank() == 0)
-                print("ARCHIVE_HEADER: open-shell from calc_info: nalpha=", na,
-                      " nbeta=", nb, " nopen=", na - nb,
-                      " inferred charge=", charge);
-        } else {
-            // Legacy fallback: neutral assumption (pre-fix behavior), loudly.
-            int nelec = static_cast<int>(Z);
-            int nopen = 2 * static_cast<int>(header.nmo_alpha) - nelec;
-            if (nopen < 0) nopen = 0;
-            params.set_user_defined_value("nopen", nopen);
-            if (world.rank() == 0)
-                print("ARCHIVE_HEADER: WARNING — no ", prefix,
-                      ".calc_info.json next to the archive; ASSUMING NEUTRAL "
-                      "(nopen=", nopen, "). A charged open-shell restart needs "
-                      "that file (moldft writes it) or the loaded orbital set "
-                      "will be wrong.");
-        }
+        MADNESS_CHECK_THROW(occupation.has_value(),
+            "an open-shell ground-state archive needs its occupation from the ground-state node "
+            "(madness::saved_occupation); the archive alone does not hold nalpha and nbeta");
+        // The charge the ground state was solved with; nopen then gives the
+        // spin split, as in the ground-state input.
+        const long na = occupation->nalpha, nb = occupation->nbeta;
+        const double charge = occupation->charge;
+        params.set_user_defined_value("charge", charge);
+        params.set_user_defined_value("nopen", static_cast<int>(na - nb));
+        if (world.rank() == 0)
+            print("ARCHIVE_HEADER: open-shell from the ground-state node: nalpha=", na,
+                  " nbeta=", nb, " nopen=", na - nb, " charge=", charge);
     }
 
     // Step 3: Construct SCF (calls set_derived_values internally)

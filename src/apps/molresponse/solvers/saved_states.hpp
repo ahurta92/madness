@@ -171,25 +171,24 @@ inline std::optional<SavedNode> find_excited(madness::World& world, const fs::pa
 }
 
 // The ground state of a run folder, read from its node without changing it:
-//   <run>/states/ground_state/            the node: description (level, box) and archive,
-//                                         with the Fock matrix of its level when the
-//                                         description's details name it (details.fock)
-//   <run>/analysis/ground_state/          the SCF stage's analysis files, where the
-//                                         node layout keeps moldft.calc_info.json
-//                                         (the molecule)
-// The analysis folder is the workflow's analysis/<calculation id> folder
-// (Drivers.hpp, Applications.hpp); no library function names it.
+//   <run>/states/ground_state/            the node: description (level, box, the
+//                                         molecule and occupation in its settings)
+//                                         and archive, with the Fock matrix of its
+//                                         level when the description's details name
+//                                         it (details.fock)
 struct GroundNode {
   SavedNode node;
   fs::path archive;        // the name the native loader takes (no .00000 suffix)
   madness::Molecule molecule;
+  madness::SavedOccupation occupation;
   std::string fock_json;   // empty when there is none: the Fock matrix is built from the orbitals
   double L = 0.0;          // half the cubic cell edge
   [[nodiscard]] it::Protocol protocol() const { return node.description.protocol; }
 };
 
 // Collective. Stops when the run has no saved ground state, the node is
-// half-saved or unreadable, or the molecule cannot be found.
+// half-saved or unreadable, or its settings lack the molecule or occupation
+// (a node saved by an older version: rerun the ground state).
 inline GroundNode read_ground(madness::World& world, const fs::path& run) {
   const auto folder = madness::ground_state_node(fs::absolute(run).lexically_normal());
   auto node = read_saved_node(world, folder);
@@ -199,27 +198,15 @@ inline GroundNode read_ground(madness::World& world, const fs::path& run) {
   GroundNode ground;
   ground.archive = it::Node(folder).archive() / "scf.restartdata";
   ground.L = node->description.details.at("orbitals").at("L").get<double>();
-  const auto analysis = fs::absolute(run).lexically_normal() / "analysis" / "ground_state";
-  const auto found = json::parse(cp::detail::on_root(world, [&] {
-    const auto info = analysis / "moldft.calc_info.json";
-    cp::records::require(fs::is_regular_file(info), "no ground-state molecule: " + info.string() + " is missing");
-    json calc_info;
-    std::ifstream(info) >> calc_info;
-    json molecule;
-    if (calc_info.contains("tasks") && calc_info["tasks"].is_array() && !calc_info["tasks"].empty())
-      molecule = calc_info["tasks"][0].value("molecule", json());
-    else
-      molecule = calc_info.value("molecule", json());
-    cp::records::require(!molecule.is_null(), "no molecule in " + info.string());
-    // A node saved before the Fock file existed names none: the matrix is then
-    // built from the orbitals.
+  ground.molecule = madness::saved_molecule(node->description);
+  ground.occupation = madness::saved_occupation(node->description);
+  // A node saved before the Fock file existed names none: the matrix is then
+  // built from the orbitals.
+  ground.fock_json = cp::detail::on_root(world, [&] {
     const auto name = node->description.details.value("fock", std::string());
     const auto fock = it::Node(folder).archive() / name;
-    return json{{"molecule", molecule},
-                {"fock", !name.empty() && fs::is_regular_file(fock) ? fock.string() : std::string()}}.dump();
-  }));
-  ground.molecule.from_json(found.at("molecule"));
-  ground.fock_json = found.at("fock").get<std::string>();
+    return !name.empty() && fs::is_regular_file(fock) ? fock.string() : std::string();
+  });
   ground.node = std::move(*node);
   return ground;
 }
@@ -230,7 +217,8 @@ inline GroundNode read_ground(madness::World& world, const fs::path& run) {
 inline GroundState load_ground(madness::World& world, const GroundNode& ground, double thresh, int k) {
   set_response_protocol(world, ground.L, thresh, k);
   print_loaded(world, ground.node);
-  auto gs = GroundState::from_archive(world, ground.archive.string(), ground.molecule);
+  auto gs = GroundState::from_archive(world, ground.archive.string(), ground.molecule, nullptr, nullptr,
+                                     ground.occupation);
   gs.set_fock_level(ground.protocol());  // its Fock file is read only at the node's level
   return gs;
 }

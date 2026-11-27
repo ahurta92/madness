@@ -546,6 +546,38 @@ nlohmann::json Molecule::electronic_settings() const {
             {"smoothing_radii_inverse", rcut}, {"pointgroup", pointgroup_}, {"core_potentials", core_settings}};
 }
 
+Molecule Molecule::from_electronic_settings(const nlohmann::json& settings) {
+    Molecule molecule;
+    molecule.parameters.from_json(settings.at("parameters"));
+    // electronic_settings() leaves these out: the coordinates are atomic units
+    // and already in the frame they were solved in.
+    molecule.parameters.set_user_defined_value("units", std::string("atomic"));
+    molecule.parameters.set_user_defined_value("no_orient", true);
+    const auto& field = settings.at("field");
+    MADNESS_CHECK_THROW(field.is_array() && field.size() == 3, "electronic field must have three components");
+    for (long i = 0; i < 3; ++i) molecule.field(i) = field.at(i).get<double>();
+    for (const auto& atom : settings.at("atoms")) {
+        const auto& r = atom.at("coordinates");
+        MADNESS_CHECK_THROW(r.is_array() && r.size() == 3, "an atom needs three coordinates");
+        const auto number = atom.at("atomic_number").get<unsigned int>();
+        molecule.atoms.emplace_back(r.at(0).get<double>(), r.at(1).get<double>(), r.at(2).get<double>(),
+                                    atom.at("charge").get<double>(), number, atom.at("pseudo_atom").get<bool>());
+        molecule.atomic_radii.push_back(get_atomic_data(number).covalent_radius * 1e-10 /
+                                        madness::constants::atomic_unit_of_length);
+    }
+    if (molecule.parameters.core_type() != "none") {
+        std::set<unsigned int> numbers;
+        for (const auto& atom : molecule.atoms) numbers.insert(atom.atomic_number);
+        molecule.core_pot.read_file(molecule.parameters.core_type(), numbers, molecule.get_eprec());
+    }
+    // The radii as saved: they include any core-potential update.
+    molecule.rcut = settings.at("smoothing_radii_inverse").get<std::vector<double>>();
+    molecule.pointgroup_ = settings.at("pointgroup").get<std::string>();
+    MADNESS_CHECK_THROW(molecule.electronic_settings() == settings,
+                        "the saved molecule cannot be rebuilt exactly from its electronic settings");
+    return molecule;
+}
+
 nlohmann::json Molecule::to_json() const {
   nlohmann::json mol_schema;
   mol_schema["symbols"] = {};
