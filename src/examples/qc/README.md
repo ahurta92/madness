@@ -83,7 +83,8 @@ is registered `medium` with it.
 host, concurrently with each other and with a CI runner; treat those times as
 upper bounds.
 The four `response_*_alpha` DFT cases compare against DALTON, not against a
-MADNESS reference: each `reference/*.calc_info.json` carries only the checked
+MADNESS reference: each `reference/*.results.json` (and the older
+`reference/*.calc_info.json` it was converted from) carries only the checked
 keys, filled with DALTON t-aug-cc-pVQZ values, and says so in its
 `reference_source` field, with the DALTON inputs and output in
 `dalton_reference/`. Do not regenerate them with `--update`; that would replace
@@ -203,13 +204,14 @@ scf_h2o_hf/
   scf_h2o_hf.in                       the deck
   run.sh                              one line: exec ${MADQC:-madqc} --wf=scf scf_h2o_hf.in
   check.json                          which results are checked, and how tightly
-  reference/scf_h2o_hf.calc_info.json compared numerically against a fresh run
+  reference/scf_h2o_hf.results.json  compared numerically against a fresh run
+  reference/scf_h2o_hf.calc_info.json the same, for checks that still read calc_info.json
   reference/scf_h2o_hf.out            what a correct run looks like -- never compared
 ```
 
 **The deck is named after the case.** `madqc` derives its output prefix from the
-deck's filename, so `scf_h2o_hf.in` produces `scf_h2o_hf.calc_info.json` and
-`scf_h2o_hf.out`. A deck named literally `input` is special-cased to the default
+deck's filename, so `scf_h2o_hf.in` produces `scf_h2o_hf.calc_info.json`,
+`scf_h2o_hf.out` and the run folder `scf_h2o_hf/`, which holds `results.json`. A deck named literally `input` is special-cased to the default
 prefix `mad` (see `ParameterManager.hpp`) — hence the convention.
 
 **`run.sh` is one line** and honours `${MADQC}` so the same file works for a user
@@ -221,20 +223,33 @@ paths and host details; comparing it would be permanently red. It is there to be
 read.
 
 **`check.json` is the assertion list**, which also documents which
-`calc_info.json` keys carry the meaningful results:
+result keys carry the meaningful results:
 
 ```json
 {
   "description": "Hartree-Fock single point on water",
   "checks": [
-    {"key": ["tasks", 0, "scf_total_energy"], "tol": 1e-4},
-    {"key": ["tasks", 0, "scf_eigenvalues_a", "vals", 0], "tol": 1e-4},
-    {"key": ["tasks", 0, "model"], "tol": 0}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "orbital_energies", "value", "alpha", 0], "file": "results", "tol": 1e-3},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "status"], "file": "results", "tol": 0}
   ]
 }
 ```
 
-`key` is a path of keys and list indices into `<prefix>.calc_info.json`. Each
+`file` names the file a check reads: `"results"` is `<prefix>/results.json`,
+compared with `reference/<case>.results.json`; `"calc_info"`, the default, is
+`<prefix>.calc_info.json`, compared with `reference/<case>.calc_info.json`. The
+scf and response cases read `results.json` wherever it has the value; the
+other workflows (nemo, cis, cc2, mp2, oep, `--optimize`) write no
+`results.json` yet and still read `calc_info.json`.
+
+`key` is a path of object keys, list indices and **selectors**. A selector is
+an object such as `{"frequency": 0.05}` or `{"root": "es_root_0000"}`: it picks
+the one list item whose fields equal it (numbers within 1e-9). `results.json`
+identifies its list items by such fields, not by position, so checks select
+rather than index. A selector that matches no item, or more than one, fails the
+check. `"count": true` checks the number of items in the list at `key` instead
+of a value (the number of excited-state roots, for example). Each
 check then carries one or more of:
 
 - `tol` — an absolute tolerance against the reference; `0` means "must match
@@ -246,6 +261,11 @@ check then carries one or more of:
   consulted. Use it for iteration counts and residuals, where the reference is a
   budget rather than a number to reproduce. It may be combined with `tol` or
   `rtol` in the same entry.
+- `min` — a lower bound on the produced value alone, the mirror of `max` (for
+  example a seed overlap that must stay above 0.99).
+
+Any other field in a check fails it, so a misspelt mode cannot quietly turn
+into an exact comparison.
 
 A key absent from either file is a failure, not a skip. Optional
 `requires` gates a case on resources — `{"threads": 20}`, `{"mpi": true}`,
@@ -315,13 +335,18 @@ a real signal about the solver, not scheduling noise. The Raman value it pins
 is a regression baseline, not a converged Raman intensity; the converged
 number was validated separately at `1e-6`/`k8`.
 
-Key paths: α is `tasks[1].properties.response_properties.alpha.<pk>[row].alpha[i][j]`
-with `<pk>` the protocol key (`"1e-04_k6"`), rows in `dipole.frequencies`
-order and `i,j` indexing the letters of `dipole.directions`; β and Raman rows
-are `…beta.<pk>[row]` / `…raman.<pk>[row]` with `A`, `B`, `C`, `freq_b`,
-`freq_c` naming the component (rows ordered A fastest, then B, then C); 2PA is
-`…tpa.<pk>[row]` with `es_root_id`, `omega`, `D_linear`; excitation energies
-are `tasks[1].metadata.excited_states.<pk>.roots[i].omega`.
+Key paths, all in `results.json` under the `response` entry
+(`["calculations", {"calculation_id": "response"}, …]`): α is
+`properties.polarizability.values[{frequency}].components.<ij>` with `<ij>`
+two of `xyz`; β is `properties.hyperpolarizability.values[{frequency_b,
+frequency_c}].components.<abc>`; the Raman polarizability gradient is
+`properties.polarizability_gradient.values[{frequency}].components.<coordinate>.<ij>`;
+excitation energies are `properties.excited_states.values[{root}].excitation_energy`;
+2PA is `properties.two_photon_absorption.values[{root}].derived.D_linear`;
+each value's `status` is `"complete"` when it was computed from converged
+states; per-state iteration counts are `state_metrics.<node>.updates`, with
+`<node>` the state's folder name (`dipole_z-f0.05000`, `excited-full`); the
+scheduler's verdict is `run.stop_reason` and `run.dropped_work`.
 
 The nightly set is the `long`/`verylong` response cases:
 `ctest -L qctest -R "madness/test/qc/response_" -LE "short|medium"`. "Nightly"

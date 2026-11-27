@@ -1,10 +1,9 @@
 {
   "description": "TPSS single point on helium -- the only meta-GGA deck, and the only one exercising the non-multiplicative kinetic-energy-density term in the Kohn-Sham operator",
   "checks": [
-    {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 0, "scf", "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 0, "scf_eigenvalues_a", "vals", 0], "tol": 1e-3},
-    {"key": ["tasks", 0, "convergence_info", "converged_for_thresh"], "tol": 0},
-    {"key": ["tasks", 0, "model"], "tol": 0}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "orbital_energies", "value", "alpha", 0], "file": "results", "tol": 1e-3},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "protocol", "threshold"], "file": "results", "tol": 0}
   ]
 }

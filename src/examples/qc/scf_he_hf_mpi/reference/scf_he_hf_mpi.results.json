@@ -1,0 +1,22 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -2.861679249901891
+        },
+        "orbital_energies": {
+          "value": {
+            "alpha": [
+              -0.9179861813058723
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "provenance": {
+    "mpi_processes": 2
+  }
+}

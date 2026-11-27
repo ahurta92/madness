@@ -1,8 +1,7 @@
 {
   "description": "Hartree-Fock on helium; the minimal scf deck",
   "checks": [
-    {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 0, "scf_eigenvalues_a", "vals", 0], "tol": 1e-3},
-    {"key": ["tasks", 0, "model"], "tol": 0}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "orbital_energies", "value", "alpha", 0], "file": "results", "tol": 1e-3}
   ]
 }

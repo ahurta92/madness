@@ -1,0 +1,51 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -1.1335935503913521
+        }
+      }
+    },
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 6
+      },
+      "run": {
+        "stop_reason": "complete"
+      },
+      "properties": {
+        "excited_states": {
+          "values": [
+            {
+              "root": "es_root_0000",
+              "status": "complete",
+              "excitation_energy": 0.465857010739035
+            }
+          ]
+        },
+        "polarizability": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "zz": 6.435301860498895
+              }
+            }
+          ]
+        }
+      },
+      "state_metrics": {
+        "dipole_z-f0.00000": {
+          "updates": 12
+        },
+        "excited-full": {
+          "updates": 5
+        }
+      }
+    }
+  ]
+}

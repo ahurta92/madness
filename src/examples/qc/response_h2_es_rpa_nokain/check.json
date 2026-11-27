@@ -2,16 +2,16 @@
   "description": "H2 excited states, RPA, with KAIN switched off: response_h2_es_rpa plus `kain false` in the response block. Review finding C3: the deck's kain / maxrotn used to reach only the FD solves, because both ES executors overwrote them. This case runs the ES solve without KAIN. It took 12 envelope iterations (the parent takes 9): FD leg 12 iterations to bsh 3.1e-4 under the relative FD gate (13 to 1.5e-4 under the old absolute one), ES root 5 iterations. The ES gate is density + omega, with bsh a sanity check only. Against response_h2_es_rpa: omega +2.4e-5, alpha_zz -1.1e-3. alpha is linear in the FD vector and so carries the looser FD stop into the value; that is why this case has its own reference instead of sharing the parent's. Reference: RelWithDebInfo, Pthreads, ArmPL, 1 rank x 7 threads, dd (Neoverse-N1), 2026-09-27, on 0ecf076f3 plus the FD relative gate, wall 30 s. The parent measures the same 31-32 s on dd and 24 s on Milan, so the case is medium like the parent. omega and alpha tol 1e-3 au.",
   "expect_files": ["response_h2_es_rpa_nokain/analysis/response/es_analysis__*.json"],
   "checks": [
-    {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 1, "type"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "protocols", "1e-04_k6", "k"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "v3_diagnostics", "stop_reason"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "excited_states", "1e-04_k6", "n_roots"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "excited_states", "1e-04_k6", "converged"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "excited_states", "1e-04_k6", "roots", 0, "omega"], "tol": 0.001},
-    {"key": ["tasks", 1, "properties", "response_properties", "alpha", "1e-04_k6", 0, "converged"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "alpha", "1e-04_k6", 0, "alpha", 0, 0], "tol": 0.001},
-    {"key": ["tasks", 1, "metadata", "fd_states", "dipole_z", "1e-04_k6", "f0.00000", "iter"], "max": 18},
-    {"key": ["tasks", 1, "metadata", "excited_states", "1e-04_k6", "iter"], "max": 18}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "response"}, "calculation_id"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "protocol", "k"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "run", "stop_reason"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "excited_states", "values"], "file": "results", "count": true, "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "excited_states", "values", {"root": "es_root_0000"}, "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "excited_states", "values", {"root": "es_root_0000"}, "excitation_energy"], "file": "results", "tol": 0.001},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "polarizability", "values", {"frequency": 0.0}, "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "polarizability", "values", {"frequency": 0.0}, "components", "zz"], "file": "results", "tol": 0.001},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.00000", "updates"], "file": "results", "max": 18},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "excited-full", "updates"], "file": "results", "max": 18}
   ]
 }

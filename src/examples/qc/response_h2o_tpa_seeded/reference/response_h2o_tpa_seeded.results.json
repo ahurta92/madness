@@ -1,0 +1,85 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -76.06770190594337
+        }
+      }
+    },
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 6
+      },
+      "run": {
+        "stop_reason": "complete"
+      },
+      "properties": {
+        "excited_states": {
+          "values": [
+            {
+              "root": "es_root_0000",
+              "status": "complete",
+              "excitation_energy": 0.3225090195332966,
+              "seed_match": {
+                "best_seed_slot": 0,
+                "seed_overlap": 0.9995431475348316
+              }
+            },
+            {
+              "root": "es_root_0001",
+              "excitation_energy": 0.3833844704306585,
+              "seed_match": {
+                "best_seed_slot": 1,
+                "seed_overlap": 0.9983214030450469
+              }
+            }
+          ]
+        },
+        "two_photon_absorption": {
+          "values": [
+            {
+              "root": "es_root_0000",
+              "status": "complete",
+              "derived": {
+                "D_linear": 2.4868396356040194
+              }
+            },
+            {
+              "root": "es_root_0001",
+              "status": "complete",
+              "derived": {
+                "D_linear": 20.9381080214219
+              }
+            }
+          ]
+        }
+      },
+      "state_metrics": {
+        "excited-full": {
+          "updates": 7
+        },
+        "dipole_x-f0.16125": {
+          "updates": 12
+        },
+        "dipole_x-f0.19169": {
+          "updates": 17
+        },
+        "dipole_y-f0.16125": {
+          "updates": 11
+        },
+        "dipole_y-f0.19169": {
+          "updates": 13
+        },
+        "dipole_z-f0.16125": {
+          "updates": 14
+        },
+        "dipole_z-f0.19169": {
+          "updates": 14
+        }
+      }
+    }
+  ]
+}

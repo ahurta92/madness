@@ -1,0 +1,36 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "dispersion_energy": {
+          "value": -0.00022896520201444098
+        },
+        "total_energy": {
+          "value": -8.047395831036242,
+          "status": "complete"
+        },
+        "gradient": {
+          "value": [
+            null,
+            null,
+            -0.0013741885896467188,
+            null,
+            null,
+            0.0020483519354161928
+          ]
+        },
+        "orbital_energies": {
+          "value": {
+            "alpha": [
+              -1.8670414811746894
+            ]
+          }
+        }
+      },
+      "protocol": {
+        "threshold": 0.0001
+      }
+    }
+  ]
+}

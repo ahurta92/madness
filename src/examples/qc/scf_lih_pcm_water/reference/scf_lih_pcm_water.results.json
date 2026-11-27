@@ -1,0 +1,12 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -8.018566375351375
+        }
+      }
+    }
+  ]
+}

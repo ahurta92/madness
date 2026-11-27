@@ -6,453 +6,412 @@
   "checks": [
     {
       "key": [
-        "tasks",
-        0,
+        "calculations",
+        {
+          "calculation_id": "ground_state"
+        },
         "properties",
-        "energy"
+        "total_energy",
+        "value"
       ],
+      "file": "results",
       "tol": 1e-05
     },
     {
       "key": [
-        "tasks",
-        1,
-        "type"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "calculation_id"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "protocols",
-        "1e-04_k6",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "protocol",
         "k"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "v3_diagnostics",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "run",
         "stop_reason"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-04_k6",
-        0,
-        "converged"
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-04_k6",
-        0,
-        "alpha",
-        0,
-        0
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "xx"
       ],
+      "file": "results",
       "tol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-04_k6",
-        0,
-        "alpha",
-        2,
-        2
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "zz"
       ],
+      "file": "results",
       "tol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        50,
-        "A"
+        "polarizability_gradient",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        50,
-        "B"
+        "polarizability_gradient",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "nuc_0_z",
+        "zz"
       ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        50,
-        "C"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        50,
-        "converged"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        50,
-        "beta"
-      ],
+      "file": "results",
       "rtol": 0.02
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        53,
-        "A"
+        "polarizability_gradient",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "nuc_1_z",
+        "zz"
       ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        53,
-        "B"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        53,
-        "C"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        53,
-        "converged"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "response_properties",
-        "raman",
-        "1e-04_k6",
-        53,
-        "beta"
-      ],
+      "file": "results",
       "rtol": 0.02
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
         "vibrational_analysis",
-        "n_atoms"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "vibrational_analysis",
-        "frequencies_cm1",
-        "vals",
+        "value",
+        "reduced_mass",
         5
       ],
+      "file": "results",
       "rtol": 0.01
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "vibrational_analysis",
-        "reducedmass",
-        "vals",
-        5
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "status"
       ],
-      "rtol": 0.01
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "raman_spectra",
-        "completeness",
-        "f0.00000",
-        "rows_found"
-      ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "raman_spectra",
-        "completeness",
-        "f0.00000",
-        "all_rows_converged"
-      ],
-      "tol": 0
-    },
-    {
-      "key": [
-        "tasks",
-        1,
-        "properties",
-        "raman_spectra",
-        "raman_spectra",
-        "f0.00000",
-        0,
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "value",
+        {
+          "mode": 1
+        },
         "mode"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "raman_spectra",
-        "raman_spectra",
-        "f0.00000",
-        0,
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "value",
+        {
+          "mode": 1
+        },
         "freq_cm1"
       ],
+      "file": "results",
       "rtol": 0.01
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "raman_spectra",
-        "raman_spectra",
-        "f0.00000",
-        0,
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "value",
+        {
+          "mode": 1
+        },
         "pol_int"
       ],
+      "file": "results",
       "rtol": 0.02
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "raman_spectra",
-        "raman_spectra",
-        "f0.00000",
-        0,
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "value",
+        {
+          "mode": 1
+        },
         "dep_ratio"
       ],
+      "file": "results",
       "rtol": 0.05
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "raman_spectra",
-        "raman_spectra",
-        "f0.00000",
-        0,
+        "raman_spectrum",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "value",
+        {
+          "mode": 1
+        },
         "converged"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_x",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_x-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 18
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_y",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_y-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 18
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_z",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_z-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 18
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_0_x",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_0_x-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_0_y",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_0_y-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_0_z",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_0_z-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_1_x",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_1_x-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_1_y",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_1_y-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "nuc_1_z",
-        "1e-04_k6",
-        "f0.00000",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "nuc_1_z-f0.00000",
+        "updates"
       ],
+      "file": "results",
       "max": 12
     }
   ]

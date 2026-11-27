@@ -1,0 +1,109 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -7.987232641123691
+        }
+      }
+    },
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 6
+      },
+      "run": {
+        "stop_reason": "complete"
+      },
+      "properties": {
+        "polarizability": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "xx": 25.43488656891217,
+                "zz": 22.154852244836466
+              }
+            }
+          ]
+        },
+        "polarizability_gradient": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "nuc_0_z": {
+                  "zz": -13.532965364102335
+                },
+                "nuc_1_z": {
+                  "zz": 13.490004236010964
+                }
+              }
+            }
+          ]
+        },
+        "vibrational_analysis": {
+          "value": {
+            "reduced_mass": [
+              null,
+              null,
+              null,
+              null,
+              null,
+              1.1304696094233881
+            ]
+          }
+        },
+        "raman_spectrum": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "value": [
+                {
+                  "mode": 1,
+                  "freq_cm1": 1441.6383256881513,
+                  "pol_int": 349.51075237624633,
+                  "dep_ratio": 0.032785413505051236,
+                  "converged": true
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "state_metrics": {
+        "dipole_x-f0.00000": {
+          "updates": 9
+        },
+        "dipole_y-f0.00000": {
+          "updates": 9
+        },
+        "dipole_z-f0.00000": {
+          "updates": 9
+        },
+        "nuc_0_x-f0.00000": {
+          "updates": 8
+        },
+        "nuc_0_y-f0.00000": {
+          "updates": 8
+        },
+        "nuc_0_z-f0.00000": {
+          "updates": 8
+        },
+        "nuc_1_x-f0.00000": {
+          "updates": 6
+        },
+        "nuc_1_y-f0.00000": {
+          "updates": 6
+        },
+        "nuc_1_z-f0.00000": {
+          "updates": 7
+        }
+      }
+    }
+  ]
+}

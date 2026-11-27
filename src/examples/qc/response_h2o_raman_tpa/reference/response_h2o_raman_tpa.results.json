@@ -1,0 +1,118 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -76.06771285798406,
+          "status": "complete"
+        }
+      },
+      "protocol": {
+        "threshold": 0.0001
+      }
+    },
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 6
+      },
+      "run": {
+        "stop_reason": "complete"
+      },
+      "properties": {
+        "polarizability": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "xx": 7.828796717929502,
+                "yy": 8.871788932056292,
+                "zz": 8.294461101070024
+              }
+            }
+          ]
+        },
+        "polarizability_gradient": {
+          "values": [
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "nuc_0_z": {
+                  "zz": 4.35117179183004
+                }
+              }
+            }
+          ]
+        },
+        "excited_states": {
+          "values": [
+            {
+              "root": "es_root_0000",
+              "status": "complete",
+              "excitation_energy": 0.3223899462753981
+            },
+            {
+              "root": "es_root_0001",
+              "excitation_energy": 0.38329098893661634
+            }
+          ]
+        },
+        "two_photon_absorption": {
+          "values": [
+            {
+              "root": "es_root_0000",
+              "energy": 0.3223899462753981,
+              "derived": {
+                "D_linear": 2.4940930678237923
+              }
+            },
+            {
+              "root": "es_root_0001",
+              "derived": {
+                "D_linear": 21.00323514334965
+              }
+            }
+          ]
+        }
+      },
+      "state_metrics": {
+        "dipole_x-f0.00000": {
+          "updates": 10
+        },
+        "dipole_x-f0.16119": {
+          "updates": 11
+        },
+        "dipole_x-f0.19165": {
+          "updates": 11
+        },
+        "dipole_y-f0.00000": {
+          "updates": 12
+        },
+        "dipole_y-f0.16119": {
+          "updates": 12
+        },
+        "dipole_y-f0.19165": {
+          "updates": 12
+        },
+        "dipole_z-f0.00000": {
+          "updates": 11
+        },
+        "dipole_z-f0.16119": {
+          "updates": 13
+        },
+        "dipole_z-f0.19165": {
+          "updates": 13
+        },
+        "nuc_0_z-f0.00000": {
+          "updates": 22
+        },
+        "excited-full": {
+          "updates": 10
+        }
+      }
+    }
+  ]
+}

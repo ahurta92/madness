@@ -1,12 +1,12 @@
 {
   "description": "PBE on LiH with the D3(BJ) dispersion correction; energy and single-point gradient",
   "checks": [
-    {"key": ["tasks", 0, "scf", "scf_dispersion_correction_energy"], "tol": 1e-12},
-    {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 0, "properties", "gradient", "vals", 2], "tol": 1e-4},
-    {"key": ["tasks", 0, "properties", "gradient", "vals", 5], "tol": 1e-4},
-    {"key": ["tasks", 0, "scf_eigenvalues_a", "vals", 0], "tol": 1e-3},
-    {"key": ["tasks", 0, "convergence_info", "converged_for_thresh"], "tol": 0},
-    {"key": ["tasks", 0, "model"], "tol": 0}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "dispersion_energy", "value"], "file": "results", "tol": 1e-12},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "gradient", "value", 2], "file": "results", "tol": 1e-4},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "gradient", "value", 5], "file": "results", "tol": 1e-4},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "orbital_energies", "value", "alpha", 0], "file": "results", "tol": 1e-3},
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "protocol", "threshold"], "file": "results", "tol": 0}
   ]
 }

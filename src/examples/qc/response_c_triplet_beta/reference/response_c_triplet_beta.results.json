@@ -1,0 +1,59 @@
+{
+  "calculations": [
+    {
+      "calculation_id": "ground_state",
+      "properties": {
+        "total_energy": {
+          "value": -37.69362652747463,
+          "status": "complete"
+        },
+        "orbital_energies": {
+          "value": {
+            "alpha": [
+              -11.345311171597748,
+              null,
+              null,
+              -0.4391045021539588
+            ],
+            "beta": [
+              -11.298744787534956,
+              -0.5853046222786102
+            ]
+          }
+        }
+      },
+      "protocol": {
+        "threshold": 0.0001
+      }
+    },
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 6
+      },
+      "run": {
+        "stop_reason": "complete_with_stalled_and_dropped_beta",
+        "dropped_work": [
+          {
+            "id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
+            "reason": "stalled (quarantined by the no-progress guard)"
+          },
+          {
+            "id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000"
+          }
+        ]
+      },
+      "state_metrics": {
+        "dipole_z-f0.00000": {
+          "updates": 16
+        },
+        "dipole_z-f0.05000": {
+          "updates": 21
+        },
+        "dipole_z-f0.10000": {
+          "updates": 23
+        }
+      }
+    }
+  ]
+}

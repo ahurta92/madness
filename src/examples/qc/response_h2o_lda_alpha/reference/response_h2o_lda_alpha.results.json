@@ -1,0 +1,35 @@
+{
+  "reference_source": "DALTON master 984913d, SVWN5/t-aug-cc-pVQZ, **PROPERTIES .ALPHA (*ABALNR .FREQUE 0.0 0.05); see dalton_reference/. Only the keys check.json names are meaningful; alpha off-diagonals are zero-filled and not checked. DALTON E = -75.909693246232.",
+  "calculations": [
+    {
+      "calculation_id": "response",
+      "protocol": {
+        "k": 8
+      },
+      "properties": {
+        "polarizability": {
+          "values": [
+            {
+              "frequency": 0.05,
+              "status": "complete",
+              "components": {
+                "xx": 10.67091,
+                "yy": 10.35192,
+                "zz": 10.4557
+              }
+            },
+            {
+              "frequency": 0.0,
+              "status": "complete",
+              "components": {
+                "xx": 10.49982,
+                "yy": 10.27436,
+                "zz": 10.34337
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

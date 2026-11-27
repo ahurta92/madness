@@ -6,311 +6,382 @@
   "checks": [
     {
       "key": [
-        "tasks",
-        0,
+        "calculations",
+        {
+          "calculation_id": "ground_state"
+        },
         "properties",
-        "energy"
+        "total_energy",
+        "value"
       ],
+      "file": "results",
       "tol": 1e-05
     },
     {
       "key": [
-        "tasks",
-        1,
-        "type"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "calculation_id"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "protocols",
-        "1e-04_k6",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "protocol",
         "k"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "v3_diagnostics",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "run",
         "stop_reason"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "n_roots"
+        "values"
       ],
+      "file": "results",
+      "count": true,
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "converged"
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "excited_states",
-        "1e-04_k6",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "excited-full",
+        "updates"
       ],
+      "file": "results",
       "max": 9
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "roots",
-        0,
-        "omega"
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "excitation_energy"
       ],
+      "file": "results",
       "tol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "roots",
-        1,
-        "omega"
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "excitation_energy"
       ],
+      "file": "results",
       "tol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        0,
-        "es_root_id"
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "root"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        0,
-        "converged"
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        0,
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "derived",
         "D_linear"
       ],
+      "file": "results",
       "rtol": 0.02
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        1,
-        "es_root_id"
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "root"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        1,
-        "converged"
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "tpa",
-        "1e-04_k6",
-        1,
+        "two_photon_absorption",
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "derived",
         "D_linear"
       ],
+      "file": "results",
       "rtol": 0.02
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "seed_guard",
-        "roots",
-        0,
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "seed_match",
         "best_seed_slot"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "seed_guard",
-        "roots",
-        0,
+        "values",
+        {
+          "root": "es_root_0000"
+        },
+        "seed_match",
         "seed_overlap"
       ],
+      "file": "results",
       "min": 0.99
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "seed_guard",
-        "roots",
-        1,
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "seed_match",
         "best_seed_slot"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "properties",
         "excited_states",
-        "1e-04_k6",
-        "seed_guard",
-        "roots",
-        1,
+        "values",
+        {
+          "root": "es_root_0001"
+        },
+        "seed_match",
         "seed_overlap"
       ],
+      "file": "results",
       "min": 0.99
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_x",
-        "1e-04_k6",
-        "f0.16125",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_x-f0.16125",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_x",
-        "1e-04_k6",
-        "f0.19169",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_x-f0.19169",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_y",
-        "1e-04_k6",
-        "f0.16125",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_y-f0.16125",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_y",
-        "1e-04_k6",
-        "f0.19169",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_y-f0.19169",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_z",
-        "1e-04_k6",
-        "f0.16125",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_z-f0.16125",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "fd_states",
-        "dipole_z",
-        "1e-04_k6",
-        "f0.19169",
-        "iter"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "state_metrics",
+        "dipole_z-f0.19169",
+        "updates"
       ],
+      "file": "results",
       "max": 21
     }
   ]

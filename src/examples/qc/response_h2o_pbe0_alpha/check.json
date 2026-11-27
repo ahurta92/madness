@@ -3,150 +3,184 @@
   "checks": [
     {
       "key": [
-        "tasks",
-        1,
-        "type"
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "calculation_id"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
-        "metadata",
-        "protocols",
-        "1e-06_k8",
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
+        "protocol",
         "k"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        1,
-        "omega"
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.05
+        },
+        "frequency"
       ],
+      "file": "results",
       "tol": 1e-12
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        0,
-        "converged"
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        0,
-        "alpha",
-        0,
-        0
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "xx"
       ],
+      "file": "results",
       "rtol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        0,
-        "alpha",
-        1,
-        1
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "yy"
       ],
+      "file": "results",
       "rtol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        0,
-        "alpha",
-        2,
-        2
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.0
+        },
+        "components",
+        "zz"
       ],
+      "file": "results",
       "rtol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        1,
-        "converged"
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.05
+        },
+        "status"
       ],
+      "file": "results",
       "tol": 0
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        1,
-        "alpha",
-        0,
-        0
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.05
+        },
+        "components",
+        "xx"
       ],
+      "file": "results",
       "rtol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        1,
-        "alpha",
-        1,
-        1
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.05
+        },
+        "components",
+        "yy"
       ],
+      "file": "results",
       "rtol": 0.001
     },
     {
       "key": [
-        "tasks",
-        1,
+        "calculations",
+        {
+          "calculation_id": "response"
+        },
         "properties",
-        "response_properties",
-        "alpha",
-        "1e-06_k8",
-        1,
-        "alpha",
-        2,
-        2
+        "polarizability",
+        "values",
+        {
+          "frequency": 0.05
+        },
+        "components",
+        "zz"
       ],
+      "file": "results",
       "rtol": 0.001
     }
   ]

@@ -1,19 +1,16 @@
 {
   "description": "Static beta_zzz(0;0,0) and alpha_zz(0) of LiH (HF, quadratic response, z only) at one rung (protocol 1e-4, k 6). The one beta row (index 0) is A=z, B=C=dipole_z, freq_b=freq_c=0 -- the static beta_zzz; LiH is polar, so it is a large number (~3e2 au) rather than a symmetry zero. Reference: RelWithDebInfo, Pthreads, ArmPL, 1 rank x 7 threads, dd (Neoverse-N1), 2026-09-27, on 0ecf076f3 plus the FD relative gate, wall 30 s; the z leg stops in 9 iterations at bsh 4.7e-4 (12 under the old absolute gate), and against the previous reference alpha_zz moved -9.9e-4 (22.155842 -> 22.154852) and beta_zzz -0.015 % (315.7768 -> 315.7309). beta rtol 0.01 (10x the run-to-run spread); the 1e-6 scripted-test value was 315.595 au. Tier: registered `long` (42 s), a deviation from the plan's CI tier -- the deck at `l 80.0` measured 50 s and at `l 50.0` (same beta_zzz to 0.08 %) 42 s, and a static beta cannot be cut further: it needs the z FD leg and one VBC solve.",
   "checks": [
-    {"key": ["tasks", 0, "properties", "energy"], "tol": 1e-5},
-    {"key": ["tasks", 1, "type"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "protocols", "1e-04_k6", "k"], "tol": 0},
-    {"key": ["tasks", 1, "metadata", "v3_diagnostics", "stop_reason"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "alpha", "1e-04_k6", 0, "converged"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "alpha", "1e-04_k6", 0, "alpha", 0, 0], "tol": 0.001},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "A"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "B"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "C"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "freq_b"], "tol": 0, "allow_zero": true},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "freq_c"], "tol": 0, "allow_zero": true},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "converged"], "tol": 0},
-    {"key": ["tasks", 1, "properties", "response_properties", "beta", "1e-04_k6", 0, "beta"], "rtol": 0.01},
-    {"key": ["tasks", 1, "metadata", "fd_states", "dipole_z", "1e-04_k6", "f0.00000", "iter"], "max": 18}
+    {"key": ["calculations", {"calculation_id": "ground_state"}, "properties", "total_energy", "value"], "file": "results", "tol": 1e-5},
+    {"key": ["calculations", {"calculation_id": "response"}, "calculation_id"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "protocol", "k"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "run", "stop_reason"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "polarizability", "values", {"frequency": 0.0}, "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "polarizability", "values", {"frequency": 0.0}, "components", "zz"], "file": "results", "tol": 0.001},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "hyperpolarizability", "values", {"frequency_b": 0.0, "frequency_c": 0.0}, "frequency_b"], "file": "results", "tol": 0, "allow_zero": true},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "hyperpolarizability", "values", {"frequency_b": 0.0, "frequency_c": 0.0}, "frequency_c"], "file": "results", "tol": 0, "allow_zero": true},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "hyperpolarizability", "values", {"frequency_b": 0.0, "frequency_c": 0.0}, "status"], "file": "results", "tol": 0},
+    {"key": ["calculations", {"calculation_id": "response"}, "properties", "hyperpolarizability", "values", {"frequency_b": 0.0, "frequency_c": 0.0}, "components", "zzz"], "file": "results", "rtol": 0.01},
+    {"key": ["calculations", {"calculation_id": "response"}, "state_metrics", "dipole_z-f0.00000", "updates"], "file": "results", "max": 18}
   ]
 }
