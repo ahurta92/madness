@@ -44,11 +44,11 @@ end
 ```
 
 `madqc --wf=response <deck>`. With a single coordinate the run solves that
-nuclear leg and the dipole legs and writes the nine `properties/raman` rows
-(`A`, `B`, `C`, `freq_b`, `freq_c`, `beta` = ∂α_AB/∂Q_C) to
-`response_metadata.json`. With `raman.nuc_atom -1` it solves all 3N nuclear
-legs, builds the dipole × nuclear source for every coordinate, writes the
-9 × 3N rows, and then the normal-mode analysis:
+nuclear leg and the dipole legs and writes the nine components ∂α_AB/∂Q_C of
+that coordinate to `results.json` (`polarizability_gradient`, keyed by the
+coordinate `nuc_<atom>_<axis>` and then `AB`). With `raman.nuc_atom -1` it
+solves all 3N nuclear legs, builds the dipole × nuclear source for every
+coordinate, writes all 9 × 3N components, and then the normal-mode analysis:
 
 - `vibrational_analysis`: Hessian (Eh/bohr²) assembled from the same nuclear
   response states (diagonal from translational invariance, nuclear-repulsion

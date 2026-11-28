@@ -13,7 +13,7 @@ using namespace madness;
 
 /// Stable identity for an FD perturbation source (doc 13). `description()`
 /// is the canonical string used in archive filenames and as the
-/// `<pert>` key in response_metadata.json — it must round-trip across runs
+/// first part of a driven node's name (dipole_z-f0.05000) — it must round-trip across runs
 /// and contain only filename-safe characters.
 ///
 /// This is identity only; the existing dipole_perturbation / magnetic /

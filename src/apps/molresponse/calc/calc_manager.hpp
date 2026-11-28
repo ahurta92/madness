@@ -39,7 +39,7 @@
 #include "../Perturbations.hpp"          // Perturbation
 #include "../ResponseProtocol.hpp"        // protocol_key, default_k_for_thresh
 #include "../ResponsePropertyPlanner.hpp" // ResponsePlan, FDRequest, ESRequest, ...
-#include "../solvers/response_metadata.hpp" // ResponseMetadata::freq_key
+#include "../solvers/frequency_key.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -115,7 +115,7 @@ struct CalcNode {
   double              es_freq_factor = 0.5;
 
   // Hard edges (correctness): node ids that must be converged before this
-  // node runs. Resolved by prerequisites_converged against the DAG + metadata.
+  // node runs. Resolved by prerequisites_converged against the DAG + snapshot.
   std::vector<std::string> prerequisites;
 
   /// A symbolic node is an expansion template, not directly schedulable:
@@ -178,7 +178,7 @@ inline std::string protocol_key_at(double thresh) {
 }
 
 inline std::string fd_node_id(const Perturbation &pert, double freq) {
-  return "fd:" + pert.description() + "@" + ResponseMetadata::freq_key(freq);
+  return "fd:" + pert.description() + "@" + freq_key(freq);
 }
 inline std::string es_node_id(bool tda, int n_roots) {
   return std::string("es:") + (tda ? "tda" : "full") + "_n"
@@ -191,7 +191,7 @@ inline std::string derived_fd_node_id(const Perturbation &pert,
 inline std::string vbc_node_id(const Perturbation &pb, const Perturbation &pc,
                                double fb, double fc) {
   return "vbc:" + pb.description() + "__" + pc.description() + "@"
-       + ResponseMetadata::freq_key(fb) + "_" + ResponseMetadata::freq_key(fc);
+       + freq_key(fb) + "_" + freq_key(fc);
 }
 /// The VBC source's node folder name: the parts of vbc_node_id joined by
 /// hyphens. A description never holds a hyphen and each frequency part starts
@@ -199,7 +199,7 @@ inline std::string vbc_node_id(const Perturbation &pb, const Perturbation &pc,
 inline std::string vbc_node_name(const Perturbation &pb, const Perturbation &pc,
                                  double fb, double fc) {
   return "vbc-" + pb.description() + "-" + pc.description() + "-"
-       + ResponseMetadata::freq_key(fb) + "-" + ResponseMetadata::freq_key(fc);
+       + freq_key(fb) + "-" + freq_key(fc);
 }
 
 /// The perturbation a node belongs to — the unit of parallelism (distinct
@@ -381,12 +381,110 @@ std::vector<CalcNode> build_dag(const ResponsePlan &plan, int n_atoms) {
 }
 
 // ---------------------------------------------------------------------------
+// best usable sources — pure reads of the snapshot (node_snapshot.hpp).
+// ---------------------------------------------------------------------------
+
+/// Pick the best usable FD restart/seed source for (pert, freq_key) at target
+/// protocol (target_thresh, target_k), from the scheduler's snapshot of the
+/// saved nodes (node_snapshot.hpp).
+/// "Usable" = present in fd_states, listed in the protocols registry,
+/// COARSER-OR-EQUAL to the target (saved_thresh >= target_thresh AND
+/// saved_k <= target_k), and NOT `diverged`. An entry under the target's own
+/// key whose registered threshold is not the target's (keys round the
+/// threshold: 1e-6 and 1.01e-6 share one) was saved under another definition
+/// of that rung, so it is not usable either. Convergence is NOT required:
+/// a coarse partial is a perfectly good seed for the finer step. Preference:
+/// exact target_key first, else closest-to-target (max k, then min thresh).
+/// Returns "" if no usable source exists.
+///
+/// Read by calc_manager's scheduler trace (planned_action). Pure: reads only
+/// the json, no World / filesystem.
+inline std::string
+best_usable_fd_source_key(const nlohmann::json &meta, const std::string &pert,
+                          const std::string &freq_key, double target_thresh,
+                          int target_k, const std::string &target_key) {
+  if (!meta.contains("fd_states") || !meta["fd_states"].contains(pert))
+    return {};
+  if (!meta.contains("protocols") || !meta["protocols"].is_object()) return {};
+  const auto &protos = meta["protocols"];
+
+  struct Cand { std::string key; double thresh; int k; };
+  std::vector<Cand> cands;
+  for (const auto &[key, ent] : meta["fd_states"][pert].items()) {
+    if (!ent.contains(freq_key))                continue;
+    if (ent[freq_key].value("diverged", false)) continue;  // never seed a blown-up state
+    if (!protos.contains(key))                  continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (key == target_key &&
+        std::abs(t - target_thresh) > 1e-12 * std::max(t, target_thresh))
+      continue;  // aliased: the same key under another threshold
+    if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
+  }
+  if (cands.empty()) return {};
+
+  for (const auto &c : cands)                    // exact wins
+    if (c.key == target_key) return c.key;
+  return std::max_element(                        // else closest-to-target
+             cands.begin(), cands.end(),
+             [](const Cand &a, const Cand &b) {
+               if (a.k != b.k) return a.k < b.k;       // higher k wins
+               return a.thresh > b.thresh;             // smaller thresh wins
+             })
+      ->key;
+}
+
+/// Pick the best usable ES restart source (protocol key) for a bundle of
+/// `want_type` / `want_shell` / `n_roots` (0 = any root count) at target
+/// (target_thresh, target_k). "Usable" = same type and shell, the same root
+/// count when the entry records one, COARSER-OR-EQUAL to the target, and NOT
+/// `diverged` (never re-seed from a blown-up bundle — review finding C4; the FD
+/// twin above has the same rule), and not an entry under the target's own key
+/// saved at another threshold (D-030, as D-022 for the FD twin). Exact
+/// target_key first, else closest-to-target (max k, then min thresh). "" if
+/// none. Pure: reads only the json. Used by calc_manager's scheduler trace.
+inline std::string
+best_usable_es_source_key(const nlohmann::json &meta, const std::string &want_type,
+                          const std::string &want_shell, int n_roots,
+                          double target_thresh, int target_k,
+                          const std::string &target_key) {
+  if (!meta.contains("excited_states") || !meta["excited_states"].is_object()) return {};
+  if (!meta.contains("protocols") || !meta["protocols"].is_object()) return {};
+  const auto &protos = meta["protocols"];
+  struct Cand { std::string key; double thresh; int k; };
+  std::vector<Cand> cands;
+  for (const auto &[key, ent] : meta["excited_states"].items()) {
+    if (ent.value("type",  std::string{}) != want_type)  continue;
+    if (ent.value("shell", std::string{}) != want_shell) continue;
+    if (n_roots > 0 && ent.contains("n_roots") &&
+        ent.value("n_roots", 0) != n_roots)              continue;
+    if (ent.value("diverged", false))                    continue;
+    if (!protos.contains(key))                           continue;
+    const double t  = protos[key].value("thresh", 0.0);
+    const int    kk = protos[key].value("k", 0);
+    if (key == target_key &&
+        std::abs(t - target_thresh) > 1e-12 * std::max(t, target_thresh))
+      continue;  // aliased: the same key under another threshold
+    if (t >= target_thresh && kk <= target_k) cands.push_back({key, t, kk});
+  }
+  if (cands.empty()) return {};
+  for (const auto &c : cands)
+    if (c.key == target_key) return c.key;
+  return std::max_element(cands.begin(), cands.end(),
+                          [](const Cand &a, const Cand &b) {
+                            if (a.k != b.k) return a.k < b.k;
+                            return a.thresh > b.thresh;
+                          })
+      ->key;
+}
+
+// ---------------------------------------------------------------------------
 // planned_action — what a planner decision (StatePlan) forces at one rung. Pure.
 // ---------------------------------------------------------------------------
 
 /// The action `plan` gives `node` at `thresh`. A rung this run has already
 /// scheduled is Skip: the session's node owns completion. Otherwise the
-/// action names the source the metadata holds (best_usable_fd_source_key,
+/// action names the source the snapshot holds (best_usable_fd_source_key,
 /// best_usable_es_source_key), for the scheduler trace.
 inline NodeAction
 planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
@@ -409,7 +507,7 @@ planned_action(const CalcNode &node, const nlohmann::json &meta, double thresh,
     return source == key ? NodeAction::Resume : NodeAction::Restart;
   }
   const std::string source = best_usable_fd_source_key(
-      meta, node.pert.description(), ResponseMetadata::freq_key(node.freq),
+      meta, node.pert.description(), freq_key(node.freq),
       thresh, k, key);
   if (source.empty()) return NodeAction::Fresh;
   return source == key ? NodeAction::Resume : NodeAction::Restart;
@@ -452,7 +550,7 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
     } else {
       const auto *e = detail_calc::fd_entry(meta, dep->pert.description(),
                                             key,
-                                            ResponseMetadata::freq_key(dep->freq),
+                                            freq_key(dep->freq),
                                             dep->freq);
       ok = e && detail_calc::entry_converged(*e);
     }
@@ -477,15 +575,15 @@ bool prerequisites_converged(const CalcNode &node, const std::vector<CalcNode> &
 /// and planned_action != Skip. Symbolic nodes (DerivedFD "*") are excluded —
 /// they are expansion templates resolved post-ES. Gated nodes (deps not
 /// ready) are dropped from the wave and picked up on a later re-schedule
-/// (after run() updates the metadata). Empty waves are omitted.
+/// (after the next snapshot of the saved nodes). Empty waves are omitted.
 ///
 /// CONTRACT — only `waves.front()` has FINAL actions. Every wave is reconciled
-/// against the SAME metadata snapshot, so a later wave's NodeActions are
+/// against the SAME snapshot, so a later wave's NodeActions are
 /// provisional: e.g. a Phase-B item may read `Fresh` here because P0 has not
 /// run yet, when it should be `Restart` once P0 lands. Membership is correct;
 /// actions downstream of the front wave are not. This is safe because
 /// `CalcManager::run` consumes ONLY the front wave and then re-schedules
-/// against fresh metadata — so each wave's actions are final by the time it
+/// against a fresh snapshot — so each wave's actions are final by the time it
 /// becomes the front. Do not consume non-front waves' actions directly. (The
 /// full list is returned anyway: it is cheap and makes the schedule legible /
 /// unit-testable.)
@@ -587,7 +685,7 @@ inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturba
                                       const std::string &key,
                                       const StatePlans &plans = {}) {
   const std::string chan = p.description();
-  const std::string fk   = ResponseMetadata::freq_key(freq);
+  const std::string fk   = freq_key(freq);
   const std::string sk   = best_usable_fd_source_key(meta, chan, fk, thresh, k, key);
   nlohmann::json a{{"input", chan}, {"freq", freq}, {"source_protocol_key", sk},
                    {"converged", false}, {"accepted", false}, {"bsh_residual", 0.0}};

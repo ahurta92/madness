@@ -193,11 +193,11 @@ struct molresponse_v3_lib {
   static const char *label() { return "molresponse"; }
 
   /// Structured result returned to ResponseApplication (→ calc_info.json).
+  /// What the response task adds to calc_info.json: the stage times
+  /// ({"v3_timing": {plan_build, solve, assemble}}), for the wall-time lines at
+  /// the end of the log. Every value is in results.json.
   struct Results {
     nlohmann::json metadata;
-    nlohmann::json properties;
-    nlohmann::json vibrational_analysis;  // full Raman only (raman.nuc_atom -1)
-    nlohmann::json raman_spectra;         // full Raman only (raman.nuc_atom -1)
   };
 
   /// The reference is the live SCF of the same process, and the response
@@ -274,7 +274,7 @@ struct molresponse_v3_lib {
       std::set<std::string> frequency_keys,protocol_keys;
       for (double frequency:frequencies)
         MADNESS_CHECK_THROW(std::isfinite(frequency) &&
-            frequency_keys.insert(ResponseMetadata::freq_key(frequency)).second,
+            frequency_keys.insert(freq_key(frequency)).second,
             "shared response frequencies must be finite and have distinct checkpoint identities");
       if (rp.nuclear()) {
         const auto nuclear_directions=rp.nuclear_directions();
@@ -287,7 +287,7 @@ struct molresponse_v3_lib {
         std::set<std::string> nuclear_keys;
         for (double frequency:nuclear_frequencies)
           MADNESS_CHECK_THROW(std::isfinite(frequency) &&
-              nuclear_keys.insert(ResponseMetadata::freq_key(frequency)).second,
+              nuclear_keys.insert(freq_key(frequency)).second,
               "nuclear response frequencies must be finite and have distinct checkpoint identities");
       }
       double previous=std::numeric_limits<double>::infinity();
@@ -659,7 +659,7 @@ struct molresponse_v3_lib {
           response_shared::excited_task(bundle.n_roots),"es:"+model});
       }
       in.settings.shared_response=std::make_shared<response_shared::Session>(world,shared_root,*shared_source,
-          *shared_request,ladder,definitions,in.settings.calc_dir,std::move(response_timing),
+          *shared_request,ladder,definitions,std::move(response_timing),
           in.settings.verbosity);
       // Direct sources run once at the final protocol, after B/C qualify.
       // The binding then checks exact inputs instead of legacy convergence flags.
@@ -705,22 +705,11 @@ struct molresponse_v3_lib {
         if (!set->has_saved())
           targets.excited[std::filesystem::path(set->folder()).filename().string()]=
               response_seed::seed_settings(set->scientific_settings());
-      const double import_started = madness::wall_time(); // D-118
       run_dalton_import(world, gs, reference_molecule, in.plan,
                         targets, dalton_dir, {}, {}, {}, 1e-4,
                         /*es_y_from_dalton=*/rp.seed_es_y() == "dalton");
-      // D-118: the import's own time (reading the Dalton files, building the
-      // MRA guesses and their gauge rotation), beside what it seeded from.
-      const double import_wall_s = madness::wall_time() - import_started;
-      if (world.rank() == 0) {
-        auto meta = ResponseMetadata::load_or_create(
-            in.settings.calc_dir + "/response_metadata.json");
-        auto seeded = meta.json().value("seeded_from", nlohmann::json::object());
-        seeded["import_wall_s"] = import_wall_s;
-        meta.set_seeded_from(seeded);
-        meta.save();
-      }
-      world.gop.fence();
+      // D-118: the import's own time is the import_guesses node of
+      // timings.json; what it seeded from is in each seed node's details.
       in.settings.shared_response->timing().end();
     }
 
@@ -730,18 +719,10 @@ struct molresponse_v3_lib {
     ResponseWorkflowOutput out =
         run_response_with_ground(world, gs, L, fock_json, in);
 
-    // 4. Map Output → Results. Stash v3 timing/diagnostics under metadata so
-    //    they ride into the workflow's calc_info.json.
+    // 4. Map Output → Results: the stage times ride into calc_info.json for
+    //    the wall-time lines; the values and the stop reason are in results.json.
     Results res;
-    res.metadata = std::move(out.metadata);
-    res.properties = std::move(out.properties);
-    res.vibrational_analysis = std::move(out.vibrational_analysis);
-    res.raman_spectra = std::move(out.raman_spectra);
-    if (world.rank() == 0) {
-      res.metadata["engine"]         = "molresponse_v3";
-      res.metadata["v3_timing"]      = std::move(out.timing);
-      res.metadata["v3_diagnostics"] = std::move(out.diagnostics);
-    }
+    res.metadata = {{"v3_timing", std::move(out.timing)}};
     return res;
   }
 };

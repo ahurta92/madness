@@ -6,10 +6,10 @@ illustrative mock-ups.
 
 Two output surfaces:
 
-- **`<prefix>.out`** — the human-readable summary, one section per workflow task.
-- **`response_metadata.json`** (in the calc directory) — the machine-readable
-  record: every property tensor keyed by protocol and by its identity fields,
-  plus provenance. This is what you script against.
+- **`<prefix>.out`** and **`<run>/summary.txt`** — the human-readable summary.
+- **`<run>/results.json`** — the machine-readable record: every property, each
+  item identified by its fields and carrying its status and convergence. This is
+  what you script against; see [results_file.md](results_file.md).
 
 ## A polarizability run, end to end
 
@@ -132,63 +132,60 @@ made on `Df`/`Dg`/`D`/`R`.
 
 ## The machine-readable record
 
-`response_metadata.json` in the calc directory holds the same results in a stable
-shape. A polarizability row:
+`<run>/results.json` holds the same results, one entry per application. From
+the `response_h2_es_rpa` example (H₂, HF, protocol 1e-4), a polarizability item
+of the `response` entry:
 
 ```json
-"properties": {
-  "alpha": {
-    "1e-06_k8": [
-      { "omega": 0.0, "directions": "z",
-        "alpha": [[8.541974761089701]],
-        "converged": true, "row_accuracy": ..., "max_bsh_residual": ... }
-    ]
-  }
+"polarizability": {
+  "units": "bohr^3",
+  "values": [
+    { "frequency": 0.0, "status": "complete",
+      "components": { "zz": 6.436397286910804 },
+      "convergence": { "bsh_residual": 2.25e-06, "density_change": 3.42e-05 } }
+  ]
 }
 ```
 
-and a two-photon row:
+and the state it was computed from, in the entry's `state_metrics`:
 
 ```json
-"properties": {
-  "tpa": {
-    "1e-06_k8": [
-      { "es_root_id": 0, "omega": 0.14906966931818236, "omega_ev": 4.056392349378767,
-        "S": [[25.79195, 2.2e-12, -2.98e-05],
-              [2.2e-12, 25.79195, 2.14e-05],
-              [-2.98e-05, 2.14e-05, 75.25462]],
-        "Df": 536.267, "Dg": 233.124,
-        "D_linear": 2005.028, "D_circular": 326.207, "R": 0.1627,
-        "sigma_linear_gm": 24.173, "sigma_circular_gm": 3.933,
-        "writer_nproc": 1 }
-    ]
-  }
+"dipole_z-f0.00000": {
+  "protocol": { "k": 6, "threshold": 0.0001 },
+  "updates": 6,
+  "status": "complete",
+  "subjects": { "response": { "values": { "bsh_residual": 2.250088916218293e-06,
+                                          "density_change": 3.4246290835799824e-05,
+                                          "kinetic_change": 8.82517065159405e-06 } } }
 }
 ```
 
 Three conventions worth knowing:
 
-- Results are keyed by **protocol** (`1e-06_k8`), so a run that climbs the ladder
-  keeps every rung side by side rather than overwriting.
-- Within a protocol, rows are **upserted on their identity fields** (for α that is
-  (ω, directions); for 2PA it is `es_root_id`) — so re-running a calculation
-  replaces its row instead of appending a duplicate.
-- Rows carry provenance (`converged`, accuracy fields, `writer_nproc`), so a
-  consumer can tell how trustworthy a number is without re-reading the log.
+- An entry holds the final level of the request; each state's earlier levels
+  are in its node's `history.jsonl`.
+- Items are identified by their fields (`frequency`; `frequency_b` and
+  `frequency_c`; `root`), not by position.
+- Every value carries `status` and a `convergence`, so a consumer can tell how
+  trustworthy a number is without re-reading the log.
 
 ## Where files land
 
 ```
-<calc-dir>/
-  response_metadata.json          the record above
-  <pert>__<protocol>__<freq>      converged response states (restartable)
-  es_analysis__<protocol>.json    transition properties
-<prefix>.out                      the human summary
-<prefix>.calc_info.json           the workflow-level record (all tasks)
+<prefix>/                          the run folder
+  results.json                     the record above
+  summary.txt                      results.json for people
+  timings.json                     where the time went
+  states/ground_state/             the ground state (archive, description.json, history.jsonl)
+  states/response/<node>/          each response state, e.g. dipole_z-f0.00000, excited-full
+  analysis/response/es_analysis__<protocol>.json   transition analysis of the excited states
+<prefix>.out                       the human summary
+<prefix>.calc_info.json            the workflow-level record (all tasks)
 ```
 
-Response states are written per protocol rung and are **restartable**: a re-run
-reloads the coarse rung and climbs from it rather than starting over. See
+Response states are saved as node folders and are **restartable**: a re-run
+reuses a state whose stored metrics meet the request, and otherwise resumes or
+climbs from what is saved rather than starting over. See
 [`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md) for the
 full deck reference and [`madqc/HDF5_IO.md`](../../../madqc/HDF5_IO.md) if you
 want these archives as HDF5 instead of the native format.

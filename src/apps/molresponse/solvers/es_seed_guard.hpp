@@ -34,9 +34,8 @@
 //     N-lowest guarantee does NOT hold (informational note).
 //
 // The report (to_json) is saved in the excited-set node's details as
-// `seed_guard`, in the same save as the roots it describes. The metadata copy
-// (excited_states/<key>/seed_guard) and results.json's per-root `seed_match`
-// are read from there.
+// `seed_guard`, in the same save as the roots it describes. results.json's
+// per-root `seed_match` is read from there.
 //
 // Collectivity: evaluate_es_seed_guard computes MRA inner products and is
 // collective on `world` (call from every rank). The report it returns is

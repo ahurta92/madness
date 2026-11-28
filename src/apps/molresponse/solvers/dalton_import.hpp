@@ -26,8 +26,8 @@
 //        basis    : from the .out ('Basis set used is "..."'), recorded.
 //      Provenance {dalton_dir, basis, method, geometry_hash} plus the MADNESS
 //      build that wrote the MRA seed artifacts (version/commit — the archive
-//      format is build-locked) goes into response_metadata.json via the
-//      metadata layer (ResponseMetadata::set_seeded_from).
+//      format is build-locked) goes into each seed node it writes, as the
+//      node's details.source beside its lineage {kind: dalton, directory}.
 //
 //   3. SEEDS the FD states: for each planned (dipole perturbation, freq) the
 //      matching RSPVEC record is located at the EXACT frequency (1e-9 au) —
@@ -66,7 +66,7 @@
 #include "../tools/dalton_mra.hpp"
 #include "../tools/dalton_rspvec.hpp"
 #include "es_solver.hpp"
-#include "response_metadata.hpp"
+#include "frequency_key.hpp"
 #include "response_seed.hpp"
 #include "response_state.hpp"
 #include "shared_response_session.hpp"   // driven_node_name
@@ -111,9 +111,9 @@ struct DaltonManifest {
   std::vector<int> atomic_numbers;                // molden [Atoms]
   std::vector<std::array<double, 3>> coords;      // bohr
 
-  /// The provenance block stamped into response_metadata.json (doc: showcase
-  /// interface contract `seeded_from: {dalton_dir, basis, method,
-  /// geometry_hash}` + the MADNESS build identity of the MRA artifacts).
+  /// The provenance each seed node records as details.source (doc: showcase
+  /// interface contract {dalton_dir, basis, method, geometry_hash} + the
+  /// MADNESS build identity of the MRA artifacts).
   nlohmann::json provenance() const {
     return nlohmann::json{
         {"dalton_dir",    dir},
@@ -549,7 +549,7 @@ struct DaltonSeedReport {
 /// not seeded.
 struct DaltonSeedTargets {
   std::filesystem::path root;              // the run folder
-  std::string calc_dir;                    // holds response_metadata.json (provenance)
+  std::string calc_dir;                    // the response analysis directory (dalton_import/ under it)
   std::map<std::string, nlohmann::json> driven;
   std::map<std::string, nlohmann::json> excited;
 };
@@ -611,7 +611,7 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
     std::set<std::pair<int, std::string>> seen;
     for (const auto &r : fd_requests) {
       if (r.pert.kind != Perturbation::Kind::Dipole) continue;
-      auto key = std::make_pair(r.pert.axis, ResponseMetadata::freq_key(r.freq));
+      auto key = std::make_pair(r.pert.axis, freq_key(r.freq));
       if (seen.insert(key).second) items.push_back({r.pert.axis, r.freq});
     }
   }
@@ -759,13 +759,12 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
     return it->second;
   };
 
-  bool wrote_any = false;
   for (size_t i = 0; i < items.size(); ++i) {
     const int    axis = items[i].axis;
     const double freq = items[i].freq;
     const Perturbation pert = Perturbation::dipole(axis);
     const std::string  pdesc = pert.description();
-    const std::string  fkey  = ResponseMetadata::freq_key(freq);
+    const std::string  fkey  = freq_key(freq);
     if (skip[i]) {
       ++rep.n_skipped;
       continue;
@@ -851,14 +850,7 @@ seed_fd_from_dalton(madness::World &world, GroundState &gs,
             "  seed=", response_seed::seed_folder(name).generic_string());
     world.gop.fence();
     ++rep.n_seeded;
-    wrote_any = true;
   }
-  if (wrote_any && world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(targets.calc_dir + "/response_metadata.json");
-    meta.set_seeded_from(m.provenance());
-    meta.save();
-  }
-  world.gop.fence();
 
   if (world.rank() == 0)
     print("[DALTON-SEED] done: seeded=", rep.n_seeded,
@@ -1046,9 +1038,6 @@ seed_es_from_dalton(madness::World &world, GroundState &gs,
                                      dalton_seed_lineage(m), details, s);
   }
   if (world.rank() == 0) {
-    auto meta = ResponseMetadata::load_or_create(targets.calc_dir + "/response_metadata.json");
-    meta.set_seeded_from(m.provenance());
-    meta.save();
     print("[DALTON-SEED] wrote the excited-state seed", response_seed::seed_folder(name).generic_string(),
           " roots =", n_roots, " type =", full ? "full" : "tda", " y-block =", any_y ? "DALTON" : "zero",
           " (the set starts from it)");

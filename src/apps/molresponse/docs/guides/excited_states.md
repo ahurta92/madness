@@ -82,7 +82,7 @@ end
 ```
 
 `madqc --wf=response <deck>`; roots and transition properties land in
-`response_metadata.json` under the excited-state records. Full recipe:
+`results.json` under `excited_states`, one item per `root`. Full recipe:
 [`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md). Seeding
 from DALTON uses the `seed_from_dalton` tool.
 

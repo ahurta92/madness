@@ -27,7 +27,7 @@ knob + io provenance) already landed.
   `dft gopt=1`, with the `optimize` workflow a stub. That form is gone and its
   `dft` keyvals are retired.)
 - Restart machinery is strong and reusable: SCF checkpoint validation with a
-  geometry-match guard; response restart via `response_metadata.json` +
+  geometry-match guard; response restart from the saved node folders +
   best-usable-seed selection; per-task `PathManager` dirs (absolute paths).
 
 ## The five changes (ordered by enablement)

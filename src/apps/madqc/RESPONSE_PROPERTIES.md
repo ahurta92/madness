@@ -68,9 +68,9 @@ response
 end
 ```
 
-**Result** (`<prefix>.calc_info.json` → response task):
-`properties.response_properties[]` entries with `property="polarizability"`,
-`component=["z","z"]`, `freqB=<ω>`, `value=<α>`. Example (H₂O/HF): α_zz(0)=8.53.
+**Result** (`<prefix>/results.json` → `response` entry): `polarizability`, one
+item per `frequency` with `components` such as `zz`, its `status` and
+`convergence`. Example (H₂O/HF): α_zz(0)=8.53.
 
 > Requesting a single direction (`z`) solves one perturbation channel — much
 > faster, and the natural choice for a quick check.
@@ -101,9 +101,9 @@ response
 end
 ```
 
-**Result:** `response_properties[]` with `property="hyperpolarizability"`,
-`component=["z","z","z"]`, `freqB`/`freqC` = the driving frequencies, `value=<β>`.
-Example (H₂O/HF): β_zzz(0,0)≈7.76.
+**Result:** `hyperpolarizability`, one item per pair of driving frequencies
+(`frequency_b`, `frequency_c`) with `components` such as `zzz`. Example
+(H₂O/HF): β_zzz(0,0)≈7.76.
 
 ---
 
@@ -134,13 +134,13 @@ end
 The nuclear-displacement responses are ~10³ larger than the dipole ones and the
 FD gate is absolute (`bsh < 5*dconv`), so a response `dconv 1e-3` is needed for
 those legs at `protocol [1e-4]`; the derivative source is cusped and sharpens
-only by climbing (e.g. `protocol [1e-4, 1e-6]`). **Result:** rows under
-`response_properties.raman.<protocol>` (`A`, `B`, `C`, `freq_b`, `freq_c`, `beta`,
-`converged`); with the full set also `properties.vibrational_analysis` (Hessian,
-frequencies in hartree and cm⁻¹, normal modes, reduced masses) and
-`properties.raman_spectra` (per optical frequency: 9 × 3N derivatives, their
-normal-mode projection, and per mode `freq_cm1`, `alpha2`, `beta2`, `pol_int`
-in Å⁴/amu, `dep_ratio`, plus the same invariants in a.u.). The legacy
+only by climbing (e.g. `protocol [1e-4, 1e-6]`). **Result:**
+`polarizability_gradient`, one item per optical `frequency` with `components`
+keyed by coordinate `nuc_<atom>_<axis>` and then dipole pair (∂α_AB/∂Q_C); with
+the full set also `vibrational_analysis` (Hessian, frequencies in hartree,
+normal modes, reduced masses) and `raman_spectrum` (per optical frequency, per
+mode `freq_cm1`, `alpha2`, `beta2`, `pol_int` in Å⁴/amu, `dep_ratio`, plus the
+same invariants in a.u.). The legacy
 `nuclear.*` keys are not read by this engine. Working decks:
 `src/examples/qc/response_lih_raman_full`, `response_h2o_raman_tpa`.
 
@@ -188,24 +188,20 @@ A coarse single rung (`protocol [1e-4]`) is fastest for a smoke test; climb
 
 ---
 
-## The response result (`calc_info.json`)
+## The response result (`results.json`)
 
-The response task in `<prefix>.calc_info.json`:
+Every response value is in `<prefix>/results.json`, in the `response` entry:
+`polarizability`, `hyperpolarizability`, `polarizability_gradient`,
+`excited_states`, `two_photon_absorption`, `vibrational_analysis`,
+`raman_spectrum`, each item with its `status` and `convergence`; the
+scheduler's verdict in `run`; each saved state in `state_metrics`. The format
+is described in
+[`../molresponse/docs/guides/results_file.md`](../molresponse/docs/guides/results_file.md),
+and `<prefix>/summary.txt` prints it for people.
 
-| Key | Meaning |
-|-----|---------|
-| `type` | `"response"` |
-| `properties.response_properties[]` | computed tensor components |
-| `…[].property` | `"polarizability"` or `"hyperpolarizability"` |
-| `…[].component` | axis labels, e.g. `["z","z"]` (α) or `["z","z","z"]` (β) |
-| `…[].freqB` (+ `freqC` for β) | driving frequencies (a.u.) |
-| `…[].value` | the tensor component |
-| `properties.raman_spectra` | per-mode Raman activities and depolarization ratios (full-set Raman) |
-| `properties.vibrational_analysis` | Hessian, frequencies, normal modes, reduced masses (full-set Raman) |
-| `metadata` | per-state / per-protocol convergence + (v3) `timing`, `diagnostics` |
-
-The human-readable `<prefix>.out` renders the same numbers (see the example in
-[`README.md`](README.md)). For the full top-level schema (SCF/CIS/correlated
+The response task in `<prefix>.calc_info.json` holds only `type` and the run's
+times (`metadata`: `elapsed_time`, `mpi_size`, `nthreads`, `clock_scope`,
+`v3_timing`), which the wall-time lines at the end of the log print. For the full top-level schema (SCF/CIS/correlated
 tasks, tensor-json encoding) see the **Output** section of [`README.md`](README.md).
 
 ---

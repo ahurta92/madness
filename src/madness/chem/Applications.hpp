@@ -717,14 +717,13 @@ public:
 
       auto res = Library::run_response(world_, params_, reference_, pm.dir());
 
+      // The run's times, as the SCF task carries them, for the wall-time
+      // lines at the end of the log. Every response value is in results.json.
       metadata_ = std::move(res.metadata);
       metadata_["elapsed_time"] = run_timer.seconds();
       metadata_["mpi_size"] = world_.size();
       metadata_["nthreads"] = ThreadPool::size() + 1;
       metadata_["clock_scope"] = "driver_rank";
-      properties_["response_properties"] = std::move(res.properties);
-      properties_["vibrational_analysis"] = std::move(res.vibrational_analysis);
-      properties_["raman_spectra"] = std::move(res.raman_spectra);
     }
   }
 
@@ -733,15 +732,12 @@ public:
    */
   [[nodiscard]] nlohmann::json results() const override {
     return {{"type", "response"},
-            {"metadata", metadata_},
-            {"properties", properties_}};
+            {"metadata", metadata_}};
   }
 
 private:
   World &world_;
   nlohmann::json metadata_;
-  nlohmann::json properties_;
-  std::optional<nlohmann::json> vibrational_analysis_;
   std::shared_ptr<SCF> reference_;
 };
 

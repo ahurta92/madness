@@ -128,10 +128,11 @@ he-alpha.out                         appended human-readable summary
 he-alpha.calc_info.json              existing combined workflow report
 he-alpha/
   results.json                      requested properties and state metrics
+  summary.txt                       results.json formatted for people
   timings.json                      SCF and response interval records, one entry per launch
   analysis/
     ground_state/                   SCF diagnostics, plots and import scratch
-    response/                       response metadata and shards
+    response/                       excited-state transition analysis (es_analysis__<protocol>.json)
   states/
     ground_state/                   the saved ground state: description.json, history.jsonl, archive/
     virtuals/                       frozen-occupied virtual orbitals, when requested

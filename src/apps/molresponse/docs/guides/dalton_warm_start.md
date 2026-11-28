@@ -102,9 +102,8 @@ seeded solve therefore prints a `[SEED-GUARD]` block — per-root seed overlap,
 seed ω, and ω shift — with a loud warning on basin escape (overlap < 0.5
 with every seed root) and a note when the solve was pure tracking. The guard is
 saved with the roots in the excited-set node (`details.seed_guard` of
-`states/response/excited-<model>/description.json`), reported per root as
-`seed_match` in `results.json` and as a `seed overlap` column in the summary,
-and copied to `excited_states/<key>/seed_guard` in `response_metadata.json`.
+`states/response/excited-<model>/description.json`), and reported per root as
+`seed_match` in `results.json` and as a `seed overlap` column in the summary.
 When a reference ladder from a better basis is available (validation
 campaigns), compare the reported energies against it by hand — the guard
 records them for exactly that purpose.

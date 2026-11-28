@@ -36,9 +36,6 @@ add_mad_executable(test_fd_gate
 add_mad_executable(test_deck_settings
                    "tests/test_deck_settings.cpp;GroundState.cpp"
                    "MADchem")
-add_mad_executable(test_response_metadata
-                   "tests/test_response_metadata.cpp"
-                   "MADchem")
 # dalton.dir import contract (showcase W3): locate-by-convention (+ tarball
 # extraction), geometry fingerprint, .out method/basis parse, exact 1-to-1
 # frequency matching. Pure filesystem/parsing — no World, no fixtures.
@@ -204,7 +201,6 @@ if (BUILD_TESTING)
   # Tier 1 — "unit": pure logic, no fixtures, no MPI launcher required.
   foreach(_t test_calc_manager test_protocol_key test_bsh_shift test_deck_settings test_es_plateau test_fd_gate
              test_raman_spectrum
-             test_response_metadata
              test_response_property_planner test_state_metrics
              test_diagonalize_slots test_dalton_import)
     add_test(NAME madness/test/molresponse/${_t}/run COMMAND ${_t})
@@ -306,17 +302,6 @@ if(BUILD_TESTING)
   set_tests_properties(madness/test/molresponse/test_shared_fd_planning/run PROPERTIES LABELS "unit;response;short" TIMEOUT 30)
   add_test(NAME madness/test/molresponse/test_shared_iteration/run COMMAND test_shared_iteration)
   set_tests_properties(madness/test/molresponse/test_shared_iteration/run PROPERTIES LABELS "unit;molresponse;short" TIMEOUT 30)
-  add_mad_executable(test_response_property_metadata "tests/test_response_property_metadata.cpp" "MADworld;nlohmann_json::nlohmann_json")
-  if(ENABLE_MPI AND MPIEXEC_EXECUTABLE)
-    foreach(mode read write)
-      add_test(NAME madness/test/molresponse/test_response_property_metadata/${mode}_mpi2
-        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-          $<TARGET_FILE:test_response_property_metadata> ${mode} ${MPIEXEC_POSTFLAGS})
-      set_tests_properties(madness/test/molresponse/test_response_property_metadata/${mode}_mpi2 PROPERTIES
-        LABELS "unit;response;short" TIMEOUT 15
-        ENVIRONMENT "MAD_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;OMP_NUM_THREADS=1;OMPI_MCA_hwloc_base_binding_policy=none")
-    endforeach()
-  endif()
 
   add_mad_executable(test_iteration_protocol "tests/test_iteration_protocol.cpp" "MADworld;nlohmann_json::nlohmann_json")
   add_test(NAME madness/test/molresponse/test_iteration_protocol/run COMMAND test_iteration_protocol)

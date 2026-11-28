@@ -46,7 +46,7 @@ inline nlohmann::json raman_spectrum_item(double frequency, const nlohmann::json
 
 /// The definitions of the quantities each raman_spectrum mode row holds
 /// (raman::invariants; a is the mode's polarizability derivative, au_to_A4_amu
-/// the conversion in response_metadata's raman_spectra section).
+/// the a.u. to Angstrom^4/amu conversion raman::AU_TO_A4_AMU).
 inline nlohmann::json raman_spectrum_definitions() {
     return {{"alpha2_au", "alpha'^2 = ( (a_xx + a_yy + a_zz) / 3 )^2"},
             {"beta2_au", "beta'^2 = 1/2 sum_ij ( 3 a_ij^2 - a_ii a_jj )"},

@@ -57,8 +57,9 @@ is taken at a specific excited state.
 2PA is requested as an excited-state residue property in the `response` block; see
 [`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md). It needs
 the excited state *f* plus the dipole responses at half the transition energy.
-Results land in `response_metadata.json` under `properties/tpa` — the two-photon
-tensor and the Monson–McClain observables per state.
+Results land in `results.json` under `two_photon_absorption` — one item per
+`root`, with the two-photon tensor in `components` and the Monson–McClain
+observables in `derived`.
 
 ## References
 

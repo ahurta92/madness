@@ -44,8 +44,9 @@ response
 end
 ```
 
-`madqc --wf=response <deck>`; the tensor lands in `response_metadata.json` under
-`properties/beta`, keyed by (A, B, C, freqs). Full recipe:
+`madqc --wf=response <deck>`; the tensor lands in `results.json` under
+`hyperpolarizability`, one item per (`frequency_b`, `frequency_c`) with
+components `<ABC>`. Full recipe:
 [`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md).
 
 ## Under the hood

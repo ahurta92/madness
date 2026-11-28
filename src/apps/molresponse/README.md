@@ -64,8 +64,9 @@ end
 madqc --wf=response h2o.in
 ```
 
-Outputs land in `<prefix>.calc_info.json` (machine-readable) and `<prefix>.out`
-(human-readable), with the property tensors in `response_metadata.json`. See
+Results land in `<prefix>/results.json` (machine-readable; see
+[`docs/guides/results_file.md`](docs/guides/results_file.md)), `<prefix>/summary.txt`
+and `<prefix>.out` (human-readable). See
 [`../madqc/RESPONSE_PROPERTIES.md`](../madqc/RESPONSE_PROPERTIES.md) for
 per-property knobs and the result schema.
 

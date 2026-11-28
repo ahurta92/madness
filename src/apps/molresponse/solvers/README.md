@@ -2,13 +2,13 @@
 
 ## Overview
 
-Iterative FD/ES solvers, convergence evidence, state archives, metadata, imported seeds and post-solve analysis.
+Iterative FD/ES solvers, convergence evidence, state archives, imported seeds and post-solve analysis.
 
 ## Interface
 
 - FDSolver iterates driven states; ESSolver iterates coupled root bundles; iterate and iterate_protocol supply the rung loop and threshold ladder [fd_solver.hpp:FDSolver](./fd_solver.hpp) [es_solver.hpp:ESSolver](./es_solver.hpp) [iterate.hpp:iterate](./iterate.hpp) [iterate_protocol.hpp:iterate_protocol](./iterate_protocol.hpp).
 - ResponseStateX/XY hold alpha and optional beta function blocks; handles are shallow while copy operations make independent trees [response_state.hpp:ResponseStateX](./response_state.hpp) [response_state.hpp:ResponseStateXY](./response_state.hpp).
-- States are saved as nodes (states/response/<name>/) and starting guesses from elsewhere as seeds (seeds/response/<name>/, same archive form, kind "seed"); ResponseMetadata writes protocols, fd_states, excited_states, vbc_states, properties and provenance as output; nothing reads it to decide [shared_response_checkpoint.hpp:DrivenState](./shared_response_checkpoint.hpp) [shared_es_checkpoint.hpp:ExcitedSet](./shared_es_checkpoint.hpp) [response_seed.hpp:save_seed](./response_seed.hpp) [response_metadata.hpp:ResponseMetadata](./response_metadata.hpp).
+- States are saved as nodes (states/response/<name>/) and starting guesses from elsewhere as seeds (seeds/response/<name>/, same archive form, kind "seed"); every value goes to results.json through the session, and an imported seed records its provenance in the seed node (details.source) [shared_response_checkpoint.hpp:DrivenState](./shared_response_checkpoint.hpp) [shared_es_checkpoint.hpp:ExcitedSet](./shared_es_checkpoint.hpp) [response_seed.hpp:save_seed](./response_seed.hpp) [shared_response_session.hpp:Session::report](./shared_response_session.hpp).
 - Analysis computes closed-shell transition properties and optional AO descriptions; full Raman assembles a nuclear Hessian and projects complete derivative rows onto normal modes [es_analysis.hpp:analyze_es_bundle](./es_analysis.hpp) [raman_analysis.hpp:assemble_raman_spectrum](./raman_analysis.hpp).
 - run_dalton_import validates geometry and HF provenance and seeds requested FD/ES states; it never invokes Dalton [dalton_import.hpp:run_dalton_import](./dalton_import.hpp).
 
@@ -29,8 +29,7 @@ Iterative FD/ES solvers, convergence evidence, state archives, metadata, importe
 ## Side Effects
 
 - Iterations mutate trees, KAIN histories and protocol defaults, perform collectives, print diagnostics and checkpoint [iterate.hpp:iterate](./iterate.hpp) [fd_solver.hpp:step](./fd_solver.hpp) [es_solver.hpp:step](./es_solver.hpp).
-- Node and seed archives are replaced with their description in one Node::save; response_metadata.json lives under calc_dir and is written through temporary files [response_seed.hpp:save_seed](./response_seed.hpp) [response_metadata.hpp:save](./response_metadata.hpp).
-- Shard merge unions group FD/VBC entries, quarantines malformed JSON as .corrupt and removes merged shards. Replacing FD data invalidates dependent VBC entries [response_metadata.hpp:ResponseMetadata::merge_state_shards](./response_metadata.hpp) [response_metadata.hpp:set_fd_state](./response_metadata.hpp).
+- Node and seed archives are replaced with their description in one Node::save [response_seed.hpp:save_seed](./response_seed.hpp).
 - Metrics collect global coefficient storage, worst-rank RSS, caller wall/iteration counts, and unavailable reasons [state_metrics.hpp:StateMetrics](./state_metrics.hpp) [function_metric_diagnostics.hpp:valid_metric_diagnostics](./function_metric_diagnostics.hpp) [es_kinetic_evidence.hpp:es_kinetic_evidence](./es_kinetic_evidence.hpp).
 - Node subworlds group by hostname using SafeMPI split, clamped to minimum ranks/host; returned Worlds must die before universe/finalization [node_subworlds.hpp:make_subworld_pool](./node_subworlds.hpp).
 - Rank-zero discovery may shell out to tar extracting RSPVEC and molden.inp into calc_dir/dalton_import. Prepared path registry prevents subworld extraction; per-leg fallback is read-only [dalton_import.hpp:locate_dalton_dir](./dalton_import.hpp) [dalton_import.hpp:register_prepared_dalton_seed](./dalton_import.hpp) [dalton_import.hpp:dalton_fd_guess](./dalton_import.hpp).
@@ -56,7 +55,7 @@ Iterative FD/ES solvers, convergence evidence, state archives, metadata, importe
 | [es_kinetic_evidence.hpp](./es_kinetic_evidence.hpp) | Validation and unavailable reasons for root kinetic evidence |
 | [es_root_identity.hpp](./es_root_identity.hpp) | Stable bookkeeping root indices and correspondence |
 | [function_hdf5_io.hpp](./function_hdf5_io.hpp) | Structured Function and opaque archive HDF5 persistence |
-| [response_metadata.hpp](./response_metadata.hpp) | JSON registry, property upserts and shard merging |
+| [frequency_key.hpp](./frequency_key.hpp) | `freq_key`, the f%.5f frequency part of node names and scheduler ids |
 | [response_seed.hpp](./response_seed.hpp) | Seeds: starting guesses from elsewhere, in the node layout under seeds/ |
 | [saved_states.hpp](./saved_states.hpp) | Lists and loads a run folder's saved response nodes through the node module, read-only |
 | [node_subworlds.hpp](./node_subworlds.hpp) | Hostname-aware task partition and World lifetimes |
@@ -74,11 +73,11 @@ Commands are run from the repository root against an existing configured build. 
 Targets and CTest registrations are in the parent manifest; BUILD_TESTING is needed for registered tests [../CMakeLists.txt:BUILD_TESTING](../CMakeLists.txt).
 
 ```sh
-cmake --build <build-dir> --target molresponse test_fd_gate test_es_plateau test_response_metadata test_fd_explicit_accuracy test_iteration_protocol test_es_kinetic_evidence
+cmake --build <build-dir> --target molresponse test_fd_gate test_es_plateau test_fd_explicit_accuracy test_iteration_protocol test_es_kinetic_evidence
 ```
 
 ```sh
-ctest --test-dir <build-dir> -R "^madness/test/molresponse/(test_fd_gate|test_es_plateau|test_response_metadata|test_fd_explicit_accuracy|test_iteration_protocol|test_es_kinetic_evidence)/run$"
+ctest --test-dir <build-dir> -R "^madness/test/molresponse/(test_fd_gate|test_es_plateau|test_fd_explicit_accuracy|test_iteration_protocol|test_es_kinetic_evidence)/run$"
 ```
 
 Function residual, kinetic and ES archive tests have MPI variants when MPI/launcher enabled; HDF5 tests require MADNESS_ENABLE_HDF5 [../CMakeLists.txt:ENABLE_MPI](../CMakeLists.txt) [../CMakeLists.txt:MADNESS_ENABLE_HDF5](../CMakeLists.txt).

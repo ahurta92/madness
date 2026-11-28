@@ -23,7 +23,6 @@
 // ===========================================================================
 
 #include "../solvers/shared_response_session.hpp"
-#include "../solvers/response_property_metadata.hpp"
 #include "calc_manager.hpp"
 #include "node_snapshot.hpp"
 
@@ -47,7 +46,6 @@
 #include "../solvers/fd_solver.hpp"
 #include "../solvers/iterate_protocol.hpp"
 #include "../solvers/node_subworlds.hpp"
-#include "../solvers/response_metadata.hpp"
 #include "../solvers/response_state.hpp"
 #include "../solvers/saved_states.hpp"
 
@@ -80,7 +78,7 @@ struct ExecutorSettings {
   PrintLevel        print_level = PrintLevel::Normal;
   // Guards the shared print functions (IterationOutput.h); from the same print_level.
   madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::detail;
-  std::string       calc_dir;      // holds response_metadata.json (output only)
+  std::string       calc_dir;      // the response analysis directory
   // DALTON nearest-frequency seed for FD legs absent from the RSPVEC (the
   // derived two-photon legs at omega_f/2). Set from the deck (`dalton.dir`,
   // `seed.freq_tol`) or --dalton-dir/--seed-freq-tol. 0 = off (2026-09-09).
@@ -477,7 +475,6 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
     if(imported && world.rank()==0) print("response: imported driven guess; fresh convergence checks");
     timing.end();
   }
-  std::size_t evaluations=0;
   if (!binding.reusable()) {
     // Diagnostic polarizability row: the assembly's own inner products, at
     // this protocol, from the state just updated. One per requested axis.
@@ -487,7 +484,6 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         for (int column:ctx.diagnostic_dipole_axes) dipoles[column]=dipole_perturbation(world,gs,column);
     const auto observe=[&](const typename Solver::State& state,const it::IterationMetrics& metrics,
                            const it::Decision& decision,const it::Progress& progress) {
-      ++evaluations;
       std::vector<it::Diagnostic> diagnostics;
       if constexpr (std::is_same_v<Shell,ClosedShell>)
         for (const auto& [column,v]:dipoles) {
@@ -521,7 +517,6 @@ NodeResult solve_fd_protocol(ExecutorContext &ctx, const Perturbation &pert,
         });
     MADNESS_CHECK_THROW(decision.checkpoint,"driven response stopped without a valid current checkpoint");
   }
-  ctx.shared_response->record_summary(binding,evaluations);
   ctx.shared_response->timing().end();
   ctx.shared_response->timing().end();
   ctx.shared_response->publish_timings();
@@ -624,11 +619,8 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       guess.stable_index.push_back(static_cast<int>(i));
     state=std::move(guess);timing.end();
   }
-  std::size_t evaluations=0;
-  std::optional<double> guard_seconds;
   if(!binding.reusable()) {
     const auto observer=[&](const auto& current,const it::IterationMetrics& metrics,const it::Decision& decision,const it::Progress& progress) {
-      ++evaluations;
       if(world.rank()==0 && it::prints(ctx.verbosity,it::needed::iteration_metrics))
         it::write_iteration_metrics(std::cout,"response",metrics,decision,response_shared::excited_metric_labels(),binding.final_level());
       // Diagnostic excitation energies: already measured, nothing computed.
@@ -649,10 +641,10 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
         const auto guard=evaluate_es_seed_guard<Type,ClosedShell>(world,current,decision.action==it::Action::complete,
             [&] {return response_seed::load_excited_seed<Type,ClosedShell>(world,*imported_seed);},
             imported_seed->shown(),protocol_key(imported_seed->description.protocol.thresh,imported_seed->description.protocol.k));
-        guard_seconds=guard_timer.seconds();
+        const double guard_seconds=guard_timer.seconds();
         print_es_seed_guard(world,guard);
         facts["seed_guard"]=guard.to_json();
-        timing.append({{"name","seed_comparison"},{"seconds",*guard_seconds}});
+        timing.append({{"name","seed_comparison"},{"seconds",guard_seconds}});
       }
       binding.publish(metrics,decision,progress,current.stable_index,[&](const auto& directory) {
         response_shared::save_excited_functions(world,current,directory);
@@ -670,7 +662,6 @@ NodeResult solve_shared_excited(ExecutorContext& ctx,int n_roots,double thresh) 
       });
     MADNESS_CHECK_THROW(decision.checkpoint,"excited bundle stopped without a valid current checkpoint");
   }
-  session.record_summary(binding,evaluations,guard_seconds);
   timing.end();timing.end();session.publish_timings();
   return {binding.complete(),protocol_key(),{}};
 }
@@ -837,7 +828,7 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   auto* shared=&session.bind_second_order(node.id,vbc_node_name(node.pert,node.pert_c,node.freq,node.freq_c),definition,
       nlohmann::json::array({response_shared::lineage_entry("B",B_state),response_shared::lineage_entry("C",C_state)}));
   if(shared->reusable()) {
-    session.record_vbc(node.id,*shared);session.timing().end();
+    session.timing().end();
     return {true,protocol_key(thresh,default_k_for_thresh(thresh)),{}};
   }
   session.timing().begin("prepare");
@@ -881,7 +872,6 @@ solve_vbc_closed_shell(ExecutorContext &ctx, const CalcNode &node, double thresh
   shared->save({"response"},[&](const std::filesystem::path& directory) {
     vbc_src.save(world,native_archive_name((directory/"response").string()),IoBackend::Native);
   });
-  session.record_vbc(node.id,*shared);
   session.timing().end();session.timing().end();session.publish_timings();
 
   if (world.rank() == 0) {
@@ -990,6 +980,8 @@ struct CalcManagerPolicy {
   int          fd_subworld_ranks = 0;   // ranks per subworld; >0 = universe split (may span nodes)
   // The session's plan for every state (D-016); schedule() requires one.
   StatePlans   state_plans;
+  // The scheduler trace (each wave's items and actions) prints at `detail`.
+  madness::iteration::Verbosity verbosity = madness::iteration::Verbosity::detail;
 };
 
 // ===========================================================================
@@ -1043,17 +1035,17 @@ public:
   /// the snapshot: planned VBC nodes that never converged at their top rung
   /// (out of scope for this ground state, or gated out by unconverged
   /// prerequisites) are reported via stop_reason 'complete_with_dropped_beta'
-  /// + diag.dropped_beta, and recorded under run_summary/dropped_work in the
-  /// metadata — a run with silently dropped beta/raman work is never labelled
-  /// plain 'complete' (review fix).
-  /// Returns the R1c scheduler trace (doc 16 L3) -> Output.diagnostics: the
-  /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
-  /// and pass count. Built identically on every rank (schedule() is
-  /// deterministic), so the value is rank-consistent.
+  /// + diag.dropped_beta, which results.json records as run.dropped_work — a
+  /// run with silently dropped beta/raman work is never labelled plain
+  /// 'complete' (review fix).
+  /// Returns the stop reason and the dropped work. The wave-by-wave trace
+  /// (id/thresh/action per item) is printed to the log at `detail`, not
+  /// returned. Built identically on every rank (schedule() is deterministic),
+  /// so the value is rank-consistent.
   /// F2 (doc 32 §5): inner per-subworld solve — build the ground state in `sub`
   /// from the archive, solve exactly `items` (its owned FD subset) at `thresh`,
-  /// save to disk under the `node_index` metadata shard. Supplied by the
-  /// orchestrator (which holds the archive path). Empty ⇒ the single-World path.
+  /// and save them to their node folders. Supplied by the orchestrator (which
+  /// holds the archive path). Empty ⇒ the single-World path.
   using SubworldSolve =
       std::function<void(madness::World &sub, const std::vector<WorkItem> &items,
                          double thresh, int gid,
@@ -1062,14 +1054,10 @@ public:
   nlohmann::json run(madness::World &world, ICalcExecutor &exec,
                      SubworldSolve fan_out = {}) {
     const std::vector<double> ramp = global_ramp();
-    // Output only: the end-of-run audit is recorded in it. Nothing is read
-    // from it to decide.
-    const std::string meta_path = calc_dir_ + "/response_metadata.json";
     if (!policy_.saved_states)
       throw std::logic_error("the response scheduler needs the snapshot of the saved states");
 
-    nlohmann::json diag;                       // R1c scheduler trace
-    diag["schedule"] = nlohmann::json::array();
+    nlohmann::json diag;                       // stop reason and dropped work
     int pass = 0;
 
 
@@ -1107,13 +1095,7 @@ public:
           if (const auto why = exec.out_of_scope(n)) refused[n.id] = *why;
         const nlohmann::json dropped = audit_dropped_work(dag_, meta_json, refused);
         // Dropped work ⇒ the beta/raman/2PA rows it feeds cannot be assembled.
-        // Record the audit in the metadata (rank 0, through the layer) even
-        // when empty, so a later completing run CLEARS a stale drop list.
-        if (world.rank() == 0) {
-          auto meta_out = ResponseMetadata::load_or_create(meta_path);
-          meta_out.set_dropped_work(dropped);
-          meta_out.save();
-        }
+        // It goes to results.json (run.dropped_work) through the trace.
 
         if (dropped.empty()) {
           if (world.rank() == 0)
@@ -1136,7 +1118,8 @@ public:
 
       const std::string sig = wave_signature(waves.front());
 
-      // R1c: record this wave (id/thresh/action per item) + protocol markers.
+      // The scheduler trace: this wave (id/thresh/action per item), in the
+      // log at `detail`.
       // A wave is one protocol level, so wthresh = the front item's threshold.
       const auto &wave = waves.front();
       const double wthresh = wave.front().thresh;
@@ -1147,14 +1130,15 @@ public:
           pidx = static_cast<int>(i);
           break;
         }
-      nlohmann::json wrec = {{"pass", pass}, {"protocol_index", pidx},
-                             {"thresh", wthresh}, {"k", wk},
-                             {"items", nlohmann::json::array()}};
-      for (const auto &it : wave)
-        wrec["items"].push_back({{"id", it.node->id},
-                                 {"thresh", it.thresh},
-                                 {"action", node_action_name(it.action)}});
-      diag["schedule"].push_back(std::move(wrec));
+      if (world.rank() == 0 &&
+          madness::iteration::prints(policy_.verbosity, madness::iteration::Verbosity::detail)) {
+        std::string items;
+        for (const auto &it : wave)
+          items += " " + it.node->id + "@" + protocol_key_at(it.thresh) + ":" +
+                   node_action_name(it.action);
+        madness::print("[CALC] schedule: pass", pass, " protocol_index", pidx,
+                       " thresh", wthresh, " k", wk, " items:", items);
+      }
       // A planned rung is scheduled once; the session's node owns completion.
       for (const auto &it : wave)
         solved_.insert(it.node->id + "|" + protocol_key_at(it.thresh));
@@ -1328,25 +1312,6 @@ public:
             }
           }
           world.gop.fence();
-          // F2b/F2g: collapse the per-group FD+VBC metadata shards into the
-          // canonical file (universe rank 0; through the metadata layer). Only
-          // when we actually sharded (G > 1). The merge itself can throw
-          // (corrupt shard, ENOSPC) — that must be collective too, not a
-          // rank-0-only unwind that strands everyone else at the fence.
-          int merge_bad = 0;
-          if (world.rank() == 0 && G > 1) {
-            try {
-              ResponseMetadata::merge_state_shards(calc_dir_, G);
-            } catch (const std::exception &e) {
-              merge_bad = 1;
-              madness::print("[SHARD-MERGE-ERROR]", e.what());
-            }
-          }
-          world.gop.max(merge_bad);
-          if (merge_bad)
-            MADNESS_EXCEPTION("per-wave shard merge failed on rank 0 "
-                              "(see [SHARD-MERGE-ERROR])", 0);
-          world.gop.fence();
           if(policy_.collect_subworlds) policy_.collect_subworlds();
         } else if ((policy_.fd_subworlds > 0 || policy_.fd_subworld_ranks > 0) && !rest.empty() &&
                    world.rank() == 0) {
@@ -1366,7 +1331,6 @@ public:
                        "  thresh=", wthresh, "  items=", (int)wave.size());
       ++pass;
     }
-    diag["passes"] = pass;
     return diag;
   }
 
@@ -1521,7 +1485,6 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
     return missing_beta_inputs(session,source_id,{A_id,fd_node_id(request.pert_b,request.freq_b),
                                                   fd_node_id(request.pert_c,request.freq_c)});
   };
-  json beta_rows=json::array(),raman_rows=json::array();
   for(const auto& request:expand_vbc_requests(plan.vbc,static_cast<int>(gs.molecule().natom()))) {
     const auto id=vbc_node_id(request.pert_b,request.pert_c,request.freq_b,request.freq_c);
     const bool nuclear=request.pert_c.kind==Perturbation::Kind::NuclearDisplacement;
@@ -1575,14 +1538,6 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
       if(world.rank()==0 && madness::iteration::prints(ctx.verbosity,madness::iteration::needed::assembled_values))
         print(nuclear ? "[RAMAN]" : "[BETA]",component,
           "fB=",request.freq_b,"fC=",request.freq_c,"value=",value);
-      // Preserve the analysis mirror consumed by the existing Raman analysis.
-      double residual=0.0;
-      for(const auto& state_id:{A_id,fd_node_id(request.pert_b,request.freq_b),fd_node_id(request.pert_c,request.freq_c)})
-        residual=std::max(residual,session.at(state_id).measured_values().at("values").at("bsh_residual").get<double>());
-      (nuclear ? raman_rows : beta_rows).push_back({{"A",std::string(1,"xyz"[axis])},
-          {"B",request.pert_b.description()},{"C",request.pert_c.description()},
-          {"freq_b",request.freq_b},{"freq_c",request.freq_c},{"beta",value},
-          {"converged",true},{"max_bsh_residual",residual}});
     }
   }
   auto publish=[&](const char* name,const char* units,auto& tensors) {
@@ -1603,12 +1558,6 @@ inline void assemble_shared_beta(ExecutorContext& ctx,const ResponsePlan& plan,d
   };
   publish("hyperpolarizability","atomic_units",beta_tensors);
   publish("polarizability_gradient","atomic_units",raman_tensors);
-  checkpoint::detail::on_root(world,[&] {
-    auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
-    const auto key=protocol_key(thresh,default_k_for_thresh(thresh));
-    meta.replace_property("beta",key,beta_rows);meta.replace_property("raman",key,raman_rows);
-    meta.save();return std::string{};
-  });
   session.timing().end();
 }
 
@@ -1776,7 +1725,6 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
   if (world.rank() == 0)
     print("\n=== TPA assembly  protocol_key=", key, "  n_roots=", nroots, " ===");
 
-  std::vector<nlohmann::json> rows;
   // rank-0 table data (S tensor + observables per root) for the Dalton-style print.
   std::vector<int>                     tbl_f;
   std::vector<double>                  tbl_w;
@@ -1907,38 +1855,6 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
 
 
     if (world.rank() == 0) {
-      nlohmann::json Sj = nlohmann::json::array();
-      for (int a = 0; a < 3; ++a) {
-        nlohmann::json ra = nlohmann::json::array();
-        for (int b = 0; b < 3; ++b) ra.push_back(S(a, b));
-        Sj.push_back(ra);
-      }
-      rows.push_back({{"es_root_id", static_cast<int>(f)},
-                      {"omega", wf},
-                      {"omega_ev", madness::derived::excitation_energy_ev(wf)},
-                      {"source_files", nlohmann::json::array()}, // sources are not saved
-                      {"writer_nproc", static_cast<int>(world.size())},
-                      {"S", Sj},
-                      {"Df", obs.Df}, {"Dg", obs.Dg},
-                      {"D_linear", obs.D_linear}, {"D_circular", obs.D_circular},
-                      {"R", obs.R},
-                      {"sigma_linear_gm", obs.sigma_linear_gm},
-                      {"sigma_circular_gm", obs.sigma_circular_gm},
-                      {"delta_parallel", obs.D_linear}});
-      {
-        nlohmann::json legs = nlohmann::json::array();
-        bool all_conv = true; double max_res = 0.0;
-        for (int a = 0; a < 3; ++a) {
-          auto leg = nlohmann::json{
-              {"converged",true},{"bsh_residual",ctx.shared_response->at(fd_node_id(Perturbation::dipole(a),wf_half)).measured_values().at("values").at("bsh_residual")}};
-          all_conv = all_conv && leg.value("converged", false);
-          max_res  = std::max(max_res, leg.value("bsh_residual", 0.0));
-          legs.push_back(std::move(leg));
-        }
-        rows.back()["row_accuracy"]     = std::move(legs);
-        rows.back()["converged"]        = all_conv;
-        rows.back()["max_bsh_residual"] = max_res;
-      }
       tbl_f.push_back(static_cast<int>(f)); tbl_w.push_back(wf);
       tbl_S.push_back(S); tbl_o.push_back(obs);
     }
@@ -1981,10 +1897,6 @@ inline void assemble_tpa(ExecutorContext &ctx, const ResponsePlan &plan,
     fflush(stdout);
   }
 
-  checkpoint::detail::on_root(world,[&] {
-    auto meta=ResponseMetadata::load_or_create(ctx.calc_dir+"/response_metadata.json");
-    meta.replace_property("tpa",key,rows);meta.save();return std::string{};
-  });
   finish_shared();
 }
 
@@ -2067,14 +1979,11 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
                    " ===");
 
   {
-    nlohmann::json tensors=nlohmann::json::array(),qualified=nlohmann::json::array();
+    nlohmann::json tensors=nlohmann::json::array();
     for (double frequency:fr) {
       nlohmann::json components=nlohmann::json::object(),availability=nlohmann::json::object();
-      nlohmann::json matrix=nlohmann::json::array();
-      double max_residual=0.0;
       for (int axis:ax) {
         auto& binding=ctx.shared_response->at(fd_node_id(Perturbation::dipole(axis),frequency));
-        nlohmann::json row=nlohmann::json::array();
         if (!binding.complete()) {
           for (int column:ax) availability[std::string{char('x'+axis),char('x'+column)}]=binding.name()+" has not met the requested criteria";
           continue;
@@ -2096,25 +2005,16 @@ inline void assemble_alpha(ExecutorContext &ctx, const ResponsePlan &plan,
           if (iteration::prints(ctx.verbosity,iteration::needed::checkpoint_timing))
             iteration::write_checkpoint_timing(std::cout,"response",binding.info().task_id,load_seconds);
         }
-        max_residual=std::max(max_residual,*frame.states.front().metrics.at(iteration::Metric::bsh_residual).value);
         for (int column:ax) {
           const double value=-2.0*(inner(functions.x_alpha,v[column])+inner(functions.y_alpha,v[column]));
-          components[std::string{char('x'+axis),char('x'+column)}]=value;row.push_back(value);
+          components[std::string{char('x'+axis),char('x'+column)}]=value;
         }
-        matrix.push_back(row);
       }
       nlohmann::json tensor={{"frequency",frequency},{"status",availability.empty() ? "complete" : components.empty() ? "unavailable" : "partial"},
                              {"components",components},{"availability",availability}};
       for (int axis:ax) ctx.shared_response->name_state(tensor,fd_node_id(Perturbation::dipole(axis),frequency));
       tensors.push_back(std::move(tensor));
-      // Keep the legacy analysis mirror for qualified tensors only.
-      if (availability.empty()) {
-        std::string directions;for (int axis:ax) directions+=char('x'+axis);
-        qualified.push_back(
-            {{"omega",frequency},{"directions",directions},{"alpha",matrix},{"converged",true},{"max_bsh_residual",max_residual}});
-      }
     }
-    replace_alpha_properties(world,ctx.calc_dir+"/response_metadata.json",key,qualified);
     ctx.shared_response->set_properties({{"polarizability",{{"units","bohr^3"},{"value_type","real"},{"values",tensors}}}});
   }
 }

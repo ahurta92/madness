@@ -17,7 +17,6 @@
 #include "../calc/calc_executor.hpp"        // ExecutorSettings/Context, FdResponseExecutor, assemble_*
 #include "../solvers/raman_analysis.hpp"    // full Raman: Hessian + normal-mode spectrum
 #include "../calc/calc_manager.hpp"         // CalcManager
-#include "../solvers/response_metadata.hpp"
 
 #include <nlohmann/json.hpp>
 #include <madness/mra/mra.h>
@@ -47,12 +46,8 @@ struct ResponseWorkflowInput {
 };
 
 struct ResponseWorkflowOutput {
-  nlohmann::json properties;   // Tier-A tensors (mirror of metadata "properties")
-  nlohmann::json metadata;     // full response_metadata.json
-  nlohmann::json vibrational_analysis;  // full Raman: Hessian, modes (metadata mirror)
-  nlohmann::json raman_spectra;         // full Raman: per-mode activities (metadata mirror)
-  nlohmann::json timing;       // R1 — reserved
-  nlohmann::json diagnostics;  // R1 — reserved
+  nlohmann::json timing;       // R1 — stage wall/cpu times (plan_build, solve, assemble)
+  nlohmann::json diagnostics;  // the scheduler's stop reason and dropped work
   nlohmann::json exports;      // R2 — reserved
   nlohmann::json debug_log;    // optional iteration-level
   int            rc = 0;
@@ -74,38 +69,6 @@ struct StageTimer {
                           {"cpu_s", madness::cpu_time() - c0}};
   }
 };
-// Compatibility output follows this invocation's qualified shared properties.
-// Persisted analysis may contain older requests and protocols; it is not output authority.
-inline void export_shared_properties(ResponseWorkflowOutput& output,const nlohmann::json& current,
-                                     const std::string& protocol) {
-  output.properties=nlohmann::json::object();
-  output.vibrational_analysis=nullptr;output.raman_spectra=nullptr;
-  const auto& metadata=output.metadata;
-  for(const auto& [shared,legacy]:std::vector<std::pair<std::string,std::string>>{
-      {"polarizability","alpha"},{"hyperpolarizability","beta"},
-      {"polarizability_gradient","raman"},{"two_photon_absorption","tpa"}}) {
-    if(!current.contains(shared)) continue;
-    bool measured=false;
-    for(const auto& value:current.at(shared).at("values"))
-      measured=measured || !value.at("components").empty();
-    if(measured && metadata.contains("properties") && metadata.at("properties").contains(legacy) &&
-        metadata.at("properties").at(legacy).contains(protocol))
-      output.properties[legacy]={{protocol,metadata.at("properties").at(legacy).at(protocol)}};
-  }
-  for(const auto& [shared,legacy]:std::vector<std::pair<std::string,std::string>>{
-      {"vibrational_analysis","vibrational_analysis"},{"raman_spectrum","raman_spectra"}}) {
-    if(!current.contains(shared) || !metadata.contains(legacy)) continue;
-    // Copied when anything was computed: the analysis's value, or a
-    // spectrum item's non-empty value.
-    const auto& property=current.at(shared);
-    bool computed=property.contains("value");
-    for(const auto& item:property.value("values",nlohmann::json::array()))
-      computed=computed || !item.value("value",nlohmann::json::array()).empty();
-    if(!computed) continue;
-    if(shared=="vibrational_analysis") output.vibrational_analysis=metadata.at(legacy);
-    else output.raman_spectra=metadata.at(legacy);
-  }
-}
 } // namespace detail_workflow
 
 // ---------------------------------------------------------------------------
@@ -146,6 +109,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   mgr_policy.fd_subworlds       = in.settings.fd_subworlds;   // F2
   mgr_policy.fd_subworld_ranks  = in.settings.fd_subworld_ranks;
   mgr_policy.state_plans        = in.settings.state_plans;     // D-016
+  mgr_policy.verbosity          = in.settings.verbosity;
   {
     auto session=in.settings.shared_response;
     mgr_policy.saved_states=[session]{return detail_exec::session_snapshot(*session);};
@@ -176,31 +140,6 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   timing["plan_build"] = t_build.lap();
   in.settings.shared_response->timing().end();
 
-  // 2a''. Sweep any metadata shards stranded by an interrupted subworld run
-  // into the canonical file, so the summary lists the states those groups
-  // saved. Output only: the scheduler reads the node folders. Same
-  // collective-error discipline as the gate: a rank-0 throw here
-  // (corrupt shard, ENOSPC on the canonical save) must not strand the other
-  // ranks at the fence.
-  {
-    int sweep_bad = 0;
-    if (world.rank() == 0) try {
-      const int n =
-          ResponseMetadata::merge_stale_state_shards(in.settings.calc_dir);
-      if (n > 0)
-        madness::print("SHARD_SWEEP  merged", n,
-                       "stale metadata shard(s) from an interrupted run");
-    } catch (const std::exception &e) {
-      sweep_bad = 1;
-      madness::print("[SHARD-SWEEP-ERROR]", e.what());
-    }
-    world.gop.max(sweep_bad);
-    if (sweep_bad)
-      MADNESS_EXCEPTION("stale-shard sweep failed on rank 0 "
-                        "(see [SHARD-SWEEP-ERROR]); aborting collectively", 0);
-  }
-  world.gop.fence();
-
   // 2b. Drive the calc manager (the solve).
   detail_workflow::StageTimer t_solve;
   ExecutorContext ctx(world, gs, L, fock_json, in.settings);
@@ -210,8 +149,8 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   // available — GroundState's only construction path is from_archive (doc 32 §3),
   // so the madqc in-memory-GS path can't fan out (it leaves fan_out null → the
   // single-World path). Each node-subworld loads its own GS and solves its owned
-  // FD items, writing to its node_index metadata shard (merged by rank 0). This
-  // is exactly the F1-proven block, lifted into the live run().
+  // FD items into their node folders. This is exactly the F1-proven block,
+  // lifted into the live run().
   CalcManager::SubworldSolve fan_out;
   const bool fan_requested =
       in.settings.fd_subworlds > 0 || in.settings.fd_subworld_ranks > 0;
@@ -315,26 +254,10 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
   if (!in.settings.shared_response->complete())
     throw std::runtime_error("response convergence criteria unmet; native endpoint and unavailable property recorded");
 
-  // 4. Collect the Output from the aggregate metadata (rank 0 authoritative).
-  madness::checkpoint::detail::on_root(world,[&] {
-    auto meta = ResponseMetadata::load_or_create(
-        in.settings.calc_dir + "/response_metadata.json");
-    // Provenance: stamp the effective restart-I/O backend into the metadata
-    // (madqc review R3 — an HDF5 run must be distinguishable from a native one).
-#ifdef MADNESS_HAS_HDF5
-    meta.set_io_info(hdf5_io_enabled() ? "hdf5" : "native", true);
-#else
-    meta.set_io_info("native", false);
-#endif
-    meta.save();
-    out.metadata = meta.json();
-    const auto protocol=madness::iteration::Protocol{in.protocols.back(),madness::FunctionDefaults<3>::get_k()};
-    detail_workflow::export_shared_properties(out,in.settings.shared_response->properties(),
-        protocol_key(protocol.thresh,protocol.k));
-    out.timing = std::move(timing);
-    out.diagnostics = sched_diag;   // R1c scheduler trace
-    return std::string{};
-  });
+  // 4. The Output: the stage times and the scheduler's verdict. The values
+  // are in results.json; the archive I/O backend is its provenance.archive_io.
+  out.timing = std::move(timing);
+  out.diagnostics = sched_diag;
   return out;
 }
 

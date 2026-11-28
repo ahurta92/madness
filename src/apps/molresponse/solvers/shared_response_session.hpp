@@ -1,21 +1,13 @@
 #pragma once
 #include "shared_response_checkpoint.hpp"
 #include "shared_es_checkpoint.hpp"
-#include "response_metadata.hpp"
+#include "frequency_key.hpp"
 #include <madness/chem/IterationHistory.h>
 #include <madness/chem/TimingRecords.h>
 #include <madness/chem/RunFiles.h>
 #include "../ResponseProtocol.hpp"
 
 namespace molresponse_v3::response_shared {
-// Root-only JSON work must finish collectively before any subsequent archive or solver call.
-template<class Update>
-void update_response_metadata(madness::World& world,const std::string& path,Update&& update) {
-  cp::detail::on_root(world,[&] {
-    auto metadata=ResponseMetadata::load_or_create(path);
-    update(metadata);metadata.save();return std::string{};
-  });
-}
 struct TaskSpec {
   std::string id;
   json settings;
@@ -29,7 +21,7 @@ struct TaskSpec {
 // states never share a name.
 inline std::string driven_node_name(const json& settings) {
   return settings.at("perturbation").get<std::string>()+"-"+
-         ResponseMetadata::freq_key(settings.at("frequency").get<double>());
+         freq_key(settings.at("frequency").get<double>());
 }
 // One saved driven node as the choice of a starting state sees it.
 struct StartCandidate {
@@ -97,7 +89,6 @@ inline std::vector<std::pair<std::string,it::NodeDescription>> saved_driven_node
 // A session of one process group (for_world) has a group number; the main
 // session has none.
 struct SessionScope {
-  std::string metadata_shard;
   int group=-1;
 };
 // A group's timing record, which the main session merges and then removes.
@@ -113,11 +104,6 @@ class Session {
   std::vector<it::Protocol> protocols_;
   std::map<std::string,TaskSpec> specifications_;
   SessionScope scope_;
-  std::string metadata_path() const {
-    return analysis_directory_+"/response_metadata"+
-        (scope_.metadata_shard.empty()?"":".group"+scope_.metadata_shard)+".json";
-  }
-  std::string analysis_directory_;
   it::Protocol final_;
   it::TimingCollector<> timing_;
   std::optional<std::size_t> timing_part_; // this run's part of the launch's timing entry
@@ -132,10 +118,10 @@ public:
   Session(madness::World& world,const std::filesystem::path& root,const GroundSource& ground,const it::Request& request,
           const std::vector<it::Protocol>& protocols,
           const std::vector<TaskSpec>& definitions,
-          std::string analysis_directory, it::TimingCollector<> timing,it::Verbosity verbosity,
+          it::TimingCollector<> timing,it::Verbosity verbosity,
           SessionScope scope={})
-      : world_(world),root_(std::filesystem::absolute(root)),ground_(ground),request_(request),protocols_(protocols),scope_(std::move(scope)),
-        analysis_directory_(std::move(analysis_directory)),final_(protocols.back()),
+      : world_(world),root_(std::filesystem::absolute(root)),ground_(ground),request_(request),protocols_(protocols),scope_(scope),
+        final_(protocols.back()),
         timing_(std::move(timing)),verbosity_(verbosity) {
     timing_.end(); // reference/input setup began before loading the ground state
     timing_.begin("checkpoint_planning");
@@ -160,8 +146,6 @@ public:
       specifications_[task.id]=task;
       states.emplace(task.id,bind(task));
     }
-    for (const auto& [id,state] : states) if (state->reusable()) record_summary(*state,0);
-    for (const auto& [id,set] : excited) if (set->reusable()) record_summary(*set,0);
     timing_.end();
   }
   // A process group bound by for_world only solves or reads; the launch that
@@ -281,7 +265,6 @@ public:
     TaskSpec task{id,settings,derived_task(),{},nearby.empty()?std::nullopt:std::optional<std::string>(nearby)};
     auto binding=bind(task);
     specifications_[id]=task;
-    if(binding->reusable()) record_summary(*binding,0);
     auto& result=*binding;states[id]=std::move(binding);return result;
   }
   // Once every two-photon state the current roots need has met the request,
@@ -309,12 +292,8 @@ public:
         if(unfinished.contains(bundle)) continue;
         for(const auto& name:two_photon_removals(bundle,names,nodes)) names_removed.push_back(name);
       }
-      if(names_removed.empty()) return result.dump();
-      // The metadata stops naming a state before its folder goes, so a run
-      // stopped in between leaves only a folder, which the next run removes.
-      auto meta=ResponseMetadata::load_or_create(metadata_path());
-      for(const auto& name:names_removed) meta.drop_fd_node(driven_folder(name).generic_string());
-      meta.save();
+      // A run stopped while removing leaves only folders, which the next
+      // run removes.
       for(const auto& name:names_removed) {
         std::filesystem::remove_all(root_/driven_folder(name));
         result.push_back(name);
@@ -327,16 +306,6 @@ public:
   SecondOrderNode& bind_second_order(const std::string& id,const std::string& name,const json& settings,const json& lineage) {
     auto binding=std::make_unique<SecondOrderNode>(world_,root_,id,name,settings,lineage);
     auto& result=*binding;second_order[id]=std::move(binding);return result;
-  }
-  void record_vbc(const std::string& id,const SecondOrderNode& binding) const {
-    cp::detail::on_root(world_,[&] {
-      auto meta=ResponseMetadata::load_or_create(metadata_path());
-      const auto key=protocol_key(final_.thresh,final_.k);
-      meta.set_protocol(key,final_.thresh,final_.k,0);
-      meta.set_vbc_state(id,key,{{"converged",true},{"diverged",false},
-          {"node",binding.folder()}});
-      meta.save();return std::string{};
-    });
   }
   it::TimingCollector<>& timing() {return timing_;}
   void record_iteration(const it::IterationInfo& info,const it::IterationTiming& measured) {
@@ -370,8 +339,8 @@ public:
     timing.begin("subworld_work",{{"clock_scope","subworld_driver_rank"},{"subworld_id",group},
         {"mpi_ranks",world.size()},{"threads_per_rank",madness::ThreadPool::size()+1}});
     timing.begin("response");timing.begin("binding_setup");
-    return std::make_shared<Session>(world,root_,ground_,request_,protocols_,definitions,analysis_directory_,std::move(timing),verbosity_,
-        SessionScope{std::to_string(group),group});
+    return std::make_shared<Session>(world,root_,ground_,request_,protocols_,definitions,std::move(timing),verbosity_,
+        SessionScope{group});
   }
   void collect_subworlds() {
     for(auto& [id,binding]:states) binding->refresh();
@@ -459,45 +428,6 @@ public:
   bool complete() const {
     return std::all_of(states.begin(),states.end(),[](const auto& entry){return entry.second->complete();}) &&
            std::all_of(excited.begin(),excited.end(),[](const auto& entry){return entry.second->complete();});
-  }
-  // The metadata copy of an excited set, with its seed guard when the saved
-  // roots carry one (`guard_seconds` when this launch measured it).
-  void record_summary(const ExcitedSet& set,std::size_t evaluations,
-                      std::optional<double> guard_seconds={}) const {
-    const auto& d=set.description();
-    const auto& physical=set.scientific_settings();
-    cp::detail::on_root(world_,[&] {
-      auto meta=ResponseMetadata::load_or_create(metadata_path());
-      const auto key=protocol_key(d.protocol.thresh,d.protocol.k);
-      meta.set_protocol(key,d.protocol.thresh,d.protocol.k,0);
-      const auto& roots=d.details.at("roots");
-      meta.set_es_bundle(key,{{"converged",set.complete()},{"diverged",false},{"stalled",false},
-        {"type",physical.at("excited_model")},{"shell","closed_shell"},{"n_roots",roots.size()},
-        {"roots",roots},{"iter",d.updates_at_protocol},{"node",set.folder()},
-        {"shared_evaluations",evaluations},{"shared_reused",set.reusable()}});
-      if(d.details.contains("seed_guard")) {
-        auto guard=d.details.at("seed_guard");
-        if(guard_seconds) guard["wall_s"]=*guard_seconds;
-        meta.set_es_seed_guard(key,guard);
-      }
-      meta.save();return std::string{};
-    });
-  }
-  void record_summary(const DrivenState& state,std::size_t evaluations) const {
-    const auto& d=state.description();
-    const auto frame=state.saved_metrics();
-    const auto& physical=state.scientific_settings();
-    cp::detail::on_root(world_,[&] {
-      auto meta=ResponseMetadata::load_or_create(metadata_path());
-      const auto key=protocol_key(d.protocol.thresh,d.protocol.k);
-      meta.set_protocol(key,d.protocol.thresh,d.protocol.k,0);
-      meta.set_fd_state(physical.at("perturbation"),key,ResponseMetadata::freq_key(physical.at("frequency")),
-          {{"converged",state.complete()},{"frequency",physical.at("frequency")},{"iter",d.updates_at_protocol},
-           {"bsh_residual",frame.states.front().metrics.at(it::Metric::bsh_residual).value.value_or(0.0)},
-           {"diverged",false},{"stalled",false},{"node",state.folder()},
-           {"shared_evaluations",evaluations},{"shared_reused",state.reusable()}});
-      meta.save();return std::string{};
-    });
   }
   void report() {
     cp::records::require(scope_.group<0,"only the main session writes the results file");

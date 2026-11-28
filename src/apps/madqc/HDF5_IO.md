@@ -47,11 +47,8 @@ nor mis-stamps the backend.
 
 ## How it behaves
 
-- The backend is recorded **per entry** in `response_metadata.json`
-  (`fd_states` / `vbc_states` `backend` field, `roots.json` `backend`) and read
-  back on load, so a state always loads with the backend that wrote it — a stale
-  twin left by toggling the backend can never shadow the metadata's state. Legacy
-  entries with no backend tag auto-detect.
+- The backend a launch writes with is recorded in `results.json` as
+  `provenance.archive_io` (`native` or `hdf5`).
 - HDF5 writes are a rank-0 gather at `nio=1`, covering closed-shell response
   states and checkpoints.
 - Native and HDF5 states can coexist in one calc directory across runs; each

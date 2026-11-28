@@ -14,7 +14,7 @@
 // <key> is the protocol key of the level the node is saved at; a node holds
 // one level. `converged` is not read from anywhere: the caller judges each
 // node against the current request (Session::node_meets_request) and passes
-// the verdict in. response_metadata.json is never read.
+// the verdict in.
 //
 // Pure: no World, no filesystem.
 // ===========================================================================
@@ -86,7 +86,7 @@ inline nlohmann::json node_snapshot(const std::vector<SnapshotNode> &nodes) {
       if (d.kind == "driven") {
         const auto pert = d.settings.at("perturbation").get<std::string>();
         const double freq = d.settings.at("frequency").get<double>();
-        s["fd_states"][pert][key][ResponseMetadata::freq_key(freq)] = {
+        s["fd_states"][pert][key][freq_key(freq)] = {
             {"converged", node.converged},
             {"freq", freq},
             {"frequency", freq},

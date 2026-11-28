@@ -56,19 +56,13 @@ accordingly and confirm the printed values.
 
 ## What you get from v3 (output differences)
 
-v3 writes the **same** response keys v2 did into `<prefix>.calc_info.json`
-(`properties.response_properties[]`, `raman_spectra`, `vibrational_analysis`) —
-so existing parsers keep working unchanged. v3 **adds** fields under the response
-task's `metadata` (additive — they don't displace anything v2 wrote):
-
-- `engine` = `"molresponse_v3"` (so you can tell which engine produced a record),
-- `timing` — structured stage/point wall+cpu timing,
-- `diagnostics` — convergence trajectories, divergence/stall flags, memory HWM,
-  scheduler trace,
-- (forthcoming) `exports` — a manifest of MRA/grid/viz artifacts.
-
-If you parse `calc_info.json`, **no change is required**; the new fields are
-opt-in extras you can ignore or consume.
+v3 no longer writes response values into `<prefix>.calc_info.json`: the
+response task there holds only `type` and the run's times. **A parser of v2's
+`properties.response_properties[]`, `raman_spectra` or `vibrational_analysis`
+must move to `<prefix>/results.json`**, where every response property is one
+named entry with its items, status and convergence (see
+[`docs/guides/results_file.md`](docs/guides/results_file.md)); timing is in
+`<prefix>/timings.json`.
 
 ---
 

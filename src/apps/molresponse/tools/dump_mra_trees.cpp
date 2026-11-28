@@ -44,7 +44,7 @@
 #include "../kernels/static.hpp"   // Kernels<Static,ClosedShell>::compute_density
 #include "../kernels/full.hpp"     // Kernels<Full,ClosedShell>::compute_density
 #include "../kernels/tda.hpp"      // Kernels<TDA,ClosedShell>::compute_density
-#include "../solvers/response_metadata.hpp"  // ResponseMetadata::freq_key (output names)
+#include "../solvers/frequency_key.hpp"  // freq_key (output names)
 #include "../solvers/saved_states.hpp"        // node folders under <run>/states/response/
 
 #include <madness/chem/atomutil.h>
@@ -626,7 +626,7 @@ void dump_driven(World& world, const saved_states::SavedNode& node, const vecfun
   const auto store = saved_states::load_driven<Storage>(world, node);
   const std::string label = "fd_" + d.settings.at("perturbation").get<std::string>() + "__" +
                             protocol_key(d.protocol.thresh, d.protocol.k) + "__" +
-                            ResponseMetadata::freq_key(d.settings.at("frequency").get<double>());
+                            freq_key(d.settings.at("frequency").get<double>());
   auto dump_block = [&](const vecfuncT& blk, const char* tag) {
     for (std::size_t i = 0; i < orbital_count(blk.size(), o.max_orbitals); ++i)
       dump_one(world, blk[i], o.out_dir + "/" + label + "_" + tag + std::to_string(i),

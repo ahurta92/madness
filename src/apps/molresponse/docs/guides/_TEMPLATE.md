@@ -39,7 +39,7 @@ No graphs in the release docs.
 
 The minimal `madqc --wf=response` deck knobs (2–4 lines), then a pointer to the
 full recipe in [`../../../madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md).
-Say where the result lands (`response_metadata.json` → `properties/<name>`).
+Say where the result lands (`results.json` → the property's name, e.g. `polarizability`).
 
 ## Under the hood
 

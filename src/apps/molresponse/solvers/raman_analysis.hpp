@@ -22,16 +22,16 @@
 //      at this protocol), projected on L, reduced to alpha'^2, beta'^2,
 //      activity and depolarization ratio (kernels/raman_spectrum.hpp).
 //
-// Records "vibrational_analysis" and "raman_spectra" in response_metadata.json
-// (mirrored into the madqc task record), with units stated. Collective
-// discipline: every MRA inner product runs on all ranks; JSON is rank 0.
+// Publishes the vibrational_analysis and raman_spectrum properties of
+// results.json, with units stated. Collective discipline: every MRA inner
+// product runs on all ranks; JSON is rank 0.
 // ===========================================================================
 
 #include "../calc/calc_executor.hpp"      // ExecutorContext, detail_exec::qualified_fd_as_xy
 #include "raman_results.hpp"
 #include "../kernels/raman_spectrum.hpp"
 #include "../ResponsePropertyPlanner.hpp"
-#include "response_metadata.hpp"
+#include "frequency_key.hpp"
 
 #include <madness/chem/molecular_functors.h>   // MolecularDerivativeFunctor
 #include <madness/chem/vibanal.h>              // compute_frequencies, compute_reduced_mass
@@ -231,7 +231,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
         {"raman_spectrum",{{"value_type","real"},{"values",spectra}}}});
     return;
   }
-  response_shared::update_response_metadata(world,ctx.calc_dir+"/response_metadata.json",[&](ResponseMetadata& meta) {
+  madness::checkpoint::detail::on_root(world,[&] {
   // The remaining local tensor algebra and JSON publication run on rank zero;
   // every rank receives any failure before returning to the workflow.
 
@@ -242,40 +242,16 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
   const auto modes = raman::vibrational_modes(vib->frequencies, tr_cutoff_cm1);
 
 
-  // --- vibrational_analysis section --------------------------------------
+  // --- the units of the vibrational_analysis property ----------------------
   nlohmann::json va;
-  va["protocol_key"] = key;
-  va["n_atoms"] = natom;
-  va["hessian"] = tensor_to_json(vib->hessian);
-  va["frequencies"] = tensor_to_json(vib->frequencies);
-  {
-    Tensor<double> fcm = copy(vib->frequencies);
-    fcm.scale(constants::au2invcm);
-    va["frequencies_cm1"] = tensor_to_json(fcm);
-  }
-  va["normalmodes"] = tensor_to_json(vib->normalmodes);
-  va["normalmodes_atomic"] = tensor_to_json(vib->normalmodes_atomic);
-  va["reducedmass"] = tensor_to_json(vib->reducedmass);
-  va["au2invcm"] = constants::au2invcm;
-  va["max_hessian_asymmetry"] = vib->max_asymmetry;
-  va["vibrational_mode_indices"] = modes;
-  va["tr_cutoff_cm1"] = tr_cutoff_cm1;
-  va["source"] = "Hessian from the static nuclear-displacement response states at this protocol; "
-                 "diagonal from translational invariance; nuclear-repulsion Hessian added";
   va["units"] = {{"hessian", "Eh/bohr^2"}, {"frequencies", "hartree"},
                  {"frequencies_cm1", "cm^-1"},
                  {"normalmodes", "mass-weighted eigenvectors (dimensionless)"},
                  {"normalmodes_atomic", "bohr per unit mass-weighted normal coordinate (M^-1/2 * mode)"},
                  {"reducedmass", "m_e"}};
 
-  // --- raman_spectra section ---------------------------------------------
+  // --- the units of the raman_spectrum property ----------------------------
   nlohmann::json rs;
-  rs["protocol_key"] = key;
-  rs["tr_cutoff_cm1"] = tr_cutoff_cm1;
-  nlohmann::json vfreq = nlohmann::json::array();
-  for (long m : modes) vfreq.push_back(vib->frequencies(m) * constants::au2invcm);
-  rs["vibrational_frequencies_cm1"] = vfreq;
-  rs["row_order"] = "row 3*A+B for dipole axes A,B in xyz; column 3*atom+axis";
   rs["units"] = {{"polarizability_derivatives", "a.u. (e^2 bohr^2 / Eh per bohr)"},
                  {"polarizability_derivatives_normal_modes", "a.u. per unit mass-weighted normal coordinate"},
                  {"alpha2_au", "a.u."}, {"beta2_au", "a.u."}, {"activity_au", "a.u. (45 alpha'^2 + 4 beta'^2)"},
@@ -284,16 +260,13 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
                  {"depol_int", "Angstrom^4/amu (dep_ratio * pol_int)"},
                  {"dep_ratio", "dimensionless (3 beta'^2 / activity)"},
                  {"freq_cm1", "cm^-1"}};
-  rs["au_to_A4_amu"] = raman::AU_TO_A4_AMU;
 
   const auto &pol_freqs = laser_frequencies;
-  rs["polarization_frequencies"] = pol_freqs;
 
-  nlohmann::json derivs = nlohmann::json::object(), derivs_modes = nlohmann::json::object(),
-                 spectra = nlohmann::json::object(), complete = nlohmann::json::object();
+  nlohmann::json spectra = nlohmann::json::object(), complete = nlohmann::json::object();
   static const char *axn = "xyz";
   for (double w : pol_freqs) {
-    const std::string wkey = ResponseMetadata::freq_key(w);
+    const std::string wkey = freq_key(w);
     Tensor<double> D(9L, dim);
     // The derivative tensor at w from the polarizability gradient assembled
     // in this run: its static-pair item (frequency w, no frequency_c), whose
@@ -331,13 +304,11 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
             "derivative rows at", key, "— spectrum not assembled for this frequency");
       continue;
     }
-    derivs[wkey] = tensor_to_json(D);
     if (modes.empty()) continue;
     Tensor<double> L(dim, static_cast<long>(modes.size()));
     for (size_t q = 0; q < modes.size(); ++q)
       for (long k = 0; k < dim; ++k) L(k, static_cast<long>(q)) = vib->normalmodes_atomic(k, modes[q]);
     const Tensor<double> Dq = raman::project_on_modes(D, L);
-    derivs_modes[wkey] = tensor_to_json(Dq);
     nlohmann::json rows = nlohmann::json::array();
     const bool print_rows = world.rank() == 0 &&
         madness::iteration::prints(ctx.verbosity, madness::iteration::needed::assembled_values);
@@ -365,14 +336,9 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
     fflush(stdout);
     spectra[wkey] = rows;
   }
-  rs["polarizability_derivatives"] = derivs;
-  rs["polarizability_derivatives_normal_modes"] = derivs_modes;
-  rs["raman_spectra"] = spectra;
-  rs["completeness"] = complete;
 
   {
-    // Public results are numeric vectors/matrices; keep the existing tensor
-    // metadata wrapper only in the application analysis file.
+    // Public results are numeric vectors/matrices.
     const auto numeric_values=[](const Tensor<double>& tensor) {
       auto values=nlohmann::json::array();
       MADNESS_CHECK(tensor.ndim()==1 || tensor.ndim()==2);
@@ -389,7 +355,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
     // One spectrum item per laser frequency.
     nlohmann::json items=nlohmann::json::array();
     for (double w:pol_freqs) {
-      const auto wkey=ResponseMetadata::freq_key(w);
+      const auto wkey=freq_key(w);
       items.push_back(raman_spectrum_item(w,hessian,gradient,complete.at(wkey),spectra.value(wkey,nlohmann::json())));
     }
     ctx.shared_response->set_properties({
@@ -399,8 +365,7 @@ inline void assemble_raman_spectrum(ExecutorContext &ctx, const ResponsePlan &pl
         {"raman_spectrum",{{"units",rs.at("units")},{"definitions",raman_spectrum_definitions()},
                            {"value_type","real"},{"values",items}}}});
   }
-  meta.set_section("vibrational_analysis", va);
-  meta.set_section("raman_spectra", rs);
+  return std::string{};
   });
 }
 

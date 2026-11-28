@@ -47,8 +47,8 @@ response
 end
 ```
 
-`madqc --wf=response <deck>`; the tensor lands in `response_metadata.json` under
-`properties/alpha`, keyed by (ω, directions). Full recipe:
+`madqc --wf=response <deck>`; the tensor lands in `results.json` under
+`polarizability`, one item per `frequency` with components `<ij>`. Full recipe:
 [`madqc/RESPONSE_PROPERTIES.md`](../../../madqc/RESPONSE_PROPERTIES.md).
 
 ## Under the hood

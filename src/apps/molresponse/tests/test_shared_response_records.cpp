@@ -254,10 +254,9 @@ int main(int argc, char** argv) {
             require(rs::read_other_node(world,std::filesystem::path(root)/old_leg.folder())==old_description);
             // A later launch binds the derived state by its settings: its own
             // node is reused, and a further move starts from the nearest node.
-            cp::detail::on_root(world,[&] {std::filesystem::create_directory(root+"/recovery");return std::string{};});
             it::TimingCollector<> recovery_timing;
             recovery_timing.begin("run"); recovery_timing.begin("response"); recovery_timing.begin("setup");
-            rs::Session recovered(world,root,ground,request,ladder,{},root+"/recovery",std::move(recovery_timing),it::Verbosity::detail);
+            rs::Session recovered(world,root,ground,request,ladder,{},std::move(recovery_timing),it::Verbosity::detail);
             auto& recovered_leg=recovered.bind_derived("new-leg",refined_settings);
             require(recovered_leg.reusable() && recovered_leg.description()==refined.description());
             auto moved_settings=refined_settings;moved_settings["frequency"]=0.12;
@@ -437,21 +436,18 @@ int main(int argc, char** argv) {
                 require(missing.at("status")=="unavailable" && !missing.contains("value") &&
                         molresponse_v3::raman_spectrum_item(0.05,hessian,gradient,cp::json(),cp::json()).at("status")=="unavailable");
             }
-            // The same collective metadata writer used by Raman must preserve
-            // the old file and publish failure timing on every rank.
-            const auto metadata_path=root+"/raman_metadata.json";
-            rs::update_response_metadata(world,metadata_path,[](auto& metadata) {
-                metadata.set_section("raman_spectra",{{"original",true}});
-            });
-            cp::detail::on_root(world,[&] {std::filesystem::create_directory(metadata_path+".tmp");return std::string{};});
+            // A collective JSON write that fails inside with_failure_timing
+            // (as Raman's rank-0 publication can) must preserve the old file
+            // and publish the failure timing on every rank.
+            const auto record_path=std::filesystem::path(root)/"record.json";
+            cp::detail::on_root(world,[&] {cp::detail::replace_json(record_path,{{"original",true}});return std::string{};});
+            cp::detail::on_root(world,[&] {std::filesystem::create_directory(root+"/.record.json.tmp");return std::string{};});
             rejects([&]{recovered.with_failure_timing([&] {
-                rs::update_response_metadata(world,metadata_path,[](auto& metadata) {
-                    metadata.set_section("raman_spectra",{{"original",false}});
-                });
+                cp::detail::on_root(world,[&] {cp::detail::replace_json(record_path,{{"original",false}});return std::string{};});
             });});
             cp::detail::on_root(world,[&] {
-                require(cp::detail::read_json(metadata_path).at("raman_spectra").at("original")==true);
-                require(cp::detail::read_json(std::filesystem::path(root)/"timings.json").dump().find("cannot open for write")!=std::string::npos);
+                require(cp::detail::read_json(record_path).at("original")==true);
+                require(cp::detail::read_json(std::filesystem::path(root)/"timings.json").dump().find("cannot create")!=std::string::npos);
                 return std::string{};
             });
             // A changed frequency inside the same rounded name also invalidates evidence.

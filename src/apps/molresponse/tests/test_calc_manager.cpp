@@ -67,7 +67,7 @@ void put_fd(json &m, const std::string &pert, double thresh, double freq,
             bool converged, bool diverged = false, int iter = 0,
             bool stalled = false) {
   const std::string key = protocol_key_at(thresh);
-  const std::string fk  = ResponseMetadata::freq_key(freq);
+  const std::string fk  = freq_key(freq);
   put_protocol(m, thresh);
   m["fd_states"][pert][key][fk] = {{"freq", freq},
                                    {"converged", converged},
@@ -378,6 +378,44 @@ int main() {
   // review/findings C4: the ES loader preferred the exact-key bundle even
   // when it had diverged, so a Restart re-seeded from the blown-up state. The
   // selection is now a pure helper shared with the loader (mirrors the FD one).
+  // ---- freq_key formatting (moved from the retired metadata test) ---------
+  std::printf("=== freq_key ===\n");
+  EXPECT(freq_key(0.057)  == "f0.05700", "freq_key(0.057)  == f0.05700");
+  EXPECT(freq_key(0.0)    == "f0.00000", "freq_key(0.0)    == f0.00000");
+  EXPECT(freq_key(0.4811) == "f0.48110", "freq_key(0.4811) == f0.48110");
+
+  // ---- best_usable_fd_source_key: an aliased entry is not a source --------
+  std::printf("=== best_usable_fd_source_key, aliased key ===\n");
+  {
+    const std::string f0 = freq_key(0.0);
+    json meta = {
+        {"protocols", {{"1e-04_k6", {{"thresh", 1e-4}, {"k", 6}}},
+                       {"1e-06_k8", {{"thresh", 1.01e-6}, {"k", 8}}}}},
+        {"fd_states", {{"dipole_z", {{"1e-04_k6", {{f0, {{"converged", true}}}}},
+                                     {"1e-06_k8", {{f0, {{"converged", true}}}}}}}}}};
+    // The saved 1.01e-6 entry is coarser than a 1e-6 target, so before this
+    // rule it was the exact source and the state resumed from it.
+    EXPECT(best_usable_fd_source_key(meta, "dipole_z", f0, 1e-6, 8, "1e-06_k8") == "1e-04_k6",
+           "an entry saved under another threshold of the same key is skipped");
+    EXPECT(best_usable_fd_source_key(meta, "dipole_z", f0, 1.01e-6, 8, "1e-06_k8") == "1e-06_k8",
+           "the same threshold is still the exact source");
+  }
+
+  // ---- best_usable_es_source_key: an aliased bundle is not a source -------
+  std::printf("=== best_usable_es_source_key, aliased key ===\n");
+  {
+    const json bundle = {{"type", "tda"}, {"shell", "closed_shell"},
+                         {"n_roots", 1}, {"converged", true}};
+    json meta = {
+        {"protocols", {{"1e-04_k6", {{"thresh", 1e-4}, {"k", 6}}},
+                       {"1e-06_k8", {{"thresh", 1.01e-6}, {"k", 8}}}}},
+        {"excited_states", {{"1e-04_k6", bundle}, {"1e-06_k8", bundle}}}};
+    EXPECT(best_usable_es_source_key(meta, "tda", "closed_shell", 1, 1e-6, 8, "1e-06_k8") == "1e-04_k6",
+           "a bundle saved under another threshold of the same key is skipped");
+    EXPECT(best_usable_es_source_key(meta, "tda", "closed_shell", 1, 1.01e-6, 8, "1e-06_k8") == "1e-06_k8",
+           "the same threshold is still the exact source");
+  }
+
   std::printf("=== best_usable_es_source_key ===\n");
   {
     const std::string k4 = protocol_key_at(1e-4), k6 = protocol_key_at(1e-6);

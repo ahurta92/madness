@@ -1,151 +1,80 @@
-# Records: metadata, results, and restart
+# Records: results, states, and restart
 
-Where a response calculation's results and state live, what the files guarantee,
-and the design reasoning behind those guarantees. This is the interface to script
-against — if you consume MADNESS response output programmatically, this is the
+Where a response calculation's results and state live, and what the files
+guarantee. If you consume MADNESS response output programmatically, this is the
 contract.
 
-## Two files, two audiences
+## The files
 
 | file | scope | audience |
 |---|---|---|
-| `<prefix>.calc_info.json` | the whole workflow — one entry per task | the driver's record: what ran, in what order, and whether it succeeded |
-| `response_metadata.json` (in the calc dir) | the response calculation | the property and state record: every tensor, every converged state, keyed and provenanced |
+| `<run>/results.json` | the whole run folder, one entry per application (`ground_state`, `response`) | every value a person or a script wants, each naming the saved states it came from — see [results_file.md](results_file.md) |
+| `<run>/summary.txt` | the same | `results.json` formatted for people; written with it, never read back |
+| `<run>/states/…/<node>/` | one saved state (ground state, driven state, excited-state set, second-order source) | the restart: `description.json` (settings, level, stored metrics, updates) and `history.jsonl` (one row per update) |
+| `<run>/timings.json` | every launch in the run folder | where the time went, per state, level, iteration and step, including each process group's work |
+| `<prefix>.calc_info.json` | the whole workflow — one entry per task | the driver's record: what ran, in what order, whether it failed, and each task's wall time |
 | `<prefix>.out` | the whole workflow | humans |
-| `<run>/results.json` | the whole run folder, one entry per application | every value a person wants, each naming the saved states it came from — see [results_file.md](results_file.md) |
 
-The rest of this page is about `response_metadata.json`, because that is the one
-with a schema you build on.
+For the response task, `calc_info.json` holds only `type` and the run's times
+(`metadata`: `elapsed_time`, `mpi_size`, `nthreads`, `clock_scope`, and
+`v3_timing` for plan_build, solve and assemble), which the wall-time lines at
+the end of the log print. Every response value is in `results.json`.
 
-## Structure
+## What `results.json` guarantees
 
-```
-{
-  "schema_version": 1,
-  "protocols":      { "<protocol_key>": { thresh, k, index } },
-  "ground_state":   { archive, fnv1a64, ... },
-  "fd_states":      { "<pert>": { "<protocol_key>": { "<freq_key>":
-                      { freq, type, shell, converged, iter, bsh_residual,
-                        archive, backend, writer_nproc } } } },
-  "excited_states": { "<protocol_key>": { type, shell, n_roots, bundle_dir,
-                        converged, slot_permutation, roots[] } },
-  "vbc_states":     { "<vbc_id>": { "<protocol_key>": { ... } } },
-  "properties":     { "<name>": { "<protocol_key>": [ { ... }, ... ] } },
-  "run_summary":    { stop_reason, dropped_work, ... },
-  "io":             { backend, hdf5_compiled }
-}
-```
-
-`<protocol_key>` is the resolution rung, e.g. `1e-04_k6`, `1e-06_k8` — the
-threshold and the polynomial order together, because they always move together.
-
-## The three conventions that matter
-
-### 1 · Everything is keyed by protocol
-
-A run that climbs the resolution ladder produces results at each rung, and they
-are stored **side by side** rather than overwriting. So `properties.alpha` may hold
-both a `1e-04_k6` and a `1e-06_k8` entry for the same frequency.
-
-*Why:* the coarse rung is not garbage — it is the seed for the fine rung, and it is
-also the evidence that the fine rung converged to the same place. Overwriting it
-would destroy the convergence trail. It also means a consumer can ask "give me the
-best available" or "show me the rung-to-rung drift" from one file.
-
-### 2 · Rows are upserted on their identity fields
-
-Within a `(property, protocol)`, a row's identity is the tuple of fields that
-physically distinguish it:
-
-| property | identity |
-|---|---|
-| `alpha` | (`omega`, `directions`) |
-| `beta`, `raman` | (`A`, `B`, `C`, `freq_b`, `freq_c`) |
-| `tpa`, ES-derived | (`es_root_id`, `fd_freq`) |
-
-Re-running a calculation **replaces** the row with the same identity rather than
-appending a second copy.
-
-*Why:* an append-only record accumulated duplicate and stale rows across restarts,
-so a consumer could not tell which α at ω = 0 was the current one. Identity-based
-upsert makes re-running idempotent, which is what you want when the whole point of
-the restart machinery is that runs get re-run.
-
-### 3 · Rows carry provenance, not just values
-
-Every record says how much to trust it:
-
-- `converged` — did the state that produced this actually converge
-- accuracy fields (`row_accuracy`, `vbc_accuracy`, `max_bsh_residual`) — the
-  quality of the *inputs* that built this row
-- `writer_nproc` — how many ranks wrote it
-- `backend` — which archive format holds the state (`native` / `hdf5`)
-
-*Why:* a bare number is not a result. A consumer — a plotting script, a regression
-harness, a paper table — needs to distinguish a converged production value from a
-partially-converged intermediate, without parsing the log. Recording accuracy at
-the row level also means a property inherits the honest accuracy of the states that
-built it, rather than claiming the accuracy of the rung it was assembled at.
+- **One level per entry.** Each entry holds the values at the final level of the
+  request (`protocol`). The earlier levels of a ladder are in each node's
+  `history.jsonl`, not in `results.json`.
+- **Values say how far to trust them.** Each value or item has a `status`
+  (`complete`, `partial`, `unavailable`), and a `convergence` computed from the
+  states it came from, beside the entry's `targets`. Each state in
+  `state_metrics` has its own `status` and `updates`.
+- **Items are identified by fields, not position.** A polarizability item by its
+  `frequency`, a hyperpolarizability item by `frequency_b` and `frequency_c`, an
+  excited state or a two-photon item by its `root`. Select by those fields.
+- **A failed calculation is recorded.** Its entry has `"status": "failed"` and
+  the error.
 
 ## Restart
 
-Converged response states are written per rung, and the metadata is what makes them
-findable: on a re-run the engine looks up the best usable state for the target
-(perturbation, frequency, protocol) and resumes from it — a coarse rung seeds the
-fine one instead of starting from scratch.
+Every state is saved as a node folder under `<run>/states/`. On a later launch
+each requested state reads its node: it is reused when its stored metrics meet
+the current request at the final level (the same test that decides `status` in
+`results.json`), resumed from its saved functions when it does not, and started
+from a nearby saved frequency of the same perturbation, a seed, or a guess when
+it has no node. A state saved at a coarser level seeds the next level.
 
-Three properties of that path worth knowing:
-
-- **Honest climb.** A rung that exhausts its iteration budget is recorded with
-  `converged: false` and still used to seed the next rung. The record stays honest
-  (it does not claim convergence) while the work is not thrown away.
-- **Diverged states are never seeded from.** A blown-up state is recorded as such
-  and excluded from source selection.
-- **Rank-agnostic.** Native archives store their own layout and are redistributed
-  on read, so a state written on one process count reloads on another. (Verified:
-  a polarizability reloaded across process counts agrees to ~10⁻¹².)
-
-The `backend` field is read back on load, so a state always loads with the format
-that wrote it — toggling the I/O backend between runs cannot make a stale twin
-shadow the state the metadata describes.
+- **Rank-agnostic.** Native archives store their own layout and are
+  redistributed on read, so a state written on one process count reloads on
+  another.
+- **One scheduling per level.** Within a launch each state is scheduled at most
+  once per level, so no state is solved again and again; work the run cannot
+  do (for example a quadratic source on an open-shell ground state) is listed in
+  `run.dropped_work` with its reason.
 
 ## Atomicity
 
-`response_metadata.json` is written to a temporary file and renamed over the
-target. On POSIX that rename is atomic within a filesystem, so a crash during the
-write leaves either the previous file intact or the new one complete — never a
-half-written record. Native state archives are written the same way.
-
-The writer is rank-0-only and MPI-free by construction; callers guard with a rank
-check and then fence, so other ranks observe the file only after it is complete.
-Concurrent writers on one file are **not** supported — serialize at the
-orchestration layer. (Processes that must share a calc directory read-only can do
-so; the tooling that does this suppresses metadata writes entirely.)
-
-## Ground-state fingerprint
-
-`ground_state` records the archive path **and a hash of it**. On a later run the
-hash is checked, so a calc directory built against one ground state cannot be
-silently reused against a different one — a mixed-ground-state directory is caught
-rather than producing quietly wrong properties.
+A node's archive and its description are replaced together in one save;
+`results.json`, `summary.txt` and `timings.json` are written to a temporary file
+and renamed over the target. On POSIX that rename is atomic within a filesystem,
+so a crash during a write leaves either the previous file intact or the new one
+complete. These writes happen on rank 0 and are collective: a failure on rank 0
+is raised on every rank.
 
 ## Consuming it
 
 ```python
 import json
-meta = json.load(open("response_metadata.json"))
+results = json.load(open("h2o/results.json"))
+response = next(c for c in results["calculations"] if c["calculation_id"] == "response")
 
-# best available alpha at omega=0, preferring the finest rung
-for key in sorted(meta["properties"]["alpha"], reverse=True):   # 1e-06_k8 before 1e-04_k6
-    rows = [r for r in meta["properties"]["alpha"][key]
-            if r["omega"] == 0.0 and r.get("converged")]
-    if rows:
-        print(key, rows[0]["alpha"]); break
+# alpha_zz at omega = 0, if it was computed from converged states
+item = next(v for v in response["properties"]["polarizability"]["values"]
+            if abs(v["frequency"]) < 1e-9)
+if item["status"] == "complete":
+    print(item["components"]["zz"], item["convergence"])
 ```
 
-Two habits worth adopting: **filter on `converged`** rather than assuming, and
-**iterate protocol keys deliberately** rather than taking the first — the file
-deliberately keeps every rung, so "which rung" is a choice the consumer makes.
-
-See [example output](example_output.md) for real records, and
+Filter on `status` rather than assuming, and select items by their identifying
+fields. See [example output](example_output.md) for a real run, and
 [`madqc/HDF5_IO.md`](../../../madqc/HDF5_IO.md) for the optional HDF5 backend.
