@@ -364,9 +364,10 @@ ctest line above.
 `response_c_triplet_beta` run an unrestricted (open-shell) reference and request
 static and dynamic β. The response *solver* is shell-generic and every
 finite-difference leg in both cases converges, but the quadratic source is
-closed-shell only, so the β nodes stall, are quarantined by the no-progress
-guard, and no property row is assembled — `response_properties` comes back empty
-and the run still exits 0. Open-shell α assembly is refused for the same reason
+closed-shell only, so the scheduler declines the β (VBC) nodes as out of scope
+for an open-shell ground state, records them as dropped with that reason, and
+no property row is assembled — no polarizability or hyperpolarizability value
+comes back and the run still exits 0. Open-shell α assembly is refused for the same reason
 (`calc_executor.hpp:2323`): the assembly readers are hardcoded to the
 closed-shell archive layout. These two cases therefore assert the unrestricted
 reference (the α and β eigenvalue sets differ in size), the converged legs, and

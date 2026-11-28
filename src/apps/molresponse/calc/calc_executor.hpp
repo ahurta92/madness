@@ -250,23 +250,6 @@ inline void print_es_kain_hold_off(madness::World &world,
                                 : "(starts from a seed or a saved bundle)");
 }
 
-/// Remove the wall-clock and RSS fields from every `metrics` object in a
-/// metadata subtree. They are measurements OF the run, not results of it: two
-/// re-solves of the same stuck state agree on every number that matters and
-/// disagree on these, which is exactly backwards for a progress comparison.
-inline void strip_volatile_metrics(nlohmann::json &j) {
-  if (j.is_object()) {
-    auto m = j.find("metrics");
-    if (m != j.end() && m->is_object()) {
-      m->erase("wall_s");
-      m->erase("rss_gb");
-    }
-    for (auto &kv : j.items()) strip_volatile_metrics(kv.value());
-  } else if (j.is_array()) {
-    for (auto &e : j) strip_volatile_metrics(e);
-  }
-}
-
 
 inline bool is_static_freq(double freq) { return std::abs(freq) < 1e-12; }
 
@@ -919,6 +902,16 @@ class FdResponseExecutor : public ICalcExecutor {
 public:
   explicit FdResponseExecutor(ExecutorContext ctx) : ctx_(ctx) {}
 
+  /// Work this executor declines for the run's ground state, and why: a VBC
+  /// node (a quadratic source) on an open-shell ground state. The same answer
+  /// on every rank, so the scheduler's audit can name it.
+  [[nodiscard]] std::optional<std::string> out_of_scope(const CalcNode &node) const override {
+    if (node.kind == CalcKind::VBC && !ctx_.gs.is_spin_restricted())
+      return std::string("the quadratic response source (VBC) and its contraction are implemented "
+                         "for a closed-shell ground state only, and this ground state is open-shell");
+    return std::nullopt;
+  }
+
   NodeResult run_protocol(const WorkItem &item) override {
     const CalcNode &node = *item.node;
     // Each solve receives one threshold, but its role belongs to the full
@@ -930,19 +923,18 @@ public:
     if (node.kind == CalcKind::ES)
       return node.tda ? solve_shared_excited<TDA>(ctx_,node.n_roots,item.thresh) :
                         solve_shared_excited<Full>(ctx_,node.n_roots,item.thresh);
-    if (node.kind == CalcKind::VBC) {
-      if (ctx_.gs.is_spin_restricted()) {
-        if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
-          madness::print("[CALC] run_protocol: VBC", node.id,
-                         " B=", node.pert.description(), "@", node.freq,
-                         " C=", node.pert_c.description(), "@", node.freq_c,
-                         " thresh=", item.thresh);
-        return solve_vbc_closed_shell(ctx_, node, item.thresh);
-      }
+    if (const auto why = out_of_scope(node)) {
       if (ctx_.world.rank() == 0)
-        madness::print("[CALC] run_protocol: VBC", node.id,
-                       "on an open-shell ground state is out of scope. Skipping.");
+        madness::print("[CALC] run_protocol:", node.id, "is out of scope:", *why, "— skipping.");
       return NodeResult{/*converged=*/false, /*reached_protocol_key=*/"", {}};
+    }
+    if (node.kind == CalcKind::VBC) {
+      if (ctx_.world.rank() == 0 && ctx_.print_level >= PrintLevel::Verbose)
+        madness::print("[CALC] run_protocol: VBC", node.id,
+                       " B=", node.pert.description(), "@", node.freq,
+                       " C=", node.pert_c.description(), "@", node.freq_c,
+                       " thresh=", item.thresh);
+      return solve_vbc_closed_shell(ctx_, node, item.thresh);
     }
     if (node.kind == CalcKind::DerivedFD) {
       // DerivedFD should have been promoted to FD on expansion.
@@ -1044,18 +1036,16 @@ public:
   /// pass: each pass reads the snapshot of the node folders, expands any
   /// converged ES bundle into concrete DerivedFD nodes, re-schedules (so
   /// actions reflect current disk) and runs the first non-empty wave.
-  /// Terminates when the schedule is empty (all Skip). A wave that repeats
-  /// with no progress is QUARANTINED (its nodes leave the schedule; trace
-  /// records a stall_event) and the loop continues with independent work —
-  /// stop_reason is 'complete_with_stalled' + diag.stalled_nodes when
-  /// anything was quarantined, so a stuck node neither spins the loop nor
-  /// starves unrelated perturbation channels (review fix). On exit the plan
-  /// is audited against the snapshot: planned VBC nodes that never converged
-  /// at their top rung (gated out by unconverged prerequisites, or stalled)
-  /// are reported via stop_reason 'complete_with_dropped_beta' (or
-  /// '..._stalled_and_dropped_beta') + diag.dropped_beta, and recorded under
-  /// run_summary/dropped_work in the metadata — a run with silently dropped
-  /// beta/raman work is never labelled plain 'complete' (review fix).
+  /// Terminates when the schedule is empty: every rung is scheduled at most
+  /// once per launch (`solved_`), and the node's own solver decides within
+  /// that one run whether it converges, so no wave can repeat and no state
+  /// can be scheduled again and again. On exit the plan is audited against
+  /// the snapshot: planned VBC nodes that never converged at their top rung
+  /// (out of scope for this ground state, or gated out by unconverged
+  /// prerequisites) are reported via stop_reason 'complete_with_dropped_beta'
+  /// + diag.dropped_beta, and recorded under run_summary/dropped_work in the
+  /// metadata — a run with silently dropped beta/raman work is never labelled
+  /// plain 'complete' (review fix).
   /// Returns the R1c scheduler trace (doc 16 L3) -> Output.diagnostics: the
   /// wave-by-wave reconcile actions (id/thresh/action per item), stop_reason,
   /// and pass count. Built identically on every rank (schedule() is
@@ -1083,9 +1073,6 @@ public:
     int pass = 0;
 
 
-    std::string last_sig;
-    std::string last_progress;           // fingerprint of the saved solve state
-    std::set<std::string> stalled_ids;   // quarantined no-progress nodes
     for (;;) {
       world.gop.fence();
       // What is saved, from the node folders, judged against this request.
@@ -1100,19 +1087,6 @@ public:
         wave.erase(std::remove_if(wave.begin(),wave.end(),[&](const WorkItem& item) {
           return !policy_.dependencies_ready(*item.node);
         }),wave.end());
-      // Review fix (confirmed HIGH — front-wave starvation): quarantine nodes
-      // that stopped making progress instead of halting the WHOLE run. Only
-      // the front wave ever executes, so a deterministically-stuck node (e.g.
-      // a diverging ES bundle) used to starve every independent item queued
-      // in later waves. Stalled nodes are excluded from scheduling, recorded
-      // in the trace, and reported honestly in stop_reason at the end.
-      for (auto &w : waves) {
-        w.erase(std::remove_if(w.begin(), w.end(),
-                               [&](const WorkItem &it) {
-                                 return stalled_ids.count(it.node->id) > 0;
-                               }),
-                w.end());
-      }
       waves.erase(std::remove_if(waves.begin(), waves.end(),
                                  [](const auto &w) { return w.empty(); }),
                   waves.end());
@@ -1126,7 +1100,12 @@ public:
         // without a converged entry at its top rung never delivered.
         // (audit_dropped_work, calc_manager.hpp: undelivered VBC sources and
         // two-photon legs whose ES bundle never converged.)
-        const nlohmann::json dropped = audit_dropped_work(dag_, meta_json, stalled_ids);
+        // Work this executor declines for this ground state, by node id,
+        // with the reason (out_of_scope; decided on every rank alike).
+        std::map<std::string, std::string> refused;
+        for (const auto &n : dag_)
+          if (const auto why = exec.out_of_scope(n)) refused[n.id] = *why;
+        const nlohmann::json dropped = audit_dropped_work(dag_, meta_json, refused);
         // Dropped work ⇒ the beta/raman/2PA rows it feeds cannot be assembled.
         // Record the audit in the metadata (rank 0, through the layer) even
         // when empty, so a later completing run CLEARS a stale drop list.
@@ -1136,18 +1115,12 @@ public:
           meta_out.save();
         }
 
-        if (stalled_ids.empty() && dropped.empty()) {
+        if (dropped.empty()) {
           if (world.rank() == 0)
             madness::print("[CALC] run: nothing left to schedule — done");
           diag["stop_reason"] = "complete";
         } else {
-          if (world.rank() == 0 && !stalled_ids.empty()) {
-            madness::print("[CALC] run: all remaining work is STALLED —",
-                           (int)stalled_ids.size(),
-                           "node(s) made no progress and were quarantined:");
-            for (const auto &id : stalled_ids) madness::print("    stalled:", id);
-          }
-          if (world.rank() == 0 && !dropped.empty()) {
+          if (world.rank() == 0) {
             madness::print("[CALC] run: WARNING —", (int)dropped.size(),
                            "planned VBC/beta node(s) were never solved "
                            "(beta/raman rows will be missing):");
@@ -1155,61 +1128,13 @@ public:
               madness::print("    dropped:", d.value("id", std::string("?")),
                              "—", d.value("reason", std::string("?")));
           }
-          if (dropped.empty())
-            diag["stop_reason"] = "complete_with_stalled";
-          else if (stalled_ids.empty())
-            diag["stop_reason"] = "complete_with_dropped_beta";
-          else
-            diag["stop_reason"] = "complete_with_stalled_and_dropped_beta";
-          if (!stalled_ids.empty()) diag["stalled_nodes"] = stalled_ids;
-          if (!dropped.empty())     diag["dropped_beta"]  = dropped;
+          diag["stop_reason"] = "complete_with_dropped_beta";
+          diag["dropped_beta"] = dropped;
         }
         break;
       }
 
       const std::string sig = wave_signature(waves.front());
-      // Progress fingerprint: the saved solve state. ONLY the front wave runs
-      // each pass, so if the front wave repeats (sig == last_sig) AND the saved
-      // state is byte-identical to the previous pass, the last attempt changed
-      // NOTHING → genuinely stuck → quarantine. If the state changed (a Resume
-      // that advanced iter/residual), it is still converging — give it another
-      // pass. Fixes the false-quarantine of a multi-pass ES/VBC Resume (and the
-      // legacy max_iters==0 "Resume forever" FD mode), whose reconcile branches
-      // don't honest-climb the schedule shape the way the FD/max_iters branch
-      // does, so the bare id@protocol signature repeats even mid-convergence.
-      const auto &mj = meta_json;
-      // The fingerprint must contain only what MEANS progress. StateMetrics
-      // embeds wall_s and rss_gb, which differ on every re-solve however little
-      // the solve achieved, so dumping the subtree whole made
-      // `progress == last_progress` unreachable and everything below this `if`
-      // dead code. iters/bytes/coeffs stay: those move only when the state does.
-      std::string progress;
-      for (const char *k : {"fd_states", "excited_states", "vbc_states"}) {
-        if (!mj.contains(k)) continue;
-        nlohmann::json sub = mj[k];
-        detail_exec::strip_volatile_metrics(sub);
-        progress += sub.dump();
-      }
-      if (sig == last_sig && progress == last_progress) {
-        // No progress on this wave: quarantine its nodes and try the rest of
-        // the schedule. The run only stops when nothing unquarantined remains.
-        if (world.rank() == 0)
-          madness::print("[CALC] run: no progress on wave {", sig,
-                         "} (saved state unchanged) — quarantining",
-                         (int)waves.front().size(),
-                         "node(s) and continuing with independent work");
-        nlohmann::json srec = {{"pass", pass}, {"wave", sig},
-                               {"quarantined", nlohmann::json::array()}};
-        for (const auto &it : waves.front()) {
-          stalled_ids.insert(it.node->id);
-          srec["quarantined"].push_back(it.node->id);
-        }
-        diag["stall_events"].push_back(std::move(srec));
-        last_sig.clear(); last_progress.clear();  // fresh window for the next wave
-        continue;
-      }
-      last_sig = sig;
-      last_progress = progress;
 
       // R1c: record this wave (id/thresh/action per item) + protocol markers.
       // A wave is one protocol level, so wthresh = the front item's threshold.
@@ -1454,16 +1379,13 @@ private:
     return detail_calc::sorted_ramp(std::move(all));
   }
 
-  /// Stable, rank-deterministic signature of a wave (sorted id@protocol list).
+  /// Stable, rank-deterministic name of a wave for the log (sorted
+  /// id@protocol list; protocol_key, not freq_key, so two rungs of one node
+  /// read differently).
   static std::string wave_signature(const std::vector<WorkItem> &wave) {
     std::vector<std::string> parts;
     parts.reserve(wave.size());
     for (const auto &it : wave)
-      // protocol_key, NOT freq_key: freq_key's fixed-decimal format collapses
-      // 1e-6 and 1e-8 to the same string ("f0.00000"), so two consecutive
-      // LADDER rungs got identical signatures and the no-progress guard
-      // falsely halted between them (exposed by honest-climb, which makes
-      // consecutive front waves be DIFFERENT rungs of the same node).
       parts.push_back(it.node->id + "@" +
                       protocol_key(it.thresh, default_k_for_thresh(it.thresh)));
     std::sort(parts.begin(), parts.end());

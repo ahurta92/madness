@@ -51,7 +51,7 @@ const char* all_complete = R"json({
             "status": "complete",
             "convergence": {"bsh_residual": 3.85e-05, "density_change": 0.000109, "energy_change": 1e-07}}]}
      },
-     "run": {"stop_reason": "complete", "dropped_work": [], "stalled": []},
+     "run": {"stop_reason": "complete", "dropped_work": []},
      "state_metrics": {}}
   ]
 })json";
@@ -102,7 +102,7 @@ Response (molresponse), level 1.0e-04 k 6
 
   not printed (see results.json): transition_quadrupole
 
-  run: complete. Nothing dropped. Nothing stalled.
+  run: complete. Nothing dropped.
 )text";
 
 // An excited root that never converged, and beta work that was dropped.
@@ -135,8 +135,7 @@ const char* unavailable_and_dropped = R"json({
      },
      "run": {"stop_reason": "complete_with_dropped_beta",
              "dropped_work": [{"id": "vbc_dipole_z-dipole_z-f0.00000-f0.05000", "top_protocol_key": "1e-04_k6",
-                               "reason": "prerequisite dipole_z-f0.05000 did not converge at the top rung"}],
-             "stalled": []},
+                               "reason": "prerequisite dipole_z-f0.05000 did not converge at the top rung"}]},
      "state_metrics": {}}
   ]
 })json";
@@ -173,7 +172,7 @@ Response (molresponse), level 1.0e-04 k 6
   0.05000    xx         4.600000  3.10e-03*     1.20e-02*
              zz         -
 
-  run: complete_with_dropped_beta. 1 dropped. Nothing stalled.
+  run: complete_with_dropped_beta. 1 dropped.
 
   * above target (driven states can pass under the scaled rule)
 )text";
@@ -220,7 +219,7 @@ const char* quadratic_two_photon_raman = R"json({
             "value": [{"mode": 1, "freq_cm1": 1405.6271, "pol_int": 42.98765, "dep_ratio": 0.2499998, "converged": true}],
             "convergence": {"bsh_residual": 5.0e-05, "density_change": 6.0e-05}}]}
      },
-     "run": {"stop_reason": "complete", "dropped_work": [], "stalled": []},
+     "run": {"stop_reason": "complete", "dropped_work": []},
      "state_metrics": {}}
   ]
 })json";
@@ -267,7 +266,7 @@ Response (molresponse), level 1.0e-06 k 8
   not printed (see results.json): polarizability_gradient components, vibrational_analysis hessian,
     vibrational_analysis normal_modes
 
-  run: complete. Nothing dropped. Nothing stalled.
+  run: complete. Nothing dropped.
 
   * above target (driven states can pass under the scaled rule)
 )text";
@@ -325,7 +324,7 @@ const char* derived_present = R"json({
             "derived": {"energy_ev": 12.675858, "wavelength_nm": 97.810102},
             "status": "complete", "convergence": {"bsh_residual": 3.85e-05, "density_change": 0.000109}}]}
      },
-     "run": {"stop_reason": "complete", "dropped_work": [], "stalled": [], "unconverged": []},
+     "run": {"stop_reason": "complete", "dropped_work": [], "unconverged": []},
      "state_metrics": {}}
   ]
 })json";
@@ -384,7 +383,7 @@ Response (molresponse), level 1.0e-04 k 6
 
   not printed (see results.json): hyperpolarizability components
 
-  run: complete. Nothing dropped. Nothing stalled.
+  run: complete. Nothing dropped.
 )text";
 
 // A run whose states did not converge: the run line counts them.
@@ -402,7 +401,7 @@ const char* unconverged = R"json({
           "availability": {"zz": "dipole_z-f0.00000 has not met the requested criteria"},
           "convergence": {"bsh_residual": 0.39, "density_change": 0.18}}]}
      },
-     "run": {"stop_reason": "unconverged", "dropped_work": [], "stalled": [],
+     "run": {"stop_reason": "unconverged", "dropped_work": [],
              "unconverged": ["dipole_z-f0.00000", "excited-full"]},
      "state_metrics": {}}
   ]
@@ -424,7 +423,7 @@ Response (molresponse), level 1.0e-04 k 6
   frequency  component  value  bsh_residual  density_change
   0.00000    zz         -      3.90e-01*     1.80e-01*
 
-  run: unconverged (2 states). Nothing dropped. Nothing stalled.
+  run: unconverged (2 states). Nothing dropped.
 
   * above target (driven states can pass under the scaled rule)
 )text";
@@ -457,7 +456,7 @@ const char* seeded = R"json({
             "status": "complete",
             "convergence": {"bsh_residual": 0.0311, "density_change": 0.0157, "energy_change": 0.0042}}]}
      },
-     "run": {"stop_reason": "complete", "dropped_work": [], "stalled": [], "unconverged": []},
+     "run": {"stop_reason": "complete", "dropped_work": [], "unconverged": []},
      "state_metrics": {"excited-full": {"protocol": {"threshold": 0.0001, "k": 6}, "updates": 0, "subjects": {}}}}
   ]
 })json";
@@ -475,7 +474,7 @@ Response (molresponse), level 1.0e-04 k 6
   es_root_0000  0.32181230  0.012346       0.998765      2.13e-02      1.14e-02        2.10e-03
   es_root_0001  0.38340000  0              0.410000      3.11e-02      1.57e-02        4.20e-03
 
-  run: complete. Nothing dropped. Nothing stalled.
+  run: complete. Nothing dropped.
 )text";
 
 int check(const char* name, const char* input, const char* expected) {

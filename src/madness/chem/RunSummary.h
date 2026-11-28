@@ -239,8 +239,8 @@ inline std::string item_label(const json& item) {
 }
 
 /// The NOT COMPLETE lines, one per item with its reason: every property or
-/// item that is not complete, and the run's stop reason, dropped work and
-/// stalled states.
+/// item that is not complete, a failed calculation, and the run's stop reason
+/// and dropped work.
 inline std::vector<std::string> not_complete(const json& results) {
     std::vector<std::string> lines;
     const auto add = [&](const std::string& head, const json& availability) {
@@ -256,8 +256,6 @@ inline std::vector<std::string> not_complete(const json& results) {
             const auto& run = entry.at("run");
             const auto stop = run.value("stop_reason", std::string("unknown"));
             if (stop != "complete") lines.push_back(std::string("  ").append(id).append(": run stopped: ").append(stop));
-            for (const auto& state : run.value("stalled", json::array()))
-                lines.push_back("  " + id + ": stalled: " + (state.is_string() ? state.get<std::string>() : state.dump()));
             for (const auto& work : run.value("dropped_work", json::array()))
                 lines.push_back("  " + id + ": dropped: " + work.value("id", std::string("?")) + ": " +
                                 work.value("reason", std::string("no reason recorded")));
@@ -790,7 +788,6 @@ inline void write_entry(std::string& out, const json& entry) {
     if (entry.contains("run")) {
         const auto& run = entry.at("run");
         const auto dropped = run.value("dropped_work", json::array()).size();
-        const auto stalled = run.value("stalled", json::array()).size();
         const auto unconverged = run.value("unconverged", json::array()).size();
         const auto states = [](std::size_t n) { return std::to_string(n) + (n == 1 ? " state" : " states"); };
         const auto stop = run.value("stop_reason", std::string("unknown"));
@@ -800,8 +797,7 @@ inline void write_entry(std::string& out, const json& entry) {
                             : stop == "unconverged" ? stop + " (" + states(unconverged) + ")"
                                                     : stop + ", unconverged (" + states(unconverged) + ")";
         out += "\n  run: " + reason + ". " +
-               (dropped == 0 ? std::string("Nothing dropped.") : std::to_string(dropped) + " dropped.") + " " +
-               (stalled == 0 ? std::string("Nothing stalled.") : std::to_string(stalled) + " stalled.") + "\n";
+               (dropped == 0 ? std::string("Nothing dropped.") : std::to_string(dropped) + " dropped.") + "\n";
     }
     // One note for every * in the section.
     if (marked) {

@@ -620,7 +620,7 @@ inline nlohmann::json fd_leg_accuracy(const nlohmann::json &meta, const Perturba
 /// run_summary/dropped_work and names it in stop_reason.
 inline nlohmann::json audit_dropped_work(const std::vector<CalcNode> &dag,
                                          const nlohmann::json &meta,
-                                         const std::set<std::string> &stalled_ids) {
+                                         const std::map<std::string, std::string> &refused = {}) {
   nlohmann::json dropped = nlohmann::json::array();
   for (const auto &n : dag) {
     if (n.kind != CalcKind::VBC || n.protocols.empty()) continue;
@@ -633,15 +633,18 @@ inline nlohmann::json audit_dropped_work(const std::vector<CalcNode> &dag,
     // solve_vbc is one-shot and always saves converged=true, so a present VBC
     // entry is caught by the `continue` above; the "built ... not converged" arm
     // is defensive coverage in case VBC ever gains partial saves.
-    const char *reason =
-        stalled_ids.count(n.id)
-            ? "stalled (quarantined by the no-progress guard)"
+    // A node the executor declines (ICalcExecutor::out_of_scope) was
+    // scheduled and refused; its prerequisites may well have converged.
+    const auto declined = refused.find(n.id);
+    const std::string reason =
+        declined != refused.end()
+            ? "out of scope: " + declined->second
             : has_entry ? "built at the top rung but not converged"
                         : "prerequisites never converged (gated out of every wave)";
     dropped.push_back({{"id", n.id}, {"top_protocol_key", top}, {"reason", reason}});
   }
   // Two-photon legs ("*" DerivedFD) expand only once their ES bundle converges
-  // at its top rung. If it never did (stalled, budget exhausted, quarantined),
+  // at its top rung. If it never did (budget exhausted, or not converged),
   // the legs and the 2PA rows they feed were never produced: report it.
   for (const auto &n : dag) {
     if (!n.is_symbolic() || n.prerequisites.empty()) continue;
@@ -680,6 +683,12 @@ struct NodeResult {
 /// -> save (+metrics). The only World-bound surface of the calc manager.
 struct ICalcExecutor {
   virtual NodeResult run_protocol(const WorkItem &item) = 0;
+  /// Why this executor declines `node` for the run's ground state, or nothing
+  /// when it does not. run_protocol skips such a node; the audit of dropped
+  /// work reports the reason.
+  [[nodiscard]] virtual std::optional<std::string> out_of_scope(const CalcNode & /*node*/) const {
+    return std::nullopt;
+  }
   virtual ~ICalcExecutor() = default;
 };
 

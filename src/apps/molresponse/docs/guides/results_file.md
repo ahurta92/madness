@@ -42,7 +42,7 @@ uncommitted changes.
     "excited_states": {"bsh_residual": 0.0005, "density_change": 0.0005, "energy_change": 0.0005}
   },
   "properties": { "<name>": <property>, ... },
-  "run": {"stop_reason": "complete", "dropped_work": [], "stalled": [], "unconverged": []},
+  "run": {"stop_reason": "complete", "dropped_work": [], "unconverged": []},
   "state_metrics": {
     "dipole_z-f0.00000": {
       "protocol": {"threshold": 0.0001, "k": 6},
@@ -67,13 +67,16 @@ uncommitted changes.
   value of the entry comes from the same state: the `ground_state` entry has
   one `convergence`, the worst measured values of its saved state, and its
   properties have none.
-- `run` appears only on the response entry. `dropped_work`, `stalled` and
-  `unconverged` are always lists, empty when there is nothing to list.
-  `unconverged` names, by folder, each state that ended without meeting the
-  request and is not already listed as stalled. `stop_reason` is `complete`
-  only when all three lists are empty; it is `unconverged` when only
-  `unconverged` is not empty. Stalled and dropped work keep their own stop
-  reasons (`complete_with_stalled`, `complete_with_dropped_beta`, …), which take
+- `run` appears only on the response entry. `dropped_work` and `unconverged`
+  are always lists, empty when there is nothing to list. `unconverged` names,
+  by folder, each state that ended without meeting the request.
+  `dropped_work` lists planned second-order work that was never delivered,
+  each `{id, top_protocol_key, reason}`; the reason says whether the work was
+  out of scope for this ground state (`out of scope: …`), gated out because
+  its prerequisites never converged, or (for two-photon legs) waited on an
+  excited-state set that never converged. `stop_reason` is `complete` only
+  when both lists are empty; it is `unconverged` when only `unconverged` is not
+  empty, and `complete_with_dropped_beta` when work was dropped, which takes
   precedence.
 - `state_metrics` is keyed by node name: the per-state table behind every
   `convergence`. Each node gives the level it was saved at, the number of
@@ -88,6 +91,8 @@ uncommitted changes.
   current request at its final level (the test a restart makes to reuse the
   state), otherwise `unconverged`. It is decided when the file is written and
   stored nowhere else; a second-order source listed here is always `complete`.
+  The occupied source of a frozen-virtuals ground state was solved under
+  another request, so its entry has no `status`.
 - `citations` appears on the `ground_state` entry: which external libraries
   the ground state used (`dftd3`, `libxc`, `pcm`, each true or false). `madqc`
   prints the matching citations at the end of the log from it.
@@ -311,12 +316,11 @@ the log when the workflow's `print_level` is 1 or more (the response group's for
 - Energy components print in the order kinetic, nuclear attraction, Coulomb,
   exchange-correlation, nuclear repulsion.
 - If any property or item is not `complete`, or the run stopped for another
-  reason, dropped work or has stalled states, the file opens with a
+  reason, dropped work, or a calculation failed, the file opens with a
   `NOT COMPLETE` block: one line per item with its reason from `availability`.
 - The response section ends with the run line: the stop reason, with the
-  number of unconverged states when there are any, then the dropped and
-  stalled counts, e.g. `run: unconverged (2 states). Nothing dropped. Nothing
-  stalled.`
+  number of unconverged states when there are any, then the dropped count,
+  e.g. `run: unconverged (2 states). Nothing dropped.`
 - `madqc` prints each task's wall time and the citations of external modules
   after the summary in the log (and appends them to `<prefix>.out`). The wall
   time is not in `results.json`; the citations come from the ground state's
@@ -382,5 +386,5 @@ Response (molresponse), level 1.0e-04 k 6
 
   not printed (see results.json): transition_quadrupole
 
-  run: complete. Nothing dropped. Nothing stalled.
+  run: complete. Nothing dropped.
 ```

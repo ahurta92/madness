@@ -52,7 +52,8 @@ void resize_bundle(World& world, SCF& scf, int alpha, int beta) {
 }
 
 // One node's measured values, keyed in results.json by its folder name, with
-// the number of updates it took at its saved level and its status.
+// the number of updates it took at its saved level and its status (none for a
+// node this request cannot judge).
 json state_metrics(const it::NodeDescription& saved, const char* status) {
     json subjects = json::object();
     for (const auto& state : it::stored_metrics(saved, {"scf", saved.protocol, 0, "saved"}).states) {
@@ -64,8 +65,10 @@ json state_metrics(const it::NodeDescription& saved, const char* status) {
         }
         subjects[state.id] = {{"values", values}, {"availability", unavailable}};
     }
-    return {{"protocol", cp::records::protocol_record(saved.protocol)}, {"updates", saved.updates_at_protocol},
-            {"status", status}, {"subjects", subjects}};
+    json metrics{{"protocol", cp::records::protocol_record(saved.protocol)}, {"updates", saved.updates_at_protocol},
+                 {"subjects", subjects}};
+    if (status != nullptr) metrics["status"] = status;
+    return metrics;
 }
 
 // A tensor's elements in row-major order.
@@ -110,7 +113,9 @@ void report(World& world, const std::filesystem::path& root, const std::filesyst
     cp::records::require(saved.has_value(), "SCF ended without a saved state");
     const auto name = folder.filename().string();
     json metrics = json::object();
-    if (occupied) metrics[ground_state_node(root).filename().string()] = state_metrics(*occupied, state_status(scf, *occupied));
+    // The occupied source of a frozen-virtuals run was solved under its own
+    // request, not this one, so this run does not judge it: no status.
+    if (occupied) metrics[ground_state_node(root).filename().string()] = state_metrics(*occupied, nullptr);
     metrics[name] = state_metrics(*saved, state_status(scf, *saved));
     const bool complete = scf.last_calculation_outcome && scf.last_calculation_outcome->complete;
     const auto property = [&](const char* units, const json& value) {

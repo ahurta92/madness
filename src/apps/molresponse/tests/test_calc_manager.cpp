@@ -430,10 +430,13 @@ int main() {
                d[1].value("reason", "").find("never converged") != std::string::npos,
            "2PA legs reported with the ES bundle as the reason");
 
-    auto s = audit_dropped_work(dag, m, {vbc_id});
-    EXPECT(!s.empty() && s[0].value("reason", "") ==
-                             "stalled (quarantined by the no-progress guard)",
-           "stalled VBC reason unchanged");
+    // A node the executor declined (out_of_scope) is reported with its
+    // reason, not as gated: it was scheduled and refused.
+    auto s = audit_dropped_work(dag, m, {{vbc_id, "not for this ground state"}});
+    EXPECT(!s.empty() && s[0].value("reason", "") == "out of scope: not for this ground state",
+           "a refused VBC node carries its own reason");
+    EXPECT(s.size() == 2 && s[1].value("id", "") == dfd_id,
+           "a refusal does not hide the other dropped work");
 
     json ok = empty_meta();
     put_vbc(ok, vbc_id, 1e-4, /*converged=*/true);

@@ -305,8 +305,7 @@ run_response_with_ground_impl(madness::World &world, GroundState &gs, double L,
     session.timing().end();
     session.timing().begin("publish_results");
     session.set_run({{"stop_reason",sched_diag.at("stop_reason")},
-                     {"dropped_work",sched_diag.value("dropped_beta",nlohmann::json::array())},
-                     {"stalled",sched_diag.value("stalled_nodes",nlohmann::json::array())}});
+                     {"dropped_work",sched_diag.value("dropped_beta",nlohmann::json::array())}});
     session.report();
     session.timing().end();
     session.timing().end(); // calculation

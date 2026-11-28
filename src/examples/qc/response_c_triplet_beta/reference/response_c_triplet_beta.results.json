@@ -32,11 +32,11 @@
         "k": 6
       },
       "run": {
-        "stop_reason": "complete_with_stalled_and_dropped_beta",
+        "stop_reason": "complete_with_dropped_beta",
         "dropped_work": [
           {
             "id": "vbc:dipole_z__dipole_z@f0.00000_f0.00000",
-            "reason": "stalled (quarantined by the no-progress guard)"
+            "reason": "out of scope: the quadratic response source (VBC) and its contraction are implemented for a closed-shell ground state only, and this ground state is open-shell"
           },
           {
             "id": "vbc:dipole_z__dipole_z@f0.05000_f0.05000"

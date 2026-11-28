@@ -535,19 +535,14 @@ public:
   }
   // The scheduler's end of the run, plus `unconverged`: the folders of the
   // states that ended without meeting the request. A run that left any is not
-  // `complete`; stalled and dropped work keep their own lists and stop reasons.
+  // `complete`; dropped work keeps its own list and stop reason.
   [[nodiscard]] json run_with_unconverged() const {
     json run=run_;
-    const auto stalled=run.value("stalled",json::array());
-    const auto listed=[&](const std::string& id,const std::string& name) {
-      return std::find(stalled.begin(),stalled.end(),json(id))!=stalled.end() ||
-             std::find(stalled.begin(),stalled.end(),json(name))!=stalled.end();
-    };
     json unconverged=json::array();
     for (const auto& [id,state] : states)
-      if (!state->complete() && !listed(id,node_name(id))) unconverged.push_back(node_name(id));
+      if (!state->complete()) unconverged.push_back(node_name(id));
     for (const auto& [id,set] : excited)
-      if (!set->complete() && !listed(id,node_name(id))) unconverged.push_back(node_name(id));
+      if (!set->complete()) unconverged.push_back(node_name(id));
     run["unconverged"]=unconverged;
     if (!unconverged.empty() && run.value("stop_reason",std::string())=="complete") run["stop_reason"]="unconverged";
     return run;
